@@ -6,6 +6,7 @@
 #include "config/config.h"
 #include <yaml-cpp/yaml.h>
 #include <stdexcept>
+#include <set>
 #include <spdlog/spdlog.h>
 
 #ifdef USE_MYSQL
@@ -18,9 +19,45 @@ namespace config {
 namespace {
 
 /**
+ * @brief Check for unknown keys in a YAML node
+ * @param node YAML node to check
+ * @param known_keys Set of known/valid keys
+ * @param section_name Name of the section for error messages
+ * @throws std::runtime_error if unknown keys are found
+ */
+void CheckUnknownKeys(const YAML::Node& node,
+                      const std::set<std::string>& known_keys,
+                      const std::string& section_name) {
+  if (!node.IsMap()) return;
+
+  std::vector<std::string> unknown_keys;
+  for (const auto& kv : node) {
+    std::string key = kv.first.as<std::string>();
+    if (known_keys.find(key) == known_keys.end()) {
+      unknown_keys.push_back(key);
+    }
+  }
+
+  if (!unknown_keys.empty()) {
+    std::string error = "Unknown key(s) in [" + section_name + "]: ";
+    for (size_t i = 0; i < unknown_keys.size(); ++i) {
+      if (i > 0) error += ", ";
+      error += "'" + unknown_keys[i] + "'";
+    }
+    throw std::runtime_error(error);
+  }
+}
+
+/**
  * @brief Parse MySQL configuration from YAML node
  */
 MysqlConfig ParseMysqlConfig(const YAML::Node& node) {
+  // Check for unknown keys
+  CheckUnknownKeys(node, {
+    "host", "port", "user", "password", "database",
+    "use_gtid", "binlog_format", "binlog_row_image", "connect_timeout_ms"
+  }, "mysql");
+
   MysqlConfig config;
 
   if (node["host"]) config.host = node["host"].as<std::string>();
@@ -96,6 +133,12 @@ Config LoadConfig(const std::string& path) {
 
   try {
     YAML::Node root = YAML::LoadFile(path);
+
+    // Check for unknown top-level keys
+    CheckUnknownKeys(root, {
+      "mysql", "tables", "build", "replication", "memory",
+      "snapshot", "api", "network", "logging"
+    }, "root");
 
     // Parse MySQL config
     if (root["mysql"]) {

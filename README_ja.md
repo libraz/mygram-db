@@ -160,40 +160,120 @@ sudo make uninstall
 YAML 設定ファイル（`config.yaml`）を作成:
 
 ```yaml
-server:
-  host: "0.0.0.0"
-  port: 11211
-  max_connections: 1000
-
+# MySQL 接続設定
 mysql:
-  host: "localhost"
+  host: "127.0.0.1"
   port: 3306
   user: "repl_user"
-  password: "repl_password"
-  database: "mydb"
+  password: "your_password_here"
+  database: "mydb"                  # データベース名（テーブル設定で指定する場合はオプション）
+  use_gtid: true                    # GTID ベースレプリケーションを有効化
+  binlog_format: "ROW"              # 必須: ROW 形式
+  binlog_row_image: "FULL"          # 必須: FULL 行イメージ
+  connect_timeout_ms: 3000          # 接続タイムアウト
 
+# テーブル設定（インスタンスごとに1テーブルをサポート）
 tables:
   - name: "articles"
     primary_key: "id"
     text_source:
-      column: "content"  # 単一カラム
+      column: "content"               # 全文検索用の単一カラム
       # または複数カラムを連結:
       # concat: ["title", "body"]
       # delimiter: " "
-    filters:
+    filters:                          # オプションのフィルターカラム
       - name: "status"
-        type: "int"
+        type: "int"                   # 整数型: tinyint, tinyint_unsigned, smallint,
+                                      #   smallint_unsigned, int, int_unsigned, mediumint,
+                                      #   mediumint_unsigned, bigint
+                                      # 浮動小数点型: float, double
+                                      # 文字列型: string, varchar, text
+                                      # 日付型: datetime, date, timestamp
+        dict_compress: true           # 辞書圧縮を有効化（低カーディナリティカラム向け）
+        bitmap_index: true            # ビットマップインデックスを有効化（フィルター高速化）
       - name: "category"
         type: "string"
+      - name: "created_at"
+        type: "datetime"
+        bucket: "minute"              # 日時のバケット化: minute|hour|day（カーディナリティ削減）
+    ngram_size: 1                     # N-gram サイズ（1=ユニグラム、2=バイグラム等）
+    posting:                          # 転置インデックス設定
+      block_size: 128
+      freq_bits: 0                    # 0=ブール値、4 または 8 で語頻度
+      use_roaring: "auto"             # auto|always|never
+    where_clause: ""                  # スナップショット用のオプション WHERE 句（例: "status = 1"）
 
-index:
-  ngram_size: 1
+# インデックス構築設定
+build:
+  mode: "select_snapshot"             # ビルドモード（現在は select_snapshot のみ）
+  batch_size: 5000                    # スナップショット時の1バッチあたりの行数
+  parallelism: 2                      # 並列ビルドスレッド数
+  throttle_ms: 0                      # バッチ間のスロットル遅延（ミリ秒）
 
+# レプリケーション設定
 replication:
   enable: true
-  start_from: "snapshot"  # オプション: snapshot, latest, gtid=<UUID:txn>, state_file
-  queue_size: 10000
+  server_id: 0                        # MySQL サーバー ID（0 = 自動生成）
+  start_from: "snapshot"              # オプション: snapshot|latest|gtid=<UUID:txn>|state_file
+  state_file: "./mygramdb_replication.state"  # GTID 状態永続化ファイル
+  queue_size: 10000                   # Binlog イベントキューサイズ
+  reconnect_backoff_min_ms: 500       # 最小再接続バックオフ遅延
+  reconnect_backoff_max_ms: 10000     # 最大再接続バックオフ遅延
+
+# メモリ管理
+memory:
+  hard_limit_mb: 8192                 # ハードメモリ制限
+  soft_target_mb: 4096                # ソフトメモリ目標
+  arena_chunk_mb: 64                  # アリーナチャンクサイズ
+  roaring_threshold: 0.18             # Roaring ビットマップ閾値
+  minute_epoch: true                  # 分精度のエポックを使用
+  normalize:                          # テキスト正規化
+    nfkc: true                        # NFKC 正規化
+    width: "narrow"                   # 幅: keep|narrow|wide
+    lower: false                      # 小文字変換
+
+# スナップショット永続化
+snapshot:
+  dir: "/var/lib/mygramdb/snapshots"  # スナップショットディレクトリ
+
+# API サーバー設定
+api:
+  tcp:
+    bind: "0.0.0.0"                   # TCP バインドアドレス
+    port: 11311                       # TCP ポート
+
+# ロギング設定
+logging:
+  level: "info"                       # ログレベル: debug|info|warn|error
 ```
+
+すべての利用可能なオプションの完全な例については `examples/config.yaml` を参照してください。
+
+### 設定のテスト
+
+サーバーを起動する前に、設定ファイルを検証します:
+
+```bash
+# 設定構文をテスト
+./build/bin/mygramdb -t config.yaml
+
+# またはロングオプションを使用
+./build/bin/mygramdb --config-test config.yaml
+```
+
+以下の検証を実行します:
+- **YAML 構文エラー**: 無効な YAML フォーマット
+- **未知の設定キー**: タイプミスやサポートされていないオプション
+- **型の不一致**: 誤ったデータ型（例: map の代わりに string）
+- **必須フィールドの欠如**: 必須設定の欠落
+- **無効な値**: 範囲外または無効な設定値
+
+設定が有効な場合、以下を表示します:
+- MySQL 接続設定
+- テーブル設定（名前、primary_key、ngram_size）
+- API サーバー設定（バインドアドレスとポート）
+- レプリケーション状態（有効/無効）
+- ロギングレベル
 
 ### サーバー起動
 
@@ -202,7 +282,12 @@ replication:
 make run
 
 # またはビルドディレクトリから直接実行
-./build/bin/mygramdb -c config.yaml
+./build/bin/mygramdb config.yaml
+
+# サーバーは設定ファイルパスを引数として必要とします
+# 使用方法: mygramdb [OPTIONS] <config.yaml>
+# オプション:
+#   -t, --config-test    設定ファイルをテストして終了
 ```
 
 ### CLI クライアントの使用
@@ -217,6 +302,25 @@ make run
 # ホストとポートを指定
 ./build/bin/mygram-cli -h localhost -p 11211
 ```
+
+#### CLI の機能
+
+CLI クライアント（`mygram-cli`）は、MygramDB 用のインタラクティブシェルを提供し、以下の機能を備えています：
+
+- **タブ補完**: TAB キーを押すとコマンド名を自動補完（GNU Readline が必要）
+- **コマンド履歴**: ↑/↓ 矢印キーでコマンド履歴をナビゲート（GNU Readline が必要）
+- **行編集**: Ctrl+A、Ctrl+E などの完全な行編集サポート（GNU Readline が必要）
+- **エラーハンドリング**: 無効なコマンドに対しても適切なエラーメッセージを表示（クラッシュしません）
+
+**注意**: タブ補完とコマンド履歴は GNU Readline ライブラリが必要です。ビルド時に Readline が利用可能な場合は自動的に使用され、そうでない場合は基本入力モードにフォールバックします。
+
+**利用可能なコマンド**（対話モードで `help` と入力）：
+- `SEARCH`、`COUNT`、`GET` - 検索と取得
+- `INFO`、`CONFIG` - サーバー情報と設定
+- `SAVE`、`LOAD` - スナップショット管理
+- `REPLICATION STATUS/STOP/START` - レプリケーション制御
+- `quit`、`exit` - クライアントの終了
+- `help` - ヘルプメッセージの表示
 
 ## プロトコル
 
@@ -272,6 +376,152 @@ GET articles 12345
 **レスポンス:**
 ```
 OK DOC <primary_key> <filter1=value1> <filter2=value2> ...
+```
+
+### INFO コマンド
+
+サーバー情報と統計を取得します。
+
+```
+INFO
+```
+
+**レスポンス:**
+```
+OK INFO version=<version> uptime=<seconds> total_requests=<count> connections=<count> index_size=<bytes> doc_count=<count>
+```
+
+### SAVE コマンド
+
+現在のインデックススナップショットをディスクに保存します。
+
+```
+SAVE [<filepath>]
+```
+
+**例:**
+```
+SAVE
+SAVE /path/to/snapshot.bin
+```
+
+**レスポンス:**
+```
+OK SAVED <filepath>
+```
+
+### LOAD コマンド
+
+インデックススナップショットをディスクから読み込みます。
+
+```
+LOAD <filepath>
+```
+
+**例:**
+```
+LOAD /path/to/snapshot.bin
+```
+
+**レスポンス:**
+```
+OK LOADED <filepath> docs=<count>
+```
+
+### REPLICATION STATUS コマンド
+
+現在のレプリケーション状態を取得します。
+
+```
+REPLICATION STATUS
+```
+
+**レスポンス:**
+```
+OK REPLICATION status=<running|stopped> gtid=<current_gtid>
+```
+
+### REPLICATION STOP コマンド
+
+Binlog レプリケーションを停止します（インデックスは読み取り専用になります）。
+
+```
+REPLICATION STOP
+```
+
+**レスポンス:**
+```
+OK REPLICATION STOPPED
+```
+
+### REPLICATION START コマンド
+
+Binlog レプリケーションを再開します。
+
+```
+REPLICATION START
+```
+
+**レスポンス:**
+```
+OK REPLICATION STARTED
+```
+
+### CONFIG コマンド
+
+現在のサーバー設定（すべての設定項目）を取得します。
+
+```
+CONFIG
+```
+
+**レスポンス:**
+YAML形式で以下の情報を返します:
+- MySQL 接続設定
+- テーブル設定（名前、primary_key、ngram_size、フィルター数）
+- API サーバー設定（バインドアドレスとポート）
+- レプリケーション設定（enable、server_id、start_from、state_file）
+- メモリ設定（制限、閾値）
+- スナップショットディレクトリ
+- ロギングレベル
+- 実行時状態（接続数、稼働時間、読み取り専用モード）
+
+**例:**
+```
+CONFIG
+OK CONFIG
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    user: repl_user
+    database: mydb
+    use_gtid: true
+  tables: 1
+    - name: articles
+      primary_key: id
+      ngram_size: 1
+      filters: 3
+  api:
+    tcp.bind: 0.0.0.0
+    tcp.port: 11311
+  replication:
+    enable: true
+    server_id: 12345
+    start_from: snapshot
+    state_file: ./mygramdb_replication.state
+  memory:
+    hard_limit_mb: 8192
+    soft_target_mb: 4096
+    roaring_threshold: 0.18
+  snapshot:
+    dir: /var/lib/mygramdb/snapshots
+  logging:
+    level: info
+  runtime:
+    connections: 5
+    max_connections: 1000
+    read_only: false
+    uptime: 3600s
 ```
 
 ### エラーレスポンス

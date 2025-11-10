@@ -13,7 +13,61 @@
 #include <sstream>
 #include <vector>
 
+// Try to use readline if available
+#ifdef HAVE_READLINE
+#include <readline/readline.h>
+#include <readline/history.h>
+#define USE_READLINE 1
+#endif
+
 namespace {
+
+#ifdef USE_READLINE
+// Command list for tab completion
+const char* command_list[] = {
+  "SEARCH", "COUNT", "GET", "INFO", "SAVE", "LOAD", "CONFIG",
+  "REPLICATION", "quit", "exit", "help", nullptr
+};
+
+/**
+ * @brief Command name generator for readline completion
+ * @param text Partial text to complete
+ * @param state 0 for first call, non-zero for subsequent calls
+ * @return Completed command name or nullptr
+ */
+char* command_generator(const char* text, int state) {
+  static int list_index, len;
+  const char* name;
+
+  if (!state) {
+    list_index = 0;
+    len = strlen(text);
+  }
+
+  while ((name = command_list[list_index++])) {
+    if (strncasecmp(name, text, len) == 0) {
+      return strdup(name);
+    }
+  }
+
+  return nullptr;
+}
+
+/**
+ * @brief Completion function for readline
+ * @param text Text to complete
+ * @param start Start position in line buffer
+ * @param end End position in line buffer
+ * @return Array of possible completions
+ */
+char** command_completion(const char* text, int start, int end) {
+  // Only complete first word (command name)
+  if (start == 0) {
+    return rl_completion_matches(text, command_generator);
+  }
+  return nullptr;
+}
+#endif
 
 struct Config {
   std::string host = "127.0.0.1";
@@ -105,16 +159,50 @@ class MygramClient {
 
   void RunInteractive() {
     std::cout << "mygram-cli " << config_.host << ":" << config_.port << std::endl;
+#ifdef USE_READLINE
+    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help (tab completion enabled)" << std::endl;
+#else
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << std::endl;
+#endif
     std::cout << std::endl;
 
+#ifdef USE_READLINE
+    // Setup readline completion
+    rl_attempted_completion_function = command_completion;
+#endif
+
     while (true) {
-      // Print prompt
+      // Read command
+      std::string line;
+
+#ifdef USE_READLINE
+      // Use readline for better line editing and history
+      std::string prompt = config_.host + ":" + std::to_string(config_.port) + "> ";
+      char* input = readline(prompt.c_str());
+
+      if (input == nullptr) {
+        // EOF (Ctrl-D)
+        std::cout << std::endl;
+        break;
+      }
+
+      line = input;
+
+      // Trim whitespace
+      line.erase(0, line.find_first_not_of(" \t\r\n"));
+      line.erase(line.find_last_not_of(" \t\r\n") + 1);
+
+      // Add to history if non-empty
+      if (!line.empty()) {
+        add_history(input);
+      }
+
+      free(input);
+#else
+      // Fallback to std::getline
       std::cout << config_.host << ":" << config_.port << "> ";
       std::cout.flush();
 
-      // Read command
-      std::string line;
       if (!std::getline(std::cin, line)) {
         break;  // EOF
       }
@@ -122,6 +210,7 @@ class MygramClient {
       // Trim whitespace
       line.erase(0, line.find_first_not_of(" \t\r\n"));
       line.erase(line.find_last_not_of(" \t\r\n") + 1);
+#endif
 
       if (line.empty()) {
         continue;
@@ -157,6 +246,7 @@ class MygramClient {
     std::cout << "  COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]" << std::endl;
     std::cout << "  GET <table> <primary_key>" << std::endl;
     std::cout << "  INFO - Show server statistics" << std::endl;
+    std::cout << "  CONFIG - Show current configuration" << std::endl;
     std::cout << "  SAVE [filename] - Save snapshot to disk" << std::endl;
     std::cout << "  LOAD <filename> - Load snapshot from disk" << std::endl;
     std::cout << "  REPLICATION STATUS - Show replication status" << std::endl;

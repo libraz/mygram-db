@@ -1,5 +1,15 @@
 # Main executable and library
 
+# Generate version header from template
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/version.h.in
+  ${CMAKE_CURRENT_BINARY_DIR}/version.h
+  @ONLY
+)
+
+# Make version.h available to all targets
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
 # Subdirectories
 add_subdirectory(config)
 add_subdirectory(mysql)

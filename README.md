@@ -1,4 +1,4 @@
-# MygramDB
+Ｙ# MygramDB
 
 High-performance in-memory full-text search engine with MySQL replication support.
 
@@ -160,40 +160,120 @@ After installation, the following files will be available:
 Create a YAML configuration file (`config.yaml`):
 
 ```yaml
-server:
-  host: "0.0.0.0"
-  port: 11211
-  max_connections: 1000
-
+# MySQL connection settings
 mysql:
-  host: "localhost"
+  host: "127.0.0.1"
   port: 3306
   user: "repl_user"
-  password: "repl_password"
-  database: "mydb"
+  password: "your_password_here"
+  database: "mydb"                  # Database name (optional if specified in table config)
+  use_gtid: true                    # Enable GTID-based replication
+  binlog_format: "ROW"              # Required: ROW format
+  binlog_row_image: "FULL"          # Required: FULL row image
+  connect_timeout_ms: 3000          # Connection timeout
 
+# Table configuration (supports one table per instance)
 tables:
   - name: "articles"
     primary_key: "id"
     text_source:
-      column: "content"  # Single column
+      column: "content"               # Single column for full-text search
       # OR concatenate multiple columns:
       # concat: ["title", "body"]
       # delimiter: " "
-    filters:
+    filters:                          # Optional filter columns
       - name: "status"
-        type: "int"
+        type: "int"                   # Integer types: tinyint, tinyint_unsigned, smallint,
+                                      #   smallint_unsigned, int, int_unsigned, mediumint,
+                                      #   mediumint_unsigned, bigint
+                                      # Float types: float, double
+                                      # String types: string, varchar, text
+                                      # Date types: datetime, date, timestamp
+        dict_compress: true           # Enable dictionary compression (for low-cardinality columns)
+        bitmap_index: true            # Enable bitmap indexing (for filter acceleration)
       - name: "category"
         type: "string"
+      - name: "created_at"
+        type: "datetime"
+        bucket: "minute"              # Datetime bucketing: minute|hour|day (reduces cardinality)
+    ngram_size: 1                     # N-gram size (1=unigram, 2=bigram, etc.)
+    posting:                          # Posting list configuration
+      block_size: 128
+      freq_bits: 0                    # 0=boolean, 4 or 8 for term frequency
+      use_roaring: "auto"             # auto|always|never
+    where_clause: ""                  # Optional WHERE clause for snapshot (e.g., "status = 1")
 
-index:
-  ngram_size: 1
+# Index build configuration
+build:
+  mode: "select_snapshot"             # Build mode (currently only select_snapshot)
+  batch_size: 5000                    # Rows per batch during snapshot
+  parallelism: 2                      # Number of parallel build threads
+  throttle_ms: 0                      # Throttle delay between batches (ms)
 
+# Replication configuration
 replication:
   enable: true
-  start_from: "snapshot"  # Options: snapshot, latest, gtid=<UUID:txn>, state_file
-  queue_size: 10000
+  server_id: 0                        # MySQL server ID (0 = auto-generate)
+  start_from: "snapshot"              # Options: snapshot|latest|gtid=<UUID:txn>|state_file
+  state_file: "./mygramdb_replication.state"  # GTID state persistence file
+  queue_size: 10000                   # Binlog event queue size
+  reconnect_backoff_min_ms: 500       # Min reconnect backoff delay
+  reconnect_backoff_max_ms: 10000     # Max reconnect backoff delay
+
+# Memory management
+memory:
+  hard_limit_mb: 8192                 # Hard memory limit
+  soft_target_mb: 4096                # Soft memory target
+  arena_chunk_mb: 64                  # Arena chunk size
+  roaring_threshold: 0.18             # Roaring bitmap threshold
+  minute_epoch: true                  # Use minute-precision epoch
+  normalize:                          # Text normalization
+    nfkc: true                        # NFKC normalization
+    width: "narrow"                   # Width: keep|narrow|wide
+    lower: false                      # Lowercase conversion
+
+# Snapshot persistence
+snapshot:
+  dir: "/var/lib/mygramdb/snapshots"  # Snapshot directory
+
+# API server configuration
+api:
+  tcp:
+    bind: "0.0.0.0"                   # TCP bind address
+    port: 11311                       # TCP port
+
+# Logging configuration
+logging:
+  level: "info"                       # Log level: debug|info|warn|error
 ```
+
+See `examples/config.yaml` for a complete example with all available options.
+
+### Test Configuration
+
+Before starting the server, validate your configuration file:
+
+```bash
+# Test configuration syntax
+./build/bin/mygramdb -t config.yaml
+
+# Or use long option
+./build/bin/mygramdb --config-test config.yaml
+```
+
+This will validate the configuration file and display:
+- **YAML syntax errors**: Invalid YAML format
+- **Unknown configuration keys**: Typos or unsupported options
+- **Type mismatches**: Wrong data types (e.g., string instead of map)
+- **Missing required fields**: Essential configuration missing
+- **Invalid values**: Out-of-range or invalid setting values
+
+If the configuration is valid, it displays:
+- MySQL connection settings
+- Table configurations (name, primary_key, ngram_size)
+- API server settings (bind address and port)
+- Replication status (enabled/disabled)
+- Logging level
 
 ### Run Server
 
@@ -202,7 +282,12 @@ replication:
 make run
 
 # Or run directly from build directory
-./build/bin/mygramdb -c config.yaml
+./build/bin/mygramdb config.yaml
+
+# The server requires a config file path as the only argument
+# Usage: mygramdb [OPTIONS] <config.yaml>
+# Options:
+#   -t, --config-test    Test configuration file and exit
 ```
 
 ### Using the CLI Client
@@ -217,6 +302,25 @@ make run
 # Specify host and port
 ./build/bin/mygram-cli -h localhost -p 11211
 ```
+
+#### CLI Features
+
+The CLI client (`mygram-cli`) provides an interactive shell for MygramDB with the following features:
+
+- **Tab Completion**: Press TAB to autocomplete command names (requires GNU Readline)
+- **Command History**: Use ↑/↓ arrow keys to navigate command history (requires GNU Readline)
+- **Line Editing**: Full line editing support with Ctrl+A, Ctrl+E, etc. (requires GNU Readline)
+- **Error Handling**: Graceful error messages for invalid commands (does not crash)
+
+**Note**: Tab completion and command history require GNU Readline library. The CLI will automatically use Readline if available at build time, otherwise falls back to basic input mode.
+
+**Available commands** (type `help` in interactive mode):
+- `SEARCH`, `COUNT`, `GET` - Search and retrieval
+- `INFO`, `CONFIG` - Server information and configuration
+- `SAVE`, `LOAD` - Snapshot management
+- `REPLICATION STATUS/STOP/START` - Replication control
+- `quit`, `exit` - Exit the client
+- `help` - Show help message
 
 ## Protocol
 
@@ -272,6 +376,152 @@ GET articles 12345
 **Response:**
 ```
 OK DOC <primary_key> <filter1=value1> <filter2=value2> ...
+```
+
+### INFO Command
+
+Get server information and statistics.
+
+```
+INFO
+```
+
+**Response:**
+```
+OK INFO version=<version> uptime=<seconds> total_requests=<count> connections=<count> index_size=<bytes> doc_count=<count>
+```
+
+### SAVE Command
+
+Save current index snapshot to disk.
+
+```
+SAVE [<filepath>]
+```
+
+**Examples:**
+```
+SAVE
+SAVE /path/to/snapshot.bin
+```
+
+**Response:**
+```
+OK SAVED <filepath>
+```
+
+### LOAD Command
+
+Load index snapshot from disk.
+
+```
+LOAD <filepath>
+```
+
+**Examples:**
+```
+LOAD /path/to/snapshot.bin
+```
+
+**Response:**
+```
+OK LOADED <filepath> docs=<count>
+```
+
+### REPLICATION STATUS Command
+
+Get current replication status.
+
+```
+REPLICATION STATUS
+```
+
+**Response:**
+```
+OK REPLICATION status=<running|stopped> gtid=<current_gtid>
+```
+
+### REPLICATION STOP Command
+
+Stop binlog replication (index becomes read-only).
+
+```
+REPLICATION STOP
+```
+
+**Response:**
+```
+OK REPLICATION STOPPED
+```
+
+### REPLICATION START Command
+
+Resume binlog replication.
+
+```
+REPLICATION START
+```
+
+**Response:**
+```
+OK REPLICATION STARTED
+```
+
+### CONFIG Command
+
+Get current server configuration (all settings).
+
+```
+CONFIG
+```
+
+**Response:**
+Returns a YAML-style formatted configuration showing:
+- MySQL connection settings
+- Table configurations (name, primary_key, ngram_size, filters count)
+- API server settings (bind address and port)
+- Replication settings (enable, server_id, start_from, state_file)
+- Memory configuration (limits, thresholds)
+- Snapshot directory
+- Logging level
+- Runtime status (connections, uptime, read_only mode)
+
+**Example:**
+```
+CONFIG
+OK CONFIG
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    user: repl_user
+    database: mydb
+    use_gtid: true
+  tables: 1
+    - name: articles
+      primary_key: id
+      ngram_size: 1
+      filters: 3
+  api:
+    tcp.bind: 0.0.0.0
+    tcp.port: 11311
+  replication:
+    enable: true
+    server_id: 12345
+    start_from: snapshot
+    state_file: ./mygramdb_replication.state
+  memory:
+    hard_limit_mb: 8192
+    soft_target_mb: 4096
+    roaring_threshold: 0.18
+  snapshot:
+    dir: /var/lib/mygramdb/snapshots
+  logging:
+    level: info
+  runtime:
+    connections: 5
+    max_connections: 1000
+    read_only: false
+    uptime: 3600s
 ```
 
 ### Error Response

@@ -1,0 +1,47 @@
+/**
+ * @file version.h
+ * @brief Version information for MygramDB (auto-generated from CMake)
+ */
+
+#pragma once
+
+#define MYGRAMDB_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define MYGRAMDB_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define MYGRAMDB_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define MYGRAMDB_VERSION_STRING "@PROJECT_VERSION@"
+#define MYGRAMDB_VERSION_FULL "MygramDB v@PROJECT_VERSION@"
+
+namespace mygramdb {
+
+/**
+ * @brief MygramDB version information
+ */
+struct Version {
+  static constexpr int MAJOR = MYGRAMDB_VERSION_MAJOR;
+  static constexpr int MINOR = MYGRAMDB_VERSION_MINOR;
+  static constexpr int PATCH = MYGRAMDB_VERSION_PATCH;
+
+  /**
+   * @brief Get version string (e.g., "1.0.0")
+   */
+  static constexpr const char* String() {
+    return MYGRAMDB_VERSION_STRING;
+  }
+
+  /**
+   * @brief Get full version string with prefix (e.g., "MygramDB v1.0.0")
+   */
+  static constexpr const char* FullString() {
+    return MYGRAMDB_VERSION_FULL;
+  }
+};
+
+/**
+ * @brief File format versions
+ */
+struct FileVersion {
+  static constexpr uint32_t INDEX_FORMAT = 1;        // Index file format version
+  static constexpr uint32_t DOCUMENT_STORE_FORMAT = 1; // Document store format version
+};
+
+}  // namespace mygramdb

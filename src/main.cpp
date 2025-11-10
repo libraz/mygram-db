@@ -8,6 +8,7 @@
 #include "storage/document_store.h"
 #include "storage/snapshot_builder.h"
 #include "server/tcp_server.h"
+#include "version.h"
 
 #ifdef USE_MYSQL
 #include "mysql/connection.h"
@@ -51,14 +52,39 @@ int main(int argc, char* argv[]) {
   spdlog::set_level(spdlog::level::info);
   spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
 
-  spdlog::info("MygramDB v1.0.0 starting...");
+  // Parse command line arguments
+  bool config_test_mode = false;
+  const char* config_path = nullptr;
 
   if (argc < 2) {
-    spdlog::error("Usage: {} <config.yaml>", argv[0]);
+    std::cerr << "Usage: " << argv[0] << " [OPTIONS] <config.yaml>\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  -t, --config-test    Test configuration file and exit\n";
     return 1;
   }
 
-  const char* config_path = argv[1];
+  // Parse arguments
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-t" || arg == "--config-test") {
+      config_test_mode = true;
+    } else if (config_path == nullptr) {
+      config_path = argv[i];
+    } else {
+      std::cerr << "Error: Unexpected argument: " << argv[i] << "\n";
+      return 1;
+    }
+  }
+
+  if (config_path == nullptr) {
+    std::cerr << "Error: Configuration file path required\n";
+    return 1;
+  }
+
+  if (!config_test_mode) {
+    spdlog::info("{} starting...", mygramdb::Version::FullString());
+  }
+
   spdlog::info("Loading configuration from: {}", config_path);
 
   // Load configuration
@@ -85,6 +111,24 @@ int main(int argc, char* argv[]) {
   if (config.tables.empty()) {
     spdlog::error("No tables configured");
     return 1;
+  }
+
+  // Config test mode: validate and exit
+  if (config_test_mode) {
+    std::cout << "Configuration file syntax is OK\n";
+    std::cout << "Configuration details:\n";
+    std::cout << "  MySQL: " << config.mysql.user << "@" << config.mysql.host
+              << ":" << config.mysql.port << "\n";
+    std::cout << "  Tables: " << config.tables.size() << "\n";
+    for (const auto& table : config.tables) {
+      std::cout << "    - " << table.name
+                << " (primary_key: " << table.primary_key
+                << ", ngram_size: " << table.ngram_size << ")\n";
+    }
+    std::cout << "  API TCP: " << config.api.tcp.bind << ":" << config.api.tcp.port << "\n";
+    std::cout << "  Replication: " << (config.replication.enable ? "enabled" : "disabled") << "\n";
+    std::cout << "  Logging level: " << config.logging.level << "\n";
+    return 0;
   }
 
   // For now, only support one table
@@ -208,6 +252,7 @@ int main(int argc, char* argv[]) {
   mygramdb::server::TcpServer tcp_server(server_config, *index, *doc_store,
                                          table_config.ngram_size,
                                          config.snapshot.dir,
+                                         &config,  // Pass full configuration
 #ifdef USE_MYSQL
                                          binlog_reader.get()
 #else

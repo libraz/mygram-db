@@ -128,6 +128,12 @@ Query QueryParser::Parse(const std::string& query_str) {
     }
 
     return query;
+  } else if (command == "CONFIG") {
+    // CONFIG - show current configuration
+    Query query;
+    query.type = QueryType::CONFIG;
+    query.table = ""; // CONFIG doesn't need a table
+    return query;
   } else {
     SetError("Unknown command: " + command);
     return Query{};

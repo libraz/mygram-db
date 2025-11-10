@@ -27,6 +27,7 @@ enum class QueryType {
   REPLICATION_STATUS,  // Get replication status
   REPLICATION_STOP,    // Stop replication
   REPLICATION_START,   // Start replication
+  CONFIG,              // Get current configuration
   UNKNOWN
 };
 

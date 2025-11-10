@@ -8,6 +8,7 @@
 #include "query/query_parser.h"
 #include "index/index.h"
 #include "storage/document_store.h"
+#include "config/config.h"
 #include <string>
 #include <thread>
 #include <atomic>
@@ -53,6 +54,7 @@ class TcpServer {
    * @param doc_store Document store reference
    * @param ngram_size N-gram size (0 for hybrid mode)
    * @param snapshot_dir Snapshot directory path
+   * @param full_config Full application configuration (for CONFIG command)
    * @param binlog_reader Optional binlog reader pointer (for stopping/starting replication)
    */
   TcpServer(const ServerConfig& config,
@@ -60,6 +62,7 @@ class TcpServer {
             storage::DocumentStore& doc_store,
             int ngram_size = 1,
             const std::string& snapshot_dir = "./snapshots",
+            const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
             mysql::BinlogReader* binlog_reader = nullptr
 #else
@@ -132,6 +135,7 @@ class TcpServer {
   int ngram_size_;  // N-gram size (0 for hybrid mode)
   std::string snapshot_dir_;  // Snapshot directory
   std::atomic<bool> read_only_{false};  // Read-only mode flag
+  const config::Config* full_config_;  // Full configuration for CONFIG command
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;  // Optional binlog reader for replication control
@@ -199,6 +203,11 @@ class TcpServer {
    * @brief Format REPLICATION START response
    */
   std::string FormatReplicationStartResponse();
+
+  /**
+   * @brief Format CONFIG response
+   */
+  std::string FormatConfigResponse();
 
   /**
    * @brief Format error response

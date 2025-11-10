@@ -27,6 +27,7 @@ TcpServer::TcpServer(const ServerConfig& config,
                      storage::DocumentStore& doc_store,
                      int ngram_size,
                      const std::string& snapshot_dir,
+                     const config::Config* full_config,
 #ifdef USE_MYSQL
                      mysql::BinlogReader* binlog_reader
 #else
@@ -35,7 +36,7 @@ TcpServer::TcpServer(const ServerConfig& config,
                      )
     : config_(config), index_(index), doc_store_(doc_store),
       ngram_size_(ngram_size), snapshot_dir_(snapshot_dir),
-      binlog_reader_(binlog_reader) {}
+      full_config_(full_config), binlog_reader_(binlog_reader) {}
 
 TcpServer::~TcpServer() {
   Stop();
@@ -578,6 +579,10 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 #endif
       }
 
+      case query::QueryType::CONFIG: {
+        return FormatConfigResponse();
+      }
+
       default:
         return FormatError("Unknown query type");
     }
@@ -710,6 +715,68 @@ std::string TcpServer::FormatReplicationStopResponse() {
 
 std::string TcpServer::FormatReplicationStartResponse() {
   return "OK REPLICATION_STARTED";
+}
+
+std::string TcpServer::FormatConfigResponse() {
+  std::ostringstream oss;
+  oss << "OK CONFIG\n";
+
+  if (!full_config_) {
+    oss << "  [Configuration not available]\n";
+    return oss.str();
+  }
+
+  // MySQL configuration
+  oss << "  mysql:\n";
+  oss << "    host: " << full_config_->mysql.host << "\n";
+  oss << "    port: " << full_config_->mysql.port << "\n";
+  oss << "    user: " << full_config_->mysql.user << "\n";
+  oss << "    database: " << full_config_->mysql.database << "\n";
+  oss << "    use_gtid: " << (full_config_->mysql.use_gtid ? "true" : "false") << "\n";
+
+  // Tables configuration
+  oss << "  tables: " << full_config_->tables.size() << "\n";
+  for (const auto& table : full_config_->tables) {
+    oss << "    - name: " << table.name << "\n";
+    oss << "      primary_key: " << table.primary_key << "\n";
+    oss << "      ngram_size: " << table.ngram_size << "\n";
+    oss << "      filters: " << table.filters.size() << "\n";
+  }
+
+  // API configuration
+  oss << "  api:\n";
+  oss << "    tcp.bind: " << full_config_->api.tcp.bind << "\n";
+  oss << "    tcp.port: " << full_config_->api.tcp.port << "\n";
+
+  // Replication configuration
+  oss << "  replication:\n";
+  oss << "    enable: " << (full_config_->replication.enable ? "true" : "false") << "\n";
+  oss << "    server_id: " << full_config_->replication.server_id << "\n";
+  oss << "    start_from: " << full_config_->replication.start_from << "\n";
+  oss << "    state_file: " << full_config_->replication.state_file << "\n";
+
+  // Memory configuration
+  oss << "  memory:\n";
+  oss << "    hard_limit_mb: " << full_config_->memory.hard_limit_mb << "\n";
+  oss << "    soft_target_mb: " << full_config_->memory.soft_target_mb << "\n";
+  oss << "    roaring_threshold: " << full_config_->memory.roaring_threshold << "\n";
+
+  // Snapshot configuration
+  oss << "  snapshot:\n";
+  oss << "    dir: " << full_config_->snapshot.dir << "\n";
+
+  // Logging configuration
+  oss << "  logging:\n";
+  oss << "    level: " << full_config_->logging.level << "\n";
+
+  // Runtime status
+  oss << "  runtime:\n";
+  oss << "    connections: " << GetConnectionCount() << "\n";
+  oss << "    max_connections: " << config_.max_connections << "\n";
+  oss << "    read_only: " << (read_only_ ? "true" : "false") << "\n";
+  oss << "    uptime: " << (std::time(nullptr) - start_time_) << "s\n";
+
+  return oss.str();
 }
 
 std::string TcpServer::FormatError(const std::string& message) {
