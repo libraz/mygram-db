@@ -107,6 +107,20 @@ class Index {
    */
   void Optimize(uint64_t total_docs);
 
+  /**
+   * @brief Serialize index to file
+   * @param filepath Output file path
+   * @return true if successful
+   */
+  bool SaveToFile(const std::string& filepath) const;
+
+  /**
+   * @brief Deserialize index from file
+   * @param filepath Input file path
+   * @return true if successful
+   */
+  bool LoadFromFile(const std::string& filepath);
+
  private:
   int ngram_size_;
   double roaring_threshold_;

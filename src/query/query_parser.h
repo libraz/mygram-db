@@ -18,9 +18,15 @@ namespace query {
  * @brief Query command type
  */
 enum class QueryType {
-  SEARCH,  // Search with limit/offset
-  COUNT,   // Get total count
-  GET,     // Get document by primary key
+  SEARCH,              // Search with limit/offset
+  COUNT,               // Get total count
+  GET,                 // Get document by primary key
+  INFO,                // Get server info (memcached-style)
+  SAVE,                // Save snapshot to disk
+  LOAD,                // Load snapshot from disk
+  REPLICATION_STATUS,  // Get replication status
+  REPLICATION_STOP,    // Stop replication
+  REPLICATION_START,   // Start replication
   UNKNOWN
 };
 
@@ -57,6 +63,7 @@ struct Query {
   uint32_t limit = 100;    // Default limit
   uint32_t offset = 0;     // Default offset
   std::string primary_key; // For GET command
+  std::string filepath;    // For SAVE/LOAD command (optional)
 
   /**
    * @brief Check if query is valid
@@ -71,6 +78,12 @@ struct Query {
  * - SEARCH <table> <text> [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>] [OFFSET <n>]
  * - COUNT <table> <text> [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
+ * - INFO
+ * - SAVE [filename]
+ * - LOAD [filename]
+ * - REPLICATION STATUS
+ * - REPLICATION STOP
+ * - REPLICATION START
  */
 class QueryParser {
  public:

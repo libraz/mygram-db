@@ -3,9 +3,10 @@ set(STORAGE_SOURCES
   document_store.cpp
 )
 
-# Add snapshot_builder if MySQL is available
+# Add snapshot_builder and gtid_state if MySQL is available
 if(USE_MYSQL AND MYSQL_FOUND)
   list(APPEND STORAGE_SOURCES snapshot_builder.cpp)
+  list(APPEND STORAGE_SOURCES gtid_state.cpp)
 endif()
 
 add_library(mygramdb_storage STATIC
@@ -22,7 +23,5 @@ target_link_libraries(mygramdb_storage PUBLIC
   mygramdb_index
 )
 
-# Link MySQL library if available
-if(USE_MYSQL AND MYSQL_FOUND)
-  target_link_libraries(mygramdb_storage PUBLIC mygramdb_mysql)
-endif()
+# Don't link MySQL here to avoid circular dependency
+# Components that need both storage and mysql should link both explicitly

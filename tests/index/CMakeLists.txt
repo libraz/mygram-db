@@ -6,8 +6,6 @@ add_executable(index_test
 
 target_link_libraries(index_test
   mygramdb_index
-  mygramdb_utils
-  GTest::gtest
   GTest::gtest_main
 )
 

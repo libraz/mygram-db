@@ -156,6 +156,12 @@ class MygramClient {
     std::cout << "  SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]" << std::endl;
     std::cout << "  COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]" << std::endl;
     std::cout << "  GET <table> <primary_key>" << std::endl;
+    std::cout << "  INFO - Show server statistics" << std::endl;
+    std::cout << "  SAVE [filename] - Save snapshot to disk" << std::endl;
+    std::cout << "  LOAD <filename> - Load snapshot from disk" << std::endl;
+    std::cout << "  REPLICATION STATUS - Show replication status" << std::endl;
+    std::cout << "  REPLICATION STOP - Stop replication" << std::endl;
+    std::cout << "  REPLICATION START - Start replication" << std::endl;
     std::cout << "  quit/exit - Exit the client" << std::endl;
     std::cout << "  help - Show this help" << std::endl;
   }
@@ -196,6 +202,57 @@ class MygramClient {
     } else if (response.find("OK DOC") == 0) {
       // GET response: OK DOC <primary_key> [<filter=value>...]
       std::cout << response.substr(3) << std::endl;  // Remove "OK "
+    } else if (response.find("OK INFO") == 0) {
+      // INFO response: OK INFO\r\n<key>: <value>\r\n...\r\nEND
+      // Simply print the formatted response (already has nice formatting from server)
+      std::string info = response.substr(8);  // Remove "OK INFO\r\n"
+
+      // Replace \r\n with actual newlines for display
+      size_t pos = 0;
+      while ((pos = info.find("\\r\\n", pos)) != std::string::npos) {
+        info.replace(pos, 4, "\n");
+        pos += 1;
+      }
+
+      // Handle actual \r\n sequences
+      pos = 0;
+      while ((pos = info.find("\r\n", pos)) != std::string::npos) {
+        info.replace(pos, 2, "\n");
+        pos += 1;
+      }
+
+      std::cout << info << std::endl;
+    } else if (response.find("OK SAVED") == 0) {
+      // SAVE response: OK SAVED <filepath>
+      std::string filepath = response.substr(9);  // Remove "OK SAVED "
+      std::cout << "Snapshot saved to: " << filepath << std::endl;
+    } else if (response.find("OK LOADED") == 0) {
+      // LOAD response: OK LOADED <filepath>
+      std::string filepath = response.substr(10);  // Remove "OK LOADED "
+      std::cout << "Snapshot loaded from: " << filepath << std::endl;
+    } else if (response.find("OK REPLICATION_STOPPED") == 0) {
+      std::cout << "Replication stopped successfully" << std::endl;
+    } else if (response.find("OK REPLICATION_STARTED") == 0) {
+      std::cout << "Replication started successfully" << std::endl;
+    } else if (response.find("OK REPLICATION") == 0) {
+      // REPLICATION STATUS response: OK REPLICATION\r\n<key>: <value>\r\n...END
+      std::string info = response.substr(15);  // Remove "OK REPLICATION\r\n"
+
+      // Replace \\r\\n with actual newlines for display
+      size_t pos = 0;
+      while ((pos = info.find("\\\\r\\\\n", pos)) != std::string::npos) {
+        info.replace(pos, 4, "\\n");
+        pos += 1;
+      }
+
+      // Handle actual \\r\\n sequences
+      pos = 0;
+      while ((pos = info.find("\\r\\n", pos)) != std::string::npos) {
+        info.replace(pos, 2, "\\n");
+        pos += 1;
+      }
+
+      std::cout << info << std::endl;
     } else if (response.find("ERROR") == 0) {
       // Error response
       std::cout << "(error) " << response.substr(6) << std::endl;  // Remove "ERROR "

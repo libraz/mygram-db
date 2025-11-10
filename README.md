@@ -233,15 +233,29 @@ ERROR <error_message>
 - **Memory Efficiency**: Optimized memory usage with compressed posting lists
 - **Search Limits**: Max 1,000 results per SEARCH query (configurable via LIMIT)
 
-## Supported Column Types
+## MySQL Replication
 
-MygramDB supports the following MySQL column types for text indexing:
+MygramDB supports real-time replication from MySQL using GTID-based binlog streaming.
 
-- `VARCHAR`
-- `TEXT` (including TINYTEXT, MEDIUMTEXT, LONGTEXT)
-- `BLOB` (treated as text, including TINYBLOB, MEDIUMBLOB, LONGBLOB)
+**Supported Operations:**
+- INSERT (WRITE_ROWS events)
+- UPDATE (UPDATE_ROWS events)
+- DELETE (DELETE_ROWS events)
 
-Attempting to use other column types (e.g., INT, DATETIME) will result in an error.
+**Supported Column Types:**
+- Integers: TINYINT, SMALLINT, INT, MEDIUMINT, BIGINT (signed/unsigned)
+- Strings: VARCHAR, CHAR, TEXT, BLOB, ENUM, SET
+- Date/Time: DATE, TIME, DATETIME, TIMESTAMP (with fractional seconds)
+- Numeric: DECIMAL, FLOAT, DOUBLE
+- Special: JSON, BIT, NULL
+
+**Features:**
+- GTID position tracking with atomic persistence
+- Automatic reconnection on connection loss
+- Multi-threaded event processing
+- Configurable event queue size
+
+**Note:** Replication must be enabled in MySQL with GTID mode. See MySQL documentation for setup instructions.
 
 ## Development
 
@@ -276,7 +290,21 @@ cd build
 ctest --output-on-failure
 ```
 
-Current test coverage: **138 tests, 100% passing**
+Current test coverage: **163 tests, 100% passing**
+
+**Note**: All unit tests run without requiring a MySQL server connection. Integration tests that require a MySQL server are separated and disabled by default. To run integration tests:
+
+```bash
+# Set environment variables for MySQL connection
+export MYSQL_HOST=127.0.0.1
+export MYSQL_USER=root
+export MYSQL_PASSWORD=your_password
+export MYSQL_DATABASE=test
+export ENABLE_MYSQL_INTEGRATION_TESTS=1
+
+# Run integration tests
+./build/bin/mysql_connection_integration_test
+```
 
 ### Build Options
 

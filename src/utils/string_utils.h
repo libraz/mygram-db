@@ -50,6 +50,18 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc,
 std::vector<std::string> GenerateNgrams(const std::string& text, int n = 1);
 
 /**
+ * @brief Generate hybrid n-grams (Kanji=1, others=2)
+ *
+ * CJK Ideographs (漢字) are tokenized as single characters,
+ * while other characters are tokenized as bigrams.
+ * This reduces memory usage while maintaining Kanji search precision.
+ *
+ * @param text Input text (should be normalized)
+ * @return Vector of n-gram strings
+ */
+std::vector<std::string> GenerateHybridNgrams(const std::string& text);
+
+/**
  * @brief Convert UTF-8 string to codepoint vector
  *
  * @param text UTF-8 encoded string

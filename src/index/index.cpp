@@ -7,6 +7,8 @@
 #include "utils/string_utils.h"
 #include <spdlog/spdlog.h>
 #include <unordered_set>
+#include <fstream>
+#include <cstring>
 
 namespace mygramdb {
 namespace index {
@@ -15,8 +17,13 @@ Index::Index(int ngram_size, double roaring_threshold)
     : ngram_size_(ngram_size), roaring_threshold_(roaring_threshold) {}
 
 void Index::AddDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams
-  auto ngrams = utils::GenerateNgrams(text, ngram_size_);
+  // Generate n-grams (hybrid mode if ngram_size_ == 0)
+  std::vector<std::string> ngrams;
+  if (ngram_size_ == 0) {
+    ngrams = utils::GenerateHybridNgrams(text);
+  } else {
+    ngrams = utils::GenerateNgrams(text, ngram_size_);
+  }
 
   // Remove duplicates while preserving uniqueness
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
@@ -27,15 +34,22 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
     posting->Add(doc_id);
   }
 
-  spdlog::debug("Added document {} with {} unique {}-grams", doc_id,
-                unique_ngrams.size(), ngram_size_);
+  const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
+  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id,
+                unique_ngrams.size(), ngram_size_, mode);
 }
 
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
                           const std::string& new_text) {
-  // Generate n-grams for both texts
-  auto old_ngrams = utils::GenerateNgrams(old_text, ngram_size_);
-  auto new_ngrams = utils::GenerateNgrams(new_text, ngram_size_);
+  // Generate n-grams for both texts (hybrid mode if ngram_size_ == 0)
+  std::vector<std::string> old_ngrams, new_ngrams;
+  if (ngram_size_ == 0) {
+    old_ngrams = utils::GenerateHybridNgrams(old_text);
+    new_ngrams = utils::GenerateHybridNgrams(new_text);
+  } else {
+    old_ngrams = utils::GenerateNgrams(old_text, ngram_size_);
+    new_ngrams = utils::GenerateNgrams(new_text, ngram_size_);
+  }
 
   std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
   std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
@@ -60,8 +74,13 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
 }
 
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams
-  auto ngrams = utils::GenerateNgrams(text, ngram_size_);
+  // Generate n-grams (hybrid mode if ngram_size_ == 0)
+  std::vector<std::string> ngrams;
+  if (ngram_size_ == 0) {
+    ngrams = utils::GenerateHybridNgrams(text);
+  } else {
+    ngrams = utils::GenerateNgrams(text, ngram_size_);
+  }
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
 
   // Remove document from posting list for each n-gram
@@ -173,6 +192,136 @@ PostingList* Index::GetOrCreatePostingList(const std::string& term) {
 const PostingList* Index::GetPostingList(const std::string& term) const {
   auto it = term_postings_.find(term);
   return it != term_postings_.end() ? it->second.get() : nullptr;
+}
+
+bool Index::SaveToFile(const std::string& filepath) const {
+  try {
+    std::ofstream ofs(filepath, std::ios::binary);
+    if (!ofs) {
+      spdlog::error("Failed to open file for writing: {}", filepath);
+      return false;
+    }
+
+    // File format:
+    // [4 bytes: magic "MGIX"] [4 bytes: version] [4 bytes: ngram_size]
+    // [8 bytes: term_count] [terms and posting lists...]
+
+    // Write magic number
+    ofs.write("MGIX", 4);
+
+    // Write version
+    uint32_t version = 1;
+    ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    // Write ngram_size
+    uint32_t ngram = static_cast<uint32_t>(ngram_size_);
+    ofs.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
+
+    // Write term count
+    uint64_t term_count = term_postings_.size();
+    ofs.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+
+    // Write each term and its posting list
+    for (const auto& [term, posting] : term_postings_) {
+      // Write term length and term
+      uint32_t term_len = static_cast<uint32_t>(term.size());
+      ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+      ofs.write(term.data(), term_len);
+
+      // Serialize posting list to buffer
+      std::vector<uint8_t> posting_data;
+      posting->Serialize(posting_data);
+
+      // Write posting list size and data
+      uint64_t posting_size = posting_data.size();
+      ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
+      ofs.write(reinterpret_cast<const char*>(posting_data.data()), posting_size);
+    }
+
+    ofs.close();
+    spdlog::info("Saved index to {}: {} terms, {} MB",
+                 filepath, term_count, MemoryUsage() / (1024 * 1024));
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while saving index: {}", e.what());
+    return false;
+  }
+}
+
+bool Index::LoadFromFile(const std::string& filepath) {
+  try {
+    std::ifstream ifs(filepath, std::ios::binary);
+    if (!ifs) {
+      spdlog::error("Failed to open file for reading: {}", filepath);
+      return false;
+    }
+
+    // Read and verify magic number
+    char magic[4];
+    ifs.read(magic, 4);
+    if (std::memcmp(magic, "MGIX", 4) != 0) {
+      spdlog::error("Invalid index file format (bad magic number)");
+      return false;
+    }
+
+    // Read version
+    uint32_t version;
+    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version != 1) {
+      spdlog::error("Unsupported index file version: {}", version);
+      return false;
+    }
+
+    // Read ngram_size
+    uint32_t ngram;
+    ifs.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
+    if (static_cast<int>(ngram) != ngram_size_) {
+      spdlog::warn("Index ngram_size mismatch: file={}, current={}", ngram, ngram_size_);
+      // Continue anyway, but this might cause issues
+    }
+
+    // Read term count
+    uint64_t term_count;
+    ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
+
+    // Clear existing data
+    term_postings_.clear();
+
+    // Read each term and its posting list
+    for (uint64_t i = 0; i < term_count; ++i) {
+      // Read term length and term
+      uint32_t term_len;
+      ifs.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
+
+      std::string term(term_len, '\0');
+      ifs.read(&term[0], term_len);
+
+      // Read posting list size and data
+      uint64_t posting_size;
+      ifs.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
+
+      std::vector<uint8_t> posting_data(posting_size);
+      ifs.read(reinterpret_cast<char*>(posting_data.data()), posting_size);
+
+      // Deserialize posting list
+      auto posting = std::make_unique<PostingList>(roaring_threshold_);
+      size_t offset = 0;
+      if (!posting->Deserialize(posting_data, offset)) {
+        spdlog::error("Failed to deserialize posting list for term: {}", term);
+        return false;
+      }
+
+      term_postings_[term] = std::move(posting);
+    }
+
+    ifs.close();
+    spdlog::info("Loaded index from {}: {} terms, {} MB",
+                 filepath, term_count, MemoryUsage() / (1024 * 1024));
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while loading index: {}", e.what());
+    return false;
+  }
 }
 
 }  // namespace index

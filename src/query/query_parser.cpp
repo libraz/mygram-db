@@ -34,7 +34,13 @@ bool Query::IsValid() const {
     return false;
   }
 
-  if (table.empty()) {
+  // INFO, SAVE, LOAD, REPLICATION_* commands don't require a table
+  if (type != QueryType::INFO && type != QueryType::SAVE &&
+      type != QueryType::LOAD &&
+      type != QueryType::REPLICATION_STATUS &&
+      type != QueryType::REPLICATION_STOP &&
+      type != QueryType::REPLICATION_START &&
+      table.empty()) {
     return false;
   }
 
@@ -76,6 +82,52 @@ Query QueryParser::Parse(const std::string& query_str) {
     return ParseCount(tokens);
   } else if (command == "GET") {
     return ParseGet(tokens);
+  } else if (command == "INFO") {
+    Query query;
+    query.type = QueryType::INFO;
+    query.table = ""; // INFO doesn't need a table
+    return query;
+  } else if (command == "SAVE") {
+    Query query;
+    query.type = QueryType::SAVE;
+    query.table = ""; // SAVE doesn't need a table
+    // Optional filepath argument
+    if (tokens.size() > 1) {
+      query.filepath = tokens[1];
+    }
+    return query;
+  } else if (command == "LOAD") {
+    Query query;
+    query.type = QueryType::LOAD;
+    query.table = ""; // LOAD doesn't need a table
+    // Optional filepath argument
+    if (tokens.size() > 1) {
+      query.filepath = tokens[1];
+    }
+    return query;
+  } else if (command == "REPLICATION") {
+    // REPLICATION STATUS | STOP | START
+    if (tokens.size() < 2) {
+      SetError("REPLICATION requires a subcommand (STATUS, STOP, START)");
+      return Query{};
+    }
+
+    std::string subcommand = ToUpper(tokens[1]);
+    Query query;
+    query.table = ""; // REPLICATION doesn't need a table
+
+    if (subcommand == "STATUS") {
+      query.type = QueryType::REPLICATION_STATUS;
+    } else if (subcommand == "STOP") {
+      query.type = QueryType::REPLICATION_STOP;
+    } else if (subcommand == "START") {
+      query.type = QueryType::REPLICATION_START;
+    } else {
+      SetError("Unknown REPLICATION subcommand: " + subcommand);
+      return Query{};
+    }
+
+    return query;
   } else {
     SetError("Unknown command: " + command);
     return Query{};

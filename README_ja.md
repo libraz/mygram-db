@@ -243,6 +243,30 @@ MygramDB は以下の MySQL カラム型をテキストインデックス化で�
 
 他のカラム型（例: INT、DATETIME）を使用しようとするとエラーが発生します。
 
+## MySQL レプリケーション
+
+MygramDB は GTID ベースの binlog ストリーミングを使用した MySQL からのリアルタイムレプリケーションをサポートしています。
+
+**サポートされている操作:**
+- INSERT（WRITE_ROWS イベント）
+- UPDATE（UPDATE_ROWS イベント）
+- DELETE（DELETE_ROWS イベント）
+
+**サポートされているカラム型:**
+- 整数型: TINYINT、SMALLINT、INT、MEDIUMINT、BIGINT（signed/unsigned）
+- 文字列型: VARCHAR、CHAR、TEXT、BLOB、ENUM、SET
+- 日時型: DATE、TIME、DATETIME、TIMESTAMP（小数秒対応）
+- 数値型: DECIMAL、FLOAT、DOUBLE
+- 特殊型: JSON、BIT、NULL
+
+**機能:**
+- アトミックな永続化を伴う GTID ポジション追跡
+- 接続断時の自動再接続
+- マルチスレッドイベント処理
+- 設定可能なイベントキューサイズ
+
+**注意:** MySQL で GTID モードを有効にしたレプリケーションを設定する必要があります。詳細は MySQL のドキュメントを参照してください。
+
 ## 開発
 
 ### プロジェクト構造
@@ -276,7 +300,21 @@ cd build
 ctest --output-on-failure
 ```
 
-現在のテストカバレッジ: **138 テスト、100% 成功**
+現在のテストカバレッジ: **163 テスト、100% 成功**
+
+**注意**: すべてのユニットテストは MySQL サーバー接続なしで実行できます。MySQL サーバーが必要な統合テストは分離されており、デフォルトでは無効化されています。統合テストを実行するには：
+
+```bash
+# MySQL 接続用の環境変数を設定
+export MYSQL_HOST=127.0.0.1
+export MYSQL_USER=root
+export MYSQL_PASSWORD=your_password
+export MYSQL_DATABASE=test
+export ENABLE_MYSQL_INTEGRATION_TESTS=1
+
+# 統合テストを実行
+./build/bin/mysql_connection_integration_test
+```
 
 ### ビルドオプション
 

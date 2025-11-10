@@ -6,11 +6,7 @@ add_executable(tcp_server_test
 
 target_link_libraries(tcp_server_test
   mygramdb_server
-  mygramdb_query
-  mygramdb_index
-  mygramdb_storage
-  mygramdb_utils
-  GTest::gtest
+  mygramdb_mysql
   GTest::gtest_main
 )
 

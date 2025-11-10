@@ -6,7 +6,6 @@ add_executable(query_parser_test
 
 target_link_libraries(query_parser_test
   mygramdb_query
-  GTest::gtest
   GTest::gtest_main
 )
 

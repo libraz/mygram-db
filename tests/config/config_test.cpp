@@ -57,6 +57,7 @@ TEST(ConfigTest, LoadValidConfig) {
 
   // Replication config
   EXPECT_TRUE(config.replication.enable);
+  EXPECT_EQ(config.replication.server_id, 100U);
   EXPECT_EQ(config.replication.start_from, "snapshot");
 
   // Memory config
@@ -161,4 +162,88 @@ TEST(ConfigTest, ConcatenatedTextSource) {
   EXPECT_EQ(table.text_source.concat[0], "title");
   EXPECT_EQ(table.text_source.concat[1], "body");
   EXPECT_EQ(table.text_source.delimiter, " | ");
+}
+
+/**
+ * @brief Test invalid server_id (0 with replication enabled)
+ */
+TEST(ConfigTest, InvalidServerId) {
+  std::ofstream f("invalid_server_id.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  start_from: snapshot\n";
+  f.close();
+
+  EXPECT_THROW({
+    try {
+      LoadConfig("invalid_server_id.yaml");
+    } catch (const std::runtime_error& e) {
+      EXPECT_STREQ(e.what(), "replication.server_id must be set to a non-zero value when replication is enabled");
+      throw;
+    }
+  }, std::runtime_error);
+}
+
+/**
+ * @brief Test invalid GTID format
+ */
+TEST(ConfigTest, InvalidGTIDFormat) {
+  std::ofstream f("invalid_gtid.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: gtid=invalid-format\n";
+  f.close();
+
+  EXPECT_THROW({
+    try {
+      LoadConfig("invalid_gtid.yaml");
+    } catch (const std::runtime_error& e) {
+      std::string error_msg(e.what());
+      EXPECT_TRUE(error_msg.find("Invalid GTID format") != std::string::npos);
+      throw;
+    }
+  }, std::runtime_error);
+}
+
+/**
+ * @brief Test invalid start_from value
+ */
+TEST(ConfigTest, InvalidStartFrom) {
+  std::ofstream f("invalid_start_from.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: invalid_option\n";
+  f.close();
+
+  EXPECT_THROW({
+    try {
+      LoadConfig("invalid_start_from.yaml");
+    } catch (const std::runtime_error& e) {
+      EXPECT_STREQ(e.what(), "replication.start_from must be one of: snapshot, latest, state_file, or gtid=<UUID:txn>");
+      throw;
+    }
+  }, std::runtime_error);
 }

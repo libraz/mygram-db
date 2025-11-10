@@ -12,15 +12,30 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
+#include <ctime>
 #include <sstream>
+
+#ifdef USE_MYSQL
+#include "mysql/binlog_reader.h"
+#endif
 
 namespace mygramdb {
 namespace server {
 
 TcpServer::TcpServer(const ServerConfig& config,
                      index::Index& index,
-                     storage::DocumentStore& doc_store)
-    : config_(config), index_(index), doc_store_(doc_store) {}
+                     storage::DocumentStore& doc_store,
+                     int ngram_size,
+                     const std::string& snapshot_dir,
+#ifdef USE_MYSQL
+                     mysql::BinlogReader* binlog_reader
+#else
+                     void* binlog_reader
+#endif
+                     )
+    : config_(config), index_(index), doc_store_(doc_store),
+      ngram_size_(ngram_size), snapshot_dir_(snapshot_dir),
+      binlog_reader_(binlog_reader) {}
 
 TcpServer::~TcpServer() {
   Stop();
@@ -84,6 +99,9 @@ bool TcpServer::Start() {
 
   should_stop_ = false;
   running_ = true;
+
+  // Record start time
+  start_time_ = static_cast<uint64_t>(std::time(nullptr));
 
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(
@@ -236,10 +254,15 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
   try {
     switch (query.type) {
       case query::QueryType::SEARCH: {
-        // Generate n-grams from search text
+        // Generate n-grams from search text (hybrid mode if ngram_size_ == 0)
         std::string normalized = utils::NormalizeText(query.search_text,
                                                        true, "keep", true);
-        auto terms = utils::GenerateNgrams(normalized, 1);
+        std::vector<std::string> terms;
+        if (ngram_size_ == 0) {
+          terms = utils::GenerateHybridNgrams(normalized);
+        } else {
+          terms = utils::GenerateNgrams(normalized, ngram_size_);
+        }
 
         // Search index
         auto results = index_.SearchAnd(terms);
@@ -250,7 +273,12 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           std::vector<std::string> not_ngrams;
           for (const auto& not_term : query.not_terms) {
             std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
-            auto ngrams = utils::GenerateNgrams(norm_not, 1);
+            std::vector<std::string> ngrams;
+            if (ngram_size_ == 0) {
+              ngrams = utils::GenerateHybridNgrams(norm_not);
+            } else {
+              ngrams = utils::GenerateNgrams(norm_not, ngram_size_);
+            }
             not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
           }
 
@@ -263,10 +291,15 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
       }
 
       case query::QueryType::COUNT: {
-        // Generate n-grams
+        // Generate n-grams (hybrid mode if ngram_size_ == 0)
         std::string normalized = utils::NormalizeText(query.search_text,
                                                        true, "keep", true);
-        auto terms = utils::GenerateNgrams(normalized, 1);
+        std::vector<std::string> terms;
+        if (ngram_size_ == 0) {
+          terms = utils::GenerateHybridNgrams(normalized);
+        } else {
+          terms = utils::GenerateNgrams(normalized, ngram_size_);
+        }
 
         // Count
         auto results = index_.SearchAnd(terms);
@@ -276,7 +309,12 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           std::vector<std::string> not_ngrams;
           for (const auto& not_term : query.not_terms) {
             std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
-            auto ngrams = utils::GenerateNgrams(norm_not, 1);
+            std::vector<std::string> ngrams;
+            if (ngram_size_ == 0) {
+              ngrams = utils::GenerateHybridNgrams(norm_not);
+            } else {
+              ngrams = utils::GenerateNgrams(norm_not, ngram_size_);
+            }
             not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
           }
 
@@ -294,6 +332,174 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         auto doc = doc_store_.GetDocument(doc_id_opt.value());
         return FormatGetResponse(doc);
+      }
+
+      case query::QueryType::INFO: {
+        return FormatInfoResponse();
+      }
+
+      case query::QueryType::SAVE: {
+        // Determine filepath
+        std::string filepath;
+        if (!query.filepath.empty()) {
+          filepath = query.filepath;
+          // If relative path, prepend snapshot_dir
+          if (filepath[0] != '/') {
+            filepath = snapshot_dir_ + "/" + filepath;
+          }
+        } else {
+          // Generate default filepath with timestamp
+          auto now = std::time(nullptr);
+          char buf[64];
+          std::strftime(buf, sizeof(buf), "snapshot_%Y%m%d_%H%M%S", std::localtime(&now));
+          filepath = snapshot_dir_ + "/" + std::string(buf);
+        }
+
+        // Get current GTID before stopping replication
+        std::string current_gtid;
+#ifdef USE_MYSQL
+        bool replication_was_running = false;
+        if (binlog_reader_ && binlog_reader_->IsRunning()) {
+          current_gtid = binlog_reader_->GetCurrentGTID();
+          spdlog::info("Stopping binlog replication for snapshot save at GTID: {}", current_gtid);
+          binlog_reader_->Stop();
+          replication_was_running = true;
+        }
+#endif
+
+        // Set read-only mode
+        read_only_ = true;
+
+        // Save index and document store with GTID
+        std::string index_path = filepath + ".index";
+        std::string doc_path = filepath + ".docs";
+
+        bool success = index_.SaveToFile(index_path) &&
+                      doc_store_.SaveToFile(doc_path, current_gtid);
+
+        // Clear read-only mode
+        read_only_ = false;
+
+        // Restart binlog replication if it was running
+#ifdef USE_MYSQL
+        if (replication_was_running && binlog_reader_) {
+          spdlog::info("Restarting binlog replication after snapshot save");
+          if (!binlog_reader_->Start()) {
+            spdlog::warn("Failed to restart binlog replication: {}",
+                        binlog_reader_->GetLastError());
+          }
+        }
+#endif
+
+        if (success) {
+          return FormatSaveResponse(filepath);
+        } else {
+          return FormatError("Failed to save snapshot");
+        }
+      }
+
+      case query::QueryType::LOAD: {
+        // Determine filepath
+        std::string filepath;
+        if (!query.filepath.empty()) {
+          filepath = query.filepath;
+          // If relative path, prepend snapshot_dir
+          if (filepath[0] != '/') {
+            filepath = snapshot_dir_ + "/" + filepath;
+          }
+        } else {
+          return FormatError("LOAD requires a filepath");
+        }
+
+        // Stop binlog replication if running
+        bool replication_was_running = false;
+#ifdef USE_MYSQL
+        if (binlog_reader_ && binlog_reader_->IsRunning()) {
+          spdlog::info("Stopping binlog replication for snapshot load");
+          binlog_reader_->Stop();
+          replication_was_running = true;
+        }
+#endif
+
+        // Set read-only mode
+        read_only_ = true;
+
+        // Load index and document store with GTID
+        std::string index_path = filepath + ".index";
+        std::string doc_path = filepath + ".docs";
+        std::string loaded_gtid;
+
+        bool success = index_.LoadFromFile(index_path) &&
+                      doc_store_.LoadFromFile(doc_path, &loaded_gtid);
+
+        // Clear read-only mode
+        read_only_ = false;
+
+        // Restore GTID if snapshot had one
+#ifdef USE_MYSQL
+        if (success && !loaded_gtid.empty() && binlog_reader_) {
+          binlog_reader_->SetCurrentGTID(loaded_gtid);
+          spdlog::info("Restored replication GTID from snapshot: {}", loaded_gtid);
+        }
+
+        // Restart binlog replication if it was running
+        if (replication_was_running && binlog_reader_) {
+          spdlog::info("Restarting binlog replication after snapshot load");
+          if (!binlog_reader_->Start()) {
+            spdlog::warn("Failed to restart binlog replication: {}",
+                        binlog_reader_->GetLastError());
+          }
+        }
+#endif
+
+        if (success) {
+          return FormatLoadResponse(filepath);
+        } else {
+          return FormatError("Failed to load snapshot");
+        }
+      }
+
+      case query::QueryType::REPLICATION_STATUS: {
+        return FormatReplicationStatusResponse();
+      }
+
+      case query::QueryType::REPLICATION_STOP: {
+#ifdef USE_MYSQL
+        if (binlog_reader_) {
+          if (binlog_reader_->IsRunning()) {
+            spdlog::info("Stopping binlog replication by user request");
+            binlog_reader_->Stop();
+            return FormatReplicationStopResponse();
+          } else {
+            return FormatError("Replication is not running");
+          }
+        } else {
+          return FormatError("Replication is not configured");
+        }
+#else
+        return FormatError("MySQL support not compiled");
+#endif
+      }
+
+      case query::QueryType::REPLICATION_START: {
+#ifdef USE_MYSQL
+        if (binlog_reader_) {
+          if (!binlog_reader_->IsRunning()) {
+            spdlog::info("Starting binlog replication by user request");
+            if (binlog_reader_->Start()) {
+              return FormatReplicationStartResponse();
+            } else {
+              return FormatError("Failed to start replication: " + binlog_reader_->GetLastError());
+            }
+          } else {
+            return FormatError("Replication is already running");
+          }
+        } else {
+          return FormatError("Replication is not configured");
+        }
+#else
+        return FormatError("MySQL support not compiled");
+#endif
       }
 
       default:
@@ -348,6 +554,86 @@ std::string TcpServer::FormatGetResponse(
   }
 
   return oss.str();
+}
+
+std::string TcpServer::FormatInfoResponse() {
+  std::ostringstream oss;
+  oss << "OK INFO\r\n";
+
+  // Server version
+  oss << "version: MygramDB 1.0.0\r\n";
+
+  // Uptime
+  uint64_t current_time = static_cast<uint64_t>(std::time(nullptr));
+  uint64_t uptime_seconds = current_time - start_time_;
+  oss << "uptime_seconds: " << uptime_seconds << "\r\n";
+
+  // Request statistics
+  oss << "total_requests: " << total_requests_.load() << "\r\n";
+  oss << "active_connections: " << GetConnectionCount() << "\r\n";
+
+  // Index statistics
+  oss << "total_documents: " << doc_store_.Size() << "\r\n";
+
+  // N-gram configuration
+  if (ngram_size_ == 0) {
+    oss << "ngram_mode: hybrid (kanji=1, others=2)\r\n";
+  } else {
+    oss << "ngram_size: " << ngram_size_ << "\r\n";
+  }
+
+  // Replication information
+#ifdef USE_MYSQL
+  if (binlog_reader_) {
+    oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
+    oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
+    oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
+  }
+#endif
+
+  oss << "END";
+  return oss.str();
+}
+
+std::string TcpServer::FormatSaveResponse(const std::string& filepath) {
+  return "OK SAVED " + filepath;
+}
+
+std::string TcpServer::FormatLoadResponse(const std::string& filepath) {
+  return "OK LOADED " + filepath;
+}
+
+std::string TcpServer::FormatReplicationStatusResponse() {
+#ifdef USE_MYSQL
+  std::ostringstream oss;
+  oss << "OK REPLICATION\r\n";
+
+  if (binlog_reader_) {
+    bool is_running = binlog_reader_->IsRunning();
+    oss << "status: " << (is_running ? "running" : "stopped") << "\r\n";
+    oss << "current_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
+    oss << "processed_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
+
+    if (is_running) {
+      oss << "queue_size: " << binlog_reader_->GetQueueSize() << "\r\n";
+    }
+  } else {
+    oss << "status: not_configured\r\n";
+  }
+
+  oss << "END";
+  return oss.str();
+#else
+  return FormatError("MySQL support not compiled");
+#endif
+}
+
+std::string TcpServer::FormatReplicationStopResponse() {
+  return "OK REPLICATION_STOPPED";
+}
+
+std::string TcpServer::FormatReplicationStartResponse() {
+  return "OK REPLICATION_STARTED";
 }
 
 std::string TcpServer::FormatError(const std::string& message) {

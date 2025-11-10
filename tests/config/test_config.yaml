@@ -35,6 +35,7 @@ build:
 
 replication:
   enable: true
+  server_id: 100
   start_from: "snapshot"
 
 memory:

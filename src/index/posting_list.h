@@ -122,6 +122,20 @@ class PostingList {
    */
   void Optimize(uint64_t total_docs);
 
+  /**
+   * @brief Serialize posting list to buffer
+   * @param buffer Output buffer
+   */
+  void Serialize(std::vector<uint8_t>& buffer) const;
+
+  /**
+   * @brief Deserialize posting list from buffer
+   * @param buffer Input buffer
+   * @param offset Current offset (will be updated)
+   * @return true if successful
+   */
+  bool Deserialize(const std::vector<uint8_t>& buffer, size_t& offset);
+
  private:
   PostingStrategy strategy_;
   double roaring_threshold_;

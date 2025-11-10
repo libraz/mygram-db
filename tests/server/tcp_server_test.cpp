@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <thread>
 #include <chrono>
+#include <fstream>
+#include <cstdio>
 
 using namespace mygramdb::server;
 using namespace mygramdb;
@@ -407,4 +409,173 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
 
   EXPECT_EQ(success_count, 3);
   EXPECT_EQ(server_->GetTotalRequests(), 3);
+}
+
+/**
+ * @brief Test INFO command
+ */
+TEST_F(TcpServerTest, InfoCommand) {
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send INFO command
+  std::string response = SendRequest(sock, "INFO");
+
+  // Should return OK INFO with server statistics
+  EXPECT_TRUE(response.find("OK INFO") == 0);
+  EXPECT_TRUE(response.find("version:") != std::string::npos);
+  EXPECT_TRUE(response.find("uptime_seconds:") != std::string::npos);
+  EXPECT_TRUE(response.find("total_requests:") != std::string::npos);
+  EXPECT_TRUE(response.find("active_connections:") != std::string::npos);
+  EXPECT_TRUE(response.find("total_documents:") != std::string::npos);
+  EXPECT_TRUE(response.find("ngram_mode:") != std::string::npos ||
+              response.find("ngram_size:") != std::string::npos);
+  EXPECT_TRUE(response.find("END") != std::string::npos);
+
+  close(sock);
+}
+
+/**
+ * @brief Test SAVE command
+ */
+TEST_F(TcpServerTest, SaveCommand) {
+  // Add some documents first
+  index_->AddDocument(1, "test document");
+  index_->AddDocument(2, "another document");
+  doc_store_->AddDocument("1", {});
+  doc_store_->AddDocument("2", {});
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send SAVE command
+  std::string test_file = "/tmp/test_snapshot_" + std::to_string(std::time(nullptr));
+  std::string response = SendRequest(sock, "SAVE " + test_file);
+
+  // Should return OK SAVED
+  EXPECT_TRUE(response.find("OK SAVED") == 0);
+  EXPECT_TRUE(response.find(test_file) != std::string::npos);
+
+  // Check files exist
+  std::ifstream index_file(test_file + ".index");
+  EXPECT_TRUE(index_file.good());
+  index_file.close();
+
+  std::ifstream docs_file(test_file + ".docs");
+  EXPECT_TRUE(docs_file.good());
+  docs_file.close();
+
+  // Cleanup
+  std::remove((test_file + ".index").c_str());
+  std::remove((test_file + ".docs").c_str());
+
+  close(sock);
+}
+
+/**
+ * @brief Test LOAD command
+ */
+TEST_F(TcpServerTest, LoadCommand) {
+  // Add and save some documents
+  index_->AddDocument(1, "test document");
+  index_->AddDocument(2, "another document");
+  doc_store_->AddDocument("1", {});
+  doc_store_->AddDocument("2", {});
+
+  std::string test_file = "/tmp/test_snapshot_load_" + std::to_string(std::time(nullptr));
+  ASSERT_TRUE(index_->SaveToFile(test_file + ".index"));
+  ASSERT_TRUE(doc_store_->SaveToFile(test_file + ".docs"));
+
+  // Recreate index and doc_store
+  index_.reset(new mygramdb::index::Index(1, 0.18));
+  doc_store_.reset(new mygramdb::storage::DocumentStore());
+  server_.reset(new mygramdb::server::TcpServer(config_, *index_, *doc_store_, 1, "./snapshots", nullptr));
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send LOAD command
+  std::string response = SendRequest(sock, "LOAD " + test_file);
+
+  // Should return OK LOADED
+  EXPECT_TRUE(response.find("OK LOADED") == 0);
+  EXPECT_TRUE(response.find(test_file) != std::string::npos);
+
+  // Verify data was loaded - check document count
+  EXPECT_EQ(doc_store_->Size(), 2);
+
+  // Cleanup
+  std::remove((test_file + ".index").c_str());
+  std::remove((test_file + ".docs").c_str());
+
+  close(sock);
+}
+
+/**
+ * @brief Test SAVE/LOAD round trip
+ */
+TEST_F(TcpServerTest, SaveLoadRoundTrip) {
+  // Add documents with filters
+  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters1;
+  filters1["status"] = static_cast<int32_t>(1);
+  filters1["name"] = std::string("test");
+
+  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters2;
+  filters2["status"] = static_cast<int32_t>(2);
+  filters2["name"] = std::string("another");
+
+  index_->AddDocument(1, "test document with filters");
+  index_->AddDocument(2, "another document");
+  doc_store_->AddDocument("100", filters1);
+  doc_store_->AddDocument("200", filters2);
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Save
+  std::string test_file = "/tmp/test_roundtrip_" + std::to_string(std::time(nullptr));
+  std::string save_response = SendRequest(sock, "SAVE " + test_file);
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
+
+  // Get original document count
+  size_t original_count = doc_store_->Size();
+
+  // Load (should replace existing data)
+  std::string load_response = SendRequest(sock, "LOAD " + test_file);
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0);
+
+  // Verify document count matches
+  EXPECT_EQ(doc_store_->Size(), original_count);
+
+  // Verify we can retrieve documents
+  auto doc1 = doc_store_->GetDocument(1);
+  ASSERT_TRUE(doc1.has_value());
+  EXPECT_EQ(doc1->primary_key, "100");
+  EXPECT_EQ(doc1->filters.size(), 2);
+
+  // Cleanup
+  std::remove((test_file + ".index").c_str());
+  std::remove((test_file + ".docs").c_str());
+
+  close(sock);
 }

@@ -198,5 +198,70 @@ std::vector<std::string> GenerateNgrams(const std::string& text, int n) {
   return ngrams;
 }
 
+namespace {
+
+/**
+ * @brief Check if codepoint is CJK Ideograph (Kanji)
+ *
+ * CJK Unified Ideographs ranges:
+ * - 4E00-9FFF: Common and uncommon Kanji
+ * - 3400-4DBF: Extension A
+ * - 20000-2A6DF: Extension B
+ * - 2A700-2B73F: Extension C
+ * - 2B740-2B81F: Extension D
+ * - F900-FAFF: Compatibility Ideographs
+ */
+bool IsCJKIdeograph(uint32_t codepoint) {
+  return (codepoint >= 0x4E00 && codepoint <= 0x9FFF) ||    // Main block
+         (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||    // Extension A
+         (codepoint >= 0x20000 && codepoint <= 0x2A6DF) ||  // Extension B
+         (codepoint >= 0x2A700 && codepoint <= 0x2B73F) ||  // Extension C
+         (codepoint >= 0x2B740 && codepoint <= 0x2B81F) ||  // Extension D
+         (codepoint >= 0xF900 && codepoint <= 0xFAFF);      // Compatibility
+}
+
+}  // namespace
+
+std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
+  std::vector<std::string> ngrams;
+
+  // Convert to codepoints for proper character-level processing
+  std::vector<uint32_t> codepoints = Utf8ToCodepoints(text);
+
+  if (codepoints.empty()) {
+    return ngrams;
+  }
+
+  ngrams.reserve(codepoints.size());  // Estimate
+
+  for (size_t i = 0; i < codepoints.size(); ++i) {
+    uint32_t cp = codepoints[i];
+
+    if (IsCJKIdeograph(cp)) {
+      // Kanji: tokenize as single character (unigram)
+      ngrams.push_back(CodepointsToUtf8({cp}));
+    } else {
+      // Non-Kanji: tokenize as bigram with next character
+      if (i + 1 < codepoints.size()) {
+        uint32_t next_cp = codepoints[i + 1];
+        ngrams.push_back(CodepointsToUtf8({cp, next_cp}));
+
+        // If next is also non-Kanji, we'll create overlapping bigrams
+        // This ensures "abc" -> ["ab", "bc"] not just ["ab", "c"]
+      }
+      // Last non-Kanji character: include as single if it's the only one left
+      else if (i == codepoints.size() - 1 && i > 0) {
+        // Check if previous was also non-Kanji (already handled in bigram)
+        if (IsCJKIdeograph(codepoints[i - 1])) {
+          // Previous was Kanji, this is standalone non-Kanji at end
+          // Skip single non-Kanji at end (not searchable by design)
+        }
+      }
+    }
+  }
+
+  return ngrams;
+}
+
 }  // namespace utils
 }  // namespace mygramdb

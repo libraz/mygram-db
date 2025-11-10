@@ -19,6 +19,7 @@ struct MysqlConfig {
   int port = 3306;
   std::string user;
   std::string password;
+  std::string database;
   bool use_gtid = true;
   std::string binlog_format = "ROW";
   std::string binlog_row_image = "FULL";
@@ -30,7 +31,12 @@ struct MysqlConfig {
  */
 struct FilterConfig {
   std::string name;
-  std::string type;  // "int", "datetime", "string"
+  std::string type;  // Type options:
+                     // Integer: "tinyint", "tinyint_unsigned", "smallint", "smallint_unsigned",
+                     //          "int", "int_unsigned", "bigint" (or legacy "int")
+                     // Float: "float", "double"
+                     // String: "string", "varchar", "text"
+                     // Date: "datetime", "date", "timestamp"
   bool dict_compress = false;
   bool bitmap_index = false;
   std::string bucket;  // For datetime: "minute", "hour", "day"
@@ -64,6 +70,7 @@ struct TableConfig {
   std::vector<FilterConfig> filters;
   int ngram_size = 1;
   PostingConfig posting;
+  std::string where_clause;  // Optional WHERE clause for snapshot (e.g., "enabled = 1")
 };
 
 /**
@@ -81,7 +88,10 @@ struct BuildConfig {
  */
 struct ReplicationConfig {
   bool enable = true;
-  std::string start_from = "snapshot";  // "snapshot", "gtid=...", "filepos=..."
+  uint32_t server_id = 0;  // MySQL server ID for replication (must be unique, 0 = disabled)
+  std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest", "state_file"
+  std::string state_file = "./mygramdb_replication.state";  // File to persist current GTID position
+  int queue_size = 10000;  // Queue size for binlog events
   int reconnect_backoff_min_ms = 500;
   int reconnect_backoff_max_ms = 10000;
 };

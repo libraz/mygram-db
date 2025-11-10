@@ -4,6 +4,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   add_library(mygramdb_mysql
     connection.cpp
     binlog_reader.cpp
+    table_metadata.cpp
+    rows_parser.cpp
   )
 
   target_link_libraries(mygramdb_mysql

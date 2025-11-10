@@ -124,6 +124,11 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
 
   query << " FROM " << table_config_.name;
 
+  // Add WHERE clause if specified
+  if (!table_config_.where_clause.empty()) {
+    query << " WHERE " << table_config_.where_clause;
+  }
+
   // Add ORDER BY for efficient processing
   query << " ORDER BY " << table_config_.primary_key;
 
@@ -239,19 +244,44 @@ SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
     }
 
     std::string value_str(row[idx]);
+    const std::string& type = filter_config.type;
 
-    if (filter_config.type == "int") {
-      try {
+    try {
+      // Integer types
+      if (type == "tinyint") {
+        filters[filter_config.name] = static_cast<int8_t>(std::stoi(value_str));
+      } else if (type == "tinyint_unsigned") {
+        filters[filter_config.name] = static_cast<uint8_t>(std::stoul(value_str));
+      } else if (type == "smallint") {
+        filters[filter_config.name] = static_cast<int16_t>(std::stoi(value_str));
+      } else if (type == "smallint_unsigned") {
+        filters[filter_config.name] = static_cast<uint16_t>(std::stoul(value_str));
+      } else if (type == "int") {
+        filters[filter_config.name] = static_cast<int32_t>(std::stoi(value_str));
+      } else if (type == "int_unsigned") {
+        filters[filter_config.name] = static_cast<uint32_t>(std::stoul(value_str));
+      } else if (type == "bigint") {
         filters[filter_config.name] = std::stoll(value_str);
-      } catch (const std::exception& e) {
-        spdlog::warn("Failed to parse int filter {}: {}",
-                     filter_config.name, value_str);
       }
-    } else if (filter_config.type == "string") {
-      filters[filter_config.name] = value_str;
-    } else if (filter_config.type == "datetime") {
-      // Store datetime as string for now
-      filters[filter_config.name] = value_str;
+      // Float types
+      else if (type == "float" || type == "double") {
+        filters[filter_config.name] = std::stod(value_str);
+      }
+      // String types
+      else if (type == "string" || type == "varchar" || type == "text") {
+        filters[filter_config.name] = value_str;
+      }
+      // Date/time types (store as string)
+      else if (type == "datetime" || type == "date" || type == "timestamp") {
+        filters[filter_config.name] = value_str;
+      }
+      else {
+        spdlog::warn("Unknown filter type '{}' for field '{}'",
+                     type, filter_config.name);
+      }
+    } catch (const std::exception& e) {
+      spdlog::warn("Failed to parse {} filter {}: {}",
+                   type, filter_config.name, value_str);
     }
   }
 

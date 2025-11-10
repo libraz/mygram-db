@@ -15,6 +15,14 @@
 #include <vector>
 #include <mutex>
 
+#ifdef USE_MYSQL
+namespace mygramdb {
+namespace mysql {
+class BinlogReader;
+}
+}
+#endif
+
 namespace mygramdb {
 namespace server {
 
@@ -40,10 +48,24 @@ class TcpServer {
  public:
   /**
    * @brief Construct TCP server
+   * @param config Server configuration
+   * @param index N-gram index reference
+   * @param doc_store Document store reference
+   * @param ngram_size N-gram size (0 for hybrid mode)
+   * @param snapshot_dir Snapshot directory path
+   * @param binlog_reader Optional binlog reader pointer (for stopping/starting replication)
    */
   TcpServer(const ServerConfig& config,
             index::Index& index,
-            storage::DocumentStore& doc_store);
+            storage::DocumentStore& doc_store,
+            int ngram_size = 1,
+            const std::string& snapshot_dir = "./snapshots",
+#ifdef USE_MYSQL
+            mysql::BinlogReader* binlog_reader = nullptr
+#else
+            void* binlog_reader = nullptr
+#endif
+            );
 
   ~TcpServer();
 
@@ -83,6 +105,11 @@ class TcpServer {
    */
   const std::string& GetLastError() const { return last_error_; }
 
+  /**
+   * @brief Get server start time (Unix timestamp)
+   */
+  uint64_t GetStartTime() const { return start_time_; }
+
  private:
   ServerConfig config_;
   index::Index& index_;
@@ -92,6 +119,7 @@ class TcpServer {
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
   std::atomic<uint64_t> total_requests_{0};
+  uint64_t start_time_ = 0;  // Server start time (Unix timestamp)
 
   int server_fd_ = -1;
   uint16_t actual_port_ = 0;
@@ -101,6 +129,15 @@ class TcpServer {
   mutable std::mutex connections_mutex_;
 
   std::string last_error_;
+  int ngram_size_;  // N-gram size (0 for hybrid mode)
+  std::string snapshot_dir_;  // Snapshot directory
+  std::atomic<bool> read_only_{false};  // Read-only mode flag
+
+#ifdef USE_MYSQL
+  mysql::BinlogReader* binlog_reader_;  // Optional binlog reader for replication control
+#else
+  void* binlog_reader_;  // Placeholder when MySQL not compiled
+#endif
 
   /**
    * @brief Accept thread function
@@ -132,6 +169,36 @@ class TcpServer {
    * @brief Format GET response
    */
   std::string FormatGetResponse(const std::optional<storage::Document>& doc);
+
+  /**
+   * @brief Format INFO response
+   */
+  std::string FormatInfoResponse();
+
+  /**
+   * @brief Format SAVE response
+   */
+  std::string FormatSaveResponse(const std::string& filepath);
+
+  /**
+   * @brief Format LOAD response
+   */
+  std::string FormatLoadResponse(const std::string& filepath);
+
+  /**
+   * @brief Format REPLICATION STATUS response
+   */
+  std::string FormatReplicationStatusResponse();
+
+  /**
+   * @brief Format REPLICATION STOP response
+   */
+  std::string FormatReplicationStopResponse();
+
+  /**
+   * @brief Format REPLICATION START response
+   */
+  std::string FormatReplicationStartResponse();
 
   /**
    * @brief Format error response

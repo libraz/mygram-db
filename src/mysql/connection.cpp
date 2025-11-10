@@ -111,7 +111,55 @@ bool Connection::Connect() {
 }
 
 bool Connection::IsConnected() const {
-  return mysql_ && mysql_ping(mysql_) == 0;
+  if (!mysql_) {
+    return false;
+  }
+
+  // Check if connection was established (thread_id will be 0 if not connected)
+  return mysql_thread_id(mysql_) != 0;
+}
+
+bool Connection::Ping() {
+  if (!mysql_) {
+    last_error_ = "Not connected";
+    return false;
+  }
+
+  int result = mysql_ping(mysql_);
+  if (result != 0) {
+    SetMySQLError();
+    spdlog::warn("MySQL ping failed: {}", last_error_);
+    return false;
+  }
+
+  return true;
+}
+
+bool Connection::Reconnect() {
+  if (!mysql_) {
+    last_error_ = "MySQL handle not initialized";
+    return false;
+  }
+
+  spdlog::info("Attempting to reconnect to MySQL {}:{}...",
+               config_.host, config_.port);
+
+  // Close existing connection if any
+  if (mysql_) {
+    mysql_close(mysql_);
+    mysql_ = nullptr;
+  }
+
+  // Reinitialize
+  mysql_ = mysql_init(nullptr);
+  if (!mysql_) {
+    last_error_ = "Failed to initialize MySQL handle";
+    spdlog::error("MySQL reconnection failed: {}", last_error_);
+    return false;
+  }
+
+  // Reconnect
+  return Connect();
 }
 
 void Connection::Close() {
@@ -199,6 +247,79 @@ std::optional<std::string> Connection::GetPurgedGTID() {
 
   spdlog::debug("Purged GTID: {}", gtid);
   return gtid;
+}
+
+bool Connection::SetGTIDNext(const std::string& gtid) {
+  std::string query = "SET GTID_NEXT = '" + gtid + "'";
+  return ExecuteUpdate(query);
+}
+
+std::optional<std::string> Connection::GetServerUUID() {
+  MYSQL_RES* result = Execute("SELECT @@GLOBAL.server_uuid");
+  if (!result) {
+    return std::nullopt;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result);
+  if (!row || !row[0]) {
+    mysql_free_result(result);
+    return std::nullopt;
+  }
+
+  std::string uuid(row[0]);
+  mysql_free_result(result);
+
+  spdlog::debug("Server UUID: {}", uuid);
+  return uuid;
+}
+
+std::optional<std::string> Connection::GetLatestGTID() {
+  // Execute SHOW MASTER STATUS to get the current binlog position
+  MYSQL_RES* result = Execute("SHOW MASTER STATUS");
+  if (!result) {
+    spdlog::error("Failed to execute SHOW MASTER STATUS");
+    return std::nullopt;
+  }
+
+  // Get field names
+  unsigned int num_fields = mysql_num_fields(result);
+  MYSQL_FIELD* fields = mysql_fetch_fields(result);
+
+  // Find the Executed_Gtid_Set column index
+  int gtid_column_index = -1;
+  for (unsigned int i = 0; i < num_fields; i++) {
+    if (std::string(fields[i].name) == "Executed_Gtid_Set") {
+      gtid_column_index = i;
+      break;
+    }
+  }
+
+  if (gtid_column_index == -1) {
+    spdlog::warn("Executed_Gtid_Set column not found in SHOW MASTER STATUS");
+    mysql_free_result(result);
+    return std::nullopt;
+  }
+
+  // Fetch the row
+  MYSQL_ROW row = mysql_fetch_row(result);
+  if (!row || !row[gtid_column_index]) {
+    mysql_free_result(result);
+    return std::nullopt;
+  }
+
+  std::string gtid_set(row[gtid_column_index]);
+  mysql_free_result(result);
+
+  // The GTID set may be empty or contain multiple ranges
+  // For simplicity, we'll return the entire set as-is
+  // Example format: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
+  if (gtid_set.empty()) {
+    spdlog::warn("Executed_Gtid_Set is empty");
+    return std::nullopt;
+  }
+
+  spdlog::info("Latest GTID from SHOW MASTER STATUS: {}", gtid_set);
+  return gtid_set;
 }
 
 void Connection::SetMySQLError() {

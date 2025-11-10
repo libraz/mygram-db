@@ -243,5 +243,100 @@ std::vector<DocId> PostingList::DecodeDelta(const std::vector<uint32_t>& encoded
   return decoded;
 }
 
+void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
+  // Format:
+  // [1 byte: strategy] [4 bytes: size] [data...]
+
+  // Write strategy
+  buffer.push_back(static_cast<uint8_t>(strategy_));
+
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    // Write size
+    uint32_t size = static_cast<uint32_t>(delta_compressed_.size());
+    buffer.push_back((size >> 24) & 0xFF);
+    buffer.push_back((size >> 16) & 0xFF);
+    buffer.push_back((size >> 8) & 0xFF);
+    buffer.push_back(size & 0xFF);
+
+    // Write delta-compressed data
+    for (uint32_t val : delta_compressed_) {
+      buffer.push_back((val >> 24) & 0xFF);
+      buffer.push_back((val >> 16) & 0xFF);
+      buffer.push_back((val >> 8) & 0xFF);
+      buffer.push_back(val & 0xFF);
+    }
+  } else {
+    // Roaring bitmap: serialize using roaring's native format
+    size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
+
+    // Write size
+    buffer.push_back((roaring_size >> 24) & 0xFF);
+    buffer.push_back((roaring_size >> 16) & 0xFF);
+    buffer.push_back((roaring_size >> 8) & 0xFF);
+    buffer.push_back(roaring_size & 0xFF);
+
+    // Write roaring bitmap data
+    size_t old_size = buffer.size();
+    buffer.resize(old_size + roaring_size);
+    roaring_bitmap_portable_serialize(roaring_bitmap_,
+                                      reinterpret_cast<char*>(buffer.data() + old_size));
+  }
+}
+
+bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset) {
+  if (offset >= buffer.size()) return false;
+
+  // Read strategy
+  strategy_ = static_cast<PostingStrategy>(buffer[offset++]);
+
+  if (offset + 4 > buffer.size()) return false;
+
+  // Read size
+  uint32_t size = (static_cast<uint32_t>(buffer[offset]) << 24) |
+                  (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
+                  (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
+                  static_cast<uint32_t>(buffer[offset + 3]);
+  offset += 4;
+
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    // Read delta-compressed data
+    if (offset + size * 4 > buffer.size()) return false;
+
+    delta_compressed_.clear();
+    delta_compressed_.reserve(size);
+
+    for (uint32_t i = 0; i < size; ++i) {
+      uint32_t val = (static_cast<uint32_t>(buffer[offset]) << 24) |
+                     (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
+                     (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
+                     static_cast<uint32_t>(buffer[offset + 3]);
+      delta_compressed_.push_back(val);
+      offset += 4;
+    }
+
+    if (roaring_bitmap_) {
+      roaring_bitmap_free(roaring_bitmap_);
+      roaring_bitmap_ = nullptr;
+    }
+  } else {
+    // Read roaring bitmap
+    if (offset + size > buffer.size()) return false;
+
+    if (roaring_bitmap_) {
+      roaring_bitmap_free(roaring_bitmap_);
+    }
+
+    roaring_bitmap_ = roaring_bitmap_portable_deserialize(
+        reinterpret_cast<const char*>(buffer.data() + offset));
+
+    if (!roaring_bitmap_) return false;
+
+    offset += size;
+    delta_compressed_.clear();
+  }
+
+  return true;
+}
+
 }  // namespace index
 }  // namespace mygramdb

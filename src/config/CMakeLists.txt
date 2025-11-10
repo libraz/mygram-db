@@ -10,3 +10,10 @@ target_link_libraries(mygramdb_config PUBLIC
   yaml-cpp
   spdlog::spdlog
 )
+
+# Link MySQL library if available (for GTID validation)
+if(USE_MYSQL AND MYSQL_FOUND)
+  target_link_libraries(mygramdb_config PUBLIC
+    mygramdb_mysql
+  )
+endif()

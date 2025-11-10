@@ -19,8 +19,31 @@ using DocId = uint64_t;
 
 /**
  * @brief Filter value types
+ *
+ * Supports multiple types for memory efficiency:
+ * - bool: BOOLEAN/TINYINT(1) (1 byte)
+ * - int8_t: TINYINT (-128 to 127)
+ * - uint8_t: TINYINT UNSIGNED (0 to 255)
+ * - int16_t: SMALLINT (-32768 to 32767)
+ * - uint16_t: SMALLINT UNSIGNED (0 to 65535)
+ * - int32_t: INT/MEDIUMINT (-2B to 2B)
+ * - uint32_t: INT UNSIGNED (0 to 4B)
+ * - int64_t: BIGINT
+ * - double: FLOAT/DOUBLE
+ * - std::string: VARCHAR/TEXT
  */
-using FilterValue = std::variant<int64_t, std::string, double>;
+using FilterValue = std::variant<
+    bool,        // BOOLEAN/TINYINT(1)
+    int8_t,      // TINYINT
+    uint8_t,     // TINYINT UNSIGNED
+    int16_t,     // SMALLINT
+    uint16_t,    // SMALLINT UNSIGNED
+    int32_t,     // INT/MEDIUMINT
+    uint32_t,    // INT UNSIGNED
+    int64_t,     // BIGINT
+    std::string, // VARCHAR/TEXT
+    double       // FLOAT/DOUBLE
+>;
 
 /**
  * @brief Document metadata
@@ -127,6 +150,22 @@ class DocumentStore {
    * @brief Clear all documents
    */
   void Clear();
+
+  /**
+   * @brief Serialize document store to file
+   * @param filepath Output file path
+   * @param replication_gtid Optional GTID position for replication (empty if not using replication)
+   * @return true if successful
+   */
+  bool SaveToFile(const std::string& filepath, const std::string& replication_gtid = "") const;
+
+  /**
+   * @brief Deserialize document store from file
+   * @param filepath Input file path
+   * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
+   * @return true if successful
+   */
+  bool LoadFromFile(const std::string& filepath, std::string* replication_gtid = nullptr);
 
  private:
   // Next DocID to assign

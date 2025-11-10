@@ -1,0 +1,16 @@
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: test_user
+  password: test_pass
+
+tables:
+  - name: test_table
+    primary_key: id
+    text_source:
+      column: content
+
+replication:
+  enable: true
+  server_id: 100
+  start_from: "gtid=invalid-format"  # Invalid GTID format

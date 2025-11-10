@@ -93,6 +93,18 @@ class Connection {
   bool IsConnected() const;
 
   /**
+   * @brief Ping MySQL server to check if connection is still alive
+   * @return true if connection is alive
+   */
+  bool Ping();
+
+  /**
+   * @brief Reconnect to MySQL server
+   * @return true if reconnection successful
+   */
+  bool Reconnect();
+
+  /**
    * @brief Close connection
    */
   void Close();
@@ -122,6 +134,29 @@ class Connection {
    * @return GTID string
    */
   std::optional<std::string> GetPurgedGTID();
+
+  /**
+   * @brief Set session GTID_NEXT for testing
+   * @param gtid GTID to set (e.g., "AUTOMATIC" or specific GTID)
+   * @return true if successful
+   */
+  bool SetGTIDNext(const std::string& gtid);
+
+  /**
+   * @brief Get server UUID
+   * @return Server UUID string
+   */
+  std::optional<std::string> GetServerUUID();
+
+  /**
+   * @brief Get latest GTID from SHOW MASTER STATUS
+   *
+   * Returns the latest GTID position in the binlog.
+   * This is useful for starting replication from the current position.
+   *
+   * @return Latest GTID string, or nullopt if not available
+   */
+  std::optional<std::string> GetLatestGTID();
 
   /**
    * @brief Get last error message

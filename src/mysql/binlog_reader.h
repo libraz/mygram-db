@@ -8,6 +8,7 @@
 #ifdef USE_MYSQL
 
 #include "mysql/connection.h"
+#include "mysql/table_metadata.h"
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "config/config.h"
@@ -57,6 +58,8 @@ class BinlogReader {
     std::string start_gtid;     // Starting GTID
     size_t queue_size = 10000;  // Maximum queue size
     int reconnect_delay_ms = 1000;
+    std::string state_file_path;  // Path to GTID state file (empty = no persistence)
+    int state_write_interval_events = 100;  // Write state every N events
   };
 
   /**
@@ -90,6 +93,12 @@ class BinlogReader {
    * @brief Get current GTID
    */
   std::string GetCurrentGTID() const;
+
+  /**
+   * @brief Set current GTID (used when loading from snapshot)
+   * @param gtid GTID to set
+   */
+  void SetCurrentGTID(const std::string& gtid);
 
   /**
    * @brief Get queue size
@@ -133,6 +142,9 @@ class BinlogReader {
 
   std::string last_error_;
 
+  // Table metadata cache
+  TableMetadataCache table_metadata_cache_;
+
   /**
    * @brief Reader thread function
    */
@@ -162,6 +174,38 @@ class BinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
+
+  /**
+   * @brief Write GTID to state file
+   */
+  void WriteGTIDToStateFile(const std::string& gtid);
+
+  /**
+   * @brief Parse binlog event buffer and create BinlogEvent
+   * @param buffer Raw binlog event data
+   * @param length Length of the buffer
+   * @return BinlogEvent if successfully parsed, nullopt otherwise
+   */
+  std::optional<BinlogEvent> ParseBinlogEvent(const unsigned char* buffer,
+                                                unsigned long length);
+
+  /**
+   * @brief Extract GTID from GTID event
+   * @param buffer Event buffer
+   * @param length Buffer length
+   * @return GTID string if found
+   */
+  std::optional<std::string> ExtractGTID(const unsigned char* buffer,
+                                          unsigned long length);
+
+  /**
+   * @brief Parse TABLE_MAP event
+   * @param buffer Event buffer (post-header)
+   * @param length Buffer length
+   * @return TableMetadata if successfully parsed
+   */
+  std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer,
+                                                    unsigned long length);
 };
 
 }  // namespace mysql
