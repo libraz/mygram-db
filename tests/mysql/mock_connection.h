@@ -27,6 +27,7 @@ class MockConnection {
   MOCK_METHOD(bool, IsConnected, (), (const));
   MOCK_METHOD(bool, Ping, (), ());
   MOCK_METHOD(bool, Reconnect, (), ());
+  MOCK_METHOD(bool, IsGTIDModeEnabled, (), ());
   MOCK_METHOD(MYSQL*, GetHandle, (), ());
   MOCK_METHOD(std::string, GetLastError, (), (const));
   MOCK_METHOD((std::optional<std::string>), ExecuteQuery, (const std::string& query), ());

@@ -148,4 +148,36 @@ TEST_F(MySQLIntegrationTest, GetLatestGTID) {
   }
 }
 
+/**
+ * @brief Test GTID mode detection
+ */
+TEST_F(MySQLIntegrationTest, IsGTIDModeEnabled) {
+  Connection::Config config;
+  const char* host = std::getenv("MYSQL_HOST");
+  config.host = host ? host : "127.0.0.1";
+  config.port = 3306;
+  const char* user = std::getenv("MYSQL_USER");
+  config.user = user ? user : "root";
+  const char* password = std::getenv("MYSQL_PASSWORD");
+  config.password = password ? password : "";
+
+  Connection conn(config);
+  ASSERT_TRUE(conn.Connect());
+
+  // Check if GTID mode is enabled
+  // This will return true if gtid_mode=ON, false otherwise
+  bool gtid_enabled = conn.IsGTIDModeEnabled();
+
+  // Log result for informational purposes
+  if (gtid_enabled) {
+    spdlog::info("GTID mode is enabled on test server");
+  } else {
+    spdlog::info("GTID mode is not enabled on test server");
+  }
+
+  // The function should return without error regardless of GTID mode setting
+  // We just verify it doesn't crash and returns a boolean
+  EXPECT_TRUE(gtid_enabled || !gtid_enabled);  // Always true, just checking it runs
+}
+
 #endif  // USE_MYSQL

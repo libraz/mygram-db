@@ -136,12 +136,30 @@ TEST(MySQLConnectionTest, ConnectionConstruct) {
 TEST(MySQLConnectionTest, ConnectionMove) {
   Connection::Config config;
   config.host = "localhost";
-  
+
   Connection conn1(config);
   Connection conn2(std::move(conn1));
-  
+
   // conn2 should take ownership
   EXPECT_FALSE(conn2.IsConnected());
+}
+
+/**
+ * @brief Test IsGTIDModeEnabled without connection
+ *
+ * This tests that IsGTIDModeEnabled returns false when not connected,
+ * rather than crashing. Actual GTID mode detection is tested in integration tests.
+ */
+TEST(MySQLConnectionTest, IsGTIDModeEnabledWithoutConnection) {
+  Connection::Config config;
+  config.host = "localhost";
+  config.user = "test";
+  config.password = "test";
+
+  Connection conn(config);
+
+  // Should return false when not connected (doesn't crash)
+  EXPECT_FALSE(conn.IsGTIDModeEnabled());
 }
 
 #endif  // USE_MYSQL

@@ -137,7 +137,8 @@ index:
   ngram_size: 1
 
 replication:
-  start_gtid: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1"
+  enable: true
+  start_from: "snapshot"  # オプション: snapshot, latest, gtid=<UUID:txn>, state_file
   queue_size: 10000
 ```
 
@@ -245,27 +246,64 @@ MygramDB は以下の MySQL カラム型をテキストインデックス化で�
 
 ## MySQL レプリケーション
 
-MygramDB は GTID ベースの binlog ストリーミングを使用した MySQL からのリアルタイムレプリケーションをサポートしています。
+MygramDB はデータ一貫性を保証した GTID ベースの binlog ストリーミングによる MySQL からのリアルタイムレプリケーションをサポートしています。
 
-**サポートされている操作:**
+### 前提条件
+
+**MySQL サーバーで GTID モードを有効化する必要があります:**
+```sql
+-- 現在の GTID モードを確認
+SHOW VARIABLES LIKE 'gtid_mode';
+
+-- GTID モードが OFF の場合は有効化（MySQL 5.7 ではサーバー再起動が必要）
+SET GLOBAL gtid_mode = ON;
+SET GLOBAL enforce_gtid_consistency = ON;
+```
+
+MygramDB は起動時に GTID モードを自動的に検証し、設定されていない場合は明確なエラーメッセージを表示します。
+
+### レプリケーション開始オプション
+
+config.yaml の `replication.start_from` で設定:
+
+- **`snapshot`**（推奨）: 初期スナップショットビルド時にキャプチャされた GTID から開始
+  - データ一貫性のため `START TRANSACTION WITH CONSISTENT SNAPSHOT` を使用
+  - スナップショット時点の `@@global.gtid_executed` を正確にキャプチャ
+  - スナップショットと binlog レプリケーション間のデータ損失を保証
+
+- **`latest`**: 現在の GTID ポジションから開始（履歴データは無視）
+  - `SHOW BINARY LOG STATUS` を使用して最新の GTID を取得
+  - リアルタイム変更のみが必要な場合に適しています
+
+- **`gtid=<UUID:txn>`**: 特定の GTID ポジションから開始
+  - 例: `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:100`
+
+- **`state_file`**: 保存された GTID 状態ファイルから再開
+  - `./gtid_state.txt` から読み込み（自動作成）
+  - クラッシュリカバリと再開を可能にします
+
+### サポートされている操作
+
 - INSERT（WRITE_ROWS イベント）
 - UPDATE（UPDATE_ROWS イベント）
 - DELETE（DELETE_ROWS イベント）
 
-**サポートされているカラム型:**
+### サポートされているカラム型
+
 - 整数型: TINYINT、SMALLINT、INT、MEDIUMINT、BIGINT（signed/unsigned）
 - 文字列型: VARCHAR、CHAR、TEXT、BLOB、ENUM、SET
 - 日時型: DATE、TIME、DATETIME、TIMESTAMP（小数秒対応）
 - 数値型: DECIMAL、FLOAT、DOUBLE
 - 特殊型: JSON、BIT、NULL
 
-**機能:**
-- アトミックな永続化を伴う GTID ポジション追跡
-- 接続断時の自動再接続
-- マルチスレッドイベント処理
-- 設定可能なイベントキューサイズ
+### 機能
 
-**注意:** MySQL で GTID モードを有効にしたレプリケーションを設定する必要があります。詳細は MySQL のドキュメントを参照してください。
+- **GTID 一貫性**: スナップショットと binlog レプリケーションは一貫性のあるスナップショットトランザクションにより調整されます
+- **GTID ポジション追跡**: 状態ファイルによるアトミックな永続化
+- **自動検証**: 起動時に GTID モードをチェックし、明確なエラーメッセージを表示
+- **自動再接続**: 接続断を適切に処理
+- **マルチスレッド処理**: リーダーとワーカーを分離したスレッド
+- **設定可能なキュー**: パフォーマンスチューニング用に調整可能なイベントキューサイズ
 
 ## 開発
 
@@ -300,7 +338,7 @@ cd build
 ctest --output-on-failure
 ```
 
-現在のテストカバレッジ: **163 テスト、100% 成功**
+現在のテストカバレッジ: **169 テスト、100% 成功**
 
 **注意**: すべてのユニットテストは MySQL サーバー接続なしで実行できます。MySQL サーバーが必要な統合テストは分離されており、デフォルトでは無効化されています。統合テストを実行するには：
 

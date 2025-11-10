@@ -137,7 +137,8 @@ index:
   ngram_size: 1
 
 replication:
-  start_gtid: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1"
+  enable: true
+  start_from: "snapshot"  # Options: snapshot, latest, gtid=<UUID:txn>, state_file
   queue_size: 10000
 ```
 
@@ -235,27 +236,64 @@ ERROR <error_message>
 
 ## MySQL Replication
 
-MygramDB supports real-time replication from MySQL using GTID-based binlog streaming.
+MygramDB supports real-time replication from MySQL using GTID-based binlog streaming with guaranteed data consistency.
 
-**Supported Operations:**
+### Prerequisites
+
+**MySQL server must have GTID mode enabled:**
+```sql
+-- Check current GTID mode
+SHOW VARIABLES LIKE 'gtid_mode';
+
+-- If GTID mode is OFF, enable it (requires server restart in MySQL 5.7)
+SET GLOBAL gtid_mode = ON;
+SET GLOBAL enforce_gtid_consistency = ON;
+```
+
+MygramDB will automatically validate GTID mode on startup and provide clear error messages if not configured.
+
+### Replication Start Options
+
+Configure `replication.start_from` in config.yaml:
+
+- **`snapshot`** (Recommended): Starts from GTID captured during initial snapshot build
+  - Uses `START TRANSACTION WITH CONSISTENT SNAPSHOT` for data consistency
+  - Captures `@@global.gtid_executed` at exact snapshot moment
+  - Guarantees no data loss between snapshot and binlog replication
+
+- **`latest`**: Starts from current GTID position (ignores historical data)
+  - Uses `SHOW BINARY LOG STATUS` to get latest GTID
+  - Suitable when only real-time changes are needed
+
+- **`gtid=<UUID:txn>`**: Starts from specific GTID position
+  - Example: `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:100`
+
+- **`state_file`**: Resumes from saved GTID state file
+  - Reads from `./gtid_state.txt` (created automatically)
+  - Enables crash recovery and resume
+
+### Supported Operations
+
 - INSERT (WRITE_ROWS events)
 - UPDATE (UPDATE_ROWS events)
 - DELETE (DELETE_ROWS events)
 
-**Supported Column Types:**
+### Supported Column Types
+
 - Integers: TINYINT, SMALLINT, INT, MEDIUMINT, BIGINT (signed/unsigned)
 - Strings: VARCHAR, CHAR, TEXT, BLOB, ENUM, SET
 - Date/Time: DATE, TIME, DATETIME, TIMESTAMP (with fractional seconds)
 - Numeric: DECIMAL, FLOAT, DOUBLE
 - Special: JSON, BIT, NULL
 
-**Features:**
-- GTID position tracking with atomic persistence
-- Automatic reconnection on connection loss
-- Multi-threaded event processing
-- Configurable event queue size
+### Features
 
-**Note:** Replication must be enabled in MySQL with GTID mode. See MySQL documentation for setup instructions.
+- **GTID Consistency**: Snapshot and binlog replication are coordinated via consistent snapshot transaction
+- **GTID Position Tracking**: Atomic persistence with state file
+- **Automatic Validation**: Checks GTID mode on startup with clear error messages
+- **Automatic Reconnection**: Handles connection loss gracefully
+- **Multi-threaded Processing**: Separate reader and worker threads
+- **Configurable Queue**: Adjustable event queue size for performance tuning
 
 ## Development
 
@@ -290,7 +328,7 @@ cd build
 ctest --output-on-failure
 ```
 
-Current test coverage: **163 tests, 100% passing**
+Current test coverage: **169 tests, 100% passing**
 
 **Note**: All unit tests run without requiring a MySQL server connection. Integration tests that require a MySQL server are separated and disabled by default. To run integration tests:
 
