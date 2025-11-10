@@ -38,7 +38,13 @@ TcpServer::TcpServer(const ServerConfig& config,
                      )
     : config_(config), index_(index), doc_store_(doc_store),
       ngram_size_(ngram_size), snapshot_dir_(snapshot_dir),
-      full_config_(full_config), binlog_reader_(binlog_reader) {}
+      full_config_(full_config), binlog_reader_(binlog_reader) {
+  // Create thread pool
+  thread_pool_ = std::make_unique<ThreadPool>(
+      config_.worker_threads > 0 ? config_.worker_threads : 0,
+      1000  // Queue size for backpressure
+  );
+}
 
 TcpServer::~TcpServer() {
   Stop();
@@ -134,32 +140,25 @@ void TcpServer::Stop() {
     accept_thread_->join();
   }
 
+  // Shutdown thread pool (completes pending tasks)
+  if (thread_pool_) {
+    thread_pool_->Shutdown();
+  }
+
   // Close all active connections
   {
     std::lock_guard<std::mutex> lock(connections_mutex_);
-    for (int fd : active_connections_) {
+    for (int fd : connection_fds_) {
       shutdown(fd, SHUT_RDWR);
       close(fd);
     }
-    active_connections_.clear();
+    connection_fds_.clear();
   }
 
-  // Wait for worker threads
-  for (auto& thread : worker_threads_) {
-    if (thread && thread->joinable()) {
-      thread->join();
-    }
-  }
-  worker_threads_.clear();
-
+  active_connections_ = 0;
   running_ = false;
   spdlog::info("TCP server stopped. Handled {} total requests",
                total_requests_.load());
-}
-
-size_t TcpServer::GetConnectionCount() const {
-  std::lock_guard<std::mutex> lock(connections_mutex_);
-  return active_connections_.size();
 }
 
 void TcpServer::AcceptThreadFunc() {
@@ -180,20 +179,43 @@ void TcpServer::AcceptThreadFunc() {
       continue;
     }
 
-    // Add to active connections
-    {
-      std::lock_guard<std::mutex> lock(connections_mutex_);
-      active_connections_.push_back(client_fd);
+    // Check connection limit
+    size_t current_connections = active_connections_.load();
+    if (current_connections >= static_cast<size_t>(config_.max_connections)) {
+      spdlog::warn("Connection limit reached ({}), rejecting new connection",
+                   config_.max_connections);
+      shutdown(client_fd, SHUT_RDWR);
+      close(client_fd);
+      continue;
     }
 
-    // Handle client in new thread
-    auto thread = std::make_unique<std::thread>(
-        &TcpServer::HandleClient, this, client_fd);
-    worker_threads_.push_back(std::move(thread));
+    // Increment active connection count
+    active_connections_.fetch_add(1);
 
-    spdlog::debug("Accepted connection from {}:{}",
+    // Add to connection set
+    {
+      std::lock_guard<std::mutex> lock(connections_mutex_);
+      connection_fds_.insert(client_fd);
+    }
+
+    // Submit to thread pool
+    bool submitted = thread_pool_->Submit([this, client_fd]() {
+      HandleClient(client_fd);
+    });
+
+    if (!submitted) {
+      spdlog::warn("Thread pool queue full, rejecting connection");
+      RemoveConnection(client_fd);
+      shutdown(client_fd, SHUT_RDWR);
+      close(client_fd);
+      active_connections_.fetch_sub(1);
+      continue;
+    }
+
+    spdlog::debug("Accepted connection from {}:{} (active: {})",
                  inet_ntoa(client_addr.sin_addr),
-                 ntohs(client_addr.sin_port));
+                 ntohs(client_addr.sin_port),
+                 active_connections_.load());
   }
 
   spdlog::info("Accept thread stopped");
@@ -240,8 +262,12 @@ void TcpServer::HandleClient(int client_fd) {
     }
   }
 
+  // Clean up connection
   RemoveConnection(client_fd);
   close(client_fd);
+  active_connections_.fetch_sub(1);
+
+  spdlog::debug("Connection closed (active: {})", active_connections_.load());
 }
 
 std::string TcpServer::ProcessRequest(const std::string& request) {
@@ -913,9 +939,7 @@ bool TcpServer::SetSocketOptions(int fd) {
 
 void TcpServer::RemoveConnection(int fd) {
   std::lock_guard<std::mutex> lock(connections_mutex_);
-  active_connections_.erase(
-      std::remove(active_connections_.begin(), active_connections_.end(), fd),
-      active_connections_.end());
+  connection_fds_.erase(fd);
 }
 
 }  // namespace server

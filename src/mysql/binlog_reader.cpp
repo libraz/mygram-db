@@ -16,6 +16,8 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstring>
+#include <regex>
+#include <algorithm>
 
 namespace mygramdb {
 namespace mysql {
@@ -483,6 +485,34 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         break;
       }
 
+      case BinlogEventType::DDL: {
+        // Handle DDL operations (TRUNCATE, ALTER, DROP)
+        std::string query = event.text;
+        std::string query_upper = query;
+        std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
+
+        if (query_upper.find("TRUNCATE") != std::string::npos) {
+          // TRUNCATE TABLE - clear all data
+          spdlog::warn("TRUNCATE TABLE detected for table {}: {}", event.table_name, query);
+          index_.Clear();
+          doc_store_.Clear();
+          spdlog::info("Cleared index and document store due to TRUNCATE");
+        } else if (query_upper.find("DROP") != std::string::npos) {
+          // DROP TABLE - clear all data and warn
+          spdlog::error("DROP TABLE detected for table {}: {}", event.table_name, query);
+          index_.Clear();
+          doc_store_.Clear();
+          spdlog::error("Table dropped! Index and document store cleared. Please reconfigure or stop MygramDB.");
+        } else if (query_upper.find("ALTER") != std::string::npos) {
+          // ALTER TABLE - log warning about potential schema mismatch
+          spdlog::warn("ALTER TABLE detected for table {}: {}", event.table_name, query);
+          spdlog::warn("Schema change may cause data inconsistency. Consider rebuilding from snapshot.");
+          // Note: We cannot automatically detect what changed (column type, name, etc.)
+          // Users should manually rebuild if text column type or PK changed
+        }
+        break;
+      }
+
       default:
         spdlog::warn("Unknown event type for pk={}", event.primary_key);
         return false;
@@ -727,10 +757,28 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       return event;
     }
 
-    case MySQLBinlogEventType::QUERY_EVENT:
-      // DDL statements (CREATE, ALTER, DROP, etc.)
-      // Not needed for row-based replication
+    case MySQLBinlogEventType::QUERY_EVENT: {
+      // DDL statements (CREATE, ALTER, DROP, TRUNCATE, etc.)
+      // Parse query string to handle schema changes
+      auto query_opt = ExtractQueryString(buffer, length);
+      if (!query_opt) {
+        return std::nullopt;
+      }
+
+      std::string query = query_opt.value();
+      spdlog::debug("QUERY_EVENT: {}", query);
+
+      // Check if this affects our target table
+      if (IsTableAffectingDDL(query, table_config_.name)) {
+        BinlogEvent event;
+        event.type = BinlogEventType::DDL;
+        event.table_name = table_config_.name;
+        event.text = query;  // Store the DDL query
+        return event;
+      }
+
       return std::nullopt;
+    }
 
     case MySQLBinlogEventType::XID_EVENT:
       // Transaction commit marker
@@ -996,6 +1044,104 @@ void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid
   // Copy pre-encoded GTID data into the packet buffer
   auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
   std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
+}
+
+std::optional<std::string> BinlogReader::ExtractQueryString(
+    const unsigned char* buffer, unsigned long length) {
+  if (!buffer || length < 19) {
+    // Minimum: 19 bytes header
+    return std::nullopt;
+  }
+
+  // QUERY_EVENT format (after 19-byte common header):
+  // thread_id (4 bytes)
+  // query_exec_time (4 bytes)
+  // db_len (1 byte)
+  // error_code (2 bytes)
+  // status_vars_len (2 bytes)
+  // [status_vars (variable length)]
+  // [db_name (variable length, null-terminated)]
+  // [query (variable length)]
+
+  const unsigned char* pos = buffer + 19;  // Skip common header
+  size_t remaining = length - 19;
+
+  if (remaining < 13) {  // Minimum: 4+4+1+2+2
+    return std::nullopt;
+  }
+
+  // Skip thread_id (4 bytes)
+  pos += 4;
+  remaining -= 4;
+
+  // Skip query_exec_time (4 bytes)
+  pos += 4;
+  remaining -= 4;
+
+  // Get db_len (1 byte)
+  uint8_t db_len = *pos;
+  pos += 1;
+  remaining -= 1;
+
+  // Skip error_code (2 bytes)
+  pos += 2;
+  remaining -= 2;
+
+  // Get status_vars_len (2 bytes, little-endian)
+  uint16_t status_vars_len = pos[0] | (pos[1] << 8);
+  pos += 2;
+  remaining -= 2;
+
+  // Skip status_vars
+  if (remaining < status_vars_len) {
+    return std::nullopt;
+  }
+  pos += status_vars_len;
+  remaining -= status_vars_len;
+
+  // Skip db_name (null-terminated)
+  if (remaining < db_len + 1) {  // +1 for null terminator
+    return std::nullopt;
+  }
+  pos += db_len + 1;
+  remaining -= (db_len + 1);
+
+  // Extract query string
+  if (remaining == 0) {
+    return std::nullopt;
+  }
+
+  std::string query(reinterpret_cast<const char*>(pos), remaining);
+  return query;
+}
+
+bool BinlogReader::IsTableAffectingDDL(const std::string& query,
+                                         const std::string& table_name) {
+  // Convert to uppercase for case-insensitive matching
+  std::string query_upper = query;
+  std::string table_upper = table_name;
+  std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
+  std::transform(table_upper.begin(), table_upper.end(), table_upper.begin(), ::toupper);
+
+  // Remove extra whitespace
+  query_upper = std::regex_replace(query_upper, std::regex("\\s+"), " ");
+
+  // Check for TRUNCATE TABLE
+  if (std::regex_search(query_upper, std::regex("TRUNCATE\\s+TABLE\\s+`?" + table_upper + "`?"))) {
+    return true;
+  }
+
+  // Check for DROP TABLE
+  if (std::regex_search(query_upper, std::regex("DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?`?" + table_upper + "`?"))) {
+    return true;
+  }
+
+  // Check for ALTER TABLE
+  if (std::regex_search(query_upper, std::regex("ALTER\\s+TABLE\\s+`?" + table_upper + "`?"))) {
+    return true;
+  }
+
+  return false;
 }
 
 }  // namespace mysql

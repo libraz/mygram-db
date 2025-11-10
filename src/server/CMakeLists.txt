@@ -1,5 +1,6 @@
 add_library(mygramdb_server STATIC
   tcp_server.cpp
+  thread_pool.cpp
 )
 
 target_include_directories(mygramdb_server PUBLIC

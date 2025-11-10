@@ -108,6 +108,11 @@ class Index {
   void Optimize(uint64_t total_docs);
 
   /**
+   * @brief Clear all data from index
+   */
+  void Clear();
+
+  /**
    * @brief Serialize index to file
    * @param filepath Output file path
    * @return true if successful

@@ -29,6 +29,7 @@ enum class BinlogEventType {
   INSERT,
   UPDATE,
   DELETE,
+  DDL,      // DDL operations (TRUNCATE, ALTER, DROP)
   UNKNOWN
 };
 
@@ -217,6 +218,23 @@ class BinlogReader {
    */
   std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer,
                                                     unsigned long length);
+
+  /**
+   * @brief Extract SQL query string from QUERY_EVENT
+   * @param buffer Event buffer
+   * @param length Buffer length
+   * @return Query string if successfully extracted
+   */
+  std::optional<std::string> ExtractQueryString(const unsigned char* buffer,
+                                                  unsigned long length);
+
+  /**
+   * @brief Check if DDL affects target table
+   * @param query SQL query string
+   * @param table_name Target table name
+   * @return true if DDL affects the table
+   */
+  bool IsTableAffectingDDL(const std::string& query, const std::string& table_name);
 };
 
 }  // namespace mysql

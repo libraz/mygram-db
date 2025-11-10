@@ -9,12 +9,14 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "config/config.h"
+#include "server/thread_pool.h"
 #include <string>
 #include <thread>
 #include <atomic>
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <set>
 
 #ifdef USE_MYSQL
 namespace mygramdb {
@@ -33,7 +35,8 @@ namespace server {
 struct ServerConfig {
   std::string host = "0.0.0.0";
   uint16_t port = 11211;  // memcached default port
-  int max_connections = 1000;
+  int max_connections = 10000;  // Maximum concurrent connections
+  int worker_threads = 0;  // Number of worker threads (0 = CPU count)
   int recv_buffer_size = 4096;
   int send_buffer_size = 65536;
 };
@@ -96,7 +99,7 @@ class TcpServer {
   /**
    * @brief Get active connection count
    */
-  size_t GetConnectionCount() const;
+  size_t GetConnectionCount() const { return active_connections_.load(); }
 
   /**
    * @brief Get total requests handled
@@ -122,13 +125,14 @@ class TcpServer {
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
   std::atomic<uint64_t> total_requests_{0};
+  std::atomic<size_t> active_connections_{0};
   uint64_t start_time_ = 0;  // Server start time (Unix timestamp)
 
   int server_fd_ = -1;
   uint16_t actual_port_ = 0;
   std::unique_ptr<std::thread> accept_thread_;
-  std::vector<std::unique_ptr<std::thread>> worker_threads_;
-  std::vector<int> active_connections_;
+  std::unique_ptr<ThreadPool> thread_pool_;
+  std::set<int> connection_fds_;  // Active connection file descriptors
   mutable std::mutex connections_mutex_;
 
   std::string last_error_;

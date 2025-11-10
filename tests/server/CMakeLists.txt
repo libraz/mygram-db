@@ -11,3 +11,16 @@ target_link_libraries(tcp_server_test
 )
 
 gtest_discover_tests(tcp_server_test)
+
+# Thread Pool tests
+
+add_executable(thread_pool_test
+  thread_pool_test.cpp
+)
+
+target_link_libraries(thread_pool_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(thread_pool_test)

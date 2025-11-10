@@ -19,7 +19,7 @@ and gives you millisecond-class search without Elasticsearch or pain.
 - **Fast Full-Text Search**: N-gram based indexing with hybrid posting lists (Delta encoding + Roaring bitmaps)
 - **MySQL Replication**: Real-time synchronization via binlog streaming (GTID-based)
 - **Unicode Support**: ICU-based Unicode normalization and processing
-- **Parallel Processing**: 10,000 concurrent read operations support
+- **Parallel Processing**: Thread pool architecture supporting 10,000 concurrent connections
 - **TCP Protocol**: memcached-style text protocol
 - **Column Type Validation**: Supports VARCHAR and TEXT types with type checking
 - **Efficient Queries**: Optimized ORDER BY with primary key indexing
@@ -545,7 +545,7 @@ ERROR <error_message>
 ## Performance
 
 - **Index Type**: Hybrid posting lists (Delta encoding for small lists, Roaring bitmaps for large lists)
-- **Read Performance**: 10,000 parallel reads supported
+- **Concurrency**: Thread pool architecture handling up to 10,000 concurrent connections
 - **Memory Efficiency**: Optimized memory usage with compressed posting lists
 - **Search Limits**: Max 1,000 results per SEARCH query (configurable via LIMIT)
 
@@ -589,9 +589,18 @@ Configure `replication.start_from` in config.yaml:
 
 ### Supported Operations
 
+**DML Operations:**
 - INSERT (WRITE_ROWS events)
 - UPDATE (UPDATE_ROWS events)
 - DELETE (DELETE_ROWS events)
+
+**DDL Operations:**
+- **TRUNCATE TABLE**: Automatically clears index and document store for the target table
+- **DROP TABLE**: Clears all data and logs an error (requires manual MygramDB restart/reconfiguration)
+- **ALTER TABLE**: Logs a warning about potential schema inconsistency
+  - Type changes (e.g., VARCHAR to TEXT) may cause replication issues
+  - Column additions/removals affecting `text_source` or `filters` require MygramDB restart
+  - Recommendation: Rebuild MygramDB snapshot after schema changes
 
 ### Supported Column Types
 
@@ -607,7 +616,7 @@ Configure `replication.start_from` in config.yaml:
 - **GTID Position Tracking**: Atomic persistence with state file
 - **Automatic Validation**: Checks GTID mode on startup with clear error messages
 - **Automatic Reconnection**: Handles connection loss gracefully
-- **Multi-threaded Processing**: Separate reader and worker threads
+- **Multi-threaded Processing**: Thread pool architecture for efficient request handling
 - **Configurable Queue**: Adjustable event queue size for performance tuning
 
 ## Development

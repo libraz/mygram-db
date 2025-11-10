@@ -176,6 +176,11 @@ void Index::Optimize(uint64_t total_docs) {
                MemoryUsage() / (1024 * 1024));
 }
 
+void Index::Clear() {
+  term_postings_.clear();
+  spdlog::info("Cleared index");
+}
+
 PostingList* Index::GetOrCreatePostingList(const std::string& term) {
   auto it = term_postings_.find(term);
   if (it != term_postings_.end()) {
