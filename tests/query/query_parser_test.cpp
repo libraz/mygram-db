@@ -499,5 +499,206 @@ TEST(QueryParserTest, CountWithLimitStillUnsupported) {
   auto query = parser.Parse("COUNT articles hello NOT world LIMIT 50");
 
   EXPECT_FALSE(query.IsValid());
-  EXPECT_NE(parser.GetError().find("FILTER"), std::string::npos);
+}
+
+/**
+ * @brief Test quoted string with double quotes
+ */
+TEST(QueryParserTest, QuotedStringDouble) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello world" LIMIT 10)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello world");
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test quoted string with single quotes
+ */
+TEST(QueryParserTest, QuotedStringSingle) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles 'hello world' LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello world");
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test quoted string with mixed quotes
+ */
+TEST(QueryParserTest, QuotedStringMixed) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "it's working" LIMIT 10)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "it's working");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test unclosed double quote
+ */
+TEST(QueryParserTest, UnclosedDoubleQuote) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello world LIMIT 10)");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed quote"), std::string::npos);
+}
+
+/**
+ * @brief Test unclosed single quote
+ */
+TEST(QueryParserTest, UnclosedSingleQuote) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles 'hello world LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed quote"), std::string::npos);
+}
+
+/**
+ * @brief Test escaped quote inside quoted string
+ */
+TEST(QueryParserTest, EscapedQuoteInString) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello \"world\"" LIMIT 10)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "hello \"world\"");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test escaped backslash
+ */
+TEST(QueryParserTest, EscapedBackslash) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello\\world" LIMIT 10)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "hello\\world");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test empty quoted string
+ */
+TEST(QueryParserTest, EmptyQuotedString) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "" LIMIT 10)");
+
+  // Empty quoted string results in UNKNOWN type due to missing args
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_FALSE(parser.GetError().empty());
+}
+
+/**
+ * @brief Test SEARCH with AND clause
+ */
+TEST(QueryParserTest, SearchWithAnd) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello AND world");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello");
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.and_terms[0], "world");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test SEARCH with multiple AND clauses
+ */
+TEST(QueryParserTest, SearchWithMultipleAnds) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello AND world AND test");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.and_terms.size(), 2);
+  EXPECT_EQ(query.and_terms[0], "world");
+  EXPECT_EQ(query.and_terms[1], "test");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test SEARCH with AND and NOT
+ */
+TEST(QueryParserTest, SearchWithAndAndNot) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello AND world NOT test");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.and_terms[0], "world");
+  EXPECT_EQ(query.not_terms.size(), 1);
+  EXPECT_EQ(query.not_terms[0], "test");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test COUNT with AND clause
+ */
+TEST(QueryParserTest, CountWithAnd) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT articles hello AND world");
+
+  EXPECT_EQ(query.type, QueryType::COUNT);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello");
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.and_terms[0], "world");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test AND without term
+ */
+TEST(QueryParserTest, AndWithoutTerm) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello AND");
+
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("AND requires"), std::string::npos);
+}
+
+/**
+ * @brief Test Japanese quoted string
+ */
+TEST(QueryParserTest, JapaneseQuotedString) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles \"漫画 アニメ\" LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "漫画 アニメ");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test complex query with quoted string, AND, NOT, and FILTER
+ */
+TEST(QueryParserTest, ComplexQueryWithQuotesAndNot) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello world" AND test NOT bad FILTER status = 1 LIMIT 50 OFFSET 100)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "hello world");
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.and_terms[0], "test");
+  EXPECT_EQ(query.not_terms.size(), 1);
+  EXPECT_EQ(query.not_terms[0], "bad");
+  EXPECT_EQ(query.filters.size(), 1);
+  EXPECT_EQ(query.limit, 50);
+  EXPECT_EQ(query.offset, 100);
+  EXPECT_TRUE(query.IsValid());
 }

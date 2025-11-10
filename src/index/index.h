@@ -121,6 +121,13 @@ class Index {
    */
   bool LoadFromFile(const std::string& filepath);
 
+  /**
+   * @brief Get posting list for term (read-only)
+   * @param term Search term
+   * @return Pointer to posting list, or nullptr if not found
+   */
+  const PostingList* GetPostingList(const std::string& term) const;
+
  private:
   int ngram_size_;
   double roaring_threshold_;
@@ -132,11 +139,6 @@ class Index {
    * @brief Get or create posting list for term
    */
   PostingList* GetOrCreatePostingList(const std::string& term);
-
-  /**
-   * @brief Get posting list for term (read-only)
-   */
-  const PostingList* GetPostingList(const std::string& term) const;
 };
 
 }  // namespace index

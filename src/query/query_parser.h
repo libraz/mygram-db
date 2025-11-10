@@ -59,6 +59,7 @@ struct Query {
   QueryType type = QueryType::UNKNOWN;
   std::string table;
   std::string search_text;
+  std::vector<std::string> and_terms;  // Additional terms for AND search
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
   uint32_t limit = 100;    // Default limit
@@ -76,8 +77,8 @@ struct Query {
  * @brief Query parser
  *
  * Parses text protocol commands:
- * - SEARCH <table> <text> [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>] [OFFSET <n>]
- * - COUNT <table> <text> [NOT <term>] [FILTER <col> <op> <value>]
+ * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>] [OFFSET <n>]
+ * - COUNT <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
  * - INFO
  * - SAVE [filename]
@@ -85,6 +86,11 @@ struct Query {
  * - REPLICATION STATUS
  * - REPLICATION STOP
  * - REPLICATION START
+ *
+ * Notes:
+ * - Use quotes for phrases: SEARCH threads "hello world" will search for the exact phrase
+ * - AND operator: SEARCH threads term1 AND term2 AND term3
+ * - NOT operator: SEARCH threads term1 NOT excluded
  */
 class QueryParser {
  public:
@@ -121,6 +127,11 @@ class QueryParser {
    * @brief Parse GET command
    */
   Query ParseGet(const std::vector<std::string>& tokens);
+
+  /**
+   * @brief Parse AND clause
+   */
+  bool ParseAnd(const std::vector<std::string>& tokens, size_t& pos, Query& query);
 
   /**
    * @brief Parse NOT clause

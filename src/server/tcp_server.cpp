@@ -14,6 +14,8 @@
 #include <cstring>
 #include <ctime>
 #include <sstream>
+#include <algorithm>
+#include <limits>
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -255,18 +257,69 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
   try {
     switch (query.type) {
       case query::QueryType::SEARCH: {
-        // Generate n-grams from search text (hybrid mode if ngram_size_ == 0)
-        std::string normalized = utils::NormalizeText(query.search_text,
-                                                       true, "keep", true);
-        std::vector<std::string> terms;
-        if (ngram_size_ == 0) {
-          terms = utils::GenerateHybridNgrams(normalized);
-        } else {
-          terms = utils::GenerateNgrams(normalized, ngram_size_);
+        // Collect all search terms (main + AND terms)
+        std::vector<std::string> all_search_terms;
+        all_search_terms.push_back(query.search_text);
+        all_search_terms.insert(all_search_terms.end(),
+                               query.and_terms.begin(),
+                               query.and_terms.end());
+
+        // Generate n-grams for each term and estimate result sizes
+        struct TermInfo {
+          std::vector<std::string> ngrams;
+          size_t estimated_size;
+        };
+        std::vector<TermInfo> term_infos;
+        term_infos.reserve(all_search_terms.size());
+
+        for (const auto& search_term : all_search_terms) {
+          std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+          std::vector<std::string> ngrams;
+          if (ngram_size_ == 0) {
+            ngrams = utils::GenerateHybridNgrams(normalized);
+          } else {
+            ngrams = utils::GenerateNgrams(normalized, ngram_size_);
+          }
+
+          // Estimate result size by checking the smallest posting list
+          size_t min_size = std::numeric_limits<size_t>::max();
+          for (const auto& ngram : ngrams) {
+            auto* posting = index_.GetPostingList(ngram);
+            if (posting) {
+              min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+            } else {
+              min_size = 0;
+              break;
+            }
+          }
+
+          term_infos.push_back({std::move(ngrams), min_size});
         }
 
-        // Search index
-        auto results = index_.SearchAnd(terms);
+        // Sort terms by estimated size (smallest first for faster intersection)
+        std::sort(term_infos.begin(), term_infos.end(),
+                 [](const TermInfo& a, const TermInfo& b) {
+                   return a.estimated_size < b.estimated_size;
+                 });
+
+        // If any term has zero results, return empty immediately
+        if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
+          return FormatSearchResponse({}, query.limit, query.offset);
+        }
+
+        // Process most selective term first
+        auto results = index_.SearchAnd(term_infos[0].ngrams);
+
+        // Intersect with remaining terms
+        for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
+          auto and_results = index_.SearchAnd(term_infos[i].ngrams);
+          std::vector<storage::DocId> intersection;
+          intersection.reserve(std::min(results.size(), and_results.size()));
+          std::set_intersection(results.begin(), results.end(),
+                              and_results.begin(), and_results.end(),
+                              std::back_inserter(intersection));
+          results = std::move(intersection);
+        }
 
         // Apply NOT filter if present
         if (!query.not_terms.empty()) {
@@ -329,18 +382,69 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
       }
 
       case query::QueryType::COUNT: {
-        // Generate n-grams (hybrid mode if ngram_size_ == 0)
-        std::string normalized = utils::NormalizeText(query.search_text,
-                                                       true, "keep", true);
-        std::vector<std::string> terms;
-        if (ngram_size_ == 0) {
-          terms = utils::GenerateHybridNgrams(normalized);
-        } else {
-          terms = utils::GenerateNgrams(normalized, ngram_size_);
+        // Collect all search terms (main + AND terms)
+        std::vector<std::string> all_search_terms;
+        all_search_terms.push_back(query.search_text);
+        all_search_terms.insert(all_search_terms.end(),
+                               query.and_terms.begin(),
+                               query.and_terms.end());
+
+        // Generate n-grams for each term and estimate result sizes
+        struct TermInfo {
+          std::vector<std::string> ngrams;
+          size_t estimated_size;
+        };
+        std::vector<TermInfo> term_infos;
+        term_infos.reserve(all_search_terms.size());
+
+        for (const auto& search_term : all_search_terms) {
+          std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+          std::vector<std::string> ngrams;
+          if (ngram_size_ == 0) {
+            ngrams = utils::GenerateHybridNgrams(normalized);
+          } else {
+            ngrams = utils::GenerateNgrams(normalized, ngram_size_);
+          }
+
+          // Estimate result size by checking the smallest posting list
+          size_t min_size = std::numeric_limits<size_t>::max();
+          for (const auto& ngram : ngrams) {
+            auto* posting = index_.GetPostingList(ngram);
+            if (posting) {
+              min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+            } else {
+              min_size = 0;
+              break;
+            }
+          }
+
+          term_infos.push_back({std::move(ngrams), min_size});
         }
 
-        // Count
-        auto results = index_.SearchAnd(terms);
+        // Sort terms by estimated size (smallest first for faster intersection)
+        std::sort(term_infos.begin(), term_infos.end(),
+                 [](const TermInfo& a, const TermInfo& b) {
+                   return a.estimated_size < b.estimated_size;
+                 });
+
+        // If any term has zero results, return 0 immediately
+        if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
+          return FormatCountResponse(0);
+        }
+
+        // Process most selective term first
+        auto results = index_.SearchAnd(term_infos[0].ngrams);
+
+        // Intersect with remaining terms
+        for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
+          auto and_results = index_.SearchAnd(term_infos[i].ngrams);
+          std::vector<storage::DocId> intersection;
+          intersection.reserve(std::min(results.size(), and_results.size()));
+          std::set_intersection(results.begin(), results.end(),
+                              and_results.begin(), and_results.end(),
+                              std::back_inserter(intersection));
+          results = std::move(intersection);
+        }
 
         // Apply NOT filter if present
         if (!query.not_terms.empty()) {

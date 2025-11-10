@@ -70,7 +70,10 @@ Query QueryParser::Parse(const std::string& query_str) {
 
   auto tokens = Tokenize(query_str);
   if (tokens.empty()) {
-    SetError("Empty query");
+    // If error is already set by Tokenize (e.g., unclosed quote), keep it
+    if (error_.empty()) {
+      SetError("Empty query");
+    }
     return Query{};
   }
 
@@ -158,7 +161,12 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   while (pos < tokens.size()) {
     std::string keyword = ToUpper(tokens[pos]);
 
-    if (keyword == "NOT") {
+    if (keyword == "AND") {
+      if (!ParseAnd(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return query;
+      }
+    } else if (keyword == "NOT") {
       if (!ParseNot(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
         return query;
@@ -213,7 +221,12 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   while (pos < tokens.size()) {
     std::string keyword = ToUpper(tokens[pos]);
 
-    if (keyword == "NOT") {
+    if (keyword == "AND") {
+      if (!ParseAnd(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return query;
+      }
+    } else if (keyword == "NOT") {
       if (!ParseNot(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
         return query;
@@ -224,7 +237,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
         return query;
       }
     } else {
-      SetError("COUNT only supports NOT and FILTER clauses");
+      SetError("COUNT only supports AND, NOT and FILTER clauses");
       query.type = QueryType::UNKNOWN;
       return query;
     }
@@ -247,6 +260,20 @@ Query QueryParser::ParseGet(const std::vector<std::string>& tokens) {
   query.primary_key = tokens[2];
 
   return query;
+}
+
+bool QueryParser::ParseAnd(const std::vector<std::string>& tokens,
+                           size_t& pos, Query& query) {
+  // AND <term>
+  pos++; // Skip "AND"
+
+  if (pos >= tokens.size()) {
+    SetError("AND requires a term");
+    return false;
+  }
+
+  query.and_terms.push_back(tokens[pos++]);
+  return true;
 }
 
 bool QueryParser::ParseNot(const std::vector<std::string>& tokens,
@@ -341,10 +368,79 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens,
 
 std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   std::vector<std::string> tokens;
-  std::istringstream iss(str);
   std::string token;
+  char quote_char = '\0';  // '\0' = not in quotes, '"' or '\'' = in quotes
+  bool escape_next = false;
 
-  while (iss >> token) {
+  for (size_t i = 0; i < str.length(); ++i) {
+    char c = str[i];
+
+    if (escape_next) {
+      // Handle escape sequences
+      switch (c) {
+        case 'n':  token += '\n'; break;
+        case 't':  token += '\t'; break;
+        case 'r':  token += '\r'; break;
+        case '\\': token += '\\'; break;
+        case '"':  token += '"';  break;
+        case '\'': token += '\''; break;
+        default:   token += c;    break;  // Unknown escape, keep as-is
+      }
+      escape_next = false;
+      continue;
+    }
+
+    if (c == '\\') {
+      escape_next = true;
+      continue;
+    }
+
+    if (quote_char == '\0') {
+      // Not currently in quotes
+      if (c == '"' || c == '\'') {
+        // Start of quoted string - save any pending token first
+        if (!token.empty()) {
+          tokens.push_back(token);
+          token.clear();
+        }
+        quote_char = c;
+        continue;
+      }
+
+      // Outside quotes, split on whitespace
+      if (std::isspace(c)) {
+        if (!token.empty()) {
+          tokens.push_back(token);
+          token.clear();
+        }
+      } else {
+        token += c;
+      }
+    } else {
+      // Inside quotes
+      if (c == quote_char) {
+        // End of quoted string
+        if (!token.empty()) {
+          tokens.push_back(token);
+          token.clear();
+        }
+        quote_char = '\0';
+        continue;
+      }
+
+      // Inside quotes, add everything including spaces
+      token += c;
+    }
+  }
+
+  // Check for unclosed quotes
+  if (quote_char != '\0') {
+    SetError(std::string("Unclosed quote: ") + quote_char);
+    return {};  // Return empty vector on error
+  }
+
+  // Add final token if any
+  if (!token.empty()) {
     tokens.push_back(token);
   }
 
