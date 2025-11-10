@@ -54,6 +54,11 @@ endif()
 # Export compile commands for clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Output directories
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
 # Options
 option(BUILD_TESTS "Build tests" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -369,3 +374,9 @@ endif()
 
 # Install
 install(TARGETS mygramdb DESTINATION bin)
+
+# Install configuration example
+install(FILES config.yaml.example DESTINATION etc/mygramdb)
+
+# Install documentation
+install(FILES README.md LICENSE DESTINATION share/doc/mygramdb)

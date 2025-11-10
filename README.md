@@ -44,11 +44,35 @@ graph TD
 
 ### Build
 
+#### Using Makefile (Recommended)
+
 ```bash
 # Clone repository
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
 
+# Install dependencies (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y pkg-config libmysqlclient-dev libicu-dev
+
+# Build
+make
+
+# Run tests
+make test
+
+# Clean build
+make clean
+
+# Other useful commands
+make help      # Show all available commands
+make rebuild   # Clean and rebuild
+make format    # Format code with clang-format
+```
+
+#### Using CMake directly
+
+```bash
 # Create build directory
 mkdir build && cd build
 
@@ -59,6 +83,24 @@ cmake --build .
 # Run tests
 ctest
 ```
+
+### Installation
+
+```bash
+# Install to /usr/local (requires sudo)
+sudo make install
+
+# Install to custom location
+make PREFIX=/opt/mygramdb install
+
+# Uninstall
+sudo make uninstall
+```
+
+After installation, the following files will be available:
+- Binaries: `/usr/local/bin/mygramdb`, `/usr/local/bin/mygram-cli`
+- Config sample: `/usr/local/etc/mygramdb/config.yaml.example`
+- Documentation: `/usr/local/share/doc/mygramdb/`
 
 ### Configuration
 
@@ -102,20 +144,24 @@ replication:
 ### Run Server
 
 ```bash
-./mygramdb -c config.yaml
+# Using Makefile
+make run
+
+# Or run directly from build directory
+./build/bin/mygramdb -c config.yaml
 ```
 
 ### Using the CLI Client
 
 ```bash
 # Interactive mode
-./mygram-cli
+./build/bin/mygram-cli
 
 # Single command mode
-./mygram-cli SEARCH articles "hello world"
+./build/bin/mygram-cli SEARCH articles "hello world"
 
 # Specify host and port
-./mygram-cli -h localhost -p 11211
+./build/bin/mygram-cli -h localhost -p 11211
 ```
 
 ## Protocol
@@ -219,12 +265,33 @@ mygram-db/
 
 ### Running Tests
 
+Using Makefile:
+```bash
+make test
+```
+
+Or using CTest directly:
 ```bash
 cd build
 ctest --output-on-failure
 ```
 
 Current test coverage: **138 tests, 100% passing**
+
+### Build Options
+
+You can configure CMake options when using Makefile:
+
+```bash
+# Enable AddressSanitizer
+make CMAKE_OPTIONS="-DENABLE_ASAN=ON" configure
+
+# Enable ThreadSanitizer
+make CMAKE_OPTIONS="-DENABLE_TSAN=ON" configure
+
+# Disable tests
+make CMAKE_OPTIONS="-DBUILD_TESTS=OFF" configure
+```
 
 ### Code Style
 

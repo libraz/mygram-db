@@ -44,11 +44,35 @@ graph TD
 
 ### ビルド
 
+#### Makefile を使用（推奨）
+
 ```bash
 # リポジトリのクローン
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
 
+# 依存関係のインストール（Ubuntu/Debian）
+sudo apt-get update
+sudo apt-get install -y pkg-config libmysqlclient-dev libicu-dev
+
+# ビルド
+make
+
+# テスト実行
+make test
+
+# ビルドをクリーン
+make clean
+
+# その他の便利なコマンド
+make help      # 利用可能なコマンド一覧を表示
+make rebuild   # クリーン後に再ビルド
+make format    # clang-format でコード整形
+```
+
+#### CMake を直接使用
+
+```bash
 # ビルドディレクトリの作成
 mkdir build && cd build
 
@@ -59,6 +83,24 @@ cmake --build .
 # テスト実行
 ctest
 ```
+
+### インストール
+
+```bash
+# /usr/local にインストール（sudo が必要）
+sudo make install
+
+# カスタムディレクトリにインストール
+make PREFIX=/opt/mygramdb install
+
+# アンインストール
+sudo make uninstall
+```
+
+インストール後、以下のファイルが利用可能になります：
+- バイナリ: `/usr/local/bin/mygramdb`, `/usr/local/bin/mygram-cli`
+- 設定サンプル: `/usr/local/etc/mygramdb/config.yaml.example`
+- ドキュメント: `/usr/local/share/doc/mygramdb/`
 
 ### 設定
 
@@ -102,20 +144,24 @@ replication:
 ### サーバー起動
 
 ```bash
-./mygramdb -c config.yaml
+# Makefile を使用
+make run
+
+# またはビルドディレクトリから直接実行
+./build/bin/mygramdb -c config.yaml
 ```
 
 ### CLI クライアントの使用
 
 ```bash
 # 対話モード
-./mygram-cli
+./build/bin/mygram-cli
 
 # 単一コマンドモード
-./mygram-cli SEARCH articles "こんにちは"
+./build/bin/mygram-cli SEARCH articles "こんにちは"
 
 # ホストとポートを指定
-./mygram-cli -h localhost -p 11211
+./build/bin/mygram-cli -h localhost -p 11211
 ```
 
 ## プロトコル
@@ -219,12 +265,33 @@ mygram-db/
 
 ### テストの実行
 
+Makefile を使用:
+```bash
+make test
+```
+
+または CTest を直接使用:
 ```bash
 cd build
 ctest --output-on-failure
 ```
 
 現在のテストカバレッジ: **138 テスト、100% 成功**
+
+### ビルドオプション
+
+Makefile を使用する際に CMake オプションを設定できます:
+
+```bash
+# AddressSanitizer を有効化
+make CMAKE_OPTIONS="-DENABLE_ASAN=ON" configure
+
+# ThreadSanitizer を有効化
+make CMAKE_OPTIONS="-DENABLE_TSAN=ON" configure
+
+# テストを無効化
+make CMAKE_OPTIONS="-DBUILD_TESTS=OFF" configure
+```
 
 ### コードスタイル
 

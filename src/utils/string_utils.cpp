@@ -20,13 +20,6 @@ namespace utils {
 namespace {
 
 /**
- * @brief Check if byte is a UTF-8 continuation byte
- */
-bool IsUtf8ContinuationByte(unsigned char byte) {
-  return (byte & 0xC0) == 0x80;
-}
-
-/**
  * @brief Get number of bytes in UTF-8 character from first byte
  */
 int Utf8CharLength(unsigned char first_byte) {
