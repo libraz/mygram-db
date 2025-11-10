@@ -1,4 +1,4 @@
-Ｙ# MygramDB
+# MygramDB
 
 High-performance in-memory full-text search engine with MySQL replication support.
 
@@ -6,7 +6,7 @@ High-performance in-memory full-text search engine with MySQL replication suppor
 
 Because MySQL FULLTEXT (ngram) is slow.
 Painfully slow. It scans millions of rows through B-tree pages on disk,
-doesn't compress postings, and struggles with short terms like "の" or "a".
+doesn't compress postings, and struggles with short, common terms like "a" or "the".
 
 It's not your fault — it was never designed for true full-text search.
 
