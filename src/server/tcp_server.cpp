@@ -285,7 +285,44 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           results = index_.SearchNot(results, not_ngrams);
         }
 
-        // TODO: Apply filter conditions
+        // Apply filter conditions
+        if (!query.filters.empty()) {
+          std::vector<storage::DocId> filtered_results;
+          filtered_results.reserve(results.size());
+
+          for (const auto& doc_id : results) {
+            bool matches_all_filters = true;
+
+            for (const auto& filter_cond : query.filters) {
+              auto stored_value = doc_store_.GetFilterValue(doc_id, filter_cond.column);
+
+              // For now, only support equality operator
+              if (filter_cond.op == query::FilterOp::EQ) {
+                // Convert filter value string to appropriate type and compare
+                bool matches = stored_value &&
+                              std::visit([&](const auto& val) {
+                                using T = std::decay_t<decltype(val)>;
+                                if constexpr (std::is_same_v<T, std::string>) {
+                                  return val == filter_cond.value;
+                                } else {
+                                  return std::to_string(val) == filter_cond.value;
+                                }
+                              }, stored_value.value());
+
+                if (!matches) {
+                  matches_all_filters = false;
+                  break;
+                }
+              }
+            }
+
+            if (matches_all_filters) {
+              filtered_results.push_back(doc_id);
+            }
+          }
+
+          results = filtered_results;
+        }
 
         return FormatSearchResponse(results, query.limit, query.offset);
       }
@@ -319,6 +356,45 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           }
 
           results = index_.SearchNot(results, not_ngrams);
+        }
+
+        // Apply filter conditions
+        if (!query.filters.empty()) {
+          std::vector<storage::DocId> filtered_results;
+          filtered_results.reserve(results.size());
+
+          for (const auto& doc_id : results) {
+            bool matches_all_filters = true;
+
+            for (const auto& filter_cond : query.filters) {
+              auto stored_value = doc_store_.GetFilterValue(doc_id, filter_cond.column);
+
+              // For now, only support equality operator
+              if (filter_cond.op == query::FilterOp::EQ) {
+                // Convert filter value string to appropriate type and compare
+                bool matches = stored_value &&
+                              std::visit([&](const auto& val) {
+                                using T = std::decay_t<decltype(val)>;
+                                if constexpr (std::is_same_v<T, std::string>) {
+                                  return val == filter_cond.value;
+                                } else {
+                                  return std::to_string(val) == filter_cond.value;
+                                }
+                              }, stored_value.value());
+
+                if (!matches) {
+                  matches_all_filters = false;
+                  break;
+                }
+              }
+            }
+
+            if (matches_all_filters) {
+              filtered_results.push_back(doc_id);
+            }
+          }
+
+          results = filtered_results;
         }
 
         return FormatCountResponse(results.size());

@@ -467,10 +467,11 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // TODO: Handle filters from row.columns
+      // Extract filters from row data
+      event.filters = ExtractFilters(row, table_config_.filters);
 
-      spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}",
-                   event.primary_key, event.text.length());
+      spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}",
+                   event.primary_key, event.text.length(), event.filters.size());
 
       return event;
     }
@@ -521,11 +522,14 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = after_row.text;
       event.gtid = current_gtid_;
 
-      // TODO: Handle filters from row.columns
-      // TODO: Handle before image for proper index update
+      // Extract filters from after image
+      event.filters = ExtractFilters(after_row, table_config_.filters);
 
-      spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}",
-                   event.primary_key, event.text.length());
+      // Note: For proper index update, we should use before image text
+      // to remove old n-grams. For now, simplified implementation.
+
+      spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}",
+                   event.primary_key, event.text.length(), event.filters.size());
 
       return event;
     }
@@ -574,10 +578,11 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // TODO: Handle filters from row.columns
+      // Extract filters from row data (before image for DELETE)
+      event.filters = ExtractFilters(row, table_config_.filters);
 
-      spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}",
-                   event.primary_key, event.text.length());
+      spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}",
+                   event.primary_key, event.text.length(), event.filters.size());
 
       return event;
     }

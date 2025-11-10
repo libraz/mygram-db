@@ -274,10 +274,17 @@ std::optional<std::string> Connection::GetServerUUID() {
 }
 
 std::optional<std::string> Connection::GetLatestGTID() {
-  // Execute SHOW MASTER STATUS to get the current binlog position
-  MYSQL_RES* result = Execute("SHOW MASTER STATUS");
+  // Try new syntax first (MySQL 8.0.23+)
+  MYSQL_RES* result = Execute("SHOW BINARY LOG STATUS");
+
+  // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
   if (!result) {
-    spdlog::error("Failed to execute SHOW MASTER STATUS");
+    spdlog::debug("SHOW BINARY LOG STATUS failed, trying SHOW MASTER STATUS");
+    result = Execute("SHOW MASTER STATUS");
+  }
+
+  if (!result) {
+    spdlog::error("Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS");
     return std::nullopt;
   }
 
@@ -295,7 +302,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
   }
 
   if (gtid_column_index == -1) {
-    spdlog::warn("Executed_Gtid_Set column not found in SHOW MASTER STATUS");
+    spdlog::warn("Executed_Gtid_Set column not found in SHOW BINARY LOG STATUS");
     mysql_free_result(result);
     return std::nullopt;
   }
@@ -318,7 +325,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
     return std::nullopt;
   }
 
-  spdlog::info("Latest GTID from SHOW MASTER STATUS: {}", gtid_set);
+  spdlog::info("Latest GTID from binary log: {}", gtid_set);
   return gtid_set;
 }
 

@@ -14,7 +14,7 @@ namespace mygramdb {
 namespace index {
 
 /**
- * @brief Document ID type (32-bit)
+ * @brief Document ID type (32-bit, supports up to 4B documents)
  */
 using DocId = uint32_t;
 

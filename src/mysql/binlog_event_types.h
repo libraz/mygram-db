@@ -25,7 +25,7 @@ enum class MySQLBinlogEventType {
   STOP_EVENT = 3,
   ROTATE_EVENT = 4,
   INTVAR_EVENT = 5,
-  SLAVE_EVENT = 7,
+  SLAVE_EVENT = 7,                    // Legacy name from binlog protocol (replica event)
   APPEND_BLOCK_EVENT = 9,
   DELETE_FILE_EVENT = 11,
   RAND_EVENT = 13,

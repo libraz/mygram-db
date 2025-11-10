@@ -12,6 +12,7 @@
 #ifdef USE_MYSQL
 #include "mysql/connection.h"
 #include "mysql/binlog_reader.h"
+#include "storage/gtid_state.h"
 #endif
 
 #include <csignal>
@@ -135,17 +136,29 @@ int main(int argc, char* argv[]) {
       spdlog::info("Replication will start from snapshot GTID (currently: initial build)");
     } else if (start_from == "latest") {
       // Get current GTID from MySQL
-      // TODO: Implement SHOW MASTER STATUS query to get current GTID
-      start_gtid = "";
-      spdlog::info("Replication will start from latest GTID");
+      auto latest_gtid = mysql_conn->GetLatestGTID();
+      if (latest_gtid) {
+        start_gtid = latest_gtid.value();
+        spdlog::info("Replication will start from latest GTID: {}", start_gtid);
+      } else {
+        spdlog::warn("Failed to get latest GTID, starting from empty");
+        start_gtid = "";
+      }
     } else if (start_from.find("gtid=") == 0) {
       // Extract GTID from "gtid=<UUID:txn>" format
       start_gtid = start_from.substr(5);
       spdlog::info("Replication will start from specified GTID: {}", start_gtid);
     } else if (start_from == "state_file") {
-      // TODO: Read GTID from state file
-      start_gtid = "";
-      spdlog::info("Replication will start from state file GTID (not yet implemented)");
+      // Read GTID from state file
+      mygramdb::storage::GTIDStateFile gtid_state("./gtid_state.txt");
+      auto saved_gtid = gtid_state.Read();
+      if (saved_gtid) {
+        start_gtid = saved_gtid.value();
+        spdlog::info("Replication will start from state file GTID: {}", start_gtid);
+      } else {
+        spdlog::warn("Failed to read GTID from state file, starting from empty");
+        start_gtid = "";
+      }
     }
 
     // Create binlog reader

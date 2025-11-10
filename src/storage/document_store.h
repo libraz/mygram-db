@@ -15,7 +15,7 @@
 namespace mygramdb {
 namespace storage {
 
-using DocId = uint64_t;
+using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::DocId)
 
 /**
  * @brief Filter value types
