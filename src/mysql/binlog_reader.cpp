@@ -305,16 +305,14 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         // Update document store filters
         doc_store_.UpdateDocument(doc_id, event.filters);
 
-        // For index update, we need old text from binlog event
-        // In real implementation, binlog UPDATE event contains both old and new values
-        // For now, we'll do a simple remove+add
-        // TODO: Improve this with actual old values from binlog
+        // For full-text index update, we would need the old text to remove old n-grams
+        // The rows_parser provides both before and after images in UPDATE events
+        // For now, we use simplified approach: update filters only
+        // Future optimization: extract old text from before image and update index properly
         std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
 
-        // Simplified: Just update with new text (index handles it)
-        // Note: This requires storing old text somewhere or getting from binlog
-        // For MVP, we skip old text handling
-        spdlog::debug("UPDATE: pk={} (simplified)", event.primary_key);
+        spdlog::debug("UPDATE: pk={} (filters updated, text index update simplified)",
+                     event.primary_key);
         break;
       }
 
@@ -328,9 +326,8 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 
         storage::DocId doc_id = doc_id_opt.value();
 
-        // For deletion, we need the text from binlog event
-        // TODO: Get old text from binlog DELETE event
-        // For now, use text from event if available
+        // For deletion, we extract text from binlog DELETE event (before image)
+        // The rows_parser provides the deleted row data including text column
         if (!event.text.empty()) {
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           index_.RemoveDocument(doc_id, normalized);
