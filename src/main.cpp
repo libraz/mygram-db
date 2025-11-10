@@ -130,10 +130,13 @@ int main(int argc, char* argv[]) {
     const std::string& start_from = config.replication.start_from;
 
     if (start_from == "snapshot") {
-      // Use GTID from snapshot (will be set when loading snapshot)
-      // For now, use empty GTID since we just built from SELECT
-      start_gtid = "";
-      spdlog::info("Replication will start from snapshot GTID (currently: initial build)");
+      // Use GTID captured during snapshot build
+      start_gtid = snapshot_builder.GetSnapshotGTID();
+      if (start_gtid.empty()) {
+        spdlog::warn("Snapshot GTID not available, replication may miss changes");
+      } else {
+        spdlog::info("Replication will start from snapshot GTID: {}", start_gtid);
+      }
     } else if (start_from == "latest") {
       // Get current GTID from MySQL
       auto latest_gtid = mysql_conn->GetLatestGTID();

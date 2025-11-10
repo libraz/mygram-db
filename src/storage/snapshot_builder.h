@@ -52,11 +52,25 @@ class SnapshotBuilder {
   ~SnapshotBuilder() = default;
 
   /**
-   * @brief Build snapshot from SELECT query
+   * @brief Build snapshot from SELECT query with consistent GTID
+   *
+   * Uses START TRANSACTION WITH CONSISTENT SNAPSHOT to ensure
+   * data consistency and captures the GTID at snapshot time.
+   *
    * @param progress_callback Optional progress callback
    * @return true if successful
    */
   bool Build(ProgressCallback progress_callback = nullptr);
+
+  /**
+   * @brief Get GTID captured at snapshot time
+   *
+   * This GTID represents the state of the database when the snapshot
+   * was taken. Binlog replication should start from this GTID.
+   *
+   * @return GTID string or empty if not available
+   */
+  const std::string& GetSnapshotGTID() const { return snapshot_gtid_; }
 
   /**
    * @brief Get last error message
@@ -82,6 +96,7 @@ class SnapshotBuilder {
   std::string last_error_;
   uint64_t processed_rows_ = 0;
   std::atomic<bool> cancelled_{false};
+  std::string snapshot_gtid_;  // GTID captured at snapshot time
 
   /**
    * @brief Build SELECT query for snapshot

@@ -31,17 +31,40 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
     return false;
   }
 
+  // Start transaction with consistent snapshot for GTID consistency
+  spdlog::info("Starting consistent snapshot transaction");
+  if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
+    last_error_ = "Failed to start consistent snapshot: " + connection_.GetLastError();
+    spdlog::error(last_error_);
+    return false;
+  }
+
+  // Capture GTID at this point (represents snapshot state)
+  MYSQL_RES* gtid_result = connection_.Execute("SELECT @@global.gtid_executed");
+  if (gtid_result) {
+    MYSQL_ROW row = mysql_fetch_row(gtid_result);
+    if (row && row[0]) {
+      snapshot_gtid_ = std::string(row[0]);
+      spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
+    }
+    mysql_free_result(gtid_result);
+  } else {
+    spdlog::warn("Failed to capture GTID, continuing without it");
+    snapshot_gtid_ = "";
+  }
+
   // Build SELECT query
   std::string query = BuildSelectQuery();
   spdlog::info("Building snapshot with query: {}", query);
 
   auto start_time = std::chrono::steady_clock::now();
 
-  // Execute query
+  // Execute query (within the consistent snapshot transaction)
   MYSQL_RES* result = connection_.Execute(query);
   if (!result) {
     last_error_ = "Failed to execute SELECT query: " + connection_.GetLastError();
     spdlog::error(last_error_);
+    connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
     return false;
   }
 
@@ -62,6 +85,7 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
   while ((row = mysql_fetch_row(result)) && !cancelled_) {
     if (!ProcessRow(row, fields, num_fields)) {
       mysql_free_result(result);
+      connection_.ExecuteUpdate("ROLLBACK");  // Clean up on error
       return false;
     }
 
@@ -83,6 +107,11 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
   }
 
   mysql_free_result(result);
+
+  // Commit the transaction (releases the snapshot)
+  if (!connection_.ExecuteUpdate("COMMIT")) {
+    spdlog::warn("Failed to commit snapshot transaction");
+  }
 
   if (cancelled_) {
     last_error_ = "Build cancelled";
