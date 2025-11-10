@@ -330,6 +330,154 @@ TEST_F(TcpServerTest, SearchWithNot) {
 }
 
 /**
+ * @brief Test SEARCH with AND operator
+ */
+TEST_F(TcpServerTest, SearchWithAnd) {
+  // Add documents
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+
+  auto doc_id3 = doc_store_->AddDocument("3", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Search for documents containing both 'a' AND 'd'
+  // Should match doc_id2 only (has both 'a' and 'd')
+  std::string response = SendRequest(sock, "SEARCH test a AND d");
+  EXPECT_EQ(response, "OK RESULTS 1 2");
+
+  close(sock);
+}
+
+/**
+ * @brief Test SEARCH with multiple AND operators
+ */
+TEST_F(TcpServerTest, SearchWithMultipleAnds) {
+  // Add documents
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz pqr");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+
+  auto doc_id3 = doc_store_->AddDocument("3", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc xyz");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Search for documents containing 'a' AND 'x' AND 'p'
+  // Should match doc_id1 only
+  std::string response = SendRequest(sock, "SEARCH test a AND x AND p");
+  EXPECT_EQ(response, "OK RESULTS 1 1");
+
+  close(sock);
+}
+
+/**
+ * @brief Test SEARCH with AND and NOT combined
+ */
+TEST_F(TcpServerTest, SearchWithAndAndNot) {
+  // Add documents
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz old");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc xyz new");
+
+  auto doc_id3 = doc_store_->AddDocument("3", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc def");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Search for documents containing 'a' AND 'x' but NOT 'o'
+  // Should match doc_id2 only
+  std::string response = SendRequest(sock, "SEARCH test a AND x NOT o");
+  EXPECT_EQ(response, "OK RESULTS 1 2");
+
+  close(sock);
+}
+
+/**
+ * @brief Test COUNT with AND operator
+ */
+TEST_F(TcpServerTest, CountWithAnd) {
+  // Add documents
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+
+  auto doc_id3 = doc_store_->AddDocument("3", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Count documents containing both 'a' AND 'd'
+  std::string response = SendRequest(sock, "COUNT test a AND d");
+  EXPECT_EQ(response, "OK COUNT 1");
+
+  close(sock);
+}
+
+/**
+ * @brief Test SEARCH with quoted strings
+ */
+TEST_F(TcpServerTest, SearchWithQuotedString) {
+  // Add documents
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello");
+
+  auto doc_id3 = doc_store_->AddDocument("3", {});
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "world");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Search for exact phrase "hello world"
+  std::string response = SendRequest(sock, "SEARCH test \"hello world\"");
+  EXPECT_EQ(response, "OK RESULTS 1 1");
+
+  close(sock);
+}
+
+/**
  * @brief Test multiple requests on same connection
  */
 TEST_F(TcpServerTest, MultipleRequests) {
