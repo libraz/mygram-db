@@ -315,4 +315,119 @@ TEST_F(RowsParserTest, ParseInvalidBuffer) {
   EXPECT_FALSE(result3.has_value());
 }
 
+// Test ExtractFilters function
+TEST_F(RowsParserTest, ExtractFiltersBasic) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["status"] = "1";
+  row_data.columns["category"] = "tech";
+  row_data.columns["count"] = "42";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"status", "tinyint_unsigned"});
+  filter_configs.push_back({"category", "string"});
+  filter_configs.push_back({"count", "int"});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  EXPECT_EQ(filters.size(), 3);
+  EXPECT_TRUE(std::holds_alternative<uint8_t>(filters["status"]));
+  EXPECT_EQ(std::get<uint8_t>(filters["status"]), 1);
+  EXPECT_TRUE(std::holds_alternative<std::string>(filters["category"]));
+  EXPECT_EQ(std::get<std::string>(filters["category"]), "tech");
+  EXPECT_TRUE(std::holds_alternative<int32_t>(filters["count"]));
+  EXPECT_EQ(std::get<int32_t>(filters["count"]), 42);
+}
+
+TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["status"] = "";  // NULL value
+  row_data.columns["category"] = "tech";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"status", "int"});
+  filter_configs.push_back({"category", "string"});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  // NULL values should be skipped
+  EXPECT_EQ(filters.size(), 1);
+  EXPECT_TRUE(filters.find("status") == filters.end());
+  EXPECT_TRUE(filters.find("category") != filters.end());
+  EXPECT_EQ(std::get<std::string>(filters["category"]), "tech");
+}
+
+TEST_F(RowsParserTest, ExtractFiltersMissingColumn) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["status"] = "1";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"status", "int"});
+  filter_configs.push_back({"missing_col", "string"});  // Column not in row data
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  // Should only extract existing columns
+  EXPECT_EQ(filters.size(), 1);
+  EXPECT_TRUE(filters.find("status") != filters.end());
+  EXPECT_TRUE(filters.find("missing_col") == filters.end());
+}
+
+TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["count"] = "invalid_number";  // Invalid integer string
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"count", "int"});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  // Invalid conversion should be skipped (exception caught internally)
+  EXPECT_EQ(filters.size(), 0);
+}
+
+TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["bool_col"] = "1";
+  row_data.columns["tinyint_col"] = "-128";
+  row_data.columns["tinyint_u_col"] = "255";
+  row_data.columns["smallint_col"] = "-32768";
+  row_data.columns["smallint_u_col"] = "65535";
+  row_data.columns["int_col"] = "-2147483648";
+  row_data.columns["int_u_col"] = "4294967295";
+  row_data.columns["bigint_col"] = "-9223372036854775808";
+  row_data.columns["float_col"] = "3.14";
+  row_data.columns["string_col"] = "test";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"bool_col", "boolean"});
+  filter_configs.push_back({"tinyint_col", "tinyint"});
+  filter_configs.push_back({"tinyint_u_col", "tinyint_unsigned"});
+  filter_configs.push_back({"smallint_col", "smallint"});
+  filter_configs.push_back({"smallint_u_col", "smallint_unsigned"});
+  filter_configs.push_back({"int_col", "int"});
+  filter_configs.push_back({"int_u_col", "int_unsigned"});
+  filter_configs.push_back({"bigint_col", "bigint"});
+  filter_configs.push_back({"float_col", "float"});
+  filter_configs.push_back({"string_col", "string"});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  EXPECT_EQ(filters.size(), 10);
+  EXPECT_EQ(std::get<bool>(filters["bool_col"]), true);
+  EXPECT_EQ(std::get<int8_t>(filters["tinyint_col"]), -128);
+  EXPECT_EQ(std::get<uint8_t>(filters["tinyint_u_col"]), 255);
+  EXPECT_EQ(std::get<int16_t>(filters["smallint_col"]), -32768);
+  EXPECT_EQ(std::get<uint16_t>(filters["smallint_u_col"]), 65535);
+  EXPECT_EQ(std::get<int32_t>(filters["int_col"]), -2147483648);
+  EXPECT_EQ(std::get<uint32_t>(filters["int_u_col"]), 4294967295U);
+  EXPECT_EQ(std::get<int64_t>(filters["bigint_col"]), -9223372036854775807LL - 1);
+  EXPECT_NEAR(std::get<double>(filters["float_col"]), 3.14, 0.01);
+  EXPECT_EQ(std::get<std::string>(filters["string_col"]), "test");
+}
+
 #endif  // USE_MYSQL
