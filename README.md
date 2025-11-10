@@ -2,6 +2,18 @@
 
 High-performance in-memory full-text search engine with MySQL replication support.
 
+## Why MygramDB?
+
+Because MySQL FULLTEXT (ngram) is slow.
+Painfully slow. It scans millions of rows through B-tree pages on disk,
+doesn't compress postings, and struggles with short terms like "の" or "a".
+
+It's not your fault — it was never designed for true full-text search.
+
+So I built **MygramDB** — an in-memory search replica for MySQL.
+It builds its index from a consistent snapshot, syncs via GTID binlog,
+and gives you millisecond-class search without Elasticsearch or pain.
+
 ## Features
 
 - **Fast Full-Text Search**: N-gram based indexing with hybrid posting lists (Delta encoding + Roaring bitmaps)
@@ -11,6 +23,47 @@ High-performance in-memory full-text search engine with MySQL replication suppor
 - **TCP Protocol**: memcached-style text protocol
 - **Column Type Validation**: Supports VARCHAR and TEXT types with type checking
 - **Efficient Queries**: Optimized ORDER BY with primary key indexing
+
+## Requirements and Limitations
+
+### System Requirements
+
+- **Memory**: In-memory storage requires sufficient RAM to hold the entire index and document store
+  - Estimate: ~1-2GB per million documents (varies by text size and ngram_size)
+  - For 10M documents with average 1KB text: expect 10-20GB memory usage
+- **CPU**: Multi-core processor recommended for parallel query processing
+- **OS**: Linux or macOS (Windows not tested)
+
+### MySQL Requirements
+
+- **MySQL Version**: 5.7.6+ or 8.0+ (tested with MySQL 8.0 and 8.4)
+- **GTID Mode**: Must be enabled (`gtid_mode=ON`, `enforce_gtid_consistency=ON`)
+- **Binary Log Format**: ROW format required (`binlog_format=ROW`)
+- **Privileges**: Replication user needs `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges
+
+### Limitations
+
+- **Single Table**: Currently supports one table per MygramDB instance
+- **Text Columns Only**: Only VARCHAR and TEXT columns can be indexed for full-text search
+- **Primary Key**: Table must have a single-column primary key (composite keys not supported)
+- **No Transactions**: MygramDB is eventually consistent (binlog lag typically <100ms)
+- **Memory Bound**: Dataset size limited by available RAM
+- **Read-Only**: MygramDB is a read replica; writes go to MySQL master
+
+### When to Use MygramDB
+
+✅ **Good fit:**
+- High read volume, low write volume
+- Full-text search on millions of rows
+- Need millisecond search latency
+- Simple deployment (no Elasticsearch cluster)
+- Japanese/CJK text search with ngrams
+
+❌ **Not recommended:**
+- Write-heavy workloads
+- Dataset doesn't fit in memory
+- Need distributed search across multiple nodes
+- Complex aggregations or analytics queries
 
 ## Architecture
 
