@@ -31,6 +31,14 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
     return false;
   }
 
+  // Check if GTID mode is enabled
+  if (!connection_.IsGTIDModeEnabled()) {
+    last_error_ = "GTID mode is not enabled on MySQL server. "
+                  "Please enable GTID mode (gtid_mode=ON) for replication support.";
+    spdlog::error(last_error_);
+    return false;
+  }
+
   // Start transaction with consistent snapshot for GTID consistency
   spdlog::info("Starting consistent snapshot transaction");
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {

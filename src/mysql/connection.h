@@ -149,7 +149,13 @@ class Connection {
   std::optional<std::string> GetServerUUID();
 
   /**
-   * @brief Get latest GTID from SHOW MASTER STATUS
+   * @brief Check if GTID mode is enabled on the server
+   * @return true if GTID_MODE is ON, false otherwise
+   */
+  bool IsGTIDModeEnabled();
+
+  /**
+   * @brief Get latest GTID from SHOW BINARY LOG STATUS
    *
    * Returns the latest GTID position in the binlog.
    * This is useful for starting replication from the current position.

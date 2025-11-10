@@ -273,6 +273,29 @@ std::optional<std::string> Connection::GetServerUUID() {
   return uuid;
 }
 
+bool Connection::IsGTIDModeEnabled() {
+  MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_mode");
+  if (!result) {
+    spdlog::warn("Failed to query GTID mode");
+    return false;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result);
+  if (!row || !row[0]) {
+    mysql_free_result(result);
+    return false;
+  }
+
+  std::string mode(row[0]);
+  mysql_free_result(result);
+
+  spdlog::debug("GTID mode: {}", mode);
+
+  // GTID mode can be ON, OFF, ON_PERMISSIVE, or OFF_PERMISSIVE
+  // For replication, we need it to be ON
+  return mode == "ON";
+}
+
 std::optional<std::string> Connection::GetLatestGTID() {
   // Try new syntax first (MySQL 8.0.23+)
   MYSQL_RES* result = Execute("SHOW BINARY LOG STATUS");

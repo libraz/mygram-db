@@ -59,6 +59,14 @@ bool BinlogReader::Start() {
     spdlog::info("Reconnected to MySQL successfully");
   }
 
+  // Check if GTID mode is enabled
+  if (!connection_.IsGTIDModeEnabled()) {
+    last_error_ = "GTID mode is not enabled on MySQL server. "
+                  "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
+    spdlog::error("Cannot start binlog reader: {}", last_error_);
+    return false;
+  }
+
   should_stop_ = false;
   running_ = true;
 
