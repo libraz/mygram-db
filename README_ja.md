@@ -329,16 +329,27 @@ MygramDB は TCP 上でシンプルなテキストベースのプロトコルを
 ### SEARCH コマンド
 
 ```
-SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]
+SEARCH <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]
 ```
 
 **例:**
 ```
 SEARCH articles こんにちは
 SEARCH articles "ライブ配信" LIMIT 100
+SEARCH articles 技術 AND AI                     # 複数項の必須検索
+SEARCH articles ニュース AND 速報 NOT 古い       # AND と NOT を組み合わせ
 SEARCH articles ニュース NOT 古い FILTER status=1
 SEARCH articles 技術 FILTER category=AI LIMIT 50 OFFSET 100
 ```
+
+**検索構文:**
+- **引用符**: フレーズ検索には単一 `'` または二重 `"` 引用符を使用
+  - 例: `"hello world"` は完全なフレーズを検索
+  - エスケープシーケンスをサポート: `\n`, `\t`, `\r`, `\\`, `\"`, `\'`
+- **AND 演算子**: すべての項を含む文書を検索
+  - 例: `term1 AND term2 AND term3`
+- **NOT 演算子**: 特定の項を除外
+  - 例: `term1 NOT excluded`
 
 **レスポンス:**
 ```
@@ -348,12 +359,13 @@ OK RESULTS <total_count> <id1> <id2> <id3> ...
 ### COUNT コマンド
 
 ```
-COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]
+COUNT <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...]
 ```
 
 **例:**
 ```
 COUNT articles こんにちは
+COUNT articles 技術 AND AI                     # 複数項を含む文書数
 COUNT articles ニュース NOT 古い FILTER status=1
 ```
 

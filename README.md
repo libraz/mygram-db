@@ -329,16 +329,27 @@ MygramDB uses a simple text-based protocol over TCP (similar to memcached).
 ### SEARCH Command
 
 ```
-SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]
+SEARCH <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]
 ```
 
 **Examples:**
 ```
 SEARCH articles hello
 SEARCH articles "live streaming" LIMIT 100
+SEARCH articles tech AND AI                    # Multiple required terms
+SEARCH articles news AND breaking NOT old      # Combine AND and NOT
 SEARCH articles news NOT old FILTER status=1
 SEARCH articles tech FILTER category=AI LIMIT 50 OFFSET 100
 ```
+
+**Search Syntax:**
+- **Quotes**: Use single `'` or double `"` quotes for phrase searches
+  - Example: `"hello world"` searches for the exact phrase
+  - Escape sequences supported: `\n`, `\t`, `\r`, `\\`, `\"`, `\'`
+- **AND operator**: Search for documents containing all terms
+  - Example: `term1 AND term2 AND term3`
+- **NOT operator**: Exclude documents containing specific terms
+  - Example: `term1 NOT excluded`
 
 **Response:**
 ```
@@ -348,12 +359,13 @@ OK RESULTS <total_count> <id1> <id2> <id3> ...
 ### COUNT Command
 
 ```
-COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]
+COUNT <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...]
 ```
 
 **Examples:**
 ```
 COUNT articles hello
+COUNT articles tech AND AI                     # Count documents with multiple terms
 COUNT articles news NOT old FILTER status=1
 ```
 
