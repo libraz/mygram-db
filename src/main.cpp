@@ -70,6 +70,18 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // Apply logging configuration
+  if (config.logging.level == "debug") {
+    spdlog::set_level(spdlog::level::debug);
+  } else if (config.logging.level == "info") {
+    spdlog::set_level(spdlog::level::info);
+  } else if (config.logging.level == "warn") {
+    spdlog::set_level(spdlog::level::warn);
+  } else if (config.logging.level == "error") {
+    spdlog::set_level(spdlog::level::err);
+  }
+  spdlog::info("Configuration loaded successfully from {}", config_path);
+
   if (config.tables.empty()) {
     spdlog::error("No tables configured");
     return 1;

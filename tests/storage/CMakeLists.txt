@@ -23,4 +23,18 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(gtid_state_test)
+
+  # Snapshot save/load integration test
+  add_executable(snapshot_save_load_test
+    snapshot_save_load_test.cpp
+  )
+
+  target_link_libraries(snapshot_save_load_test
+    mygramdb_storage
+    mygramdb_index
+    mygramdb_mysql
+    mygramdb_query
+    mygramdb_utils
+    mygramdb_config
+  )
 endif()

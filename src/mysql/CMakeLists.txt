@@ -6,6 +6,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     binlog_reader.cpp
     table_metadata.cpp
     rows_parser.cpp
+    gtid_encoder.cpp
   )
 
   target_link_libraries(mygramdb_mysql

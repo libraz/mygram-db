@@ -9,11 +9,13 @@
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_util.h"
+#include "mysql/gtid_encoder.h"
 #include "mysql/rows_parser.h"
 #include "storage/gtid_state.h"
 #include "utils/string_utils.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cstring>
 
 namespace mygramdb {
 namespace mysql {
@@ -48,24 +50,36 @@ bool BinlogReader::Start() {
     return false;
   }
 
-  // Try to reconnect if connection was lost
-  if (!connection_.Ping()) {
-    spdlog::warn("MySQL connection lost, attempting to reconnect...");
-    if (!connection_.Reconnect()) {
-      last_error_ = "Failed to reconnect to MySQL: " + connection_.GetLastError();
-      spdlog::error("Cannot start binlog reader: {}", last_error_);
-      return false;
-    }
-    spdlog::info("Reconnected to MySQL successfully");
-  }
-
-  // Check if GTID mode is enabled
+  // Check if GTID mode is enabled (using main connection)
   if (!connection_.IsGTIDModeEnabled()) {
     last_error_ = "GTID mode is not enabled on MySQL server. "
                   "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
     spdlog::error("Cannot start binlog reader: {}", last_error_);
     return false;
   }
+
+  // Create dedicated connection for binlog reading
+  // We need a separate connection because mysql_binlog_* functions
+  // are blocking and cannot share a connection with other queries
+  spdlog::info("Creating dedicated binlog connection...");
+  mysql::Connection::Config binlog_conn_config;
+  binlog_conn_config.host = connection_.GetConfig().host;
+  binlog_conn_config.port = connection_.GetConfig().port;
+  binlog_conn_config.user = connection_.GetConfig().user;
+  binlog_conn_config.password = connection_.GetConfig().password;
+  binlog_conn_config.database = connection_.GetConfig().database;
+  binlog_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
+  binlog_conn_config.read_timeout = connection_.GetConfig().read_timeout;
+  binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
+
+  binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
+  if (!binlog_connection_->Connect()) {
+    last_error_ = "Failed to create binlog connection: " + binlog_connection_->GetLastError();
+    spdlog::error("Cannot start binlog reader: {}", last_error_);
+    binlog_connection_.reset();
+    return false;
+  }
+  spdlog::info("Dedicated binlog connection established");
 
   should_stop_ = false;
   running_ = true;
@@ -124,8 +138,14 @@ void BinlogReader::Stop() {
     worker_thread_->join();
   }
 
+  // Close binlog connection
+  if (binlog_connection_) {
+    binlog_connection_->Close();
+    binlog_connection_.reset();
+  }
+
   running_ = false;
-  spdlog::info("Binlog reader stopped. Processed {} events", 
+  spdlog::info("Binlog reader stopped. Processed {} events",
                processed_events_.load());
 }
 
@@ -148,15 +168,7 @@ size_t BinlogReader::GetQueueSize() const {
 void BinlogReader::ReaderThreadFunc() {
   spdlog::info("Binlog reader thread started");
 
-  // Initialize MYSQL_RPL structure for binlog reading
-  MYSQL_RPL rpl{};
-  rpl.file_name_length = 0;    // 0 means start from current position
-  rpl.file_name = nullptr;
-  rpl.start_position = 4;      // Skip magic number at start of binlog
-  rpl.server_id = 0;           // 0 means use default
-  rpl.flags = MYSQL_RPL_GTID | MYSQL_RPL_SKIP_HEARTBEAT;  // Use GTID mode
-
-  // Set GTID set if we have a starting GTID
+  // Get starting GTID
   std::string gtid_set;
   {
     std::lock_guard<std::mutex> lock(gtid_mutex_);
@@ -166,44 +178,167 @@ void BinlogReader::ReaderThreadFunc() {
     }
   }
 
-  // Open binlog stream
-  if (mysql_binlog_open(connection_.GetHandle(), &rpl) != 0) {
-    last_error_ = "Failed to open binlog stream: " + connection_.GetLastError();
-    spdlog::error("{}", last_error_);
-    should_stop_ = true;
-    running_ = false;
-    return;
-  }
+  // Main reconnection loop (infinite retries)
+  int reconnect_attempt = 0;
 
-  spdlog::info("Binlog stream opened successfully");
-
-  // Read binlog events
   while (!should_stop_) {
-    // Fetch next binlog event
-    int result = mysql_binlog_fetch(connection_.GetHandle(), &rpl);
-
-    if (result != 0) {
-      last_error_ = "Failed to fetch binlog event: " + connection_.GetLastError();
+    // Disable binlog checksums for this connection
+    // We don't verify checksums yet, so ask the server to send events without them
+    if (mysql_query(binlog_connection_->GetHandle(),
+                    "SET @source_binlog_checksum='NONE'") != 0) {
+      last_error_ = "Failed to disable binlog checksum: " + binlog_connection_->GetLastError();
       spdlog::error("{}", last_error_);
-      break;
+
+      // Retry connection after delay
+      spdlog::info("Will retry connection in {} ms", config_.reconnect_delay_ms);
+      std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+
+      // Reconnect
+      if (!binlog_connection_->Connect()) {
+        spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+        continue;
+      }
+      continue;
+    }
+    spdlog::info("Binlog checksums disabled for replication");
+
+    // Initialize MYSQL_RPL structure for binlog reading
+    MYSQL_RPL rpl{};
+    rpl.file_name_length = 0;    // 0 means start from current position
+    rpl.file_name = nullptr;
+    rpl.start_position = 4;      // Skip magic number at start of binlog
+    rpl.server_id = 1001;        // Use non-zero server ID for replica
+    rpl.flags = MYSQL_RPL_GTID;  // Use GTID mode (allow heartbeat events)
+
+    // Use current GTID for replication (updated after each event)
+    std::string current_gtid = GetCurrentGTID();
+
+    // Encode GTID set to binary format if we have one
+    if (!current_gtid.empty()) {
+      // Encode GTID set using our encoder and store in member variable
+      // (must persist during mysql_binlog_open call)
+      gtid_encoded_data_ = mygram::mysql::GtidEncoder::Encode(current_gtid);
+
+      // Use callback approach: MySQL will call our callback to encode the GTID into the packet
+      rpl.gtid_set_encoded_size = gtid_encoded_data_.size();
+      rpl.gtid_set_arg = &gtid_encoded_data_;  // Pass pointer to our encoded data
+      rpl.fix_gtid_set = &BinlogReader::FixGtidSetCallback;  // Static callback function
+
+      spdlog::info("Using GTID set '{}' (encoded to {} bytes)", current_gtid, gtid_encoded_data_.size());
+    } else {
+      // Empty GTID set: receive all events from current binlog position
+      rpl.gtid_set_encoded_size = 0;
+      rpl.gtid_set_arg = nullptr;
+      rpl.fix_gtid_set = nullptr;
+      spdlog::info("Using empty GTID set (will receive all events)");
     }
 
-    // Check if we have data
-    if (rpl.size == 0 || rpl.buffer == nullptr) {
-      // No data available, wait a bit
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Open binlog stream
+    if (mysql_binlog_open(binlog_connection_->GetHandle(), &rpl) != 0) {
+      last_error_ = "Failed to open binlog stream: " + binlog_connection_->GetLastError();
+      spdlog::error("{}", last_error_);
+
+      // Retry connection after delay
+      spdlog::info("Will retry connection in {} ms", config_.reconnect_delay_ms);
+      std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+
+      // Reconnect
+      if (!binlog_connection_->Connect()) {
+        spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+      }
       continue;
     }
 
-    // Parse the binlog event
-    auto event_opt = ParseBinlogEvent(rpl.buffer, rpl.size);
-    if (event_opt) {
-      PushEvent(event_opt.value());
+    spdlog::info("Binlog stream opened successfully");
+    reconnect_attempt = 0;  // Reset reconnect counter on success
+
+    // Read binlog events
+    int event_count = 0;
+    bool connection_lost = false;
+
+    while (!should_stop_ && !connection_lost) {
+      // Fetch next binlog event
+      spdlog::debug("Calling mysql_binlog_fetch...");
+      int result = mysql_binlog_fetch(binlog_connection_->GetHandle(), &rpl);
+
+      if (result != 0) {
+        unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
+        const char* err_str = mysql_error(binlog_connection_->GetHandle());
+        last_error_ = "Failed to fetch binlog event: " + std::string(err_str) +
+                      " (errno: " + std::to_string(err_no) + ")";
+        spdlog::error("{}", last_error_);
+        spdlog::error("mysql_binlog_fetch returned: {}", result);
+
+        // Check if this is a recoverable error
+        if (err_no == 2013 || err_no == 2006) {  // Connection lost or gone away
+          spdlog::warn("Connection lost, will attempt to reconnect...");
+          connection_lost = true;
+
+          // Close current binlog stream
+          mysql_binlog_close(binlog_connection_->GetHandle(), &rpl);
+
+          // Wait before reconnecting
+          reconnect_attempt++;
+          int delay_ms = config_.reconnect_delay_ms * std::min(reconnect_attempt, 10);
+          spdlog::info("Reconnect attempt #{}, waiting {} ms", reconnect_attempt, delay_ms);
+          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+
+          // Reconnect
+          if (!binlog_connection_->Connect()) {
+            spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+          }
+          break;  // Exit inner loop to retry from outer loop
+        } else {
+          // Non-recoverable error
+          should_stop_ = true;
+          break;
+        }
+      }
+
+      // Check if we have data
+      if (rpl.size == 0 || rpl.buffer == nullptr) {
+        // No data available (EOF or keepalive)
+        spdlog::debug("No data in binlog fetch (size={}, buffer={})", rpl.size, (void*)rpl.buffer);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+
+      event_count++;
+      spdlog::debug("Received binlog event #{}, size: {} bytes", event_count, rpl.size);
+
+      // Parse the binlog event
+      auto event_opt = ParseBinlogEvent(rpl.buffer, rpl.size);
+      if (event_opt) {
+        spdlog::debug("Parsed event: type={}, table={}",
+                      static_cast<int>(event_opt->type), event_opt->table_name);
+
+        // Log important data events at info level
+        if (event_opt->type == BinlogEventType::INSERT ||
+            event_opt->type == BinlogEventType::UPDATE ||
+            event_opt->type == BinlogEventType::DELETE) {
+          spdlog::info("Binlog event: {} on table '{}', pk={}",
+                       event_opt->type == BinlogEventType::INSERT ? "INSERT" :
+                       event_opt->type == BinlogEventType::UPDATE ? "UPDATE" : "DELETE",
+                       event_opt->table_name, event_opt->primary_key);
+        }
+
+        PushEvent(event_opt.value());
+      } else {
+        spdlog::debug("Event skipped (not a data event or parse failed)");
+      }
+    }
+
+    // Close binlog stream if still connected
+    if (binlog_connection_ && binlog_connection_->IsConnected()) {
+      mysql_binlog_close(binlog_connection_->GetHandle(), &rpl);
+    }
+
+    // If not reconnecting, exit the loop
+    if (!connection_lost || should_stop_) {
+      break;
     }
   }
 
-  // Close binlog stream
-  mysql_binlog_close(connection_.GetHandle(), &rpl);
   spdlog::info("Binlog reader thread stopped");
 }
 
@@ -855,6 +990,12 @@ std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
                 metadata.table_id, column_count);
 
   return metadata;
+}
+
+void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set) {
+  // Copy pre-encoded GTID data into the packet buffer
+  auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
+  std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
 }
 
 }  // namespace mysql

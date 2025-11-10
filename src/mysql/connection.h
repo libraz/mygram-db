@@ -170,6 +170,11 @@ class Connection {
   const std::string& GetLastError() const { return last_error_; }
 
   /**
+   * @brief Get connection configuration
+   */
+  const Config& GetConfig() const { return config_; }
+
+  /**
    * @brief Get raw MYSQL handle
    */
   MYSQL* GetHandle() { return mysql_; }

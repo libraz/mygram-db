@@ -116,7 +116,8 @@ class BinlogReader {
   const std::string& GetLastError() const { return last_error_; }
 
  private:
-  Connection& connection_;
+  Connection& connection_;  // Main connection (used for queries, not binlog)
+  std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading
   index::Index& index_;
   storage::DocumentStore& doc_store_;
   config::TableConfig table_config_;
@@ -144,6 +145,16 @@ class BinlogReader {
 
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
+
+  // GTID encoding data (must persist during mysql_binlog_open call)
+  std::vector<uint8_t> gtid_encoded_data_;
+
+  /**
+   * @brief Static callback for MySQL binlog API to encode GTID set
+   * @param rpl MYSQL_RPL structure
+   * @param packet_gtid_set Buffer to write encoded GTID data
+   */
+  static void FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set);
 
   /**
    * @brief Reader thread function
