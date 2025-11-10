@@ -1,0 +1,59 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (gitignored as requested)
+docs/
+CLAUDE.md
+.claude/
+
+# Generated files
+*.log
+*.out
+core
+core.*
+
+# Test outputs
+Testing/
+*.gcov
+*.gcda
+*.gcno
+
+# Binaries
+mygramdb
+mygram-cli
+*.exe
+
+# Dependencies
+third_party/*
+!third_party/CMakeLists.txt
+
+# Snapshots & Data
+/var/
+*.snap
+snapshots/
+
+# Config files (may contain sensitive info)
+config.yaml
+config.yml

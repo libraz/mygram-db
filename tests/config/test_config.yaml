@@ -1,0 +1,71 @@
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: test_user
+  password: test_pass
+  use_gtid: true
+  binlog_format: ROW
+  binlog_row_image: FULL
+  connect_timeout_ms: 5000
+
+tables:
+  - name: test_table
+    primary_key: id
+    text_source:
+      column: content
+    filters:
+      - name: status
+        type: int
+        dict_compress: true
+        bitmap_index: true
+      - name: created_at
+        type: datetime
+        bucket: "hour"
+    ngram_size: 1
+    posting:
+      block_size: 64
+      freq_bits: 0
+      use_roaring: "auto"
+
+build:
+  mode: "select_snapshot"
+  batch_size: 1000
+  parallelism: 1
+  throttle_ms: 0
+
+replication:
+  enable: true
+  start_from: "snapshot"
+
+memory:
+  hard_limit_mb: 1024
+  soft_target_mb: 512
+  arena_chunk_mb: 32
+  roaring_threshold: 0.2
+  minute_epoch: true
+  normalize:
+    nfkc: true
+    width: "narrow"
+    lower: false
+
+snapshot:
+  dir: "/tmp/test_snapshots"
+  interval_sec: 300
+  retain: 2
+
+api:
+  tcp:
+    bind: "127.0.0.1"
+    port: 11311
+  http:
+    enable: false
+    bind: "127.0.0.1"
+    port: 8080
+
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"
+
+logging:
+  level: "debug"
+  json: false

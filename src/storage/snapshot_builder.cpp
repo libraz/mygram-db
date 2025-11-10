@@ -1,0 +1,275 @@
+/**
+ * @file snapshot_builder.cpp
+ * @brief Snapshot builder implementation
+ */
+
+#include "storage/snapshot_builder.h"
+
+#ifdef USE_MYSQL
+
+#include "utils/string_utils.h"
+#include <spdlog/spdlog.h>
+#include <chrono>
+#include <sstream>
+
+namespace mygramdb {
+namespace storage {
+
+SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection,
+                                 index::Index& index,
+                                 DocumentStore& doc_store,
+                                 const config::TableConfig& table_config)
+    : connection_(connection),
+      index_(index),
+      doc_store_(doc_store),
+      table_config_(table_config) {}
+
+bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
+  if (!connection_.IsConnected()) {
+    last_error_ = "MySQL connection not established";
+    spdlog::error(last_error_);
+    return false;
+  }
+
+  // Build SELECT query
+  std::string query = BuildSelectQuery();
+  spdlog::info("Building snapshot with query: {}", query);
+
+  auto start_time = std::chrono::steady_clock::now();
+
+  // Execute query
+  MYSQL_RES* result = connection_.Execute(query);
+  if (!result) {
+    last_error_ = "Failed to execute SELECT query: " + connection_.GetLastError();
+    spdlog::error(last_error_);
+    return false;
+  }
+
+  // Get field metadata
+  unsigned int num_fields = mysql_num_fields(result);
+  MYSQL_FIELD* fields = mysql_fetch_fields(result);
+
+  // Get total row count (approximate from result)
+  uint64_t total_rows = mysql_num_rows(result);
+
+  spdlog::info("Processing {} rows from table {}", total_rows,
+               table_config_.name);
+
+  // Process rows
+  MYSQL_ROW row;
+  processed_rows_ = 0;
+
+  while ((row = mysql_fetch_row(result)) && !cancelled_) {
+    if (!ProcessRow(row, fields, num_fields)) {
+      mysql_free_result(result);
+      return false;
+    }
+
+    processed_rows_++;
+
+    // Progress callback every 1000 rows
+    if (progress_callback && processed_rows_ % 1000 == 0) {
+      auto now = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now - start_time).count();
+
+      SnapshotProgress progress;
+      progress.total_rows = total_rows;
+      progress.processed_rows = processed_rows_;
+      progress.elapsed_seconds = elapsed;
+      progress.rows_per_second = elapsed > 0 ? processed_rows_ / elapsed : 0;
+
+      progress_callback(progress);
+    }
+  }
+
+  mysql_free_result(result);
+
+  if (cancelled_) {
+    last_error_ = "Build cancelled";
+    spdlog::warn(last_error_);
+    return false;
+  }
+
+  auto end_time = std::chrono::steady_clock::now();
+  double total_elapsed =
+      std::chrono::duration<double>(end_time - start_time).count();
+
+  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)",
+               processed_rows_, total_elapsed,
+               total_elapsed > 0 ? processed_rows_ / total_elapsed : 0);
+
+  return true;
+}
+
+std::string SnapshotBuilder::BuildSelectQuery() const {
+  std::ostringstream query;
+  query << "SELECT ";
+
+  // Primary key
+  query << table_config_.primary_key;
+
+  // Text source columns
+  if (!table_config_.text_source.column.empty()) {
+    query << ", " << table_config_.text_source.column;
+  } else {
+    for (const auto& col : table_config_.text_source.concat) {
+      query << ", " << col;
+    }
+  }
+
+  // Filter columns
+  for (const auto& filter : table_config_.filters) {
+    query << ", " << filter.name;
+  }
+
+  query << " FROM " << table_config_.name;
+
+  // Add ORDER BY for efficient processing
+  query << " ORDER BY " << table_config_.primary_key;
+
+  return query.str();
+}
+
+bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                 unsigned int num_fields) {
+  // Extract primary key
+  std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
+  if (primary_key.empty()) {
+    last_error_ = "Failed to extract primary key";
+    spdlog::error(last_error_);
+    return false;
+  }
+
+  // Extract text
+  std::string text = ExtractText(row, fields, num_fields);
+  if (text.empty()) {
+    spdlog::debug("Empty text for primary key {}, skipping", primary_key);
+    return true;  // Skip empty documents
+  }
+
+  // Normalize text
+  std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+
+  // Extract filters
+  auto filters = ExtractFilters(row, fields, num_fields);
+
+  // Add to document store
+  DocId doc_id = doc_store_.AddDocument(primary_key, filters);
+
+  // Add to index
+  index_.AddDocument(doc_id, normalized_text);
+
+  return true;
+}
+
+bool SnapshotBuilder::IsTextColumn(enum_field_types type) const {
+  // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
+  return type == MYSQL_TYPE_VARCHAR ||
+         type == MYSQL_TYPE_VAR_STRING ||
+         type == MYSQL_TYPE_STRING ||
+         type == MYSQL_TYPE_TINY_BLOB ||
+         type == MYSQL_TYPE_MEDIUM_BLOB ||
+         type == MYSQL_TYPE_LONG_BLOB ||
+         type == MYSQL_TYPE_BLOB;
+}
+
+std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                         unsigned int num_fields) const {
+  if (!table_config_.text_source.column.empty()) {
+    // Single column
+    int idx = FindFieldIndex(table_config_.text_source.column, fields,
+                             num_fields);
+    if (idx >= 0) {
+      // Validate column type
+      if (!IsTextColumn(fields[idx].type)) {
+        spdlog::error("Column '{}' is not a text type (VARCHAR/TEXT). "
+                      "Type: {}", table_config_.text_source.column,
+                      static_cast<int>(fields[idx].type));
+        return "";
+      }
+      if (row[idx]) {
+        return std::string(row[idx]);
+      }
+    }
+  } else {
+    // Concatenate columns
+    std::ostringstream text;
+    for (const auto& col : table_config_.text_source.concat) {
+      int idx = FindFieldIndex(col, fields, num_fields);
+      if (idx >= 0) {
+        // Validate column type
+        if (!IsTextColumn(fields[idx].type)) {
+          spdlog::error("Column '{}' is not a text type (VARCHAR/TEXT). "
+                        "Type: {}", col, static_cast<int>(fields[idx].type));
+          continue;  // Skip this column
+        }
+        if (row[idx]) {
+          if (text.tellp() > 0) {
+            text << table_config_.text_source.delimiter;
+          }
+          text << row[idx];
+        }
+      }
+    }
+    return text.str();
+  }
+
+  return "";
+}
+
+std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row,
+                                               MYSQL_FIELD* fields,
+                                               unsigned int num_fields) const {
+  int idx = FindFieldIndex(table_config_.primary_key, fields, num_fields);
+  if (idx >= 0 && row[idx]) {
+    return std::string(row[idx]);
+  }
+  return "";
+}
+
+std::unordered_map<std::string, FilterValue>
+SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                unsigned int num_fields) const {
+  std::unordered_map<std::string, FilterValue> filters;
+
+  for (const auto& filter_config : table_config_.filters) {
+    int idx = FindFieldIndex(filter_config.name, fields, num_fields);
+    if (idx < 0 || !row[idx]) {
+      continue;
+    }
+
+    std::string value_str(row[idx]);
+
+    if (filter_config.type == "int") {
+      try {
+        filters[filter_config.name] = std::stoll(value_str);
+      } catch (const std::exception& e) {
+        spdlog::warn("Failed to parse int filter {}: {}",
+                     filter_config.name, value_str);
+      }
+    } else if (filter_config.type == "string") {
+      filters[filter_config.name] = value_str;
+    } else if (filter_config.type == "datetime") {
+      // Store datetime as string for now
+      filters[filter_config.name] = value_str;
+    }
+  }
+
+  return filters;
+}
+
+int SnapshotBuilder::FindFieldIndex(const std::string& field_name,
+                                    MYSQL_FIELD* fields,
+                                    unsigned int num_fields) const {
+  for (unsigned int i = 0; i < num_fields; ++i) {
+    if (field_name == fields[i].name) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+}  // namespace storage
+}  // namespace mygramdb
+
+#endif  // USE_MYSQL
