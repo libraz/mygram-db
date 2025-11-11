@@ -1,7 +1,13 @@
 /**
  * @file mygramclient_c.cpp
  * @brief C API wrapper implementation
+ *
+ * This file implements a C API wrapper which requires manual memory management
+ * and uses C naming conventions. All related warnings are suppressed for the entire file.
  */
+
+// NOLINTBEGIN(readability-identifier-naming, cppcoreguidelines-owning-memory,
+// cppcoreguidelines-no-malloc, readability-implicit-bool-conversion)
 
 #include "client/mygramclient_c.h"
 
@@ -21,6 +27,7 @@ struct MygramClient_C {
 };
 
 // Helper: Allocate C string copy
+// cppcoreguidelines-no-malloc)
 static char* strdup_safe(const std::string& str) {
   char* result = static_cast<char*>(malloc(str.size() + 1));
   if (result != nullptr) {
@@ -30,6 +37,7 @@ static char* strdup_safe(const std::string& str) {
 }
 
 // Helper: Convert vector<string> to char** array
+// cppcoreguidelines-no-malloc)
 static char** string_vector_to_c_array(const std::vector<std::string>& vec) {
   if (vec.empty()) {
     return nullptr;
@@ -67,7 +75,7 @@ MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
   auto* client_c = new MygramClient_C();
 
   ClientConfig cpp_config;
-  cpp_config.host = config->host ? config->host : "127.0.0.1";
+  cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
   cpp_config.port = config->port != 0 ? config->port : 11211;
   cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
   cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
@@ -468,3 +476,6 @@ void mygramclient_free_server_info(MygramServerInfo_C* info) {
 void mygramclient_free_string(char* str) {
   free(str);
 }
+
+// NOLINTEND(readability-identifier-naming, cppcoreguidelines-owning-memory,
+// cppcoreguidelines-no-malloc, readability-implicit-bool-conversion)

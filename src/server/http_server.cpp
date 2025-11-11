@@ -174,13 +174,13 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     std::string table = req.matches[1];
 
     // Lookup table
-    auto it = table_contexts_.find(table);
-    if (it == table_contexts_.end()) {
+    auto table_iter = table_contexts_.find(table);
+    if (table_iter == table_contexts_.end()) {
       SendError(res, 404, "Table not found: " + table);
       return;
     }
-    auto* current_index = it->second->index.get();
-    auto* current_doc_store = it->second->doc_store.get();
+    auto* current_index = table_iter->second->index.get();
+    auto* current_doc_store = table_iter->second->doc_store.get();
 
     // Parse JSON body
     json body;
@@ -231,7 +231,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Get ngram size for this table
-    int current_ngram_size = it->second->config.ngram_size;
+    int current_ngram_size = table_iter->second->config.ngram_size;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -375,7 +375,9 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     size_t end_idx = std::min(start_idx + query.limit, results.size());
 
     if (start_idx < results.size()) {
-      results = std::vector<DocId>(results.begin() + start_idx, results.begin() + end_idx);
+      results = std::vector<DocId>(
+          results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
+          results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
     } else {
       results.clear();
     }
@@ -438,12 +440,12 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     std::string id_str = req.matches[2];
 
     // Lookup table
-    auto it = table_contexts_.find(table);
-    if (it == table_contexts_.end()) {
+    auto table_iter = table_contexts_.find(table);
+    if (table_iter == table_contexts_.end()) {
       SendError(res, 404, "Table not found: " + table);
       return;
     }
-    auto* current_doc_store = it->second->doc_store.get();
+    auto* current_doc_store = table_iter->second->doc_store.get();
 
     // Parse ID
     uint64_t doc_id = 0;

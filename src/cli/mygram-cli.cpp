@@ -103,12 +103,14 @@ char* KeywordGenerator(const std::vector<std::string>& keywords, const char* tex
 /**
  * @brief Wrapper for keyword generator with static storage
  */
-static std::vector<std::string> current_keywords;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::vector<std::string> current_keywords;
 
 /**
  * @brief Global storage for table names fetched from server
  */
-static std::vector<std::string> available_tables;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::vector<std::string> available_tables;
 
 char* KeywordGeneratorWrapper(const char* text, int state) {
   return KeywordGenerator(current_keywords, text, state);
@@ -121,6 +123,7 @@ char* KeywordGeneratorWrapper(const char* text, int state) {
  * @param end End position in line buffer (unused)
  * @return Array of possible completions
  */
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 char** CommandCompletion(const char* text, int start, int /* end */) {
   // Disable default filename completion
   rl_attempted_completion_over = 1;
@@ -136,8 +139,8 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
   std::string command = tokens[0];
   // Convert to uppercase for comparison
-  for (char& c : command) {
-    c = static_cast<char>(toupper(c));
+  for (char& character : command) {
+    character = static_cast<char>(toupper(character));
   }
 
   size_t token_count = tokens.size();
@@ -146,8 +149,8 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
   auto has_keyword = [&tokens](const std::string& keyword) {
     for (const auto& token : tokens) {
       std::string upper_token = token;
-      for (char& c : upper_token) {
-        c = static_cast<char>(toupper(c));
+      for (char& character : upper_token) {
+        character = static_cast<char>(toupper(character));
       }
       if (upper_token == keyword) {
         return true;
@@ -398,7 +401,7 @@ class MygramClient {
    * @brief Fetch table names from server INFO command
    * Updates global available_tables vector
    */
-  void FetchTableNames() {
+  void FetchTableNames() const {
     if (!IsConnected()) {
       return;
     }
@@ -412,7 +415,7 @@ class MygramClient {
       pos += 8;  // Skip "tables: "
       size_t end_pos = response.find("\r\n", pos);
       if (end_pos == std::string::npos) {
-        end_pos = response.find("\n", pos);
+        end_pos = response.find('\n', pos);
       }
       if (end_pos != std::string::npos) {
         std::string tables_str = response.substr(pos, end_pos - pos);

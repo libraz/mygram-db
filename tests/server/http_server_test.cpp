@@ -69,7 +69,7 @@ class HttpServerTest : public ::testing::Test {
     config_->mysql.database = "testdb";
     config_->mysql.user = "test_user";
     config_->api.tcp.bind = "127.0.0.1";
-    config_->api.tcp.port = 11311;
+    config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
     config_->api.http.port = 18080;  // Use different port for testing
@@ -419,7 +419,7 @@ class HttpServerMultiTableTest : public ::testing::Test {
     config_->mysql.database = "testdb";
     config_->mysql.user = "test_user";
     config_->api.tcp.bind = "127.0.0.1";
-    config_->api.tcp.port = 11311;
+    config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
     config_->api.http.port = 18081;  // Different port

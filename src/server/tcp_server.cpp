@@ -249,7 +249,7 @@ void TcpServer::HandleClient(int client_fd) {
   ctx.client_fd = client_fd;
   ctx.debug_mode = false;
   {
-    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    std::scoped_lock<std::mutex> lock(contexts_mutex_);
     connection_contexts_[client_fd] = ctx;
   }
 
@@ -278,7 +278,7 @@ void TcpServer::HandleClient(int client_fd) {
 
       // Get connection context
       {
-        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        std::scoped_lock<std::mutex> lock(contexts_mutex_);
         ctx = connection_contexts_[client_fd];
       }
 
@@ -288,7 +288,7 @@ void TcpServer::HandleClient(int client_fd) {
 
       // Update connection context (in case debug mode changed)
       {
-        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        std::scoped_lock<std::mutex> lock(contexts_mutex_);
         connection_contexts_[client_fd] = ctx;
       }
 
@@ -305,7 +305,7 @@ void TcpServer::HandleClient(int client_fd) {
   // Clean up connection
   RemoveConnection(client_fd);
   {
-    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    std::scoped_lock<std::mutex> lock(contexts_mutex_);
     connection_contexts_.erase(client_fd);
   }
   close(client_fd);
@@ -339,13 +339,13 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
   // For queries that require a table, validate and fetch context
   if (!query.table.empty()) {
-    auto it = table_contexts_.find(query.table);
-    if (it == table_contexts_.end()) {
+    auto table_iter = table_contexts_.find(query.table);
+    if (table_iter == table_contexts_.end()) {
       return FormatError("Table not found: " + query.table);
     }
-    current_index = it->second->index.get();
-    current_doc_store = it->second->doc_store.get();
-    current_ngram_size = it->second->config.ngram_size;
+    current_index = table_iter->second->index.get();
+    current_doc_store = table_iter->second->doc_store.get();
+    current_ngram_size = table_iter->second->config.ngram_size;
   }
 
   try {
@@ -733,8 +733,14 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         // Save each table
         success = true;
         for (const auto& [table_name, ctx] : table_contexts_) {
-          std::string table_index_path = filepath + "/" + table_name + ".index";
-          std::string table_doc_path = filepath + "/" + table_name + ".docs";
+          std::string table_index_path = filepath;
+          table_index_path += "/";
+          table_index_path += table_name;
+          table_index_path += ".index";
+          std::string table_doc_path = filepath;
+          table_doc_path += "/";
+          table_doc_path += table_name;
+          table_doc_path += ".docs";
 
           if (!ctx->index->SaveToFile(table_index_path) ||
               !ctx->doc_store->SaveToFile(table_doc_path, "")) {
@@ -750,14 +756,16 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           std::string meta_path = filepath + "/meta.json";
           std::ofstream meta_file(meta_path);
           if (meta_file) {
+            // NOLINTNEXTLINE(modernize-raw-string-literal)
             meta_file << "{\n";
             meta_file << "  \"version\": \"1.0\",\n";
             meta_file << "  \"gtid\": \"" << current_gtid << "\",\n";
             meta_file << "  \"tables\": [";
             bool first = true;
             for (const auto& [table_name, ctx] : table_contexts_) {
-              if (!first)
+              if (!first) {
                 meta_file << ", ";
+              }
               meta_file << "\"" << table_name << "\"";
               first = false;
             }
@@ -800,8 +808,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Load from directory
         // Check if directory exists
-        struct stat st;
-        if (stat(filepath.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        struct stat file_stat {};
+        if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
           loading_ = false;
           return FormatError("Snapshot directory not found: " + filepath);
         }
@@ -822,8 +830,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         std::string loaded_gtid;
         size_t gtid_pos = meta_content.find("\"gtid\":");
         if (gtid_pos != std::string::npos) {
-          size_t quote_start = meta_content.find("\"", gtid_pos + 7);
-          size_t quote_end = meta_content.find("\"", quote_start + 1);
+          size_t quote_start = meta_content.find('\"', gtid_pos + 7);
+          size_t quote_end = meta_content.find('\"', quote_start + 1);
           if (quote_start != std::string::npos && quote_end != std::string::npos) {
             loaded_gtid = meta_content.substr(quote_start + 1, quote_end - quote_start - 1);
           }
@@ -832,11 +840,17 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         // Load each table
         bool success = true;
         for (const auto& [table_name, ctx] : table_contexts_) {
-          std::string table_index_path = filepath + "/" + table_name + ".index";
-          std::string table_doc_path = filepath + "/" + table_name + ".docs";
+          std::string table_index_path = filepath;
+          table_index_path += "/";
+          table_index_path += table_name;
+          table_index_path += ".index";
+          std::string table_doc_path = filepath;
+          table_doc_path += "/";
+          table_doc_path += table_name;
+          table_doc_path += ".docs";
 
           // Check if snapshot files exist for this table
-          if (stat(table_index_path.c_str(), &st) != 0) {
+          if (stat(table_index_path.c_str(), &file_stat) != 0) {
             spdlog::warn("Snapshot for table '{}' not found, skipping (table may be new)",
                          table_name);
             continue;
@@ -1163,7 +1177,8 @@ std::string TcpServer::FormatInfoResponse() {
   oss << "# Tables\r\n";
   oss << "tables: ";
   size_t idx = 0;
-  for (const auto& [name, _] : table_contexts_) {
+  for (const auto& [name, unused_context] : table_contexts_) {
+    (void)unused_context;  // Mark as intentionally unused
     if (idx++ > 0) {
       oss << ",";
     }

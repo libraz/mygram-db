@@ -94,8 +94,9 @@ std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens,
 std::string EscapeQueryString(const std::string& str) {
   // Check if string needs quoting (contains spaces or special chars)
   bool needs_quotes = false;
-  for (char c : str) {
-    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '"' || c == '\'') {
+  for (char character : str) {
+    if (character == ' ' || character == '\t' || character == '\n' || character == '\r' ||
+        character == '"' || character == '\'') {
       needs_quotes = true;
       break;
     }
@@ -107,11 +108,11 @@ std::string EscapeQueryString(const std::string& str) {
 
   // Use double quotes and escape internal quotes
   std::string result = "\"";
-  for (char c : str) {
-    if (c == '"' || c == '\\') {
+  for (char character : str) {
+    if (character == '"' || character == '\\') {
       result += '\\';
     }
-    result += c;
+    result += character;
   }
   result += '"';
   return result;
@@ -146,11 +147,12 @@ class MygramClient::Impl {
     }
 
     // Set socket timeout
-    struct timeval tv{};
-    tv.tv_sec = config_.timeout_ms / 1000;
-    tv.tv_usec = (config_.timeout_ms % 1000) * 1000;
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct timeval timeout_val{};
+    timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / 1000);
+    timeout_val.tv_usec =
+        static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % 1000) * 1000);
+    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
+    setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
 
     struct sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
@@ -273,10 +275,10 @@ class MygramClient::Impl {
     }
 
     std::istringstream iss(response);
-    std::string ok;
+    std::string status;
     std::string results_str;
     uint64_t total_count = 0;
-    iss >> ok >> results_str >> total_count;
+    iss >> status >> results_str >> total_count;
 
     SearchResponse resp;
     resp.total_count = total_count;
@@ -345,10 +347,10 @@ class MygramClient::Impl {
     }
 
     std::istringstream iss(response);
-    std::string ok;
+    std::string status;
     std::string count_str;
     uint64_t count = 0;
-    iss >> ok >> count_str >> count;
+    iss >> status >> count_str >> count;
 
     CountResponse resp;
     resp.count = count;
@@ -387,12 +389,12 @@ class MygramClient::Impl {
     }
 
     std::istringstream iss(response);
-    std::string ok;
+    std::string status;
     std::string doc_str;
-    std::string pk;
-    iss >> ok >> doc_str >> pk;
+    std::string primary_key;
+    iss >> status >> doc_str >> primary_key;
 
-    Document doc(pk);
+    Document doc(primary_key);
 
     // Parse remaining key=value pairs
     std::string rest;
@@ -402,6 +404,7 @@ class MygramClient::Impl {
     return doc;
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
   std::variant<ServerInfo, Error> Info() {
     auto result = SendCommand("INFO");
     if (auto* err = std::get_if<Error>(&result)) {

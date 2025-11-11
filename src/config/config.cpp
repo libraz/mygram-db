@@ -179,6 +179,7 @@ FilterConfig ParseFilterConfig(const json& json_obj) {
 /**
  * @brief Parse table configuration from JSON
  */
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TableConfig ParseTableConfig(const json& json_obj) {
   TableConfig config;
 
