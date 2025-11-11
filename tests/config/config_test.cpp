@@ -81,7 +81,7 @@ TEST(ConfigTest, LoadValidConfig) {
 
   // API config
   EXPECT_EQ(config.api.tcp.bind, "127.0.0.1");
-  EXPECT_EQ(config.api.tcp.port, 11311);
+  EXPECT_EQ(config.api.tcp.port, 11016);
   EXPECT_FALSE(config.api.http.enable);
   EXPECT_EQ(config.api.http.bind, "127.0.0.1");
   EXPECT_EQ(config.api.http.port, 8080);
@@ -138,7 +138,7 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_TRUE(config.mysql.use_gtid);
   EXPECT_EQ(config.build.batch_size, 5000);
   EXPECT_EQ(config.memory.hard_limit_mb, 8192);
-  EXPECT_EQ(config.api.tcp.port, 11311);
+  EXPECT_EQ(config.api.tcp.port, 11016);
   EXPECT_TRUE(config.api.http.enable);
 }
 
