@@ -221,8 +221,8 @@ class BinlogReader {
    * @param filter Required filter configuration
    * @return true if condition is satisfied
    */
-  bool CompareFilterValue(const storage::FilterValue& value,
-                          const config::RequiredFilterConfig& filter) const;
+  static bool CompareFilterValue(const storage::FilterValue& value,
+                                 const config::RequiredFilterConfig& filter);
 
   /**
    * @brief Extract all filter columns (both required and optional) from row data

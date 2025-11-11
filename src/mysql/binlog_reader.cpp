@@ -33,7 +33,7 @@ BinlogReader::BinlogReader(Connection& connection, index::Index& index,
                            storage::DocumentStore& doc_store, config::TableConfig table_config,
                            const Config& config)
     : connection_(connection),
-      multi_table_mode_(false),
+
       index_(&index),
       doc_store_(&doc_store),
       table_config_(std::move(table_config)),
@@ -441,13 +441,13 @@ bool BinlogReader::EvaluateRequiredFilters(
 
   // Check each required filter condition
   for (const auto& required_filter : table_config.required_filters) {
-    auto it = filters.find(required_filter.name);
-    if (it == filters.end()) {
+    auto filter_iter = filters.find(required_filter.name);
+    if (filter_iter == filters.end()) {
       spdlog::warn("Required filter column '{}' not found in binlog event", required_filter.name);
       return false;
     }
 
-    if (!CompareFilterValue(it->second, required_filter)) {
+    if (!CompareFilterValue(filter_iter->second, required_filter)) {
       return false;
     }
   }
@@ -482,7 +482,7 @@ std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFi
 }
 
 bool BinlogReader::CompareFilterValue(const storage::FilterValue& value,
-                                      const config::RequiredFilterConfig& filter) const {
+                                      const config::RequiredFilterConfig& filter) {
   // Handle NULL checks
   if (filter.op == "IS NULL") {
     return std::holds_alternative<std::monostate>(value);
@@ -502,54 +502,72 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value,
     int64_t val = std::get<int64_t>(value);
     int64_t target = std::stoll(filter.value);
 
-    if (filter.op == "=")
+    if (filter.op == "=") {
       return val == target;
-    if (filter.op == "!=")
+    }
+    if (filter.op == "!=") {
       return val != target;
-    if (filter.op == "<")
+    }
+    if (filter.op == "<") {
       return val < target;
-    if (filter.op == ">")
+    }
+    if (filter.op == ">") {
       return val > target;
-    if (filter.op == "<=")
+    }
+    if (filter.op == "<=") {
       return val <= target;
-    if (filter.op == ">=")
+    }
+    if (filter.op == ">=") {
       return val >= target;
+    }
 
   } else if (std::holds_alternative<double>(value)) {
     // Float comparison
     double val = std::get<double>(value);
     double target = std::stod(filter.value);
 
-    if (filter.op == "=")
+    if (filter.op == "=") {
       return std::abs(val - target) < 1e-9;
-    if (filter.op == "!=")
+    }
+    if (filter.op == "!=") {
       return std::abs(val - target) >= 1e-9;
-    if (filter.op == "<")
+    }
+    if (filter.op == "<") {
       return val < target;
-    if (filter.op == ">")
+    }
+    if (filter.op == ">") {
       return val > target;
-    if (filter.op == "<=")
+    }
+    if (filter.op == "<=") {
       return val <= target;
-    if (filter.op == ">=")
+    }
+    if (filter.op == ">=") {
       return val >= target;
+    }
 
   } else if (std::holds_alternative<std::string>(value)) {
     // String comparison
-    const std::string& val = std::get<std::string>(value);
+    const auto& val = std::get<std::string>(value);
     const std::string& target = filter.value;
 
-    if (filter.op == "=")
+    if (filter.op == "=") {
       return val == target;
-    if (filter.op == "!=")
+    }
+    if (filter.op == "!=") {
       return val != target;
-    if (filter.op == "<")
+    }
+    if (filter.op == "<") {
       return val < target;
-    if (filter.op == ">")
+    }
+    if (filter.op == ">") {
       return val > target;
-    if (filter.op == "<=")
+    }
+    if (filter.op == "<=") {
       return val <= target;
-    if (filter.op == ">=")
+    }
+    if (filter.op == ">=") {
       return val >= target;
+    }
 
   } else if (std::holds_alternative<uint64_t>(value)) {
     // Datetime/timestamp (stored as uint64_t epoch)
@@ -560,18 +578,24 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value,
     // TODO: Add proper datetime parsing if needed
     uint64_t target = std::stoull(filter.value);
 
-    if (filter.op == "=")
+    if (filter.op == "=") {
       return val == target;
-    if (filter.op == "!=")
+    }
+    if (filter.op == "!=") {
       return val != target;
-    if (filter.op == "<")
+    }
+    if (filter.op == "<") {
       return val < target;
-    if (filter.op == ">")
+    }
+    if (filter.op == ">") {
       return val > target;
-    if (filter.op == "<=")
+    }
+    if (filter.op == "<=") {
       return val <= target;
-    if (filter.op == ">=")
+    }
+    if (filter.op == ">=") {
       return val >= target;
+    }
   }
 
   spdlog::warn("Unsupported filter value type for comparison");
@@ -586,14 +610,14 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 
   if (multi_table_mode_) {
     // Multi-table mode: lookup table from event
-    auto it = table_contexts_.find(event.table_name);
-    if (it == table_contexts_.end()) {
+    auto table_iter = table_contexts_.find(event.table_name);
+    if (table_iter == table_contexts_.end()) {
       // Event is for a table we're not tracking, skip silently
       return true;
     }
-    current_index = it->second->index.get();
-    current_doc_store = it->second->doc_store.get();
-    current_config = &it->second->config;
+    current_index = table_iter->second->index.get();
+    current_doc_store = table_iter->second->doc_store.get();
+    current_config = &table_iter->second->config;
   } else {
     // Single-table mode: skip events for other tables
     if (event.table_name != table_config_.name) {

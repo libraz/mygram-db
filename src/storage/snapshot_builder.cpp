@@ -26,6 +26,7 @@ SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& in
       table_config_(std::move(table_config)),
       build_config_(std::move(build_config)) {}
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   if (!connection_.IsConnected()) {
     last_error_ = "MySQL connection not established";

@@ -66,6 +66,7 @@ bool Query::IsValid() const {
   return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::Parse(const std::string& query_str) {
   error_.clear();
 
@@ -180,6 +181,7 @@ Query QueryParser::Parse(const std::string& query_str) {
   return Query{};
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   Query query;
   query.type = QueryType::SEARCH;
@@ -194,7 +196,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
   // Helper lambda to count parentheses in a token, respecting quotes
   auto count_parens = [](const std::string& token) -> std::pair<int, int> {
-    int open = 0, close = 0;
+    int open = 0;
+    int close = 0;
     bool in_quote = false;
     char quote_char = '\0';
 
@@ -214,10 +217,12 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(')
+        if (c == '(') {
           open++;
-        if (c == ')')
+        }
+        if (c == ')') {
           close++;
+        }
       }
     }
 
@@ -357,6 +362,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   return query;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   Query query;
   query.type = QueryType::COUNT;
@@ -371,7 +377,8 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
   // Helper lambda to count parentheses in a token, respecting quotes
   auto count_parens = [](const std::string& token) -> std::pair<int, int> {
-    int open = 0, close = 0;
+    int open = 0;
+    int close = 0;
     bool in_quote = false;
     char quote_char = '\0';
 
@@ -391,10 +398,12 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(')
+        if (c == '(') {
           open++;
-        if (c == ')')
+        }
+        if (c == ')') {
           close++;
+        }
       }
     }
 

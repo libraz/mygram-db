@@ -356,6 +356,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatError("Server is loading, please try again later");
         }
 
+        // Verify index is available
+        if (current_index == nullptr) {
+          return FormatError("Index not available");
+        }
+
         // Start index search timing
         auto index_start = std::chrono::high_resolution_clock::now();
 
@@ -550,6 +555,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatError("Server is loading, please try again later");
         }
 
+        // Verify index is available
+        if (current_index == nullptr) {
+          return FormatError("Index not available");
+        }
+
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
@@ -682,6 +692,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatError("Server is loading, please try again later");
         }
 
+        // Verify doc_store is available
+        if (current_doc_store == nullptr) {
+          return FormatError("Document store not available");
+        }
+
         auto doc_id_opt = current_doc_store->GetDocId(query.primary_key);
         if (!doc_id_opt) {
           return FormatError("Document not found");
@@ -759,6 +774,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             // NOLINTNEXTLINE(modernize-raw-string-literal)
             meta_file << "{\n";
             meta_file << "  \"version\": \"1.0\",\n";
+            // NOLINTNEXTLINE(modernize-raw-string-literal)
             meta_file << "  \"gtid\": \"" << current_gtid << "\",\n";
             meta_file << "  \"tables\": [";
             bool first = true;
@@ -808,7 +824,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Load from directory
         // Check if directory exists
-        struct stat file_stat {};
+        struct stat file_stat{};
         if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
           loading_ = false;
           return FormatError("Snapshot directory not found: " + filepath);
@@ -887,6 +903,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       case query::QueryType::REPLICATION_STOP: {
 #ifdef USE_MYSQL
         if (binlog_reader_ != nullptr) {
+          // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
           if (binlog_reader_->IsRunning()) {
             spdlog::info("Stopping binlog replication by user request");
             binlog_reader_->Stop();
@@ -904,6 +921,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       case query::QueryType::REPLICATION_START: {
 #ifdef USE_MYSQL
         if (binlog_reader_ != nullptr) {
+          // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
           if (!binlog_reader_->IsRunning()) {
             spdlog::info("Starting binlog replication by user request");
             if (binlog_reader_->Start()) {
@@ -924,6 +942,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       }
 
       case query::QueryType::OPTIMIZE: {
+        // Verify index is available
+        if (current_index == nullptr) {
+          return FormatError("Index not available");
+        }
+
         // Check if optimization is already running
         if (current_index->IsOptimizing()) {
           return FormatError("Optimization already in progress");
@@ -966,6 +989,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
   }
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& results,
                                             uint32_t limit, uint32_t offset,
                                             storage::DocumentStore* doc_store,

@@ -73,7 +73,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 
   // Phase 3: Add to posting lists (with locking, minimal lock time)
   // Use PostingList::AddBatch() for better performance
-  std::lock_guard<std::mutex> lock(postings_mutex_);
+  std::scoped_lock<std::mutex> lock(postings_mutex_);
 
   for (const auto& [term, doc_ids] : term_to_docs) {
     auto* posting = GetOrCreatePostingList(term);

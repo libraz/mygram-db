@@ -204,7 +204,8 @@ std::vector<DocId> DocumentStore::GetAllDocIds() const {
   std::vector<DocId> results;
   results.reserve(doc_id_to_pk_.size());
 
-  for (const auto& [doc_id, _] : doc_id_to_pk_) {
+  for (const auto& [doc_id, unused_pk] : doc_id_to_pk_) {
+    (void)unused_pk;  // Mark as intentionally unused
     results.push_back(doc_id);
   }
 
@@ -218,13 +219,10 @@ bool DocumentStore::HasFilterColumn(const std::string& filter_name) const {
   std::shared_lock lock(mutex_);
 
   // Check if any document has this filter column
-  for (const auto& [doc_id, filters] : doc_filters_) {
-    if (filters.find(filter_name) != filters.end()) {
-      return true;
-    }
-  }
-
-  return false;
+  return std::any_of(doc_filters_.begin(), doc_filters_.end(),
+                     [&filter_name](const auto& doc_filter) {
+                       return doc_filter.second.find(filter_name) != doc_filter.second.end();
+                     });
 }
 
 size_t DocumentStore::MemoryUsage() const {
@@ -293,8 +291,8 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
     uint32_t version = 1;
     ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
-    uint32_t next_id;
-    uint64_t doc_count;
+    uint32_t next_id = 0;
+    uint64_t doc_count = 0;
 
     // Lock scope: read data structures
     {

@@ -163,8 +163,8 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
   auto get_prev_token = [&tokens]() -> std::string {
     if (tokens.size() >= 2) {
       std::string prev = tokens[tokens.size() - 1];
-      for (char& c : prev) {
-        c = static_cast<char>(toupper(c));
+      for (char& character : prev) {
+        character = static_cast<char>(toupper(character));
       }
       return prev;
     }
@@ -475,7 +475,7 @@ class MygramClient {
     return response;
   }
 
-  void RunInteractive() {
+  void RunInteractive() const {
     std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
 #ifdef USE_READLINE
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';

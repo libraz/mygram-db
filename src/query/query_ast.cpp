@@ -182,7 +182,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
 Tokenizer::Tokenizer(std::string input) : input_(std::move(input)) {}
 
 void Tokenizer::SkipWhitespace() {
-  while (pos_ < input_.size() && std::isspace(static_cast<unsigned char>(input_[pos_]))) {
+  while (pos_ < input_.size() && (std::isspace(static_cast<unsigned char>(input_[pos_])) != 0)) {
     pos_++;
   }
 }
@@ -363,8 +363,8 @@ const Token& QueryASTParser::CurrentToken() const {
   if (pos_ < tokens_.size()) {
     return tokens_[pos_];
   }
-  static const Token end_token(TokenType::END);
-  return end_token;
+  static const Token kEndToken(TokenType::END);
+  return kEndToken;
 }
 
 void QueryASTParser::Advance() {

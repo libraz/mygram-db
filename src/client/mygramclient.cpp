@@ -391,10 +391,10 @@ class MygramClient::Impl {
     std::istringstream iss(response);
     std::string status;
     std::string doc_str;
-    std::string primary_key;
-    iss >> status >> doc_str >> primary_key;
+    std::string doc_pk;
+    iss >> status >> doc_str >> doc_pk;
 
-    Document doc(primary_key);
+    Document doc(doc_pk);
 
     // Parse remaining key=value pairs
     std::string rest;

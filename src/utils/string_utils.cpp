@@ -251,6 +251,7 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii
       // CJK character: use kanji_ngram_size
       if (i + kanji_ngram_size <= codepoints.size()) {
         std::vector<uint32_t> ngram_codepoints;
+        ngram_codepoints.reserve(kanji_ngram_size);
         for (int j = 0; j < kanji_ngram_size; ++j) {
           ngram_codepoints.push_back(codepoints[i + j]);
         }
@@ -260,6 +261,7 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii
       // Non-CJK character: use ascii_ngram_size
       if (i + ascii_ngram_size <= codepoints.size()) {
         std::vector<uint32_t> ngram_codepoints;
+        ngram_codepoints.reserve(ascii_ngram_size);
         for (int j = 0; j < ascii_ngram_size; ++j) {
           ngram_codepoints.push_back(codepoints[i + j]);
         }
