@@ -7,10 +7,12 @@
  * the ENABLE_MYSQL_INTEGRATION_TESTS environment variable.
  */
 
-#include "mysql/connection.h"
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+
 #include <cstdlib>
+
+#include "mysql/connection.h"
 
 #ifdef USE_MYSQL
 

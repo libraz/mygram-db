@@ -4,14 +4,16 @@
  */
 
 #include "client/mygramclient.h"
-#include "server/tcp_server.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "utils/string_utils.h"
 
 #include <gtest/gtest.h>
-#include <thread>
+
 #include <chrono>
+#include <thread>
+
+#include "index/index.h"
+#include "server/tcp_server.h"
+#include "storage/document_store.h"
+#include "utils/string_utils.h"
 
 using namespace mygramdb::client;
 using namespace mygramdb;
@@ -93,7 +95,7 @@ class MygramClientTest : public ::testing::Test {
     index_->AddDocument(3, text3);
   }
 
-  index::Index* index_;  // Raw pointer to table_context_.index
+  index::Index* index_;                // Raw pointer to table_context_.index
   storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
   server::TableContext table_context_;
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
@@ -159,7 +161,7 @@ TEST_F(MygramClientTest, SearchWithLimit) {
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
 
   auto resp = std::get<SearchResponse>(result);
-  EXPECT_EQ(resp.total_count, 2);  // Total 2 matches
+  EXPECT_EQ(resp.total_count, 2);     // Total 2 matches
   EXPECT_EQ(resp.results.size(), 1);  // But only 1 returned due to LIMIT
 }
 
@@ -355,8 +357,7 @@ TEST_F(MygramClientTest, ErrorHandling_InvalidTable) {
   // Search with invalid table name should return error
   auto result = client_->Search("nonexistent_table", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<Error>(result))
-      << "Expected error for invalid table";
+  ASSERT_TRUE(std::holds_alternative<Error>(result)) << "Expected error for invalid table";
 
   auto err = std::get<Error>(result);
   EXPECT_TRUE(err.message.find("Table not found") != std::string::npos)

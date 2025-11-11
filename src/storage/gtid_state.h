@@ -7,8 +7,8 @@
 
 #ifdef USE_MYSQL
 
-#include <string>
 #include <optional>
+#include <string>
 
 namespace mygramdb {
 namespace storage {

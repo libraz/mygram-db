@@ -3,22 +3,24 @@
  * @brief Unit tests for TCP server multi-table functionality
  */
 
-#include "server/tcp_server.h"
-#include "config/config.h"
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <thread>
+
 #include <chrono>
-#include <fstream>
 #include <cstdio>
+#include <fstream>
+#include <thread>
+
+#include "config/config.h"
+#include "server/tcp_server.h"
 
 #ifdef USE_MYSQL
-#include "mysql/connection.h"
 #include "mysql/binlog_reader.h"
+#include "mysql/connection.h"
 #endif
 
 using namespace mygramdb::server;
@@ -152,7 +154,8 @@ TEST(TcpServerMultiTableTest, MultiTableLoad) {
 
   // Create meta.json
   std::ofstream meta_file(test_dir + "/meta.json");
-  meta_file << "{\"version\":\"1.0\",\"tables\":[\"users\",\"products\"],\"timestamp\":\"2024-01-01T00:00:00Z\"}";
+  meta_file << "{\"version\":\"1.0\",\"tables\":[\"users\",\"products\"],\"timestamp\":\"2024-01-"
+               "01T00:00:00Z\"}";
   meta_file.close();
 
   // Create empty table contexts

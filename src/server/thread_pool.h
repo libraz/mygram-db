@@ -5,14 +5,14 @@
 
 #pragma once
 
-#include <vector>
-#include <queue>
-#include <thread>
-#include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
-#include <atomic>
 #include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
 
 namespace mygramdb {
 namespace server {

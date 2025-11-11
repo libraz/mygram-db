@@ -7,13 +7,14 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/connection.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "config/config.h"
-#include <memory>
-#include <functional>
 #include <atomic>
+#include <functional>
+#include <memory>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "mysql/connection.h"
+#include "storage/document_store.h"
 
 namespace mygramdb {
 namespace storage {
@@ -22,10 +23,10 @@ namespace storage {
  * @brief Snapshot builder progress callback
  */
 struct SnapshotProgress {
-  uint64_t total_rows = 0;      // Total rows to process
-  uint64_t processed_rows = 0;  // Rows processed so far
-  double elapsed_seconds = 0.0; // Elapsed time
-  double rows_per_second = 0.0; // Processing rate
+  uint64_t total_rows = 0;       // Total rows to process
+  uint64_t processed_rows = 0;   // Rows processed so far
+  double elapsed_seconds = 0.0;  // Elapsed time
+  double rows_per_second = 0.0;  // Processing rate
 };
 
 using ProgressCallback = std::function<void(const SnapshotProgress&)>;
@@ -45,11 +46,8 @@ class SnapshotBuilder {
    * @param table_config Table configuration
    * @param build_config Build configuration (batch_size, parallelism)
    */
-  SnapshotBuilder(mysql::Connection& connection,
-                  index::Index& index,
-                  DocumentStore& doc_store,
-                  config::TableConfig table_config,
-                  config::BuildConfig build_config = {});
+  SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
+                  config::TableConfig table_config, config::BuildConfig build_config = {});
 
   ~SnapshotBuilder() = default;
 
@@ -119,20 +117,18 @@ class SnapshotBuilder {
   /**
    * @brief Extract text from row based on text_source configuration
    */
-  std::string ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
-                          unsigned int num_fields) const;
+  std::string ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
 
   /**
    * @brief Extract primary key from row
    */
-  std::string ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                unsigned int num_fields) const;
+  std::string ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
 
   /**
    * @brief Extract filter values from row
    */
-  std::unordered_map<std::string, FilterValue> ExtractFilters(
-      MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
+  std::unordered_map<std::string, FilterValue> ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                              unsigned int num_fields) const;
 
   /**
    * @brief Find field index by name

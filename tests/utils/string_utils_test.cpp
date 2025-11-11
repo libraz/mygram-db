@@ -4,6 +4,7 @@
  */
 
 #include "utils/string_utils.h"
+
 #include <gtest/gtest.h>
 
 using namespace mygramdb::utils;
@@ -294,12 +295,12 @@ TEST(StringUtilsTest, FourByteEmoji) {
 TEST(StringUtilsTest, EmojiWithText) {
   // Mixed: ASCII + Japanese + emoji
   auto codepoints = Utf8ToCodepoints("Hello😀世界🎉");
-  ASSERT_EQ(codepoints.size(), 9);   // H e l l o 😀 世 界 🎉
-  EXPECT_EQ(codepoints[0], 0x48);    // 'H'
-  EXPECT_EQ(codepoints[5], 0x1F600); // 😀
-  EXPECT_EQ(codepoints[6], 0x4E16);  // 世
-  EXPECT_EQ(codepoints[7], 0x754C);  // 界
-  EXPECT_EQ(codepoints[8], 0x1F389); // 🎉
+  ASSERT_EQ(codepoints.size(), 9);    // H e l l o 😀 世 界 🎉
+  EXPECT_EQ(codepoints[0], 0x48);     // 'H'
+  EXPECT_EQ(codepoints[5], 0x1F600);  // 😀
+  EXPECT_EQ(codepoints[6], 0x4E16);   // 世
+  EXPECT_EQ(codepoints[7], 0x754C);   // 界
+  EXPECT_EQ(codepoints[8], 0x1F389);  // 🎉
 
   // Round trip
   std::string text = "Hello😀世界🎉";

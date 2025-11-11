@@ -4,6 +4,7 @@
  */
 
 #include "mysql/binlog_reader.h"
+
 #include <gtest/gtest.h>
 
 #ifdef USE_MYSQL
@@ -48,22 +49,22 @@ TEST(BinlogReaderTest, Construction) {
   conn_config.host = "localhost";
   conn_config.user = "test";
   conn_config.password = "test";
-  
+
   Connection conn(conn_config);
-  
+
   index::Index idx(1);
   storage::DocumentStore doc_store;
-  
+
   config::TableConfig table_config;
   table_config.name = "test_table";
   table_config.primary_key = "id";
-  
+
   BinlogReader::Config reader_config;
   reader_config.start_gtid = "uuid:1";
   reader_config.queue_size = 1000;
-  
+
   BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
-  
+
   // Should construct successfully
   EXPECT_FALSE(reader.IsRunning());
   EXPECT_EQ(reader.GetProcessedEvents(), 0);
@@ -76,18 +77,18 @@ TEST(BinlogReaderTest, Construction) {
 TEST(BinlogReaderTest, InitialState) {
   Connection::Config conn_config;
   Connection conn(conn_config);
-  
+
   index::Index idx(1);
   storage::DocumentStore doc_store;
-  
+
   config::TableConfig table_config;
   table_config.name = "test_table";
-  
+
   BinlogReader::Config reader_config;
   reader_config.start_gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:100";
-  
+
   BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
-  
+
   EXPECT_FALSE(reader.IsRunning());
   EXPECT_EQ(reader.GetCurrentGTID(), "3E11FA47-71CA-11E1-9E33-C80AA9429562:100");
   EXPECT_EQ(reader.GetQueueSize(), 0);
@@ -99,16 +100,16 @@ TEST(BinlogReaderTest, InitialState) {
  */
 TEST(BinlogReaderTest, Config) {
   BinlogReader::Config config;
-  
+
   // Default values
   EXPECT_EQ(config.queue_size, 10000);
   EXPECT_EQ(config.reconnect_delay_ms, 1000);
-  
+
   // Custom values
   config.start_gtid = "test:123";
   config.queue_size = 5000;
   config.reconnect_delay_ms = 500;
-  
+
   EXPECT_EQ(config.start_gtid, "test:123");
   EXPECT_EQ(config.queue_size, 5000);
   EXPECT_EQ(config.reconnect_delay_ms, 500);
@@ -123,16 +124,16 @@ TEST(BinlogReaderTest, EventWithFilters) {
   event.table_name = "articles";
   event.primary_key = "456";
   event.text = "article text";
-  
+
   // Add filters
   event.filters["status"] = static_cast<int64_t>(1);
   event.filters["category"] = std::string("news");
-  
+
   EXPECT_EQ(event.filters.size(), 2);
-  
+
   auto status = std::get<int64_t>(event.filters["status"]);
   auto category = std::get<std::string>(event.filters["category"]);
-  
+
   EXPECT_EQ(status, 1);
   EXPECT_EQ(category, "news");
 }

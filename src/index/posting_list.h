@@ -5,10 +5,11 @@
 
 #pragma once
 
-#include <cstdint>
-#include <vector>
-#include <memory>
 #include <roaring/roaring.h>
+
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace mygramdb {
 namespace index {

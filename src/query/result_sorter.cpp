@@ -4,17 +4,16 @@
  */
 
 #include "query/result_sorter.h"
+
 #include <spdlog/spdlog.h>
+
 #include <variant>
 
 namespace mygramdb {
 namespace query {
 
-std::string ResultSorter::GetSortKey(
-    DocId doc_id,
-    const storage::DocumentStore& doc_store,
-    const OrderByClause& order_by) {
-
+std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
+                                     const OrderByClause& order_by) {
   // If ordering by primary key (empty column name)
   if (order_by.IsPrimaryKey()) {
     // Get primary key as sort key
@@ -38,31 +37,33 @@ std::string ResultSorter::GetSortKey(
 
   // Convert FilterValue to string for comparison
   // Use static buffer to reduce allocations for numeric types
-  return std::visit([](auto&& arg) -> std::string {
-    using T = std::decay_t<decltype(arg)>;
-    if constexpr (std::is_same_v<T, std::monostate>) {
-      return "";  // NULL
-    } else if constexpr (std::is_same_v<T, bool>) {
-      return arg ? "1" : "0";
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      return arg;
-    } else {
-      // Numeric types: pad with zeros for lexicographic comparison
-      // This ensures proper numeric ordering
-      // Using fixed-size buffer to reduce heap allocations
-      char buf[32];
-      if constexpr (std::is_same_v<T, double>) {
-        snprintf(buf, sizeof(buf), "%020.6f", arg);
-      } else if constexpr (std::is_signed_v<T>) {
-        // Signed: add offset to make all values positive for sorting
-        snprintf(buf, sizeof(buf), "%020lld", static_cast<long long>(arg) + (1LL << 60));
-      } else {
-        // Unsigned
-        snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(arg));
-      }
-      return std::string(buf);
-    }
-  }, filter_val.value());
+  return std::visit(
+      [](auto&& arg) -> std::string {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          return "";  // NULL
+        } else if constexpr (std::is_same_v<T, bool>) {
+          return arg ? "1" : "0";
+        } else if constexpr (std::is_same_v<T, std::string>) {
+          return arg;
+        } else {
+          // Numeric types: pad with zeros for lexicographic comparison
+          // This ensures proper numeric ordering
+          // Using fixed-size buffer to reduce heap allocations
+          char buf[32];
+          if constexpr (std::is_same_v<T, double>) {
+            snprintf(buf, sizeof(buf), "%020.6f", arg);
+          } else if constexpr (std::is_signed_v<T>) {
+            // Signed: add offset to make all values positive for sorting
+            snprintf(buf, sizeof(buf), "%020lld", static_cast<long long>(arg) + (1LL << 60));
+          } else {
+            // Unsigned
+            snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(arg));
+          }
+          return std::string(buf);
+        }
+      },
+      filter_val.value());
 }
 
 bool ResultSorter::SortComparator::operator()(DocId a, DocId b) const {
@@ -77,8 +78,7 @@ bool ResultSorter::SortComparator::operator()(DocId a, DocId b) const {
       const auto& str_b = pk_b.value();
 
       // Fast path: both are pure numeric strings
-      if (!str_a.empty() && !str_b.empty() &&
-          std::all_of(str_a.begin(), str_a.end(), ::isdigit) &&
+      if (!str_a.empty() && !str_b.empty() && std::all_of(str_a.begin(), str_a.end(), ::isdigit) &&
           std::all_of(str_b.begin(), str_b.end(), ::isdigit)) {
         try {
           uint64_t num_a = std::stoull(str_a);
@@ -108,11 +108,9 @@ bool ResultSorter::SortComparator::operator()(DocId a, DocId b) const {
   return ascending_ ? (cmp < 0) : (cmp > 0);
 }
 
-std::vector<DocId> ResultSorter::SortAndPaginate(
-    std::vector<DocId>& results,
-    const storage::DocumentStore& doc_store,
-    const Query& query) {
-
+std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results,
+                                                 const storage::DocumentStore& doc_store,
+                                                 const Query& query) {
   // No results to sort
   if (results.empty()) {
     return {};
@@ -152,9 +150,10 @@ std::vector<DocId> ResultSorter::SortAndPaginate(
     if (!column_found) {
       // Warning: column not found in sample
       // Note: This is not a hard error - documents without the column will be sorted as NULL
-      spdlog::warn("ORDER BY column '{}' not found in first {} documents. "
-                   "Documents without this column will be sorted as NULL values.",
-                   order_by.column, check_count);
+      spdlog::warn(
+          "ORDER BY column '{}' not found in first {} documents. "
+          "Documents without this column will be sorted as NULL values.",
+          order_by.column, check_count);
     }
   }
 
@@ -169,20 +168,14 @@ std::vector<DocId> ResultSorter::SortAndPaginate(
   // Use partial_sort aggressively when total_needed is significantly smaller than result size
   // Threshold: if we need less than 50% of results, use partial_sort
   // For 800K results with LIMIT 100, partial_sort is ~3x faster (O(N*log(K)) vs O(N*log(N)))
-  if (total_needed < results.size() &&
-      static_cast<double>(total_needed) < results.size() * 0.5) {
+  if (total_needed < results.size() && static_cast<double>(total_needed) < results.size() * 0.5) {
     // partial_sort: O(N * log(K)) where K = total_needed
     // For 800K results with K=100: ~800K * log2(100) ≈ 5.3M operations
     // vs full sort: 800K * log2(800K) ≈ 15.9M operations
     // Memory: in-place, no additional allocation
-    std::partial_sort(
-        results.begin(),
-        results.begin() + total_needed,
-        results.end(),
-        comparator);
+    std::partial_sort(results.begin(), results.begin() + total_needed, results.end(), comparator);
 
-    spdlog::trace("Used partial_sort for {} out of {} results",
-                  total_needed, results.size());
+    spdlog::trace("Used partial_sort for {} out of {} results", total_needed, results.size());
   } else {
     // Full sort: O(N * log(N))
     // Use when we need most of the results anyway

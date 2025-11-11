@@ -146,13 +146,13 @@ class MygramClient::Impl {
     }
 
     // Set socket timeout
-    struct timeval tv {};
+    struct timeval tv{};
     tv.tv_sec = config_.timeout_ms / 1000;
     tv.tv_usec = (config_.timeout_ms % 1000) * 1000;
     setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    struct sockaddr_in server_addr {};
+    struct sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(config_.port);
 
@@ -163,8 +163,7 @@ class MygramClient::Impl {
       return last_error_;
     }
 
-    if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr),
-                sizeof(server_addr)) < 0) {
+    if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
       last_error_ = std::string("Connection failed: ") + strerror(errno);
       close(sock_);
       sock_ = -1;
@@ -206,20 +205,17 @@ class MygramClient::Impl {
       if (received == 0) {
         last_error_ = "Connection closed by server";
       } else {
+        last_error_ = std::string("Failed to receive response: ") + strerror(errno);
+      }
 
-          last_error_ = std::string("Failed to receive response: ") + strerror(errno);
-
-        }
-
-        return Error(last_error_);
+      return Error(last_error_);
     }
 
     buffer[received] = '\0';
     std::string response(buffer.data(), received);
 
     // Remove trailing \r\n
-    while (!response.empty() &&
-           (response.back() == '\n' || response.back() == '\r')) {
+    while (!response.empty() && (response.back() == '\n' || response.back() == '\r')) {
       response.pop_back();
     }
 
@@ -227,16 +223,10 @@ class MygramClient::Impl {
   }
 
   std::variant<SearchResponse, Error> Search(
-      const std::string& table,
-      const std::string& query,
-      uint32_t limit,
-      uint32_t offset,
-      const std::vector<std::string>& and_terms,
-      const std::vector<std::string>& not_terms,
-      const std::vector<std::pair<std::string, std::string>>& filters,
-      const std::string& order_by,
+      const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
+      const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
+      const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by,
       bool order_desc) {
-
     // Build command
     std::ostringstream cmd;
     cmd << "SEARCH " << table << " " << EscapeQueryString(query);
@@ -320,12 +310,9 @@ class MygramClient::Impl {
   }
 
   std::variant<CountResponse, Error> Count(
-      const std::string& table,
-      const std::string& query,
-      const std::vector<std::string>& and_terms,
+      const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
       const std::vector<std::string>& not_terms,
       const std::vector<std::pair<std::string, std::string>>& filters) {
-
     // Build command
     std::ostringstream cmd;
     cmd << "COUNT " << table << " " << EscapeQueryString(query);
@@ -380,8 +367,7 @@ class MygramClient::Impl {
     return resp;
   }
 
-  std::variant<Document, Error> Get(const std::string& table,
-                                          const std::string& primary_key) {
+  std::variant<Document, Error> Get(const std::string& table, const std::string& primary_key) {
     std::ostringstream cmd;
     cmd << "GET " << table << " " << primary_key;
 
@@ -645,41 +631,42 @@ MygramClient::~MygramClient() = default;
 MygramClient::MygramClient(MygramClient&&) noexcept = default;
 MygramClient& MygramClient::operator=(MygramClient&&) noexcept = default;
 
-std::optional<std::string> MygramClient::Connect() { return impl_->Connect(); }
+std::optional<std::string> MygramClient::Connect() {
+  return impl_->Connect();
+}
 
-void MygramClient::Disconnect() { impl_->Disconnect(); }
+void MygramClient::Disconnect() {
+  impl_->Disconnect();
+}
 
-bool MygramClient::IsConnected() const { return impl_->IsConnected(); }
+bool MygramClient::IsConnected() const {
+  return impl_->IsConnected();
+}
 
 std::variant<SearchResponse, Error> MygramClient::Search(
-    const std::string& table,
-    const std::string& query,
-    uint32_t limit,
-    uint32_t offset,
-    const std::vector<std::string>& and_terms,
-    const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters,
-    const std::string& order_by,
+    const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
+    const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
+    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by,
     bool order_desc) {
-  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters,
-                       order_by, order_desc);
+  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, order_by,
+                       order_desc);
 }
 
 std::variant<CountResponse, Error> MygramClient::Count(
-    const std::string& table,
-    const std::string& query,
-    const std::vector<std::string>& and_terms,
+    const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
     const std::vector<std::string>& not_terms,
     const std::vector<std::pair<std::string, std::string>>& filters) {
   return impl_->Count(table, query, and_terms, not_terms, filters);
 }
 
 std::variant<Document, Error> MygramClient::Get(const std::string& table,
-                                                       const std::string& primary_key) {
+                                                const std::string& primary_key) {
   return impl_->Get(table, primary_key);
 }
 
-std::variant<ServerInfo, Error> MygramClient::Info() { return impl_->Info(); }
+std::variant<ServerInfo, Error> MygramClient::Info() {
+  return impl_->Info();
+}
 
 std::variant<std::string, Error> MygramClient::GetConfig() {
   return impl_->GetConfig();
@@ -705,18 +692,21 @@ std::optional<std::string> MygramClient::StartReplication() {
   return impl_->StartReplication();
 }
 
-std::optional<std::string> MygramClient::EnableDebug() { return impl_->EnableDebug(); }
+std::optional<std::string> MygramClient::EnableDebug() {
+  return impl_->EnableDebug();
+}
 
 std::optional<std::string> MygramClient::DisableDebug() {
   return impl_->DisableDebug();
 }
 
-std::variant<std::string, Error> MygramClient::SendCommand(
-    const std::string& command) {
+std::variant<std::string, Error> MygramClient::SendCommand(const std::string& command) {
   return impl_->SendCommand(command);
 }
 
-const std::string& MygramClient::GetLastError() const { return impl_->GetLastError(); }
+const std::string& MygramClient::GetLastError() const {
+  return impl_->GetLastError();
+}
 
 }  // namespace client
 }  // namespace mygramdb

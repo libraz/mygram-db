@@ -4,19 +4,20 @@
  */
 
 #include "query/result_sorter.h"
-#include "storage/document_store.h"
-#include "query/query_parser.h"
+
 #include <gtest/gtest.h>
+
 #include <algorithm>
+
+#include "query/query_parser.h"
+#include "storage/document_store.h"
 
 using namespace mygramdb::query;
 using namespace mygramdb::storage;
 
 class ResultSorterTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    doc_store_.Clear();
-  }
+  void SetUp() override { doc_store_.Clear(); }
 
   DocumentStore doc_store_;
 };

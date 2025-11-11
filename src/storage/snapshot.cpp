@@ -6,6 +6,7 @@
 #include "storage/snapshot.h"
 
 #include <spdlog/spdlog.h>
+
 #include <utility>
 
 namespace mygramdb {

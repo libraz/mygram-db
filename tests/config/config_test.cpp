@@ -4,7 +4,9 @@
  */
 
 #include "config/config.h"
+
 #include <gtest/gtest.h>
+
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -187,19 +189,23 @@ TEST(ConfigTest, InvalidServerId) {
   f << "  start_from: snapshot\n";
   f.close();
 
-  EXPECT_THROW({
-    try {
-      LoadConfig("invalid_server_id.yaml");
-    } catch (const std::runtime_error& e) {
-      std::string error_msg(e.what());
-      // Schema validation happens first, so check for schema error or server_id error
-      bool valid_error = (error_msg.find("replication.server_id must be set to a non-zero value") != std::string::npos) ||
-                        (error_msg.find("server_id") != std::string::npos) ||
-                        (error_msg.find("required property") != std::string::npos);
-      EXPECT_TRUE(valid_error) << "Actual error: " << error_msg;
-      throw;
-    }
-  }, std::runtime_error);
+  EXPECT_THROW(
+      {
+        try {
+          LoadConfig("invalid_server_id.yaml");
+        } catch (const std::runtime_error& e) {
+          std::string error_msg(e.what());
+          // Schema validation happens first, so check for schema error or server_id error
+          bool valid_error =
+              (error_msg.find("replication.server_id must be set to a non-zero value") !=
+               std::string::npos) ||
+              (error_msg.find("server_id") != std::string::npos) ||
+              (error_msg.find("required property") != std::string::npos);
+          EXPECT_TRUE(valid_error) << "Actual error: " << error_msg;
+          throw;
+        }
+      },
+      std::runtime_error);
 }
 
 /**
@@ -222,15 +228,17 @@ TEST(ConfigTest, InvalidGTIDFormat) {
   f << "  start_from: gtid=invalid-format\n";
   f.close();
 
-  EXPECT_THROW({
-    try {
-      LoadConfig("invalid_gtid.yaml");
-    } catch (const std::runtime_error& e) {
-      std::string error_msg(e.what());
-      EXPECT_TRUE(error_msg.find("Invalid GTID format") != std::string::npos);
-      throw;
-    }
-  }, std::runtime_error);
+  EXPECT_THROW(
+      {
+        try {
+          LoadConfig("invalid_gtid.yaml");
+        } catch (const std::runtime_error& e) {
+          std::string error_msg(e.what());
+          EXPECT_TRUE(error_msg.find("Invalid GTID format") != std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
 }
 
 /**
@@ -253,15 +261,18 @@ TEST(ConfigTest, InvalidStartFrom) {
   f << "  start_from: invalid_option\n";
   f.close();
 
-  EXPECT_THROW({
-    try {
-      LoadConfig("invalid_start_from.yaml");
-    } catch (const std::runtime_error& e) {
-      std::string error_msg(e.what());
-      EXPECT_TRUE(error_msg.find("replication.start_from must be one of: snapshot, latest, state_file, or gtid=<UUID:txn>") != std::string::npos);
-      throw;
-    }
-  }, std::runtime_error);
+  EXPECT_THROW(
+      {
+        try {
+          LoadConfig("invalid_start_from.yaml");
+        } catch (const std::runtime_error& e) {
+          std::string error_msg(e.what());
+          EXPECT_TRUE(error_msg.find("replication.start_from must be one of: snapshot, latest, "
+                                     "state_file, or gtid=<UUID:txn>") != std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
 }
 
 /**
@@ -269,41 +280,24 @@ TEST(ConfigTest, InvalidStartFrom) {
  */
 TEST(ConfigTest, LoadValidJSONConfig) {
   // Create JSON config file
-  json j = {
-    {"mysql", {
-      {"host", "127.0.0.1"},
-      {"port", 3306},
-      {"user", "json_user"},
-      {"password", "json_pass"},
-      {"database", "json_db"},
-      {"use_gtid", true},
-      {"binlog_format", "ROW"},
-      {"binlog_row_image", "FULL"},
-      {"connect_timeout_ms", 5000}
-    }},
-    {"tables", {{
-      {"name", "json_table"},
-      {"primary_key", "id"},
-      {"text_source", {
-        {"column", "content"}
-      }},
-      {"ngram_size", 2},
-      {"posting", {
-        {"block_size", 256},
-        {"freq_bits", 8},
-        {"use_roaring", "always"}
-      }}
-    }}},
-    {"replication", {
-      {"enable", true},
-      {"server_id", 200},
-      {"start_from", "latest"}
-    }},
-    {"logging", {
-      {"level", "info"},
-      {"json", true}
-    }}
-  };
+  json j = {{"mysql",
+             {{"host", "127.0.0.1"},
+              {"port", 3306},
+              {"user", "json_user"},
+              {"password", "json_pass"},
+              {"database", "json_db"},
+              {"use_gtid", true},
+              {"binlog_format", "ROW"},
+              {"binlog_row_image", "FULL"},
+              {"connect_timeout_ms", 5000}}},
+            {"tables",
+             {{{"name", "json_table"},
+               {"primary_key", "id"},
+               {"text_source", {{"column", "content"}}},
+               {"ngram_size", 2},
+               {"posting", {{"block_size", 256}, {"freq_bits", 8}, {"use_roaring", "always"}}}}}},
+            {"replication", {{"enable", true}, {"server_id", 200}, {"start_from", "latest"}}},
+            {"logging", {{"level", "info"}, {"json", true}}}};
 
   std::ofstream f("test_config.json");
   f << j.dump(2);
@@ -347,19 +341,9 @@ TEST(ConfigTest, LoadValidJSONConfig) {
 TEST(ConfigTest, LoadJSONConfigWithSchemaValidation) {
   // Create valid JSON config
   json config_json = {
-    {"mysql", {
-      {"user", "test_user"},
-      {"password", "test_pass"},
-      {"database", "test_db"}
-    }},
-    {"tables", {{
-      {"name", "test_table"},
-      {"text_source", {{"column", "content"}}}
-    }}},
-    {"replication", {
-      {"server_id", 100}
-    }}
-  };
+      {"mysql", {{"user", "test_user"}, {"password", "test_pass"}, {"database", "test_db"}}},
+      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
+      {"replication", {{"server_id", 100}}}};
 
   std::ofstream f("valid_config.json");
   f << config_json.dump(2);
@@ -377,15 +361,8 @@ TEST(ConfigTest, LoadJSONConfigWithSchemaValidation) {
 TEST(ConfigTest, LoadInvalidJSONWithSchemaValidation) {
   // Create invalid JSON config (missing required "user" field)
   json config_json = {
-    {"mysql", {
-      {"password", "test_pass"},
-      {"database", "test_db"}
-    }},
-    {"tables", {{
-      {"name", "test_table"},
-      {"text_source", {{"column", "content"}}}
-    }}}
-  };
+      {"mysql", {{"password", "test_pass"}, {"database", "test_db"}}},
+      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}}};
 
   std::ofstream f("invalid_config.json");
   f << config_json.dump(2);
@@ -435,20 +412,13 @@ TEST(ConfigTest, LoadInvalidJSON) {
 TEST(ConfigTest, JSONConfigWithUnknownKeys) {
   // Create JSON config with unknown field
   json config_json = {
-    {"mysql", {
-      {"user", "test_user"},
-      {"password", "test_pass"},
-      {"database", "test_db"},
-      {"unknown_field", "should_be_rejected"}
-    }},
-    {"tables", {{
-      {"name", "test_table"},
-      {"text_source", {{"column", "content"}}}
-    }}},
-    {"replication", {
-      {"server_id", 100}
-    }}
-  };
+      {"mysql",
+       {{"user", "test_user"},
+        {"password", "test_pass"},
+        {"database", "test_db"},
+        {"unknown_field", "should_be_rejected"}}},
+      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
+      {"replication", {{"server_id", 100}}}};
 
   std::ofstream f("unknown_keys.json");
   f << config_json.dump(2);
@@ -483,19 +453,9 @@ TEST(ConfigTest, LoadConfigYamlLegacy) {
  */
 TEST(ConfigTest, LoadConfigJsonFunction) {
   json config_json = {
-    {"mysql", {
-      {"user", "json_func_user"},
-      {"password", "pass"},
-      {"database", "db"}
-    }},
-    {"tables", {{
-      {"name", "test"},
-      {"text_source", {{"column", "content"}}}
-    }}},
-    {"replication", {
-      {"server_id", 300}
-    }}
-  };
+      {"mysql", {{"user", "json_func_user"}, {"password", "pass"}, {"database", "db"}}},
+      {"tables", {{{"name", "test"}, {"text_source", {{"column", "content"}}}}}},
+      {"replication", {{"server_id", 300}}}};
 
   std::ofstream f("func_test.json");
   f << config_json.dump(2);

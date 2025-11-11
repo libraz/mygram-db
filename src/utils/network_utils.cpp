@@ -6,8 +6,9 @@
 #include "utils/network_utils.h"
 
 #include <arpa/inet.h>
-#include <sstream>
+
 #include <optional>
+#include <sstream>
 
 namespace mygramdb {
 namespace utils {

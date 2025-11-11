@@ -4,16 +4,19 @@
  */
 
 #include "server/http_server.h"
-#include "server/tcp_server.h"  // For TableContext definition
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "config/config.h"
-#include "version.h"
+
 #include <gtest/gtest.h>
+#include <httplib.h>
+
+#include <chrono>
 #include <nlohmann/json.hpp>
 #include <thread>
-#include <chrono>
-#include <httplib.h>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "server/tcp_server.h"  // For TableContext definition
+#include "storage/document_store.h"
+#include "version.h"
 
 using json = nlohmann::json;
 
@@ -78,9 +81,8 @@ class HttpServerTest : public ::testing::Test {
     http_config.bind = "127.0.0.1";
     http_config.port = 18080;
 
-    http_server_ = std::make_unique<HttpServer>(
-        http_config, table_contexts_, config_.get(), nullptr
-    );
+    http_server_ =
+        std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
   }
 
   void TearDown() override {
@@ -91,7 +93,7 @@ class HttpServerTest : public ::testing::Test {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  index::Index* index_;  // Raw pointer to table_context_.index
+  index::Index* index_;                // Raw pointer to table_context_.index
   storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
   TableContext table_context_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -429,9 +431,8 @@ class HttpServerMultiTableTest : public ::testing::Test {
     http_config.bind = "127.0.0.1";
     http_config.port = 18081;
 
-    http_server_ = std::make_unique<HttpServer>(
-        http_config, table_contexts_, config_.get(), nullptr
-    );
+    http_server_ =
+        std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
   }
 
   void TearDown() override {

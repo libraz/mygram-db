@@ -17,9 +17,9 @@ namespace utils {
  * @brief CIDR (Classless Inter-Domain Routing) representation
  */
 struct CIDR {
-  uint32_t network;     // Network address in host byte order
-  uint32_t netmask;     // Network mask in host byte order
-  int prefix_length;    // Prefix length (0-32)
+  uint32_t network;   // Network address in host byte order
+  uint32_t netmask;   // Network mask in host byte order
+  int prefix_length;  // Prefix length (0-32)
 
   /**
    * @brief Check if an IP address is within this CIDR range

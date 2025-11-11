@@ -17,8 +17,8 @@
 
 // Try to use readline if available
 #ifdef HAVE_READLINE
-#include <readline/readline.h>
 #include <readline/history.h>
+#include <readline/readline.h>
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define USE_READLINE 1
 #endif
@@ -28,10 +28,8 @@ namespace {
 #ifdef USE_READLINE
 // Command list for tab completion
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-const char* command_list[] = {
-  "SEARCH", "COUNT", "GET", "INFO", "SAVE", "LOAD", "CONFIG",
-  "REPLICATION", "DEBUG", "quit", "exit", "help", nullptr
-};
+const char* command_list[] = {"SEARCH",      "COUNT", "GET",  "INFO", "SAVE", "LOAD", "CONFIG",
+                              "REPLICATION", "DEBUG", "quit", "exit", "help", nullptr};
 
 /**
  * @brief Command name generator for readline completion
@@ -170,7 +168,8 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
     return "";
   };
 
-  // SEARCH <table> <text> [AND/OR/NOT <term>] [FILTER <col=val>] [ORDER [BY] [ASC|DESC]] [LIMIT <n>] [OFFSET <n>]
+  // SEARCH <table> <text> [AND/OR/NOT <term>] [FILTER <col=val>] [ORDER [BY] [ASC|DESC]] [LIMIT
+  // <n>] [OFFSET <n>]
   if (command == "SEARCH") {
     std::string prev = get_prev_token();
 
@@ -293,8 +292,8 @@ struct Config {
   std::string host = "127.0.0.1";
   uint16_t port = 11211;
   bool interactive = true;
-  int retry_count = 0;       // Number of retries (0 = no retry)
-  int retry_interval = 3;    // Seconds between retries
+  int retry_count = 0;     // Number of retries (0 = no retry)
+  int retry_interval = 3;  // Seconds between retries
 };
 
 class MygramClient {
@@ -309,9 +308,7 @@ class MygramClient {
   MygramClient(MygramClient&&) = default;
   MygramClient& operator=(MygramClient&&) = default;
 
-  ~MygramClient() {
-    Disconnect();
-  }
+  ~MygramClient() { Disconnect(); }
 
   bool Connect() {
     int attempts = 0;
@@ -342,7 +339,8 @@ class MygramClient {
         return false;  // Don't retry invalid address
       }
 
-      if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
+      if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) <
+          0) {
         int saved_errno = errno;
         std::cerr << "Connection failed: " << strerror(saved_errno) << '\n';
 
@@ -358,7 +356,8 @@ class MygramClient {
           std::cerr << "\nFor large datasets, initial index build may take 10-30 minutes.\n";
           std::cerr << "Server will start accepting connections after initialization completes.\n";
         } else if (saved_errno == ETIMEDOUT) {
-          std::cerr << "\nServer is not responding. Check if the server is running and network is accessible.\n";
+          std::cerr << "\nServer is not responding. Check if the server is running and network is "
+                       "accessible.\n";
         } else if (saved_errno == ENETUNREACH || saved_errno == EHOSTUNREACH) {
           std::cerr << "\nNetwork is unreachable. Check hostname and network connectivity.\n";
         }
@@ -465,9 +464,8 @@ class MygramClient {
     std::string response(buffer);
 
     // Remove trailing \r\n
-    if (response.size() >= 2 &&
-        response[response.size()-2] == '\r' &&
-        response[response.size()-1] == '\n') {
+    if (response.size() >= 2 && response[response.size() - 2] == '\r' &&
+        response[response.size() - 1] == '\n') {
       response = response.substr(0, response.size() - 2);
     }
 
@@ -733,8 +731,10 @@ void PrintUsage(const char* program_name) {
   std::cout << "  " << program_name << "                          # Interactive mode" << '\n';
   std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server"
             << '\n';
-  std::cout << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
-  std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready" << '\n';
+  std::cout << "  " << program_name
+            << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
+  std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready"
+            << '\n';
   std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';
 }
 

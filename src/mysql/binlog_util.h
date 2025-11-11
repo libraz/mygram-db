@@ -31,17 +31,16 @@ inline uint32_t uint3korr(const unsigned char* ptr) {
  * @brief Read 4 bytes in little-endian format
  */
 inline uint32_t uint4korr(const unsigned char* ptr) {
-  return (uint32_t)(ptr[0]) | ((uint32_t)(ptr[1]) << 8) |
-         ((uint32_t)(ptr[2]) << 16) | ((uint32_t)(ptr[3]) << 24);
+  return (uint32_t)(ptr[0]) | ((uint32_t)(ptr[1]) << 8) | ((uint32_t)(ptr[2]) << 16) |
+         ((uint32_t)(ptr[3]) << 24);
 }
 
 /**
  * @brief Read 8 bytes in little-endian format
  */
 inline uint64_t uint8korr(const unsigned char* ptr) {
-  return (uint64_t)(ptr[0]) | ((uint64_t)(ptr[1]) << 8) |
-         ((uint64_t)(ptr[2]) << 16) | ((uint64_t)(ptr[3]) << 24) |
-         ((uint64_t)(ptr[4]) << 32) | ((uint64_t)(ptr[5]) << 40) |
+  return (uint64_t)(ptr[0]) | ((uint64_t)(ptr[1]) << 8) | ((uint64_t)(ptr[2]) << 16) |
+         ((uint64_t)(ptr[3]) << 24) | ((uint64_t)(ptr[4]) << 32) | ((uint64_t)(ptr[5]) << 40) |
          ((uint64_t)(ptr[6]) << 48) | ((uint64_t)(ptr[7]) << 56);
 }
 
@@ -222,11 +221,11 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       return 8;
     case 9:  // MYSQL_TYPE_INT24
       return 3;
-    case 13: // MYSQL_TYPE_YEAR
+    case 13:  // MYSQL_TYPE_YEAR
       return 1;
 
     // VARCHAR
-    case 15: { // MYSQL_TYPE_VARCHAR
+    case 15: {  // MYSQL_TYPE_VARCHAR
       uint32_t length = metadata > 255 ? 2 : 1;
       if (length == 1) {
         length += static_cast<uint32_t>(*master_data);
@@ -237,7 +236,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // BLOB/TEXT types
-    case 252: { // MYSQL_TYPE_BLOB (includes TEXT)
+    case 252: {  // MYSQL_TYPE_BLOB (includes TEXT)
       // metadata indicates the number of length bytes (1, 2, 3, or 4)
       uint32_t blob_len = 0;
       switch (metadata) {
@@ -258,7 +257,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // STRING (CHAR)
-    case 254: { // MYSQL_TYPE_STRING
+    case 254: {  // MYSQL_TYPE_STRING
       unsigned char type = metadata >> 8;
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
         return metadata & 0xff;
@@ -280,31 +279,31 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       return 0;
 
     // Date/Time types
-    case 10: // MYSQL_TYPE_DATE
+    case 10:  // MYSQL_TYPE_DATE
       return 3;
-    case 11: // MYSQL_TYPE_TIME
+    case 11:  // MYSQL_TYPE_TIME
       return 3;
-    case 12: // MYSQL_TYPE_DATETIME
+    case 12:  // MYSQL_TYPE_DATETIME
       return 8;
     case 7:  // MYSQL_TYPE_TIMESTAMP
       return 4;
 
     // Date/Time types with fractional seconds
-    case 19: { // MYSQL_TYPE_TIME2
+    case 19: {  // MYSQL_TYPE_TIME2
       // metadata is fractional seconds precision (0-6)
       return 3 + (metadata + 1) / 2;
     }
-    case 17: { // MYSQL_TYPE_TIMESTAMP2
+    case 17: {  // MYSQL_TYPE_TIMESTAMP2
       // metadata is fractional seconds precision (0-6)
       return 4 + (metadata + 1) / 2;
     }
-    case 18: { // MYSQL_TYPE_DATETIME2
+    case 18: {  // MYSQL_TYPE_DATETIME2
       // metadata is fractional seconds precision (0-6)
       return 5 + (metadata + 1) / 2;
     }
 
     // DECIMAL types
-    case 246: { // MYSQL_TYPE_NEWDECIMAL
+    case 246: {  // MYSQL_TYPE_NEWDECIMAL
       // metadata: (precision << 8) | scale
       uint8_t precision = metadata >> 8;
       uint8_t scale = metadata & 0xFF;
@@ -323,7 +322,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // JSON type
-    case 245: { // MYSQL_TYPE_JSON
+    case 245: {  // MYSQL_TYPE_JSON
       // JSON is stored like BLOB with metadata indicating length bytes
       uint32_t json_len = 0;
       switch (metadata) {
@@ -349,7 +348,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // BIT type
-    case 16: { // MYSQL_TYPE_BIT
+    case 16: {  // MYSQL_TYPE_BIT
       // metadata: (bytes << 8) | bits
       unsigned int bytes = (metadata >> 8) & 0xFF;
       unsigned int bits = metadata & 0xFF;

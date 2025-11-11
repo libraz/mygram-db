@@ -3,8 +3,10 @@
  * @brief Unit tests for GTID state file
  */
 
-#include <gtest/gtest.h>
 #include "storage/gtid_state.h"
+
+#include <gtest/gtest.h>
+
 #include <filesystem>
 #include <fstream>
 
@@ -192,8 +194,9 @@ TEST_F(GTIDStateFileTest, MultipleServerUUIDs) {
   GTIDStateFile state_file(test_file_.string());
 
   // Write GTID with multiple server UUIDs (comma-separated)
-  std::string gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5,"
-                     "4E11FA47-71CA-11E1-9E33-C80AA9429563:1-3";
+  std::string gtid =
+      "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5,"
+      "4E11FA47-71CA-11E1-9E33-C80AA9429563:1-3";
   EXPECT_TRUE(state_file.Write(gtid));
 
   // Read GTID

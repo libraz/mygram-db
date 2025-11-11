@@ -7,18 +7,18 @@
 
 #ifdef USE_MYSQL
 
-#include "utils/string_utils.h"
 #include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <sstream>
+
+#include "utils/string_utils.h"
 
 namespace mygramdb {
 namespace storage {
 
-SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection,
-                                 index::Index& index,
-                                 DocumentStore& doc_store,
-                                 config::TableConfig table_config,
+SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& index,
+                                 DocumentStore& doc_store, config::TableConfig table_config,
                                  config::BuildConfig build_config)
     : connection_(connection),
       index_(index),
@@ -35,8 +35,9 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
 
   // Check if GTID mode is enabled
   if (!connection_.IsGTIDModeEnabled()) {
-    last_error_ = "GTID mode is not enabled on MySQL server. "
-                  "Please enable GTID mode (gtid_mode=ON) for replication support.";
+    last_error_ =
+        "GTID mode is not enabled on MySQL server. "
+        "Please enable GTID mode (gtid_mode=ON) for replication support.";
     spdlog::error(last_error_);
     return false;
   }
@@ -85,8 +86,7 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   // Get total row count (approximate from result)
   uint64_t total_rows = mysql_num_rows(result);
 
-  spdlog::info("Processing {} rows from table {}", total_rows,
-               table_config_.name);
+  spdlog::info("Processing {} rows from table {}", total_rows, table_config_.name);
 
   // Process rows in batches
   MYSQL_ROW row = nullptr;
@@ -194,11 +194,10 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   }
 
   auto end_time = std::chrono::steady_clock::now();
-  double total_elapsed =
-      std::chrono::duration<double>(end_time - start_time).count();
+  double total_elapsed = std::chrono::duration<double>(end_time - start_time).count();
 
-  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)",
-               processed_rows_, total_elapsed,
+  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_,
+               total_elapsed,
                total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
 
   return true;
@@ -266,8 +265,7 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
   return query.str();
 }
 
-bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                 unsigned int num_fields) {
+bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) {
   // Extract primary key
   std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
   if (primary_key.empty()) {
@@ -300,13 +298,9 @@ bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
 
 bool SnapshotBuilder::IsTextColumn(enum_field_types type) {
   // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
-  return type == MYSQL_TYPE_VARCHAR ||
-         type == MYSQL_TYPE_VAR_STRING ||
-         type == MYSQL_TYPE_STRING ||
-         type == MYSQL_TYPE_TINY_BLOB ||
-         type == MYSQL_TYPE_MEDIUM_BLOB ||
-         type == MYSQL_TYPE_LONG_BLOB ||
-         type == MYSQL_TYPE_BLOB;
+  return type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING ||
+         type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
+         type == MYSQL_TYPE_LONG_BLOB || type == MYSQL_TYPE_BLOB;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -314,14 +308,14 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
                                          unsigned int num_fields) const {
   if (!table_config_.text_source.column.empty()) {
     // Single column
-    int idx = FindFieldIndex(table_config_.text_source.column, fields,
-                             num_fields);
+    int idx = FindFieldIndex(table_config_.text_source.column, fields, num_fields);
     if (idx >= 0) {
       // Validate column type
       if (!IsTextColumn(fields[idx].type)) {
-        spdlog::error("Column '{}' is not a text type (VARCHAR/TEXT). "
-                      "Type: {}", table_config_.text_source.column,
-                      static_cast<int>(fields[idx].type));
+        spdlog::error(
+            "Column '{}' is not a text type (VARCHAR/TEXT). "
+            "Type: {}",
+            table_config_.text_source.column, static_cast<int>(fields[idx].type));
         return "";
       }
       if (row[idx] != nullptr) {
@@ -336,8 +330,10 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
       if (idx >= 0) {
         // Validate column type
         if (!IsTextColumn(fields[idx].type)) {
-          spdlog::error("Column '{}' is not a text type (VARCHAR/TEXT). "
-                        "Type: {}", col, static_cast<int>(fields[idx].type));
+          spdlog::error(
+              "Column '{}' is not a text type (VARCHAR/TEXT). "
+              "Type: {}",
+              col, static_cast<int>(fields[idx].type));
           continue;  // Skip this column
         }
         if (row[idx] != nullptr) {
@@ -354,8 +350,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
   return "";
 }
 
-std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row,
-                                               MYSQL_FIELD* fields,
+std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields,
                                                unsigned int num_fields) const {
   int idx = FindFieldIndex(table_config_.primary_key, fields, num_fields);
   if (idx >= 0 && row[idx] != nullptr) {
@@ -364,9 +359,8 @@ std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row,
   return "";
 }
 
-std::unordered_map<std::string, FilterValue>
-SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                unsigned int num_fields) const {
+std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(
+    MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
   std::unordered_map<std::string, FilterValue> filters;
 
   for (const auto& filter_config : table_config_.filters) {
@@ -406,22 +400,18 @@ SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
       // Date/time types (store as string)
       else if (type == "datetime" || type == "date" || type == "timestamp") {
         filters[filter_config.name] = value_str;
-      }
-      else {
-        spdlog::warn("Unknown filter type '{}' for field '{}'",
-                     type, filter_config.name);
+      } else {
+        spdlog::warn("Unknown filter type '{}' for field '{}'", type, filter_config.name);
       }
     } catch (const std::exception& e) {
-      spdlog::warn("Failed to parse {} filter {}: {}",
-                   type, filter_config.name, value_str);
+      spdlog::warn("Failed to parse {} filter {}: {}", type, filter_config.name, value_str);
     }
   }
 
   return filters;
 }
 
-int SnapshotBuilder::FindFieldIndex(const std::string& field_name,
-                                    MYSQL_FIELD* fields,
+int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields,
                                     unsigned int num_fields) {
   for (unsigned int i = 0; i < num_fields; ++i) {
     if (field_name == fields[i].name) {

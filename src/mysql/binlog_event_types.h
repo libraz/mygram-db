@@ -20,12 +20,12 @@ namespace mysql {
  */
 enum class MySQLBinlogEventType {
   UNKNOWN_EVENT = 0,
-  START_EVENT_V3 = 1,             // Deprecated
+  START_EVENT_V3 = 1,  // Deprecated
   QUERY_EVENT = 2,
   STOP_EVENT = 3,
   ROTATE_EVENT = 4,
   INTVAR_EVENT = 5,
-  SLAVE_EVENT = 7,                    // Legacy name from binlog protocol (replica event)
+  SLAVE_EVENT = 7,  // Legacy name from binlog protocol (replica event)
   APPEND_BLOCK_EVENT = 9,
   DELETE_FILE_EVENT = 11,
   RAND_EVENT = 13,
@@ -35,7 +35,7 @@ enum class MySQLBinlogEventType {
   BEGIN_LOAD_QUERY_EVENT = 17,
   EXECUTE_LOAD_QUERY_EVENT = 18,
 
-  TABLE_MAP_EVENT = 19,           // Contains table metadata
+  TABLE_MAP_EVENT = 19,  // Contains table metadata
 
   // V1 events (obsolete since 8.4.0)
   OBSOLETE_WRITE_ROWS_EVENT_V1 = 23,
@@ -48,11 +48,11 @@ enum class MySQLBinlogEventType {
   ROWS_QUERY_LOG_EVENT = 29,
 
   // V2 Row events (current format)
-  WRITE_ROWS_EVENT = 30,          // INSERT operations
-  UPDATE_ROWS_EVENT = 31,         // UPDATE operations
-  DELETE_ROWS_EVENT = 32,         // DELETE operations
+  WRITE_ROWS_EVENT = 30,   // INSERT operations
+  UPDATE_ROWS_EVENT = 31,  // UPDATE operations
+  DELETE_ROWS_EVENT = 32,  // DELETE operations
 
-  GTID_LOG_EVENT = 33,            // GTID transaction marker
+  GTID_LOG_EVENT = 33,  // GTID transaction marker
   ANONYMOUS_GTID_LOG_EVENT = 34,
   PREVIOUS_GTIDS_LOG_EVENT = 35,
   TRANSACTION_CONTEXT_EVENT = 36,
@@ -63,7 +63,7 @@ enum class MySQLBinlogEventType {
   HEARTBEAT_LOG_EVENT_V2 = 41,
   GTID_TAGGED_LOG_EVENT = 42,
 
-  ENUM_END_EVENT = 255            // End marker
+  ENUM_END_EVENT = 255  // End marker
 };
 
 /**
@@ -71,21 +71,36 @@ enum class MySQLBinlogEventType {
  */
 inline const char* GetEventTypeName(MySQLBinlogEventType type) {
   switch (type) {
-    case MySQLBinlogEventType::UNKNOWN_EVENT: return "UNKNOWN_EVENT";
-    case MySQLBinlogEventType::QUERY_EVENT: return "QUERY_EVENT";
-    case MySQLBinlogEventType::STOP_EVENT: return "STOP_EVENT";
-    case MySQLBinlogEventType::ROTATE_EVENT: return "ROTATE_EVENT";
-    case MySQLBinlogEventType::FORMAT_DESCRIPTION_EVENT: return "FORMAT_DESCRIPTION_EVENT";
-    case MySQLBinlogEventType::XID_EVENT: return "XID_EVENT";
-    case MySQLBinlogEventType::TABLE_MAP_EVENT: return "TABLE_MAP_EVENT";
-    case MySQLBinlogEventType::WRITE_ROWS_EVENT: return "WRITE_ROWS_EVENT";
-    case MySQLBinlogEventType::UPDATE_ROWS_EVENT: return "UPDATE_ROWS_EVENT";
-    case MySQLBinlogEventType::DELETE_ROWS_EVENT: return "DELETE_ROWS_EVENT";
-    case MySQLBinlogEventType::GTID_LOG_EVENT: return "GTID_LOG_EVENT";
-    case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT: return "HEARTBEAT_LOG_EVENT";
-    case MySQLBinlogEventType::ROWS_QUERY_LOG_EVENT: return "ROWS_QUERY_LOG_EVENT";
-    case MySQLBinlogEventType::PREVIOUS_GTIDS_LOG_EVENT: return "PREVIOUS_GTIDS_LOG_EVENT";
-    default: return "UNKNOWN";
+    case MySQLBinlogEventType::UNKNOWN_EVENT:
+      return "UNKNOWN_EVENT";
+    case MySQLBinlogEventType::QUERY_EVENT:
+      return "QUERY_EVENT";
+    case MySQLBinlogEventType::STOP_EVENT:
+      return "STOP_EVENT";
+    case MySQLBinlogEventType::ROTATE_EVENT:
+      return "ROTATE_EVENT";
+    case MySQLBinlogEventType::FORMAT_DESCRIPTION_EVENT:
+      return "FORMAT_DESCRIPTION_EVENT";
+    case MySQLBinlogEventType::XID_EVENT:
+      return "XID_EVENT";
+    case MySQLBinlogEventType::TABLE_MAP_EVENT:
+      return "TABLE_MAP_EVENT";
+    case MySQLBinlogEventType::WRITE_ROWS_EVENT:
+      return "WRITE_ROWS_EVENT";
+    case MySQLBinlogEventType::UPDATE_ROWS_EVENT:
+      return "UPDATE_ROWS_EVENT";
+    case MySQLBinlogEventType::DELETE_ROWS_EVENT:
+      return "DELETE_ROWS_EVENT";
+    case MySQLBinlogEventType::GTID_LOG_EVENT:
+      return "GTID_LOG_EVENT";
+    case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT:
+      return "HEARTBEAT_LOG_EVENT";
+    case MySQLBinlogEventType::ROWS_QUERY_LOG_EVENT:
+      return "ROWS_QUERY_LOG_EVENT";
+    case MySQLBinlogEventType::PREVIOUS_GTIDS_LOG_EVENT:
+      return "PREVIOUS_GTIDS_LOG_EVENT";
+    default:
+      return "UNKNOWN";
   }
 }
 

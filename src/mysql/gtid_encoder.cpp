@@ -57,8 +57,8 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
   // Calculate total size needed
   size_t total_size = 8;  // n_sids
   for (const auto& sid : sids) {
-    total_size += 16;  // UUID
-    total_size += 8;   // n_intervals
+    total_size += 16;                         // UUID
+    total_size += 8;                          // n_intervals
     total_size += 16 * sid.intervals.size();  // intervals (start+end each 8 bytes)
   }
 

@@ -47,7 +47,7 @@ struct SearchResult {
  * @brief Document with filter fields
  */
 struct Document {
-  std::string primary_key;                           // Document primary key
+  std::string primary_key;                                  // Document primary key
   std::vector<std::pair<std::string, std::string>> fields;  // Filter fields (key=value)
 
   Document() = default;
@@ -58,17 +58,17 @@ struct Document {
  * @brief Query debug information
  */
 struct DebugInfo {
-  double query_time_ms = 0.0;    // Total query execution time (ms)
-  double index_time_ms = 0.0;    // Index search time (ms)
-  double filter_time_ms = 0.0;   // Filter processing time (ms)
-  uint32_t terms = 0;            // Number of search terms
-  uint32_t ngrams = 0;           // Number of n-grams generated
-  uint64_t candidates = 0;       // Initial candidate count
+  double query_time_ms = 0.0;       // Total query execution time (ms)
+  double index_time_ms = 0.0;       // Index search time (ms)
+  double filter_time_ms = 0.0;      // Filter processing time (ms)
+  uint32_t terms = 0;               // Number of search terms
+  uint32_t ngrams = 0;              // Number of n-grams generated
+  uint64_t candidates = 0;          // Initial candidate count
   uint64_t after_intersection = 0;  // After AND intersection
-  uint64_t after_not = 0;        // After NOT filtering
-  uint64_t after_filters = 0;    // After FILTER conditions
-  uint64_t final = 0;            // Final result count
-  std::string optimization;      // Optimization strategy used
+  uint64_t after_not = 0;           // After NOT filtering
+  uint64_t after_filters = 0;       // After FILTER conditions
+  uint64_t final = 0;               // Final result count
+  std::string optimization;         // Optimization strategy used
 };
 
 /**
@@ -114,9 +114,9 @@ struct ReplicationStatus {
  * @brief Client configuration
  */
 struct ClientConfig {
-  std::string host = "127.0.0.1";  // Server hostname
-  uint16_t port = 11211;           // Server port
-  uint32_t timeout_ms = 5000;      // Connection timeout (milliseconds)
+  std::string host = "127.0.0.1";     // Server hostname
+  uint16_t port = 11211;              // Server port
+  uint32_t timeout_ms = 5000;         // Connection timeout (milliseconds)
   uint32_t recv_buffer_size = 65536;  // Receive buffer size
 };
 
@@ -200,15 +200,11 @@ class MygramClient {
    * @return SearchResponse on success, Error on failure
    */
   std::variant<SearchResponse, Error> Search(
-      const std::string& table,
-      const std::string& query,
-      uint32_t limit = 1000,
-      uint32_t offset = 0,
-      const std::vector<std::string>& and_terms = {},
+      const std::string& table, const std::string& query, uint32_t limit = 1000,
+      uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {},
-      const std::string& order_by = "",
-      bool order_desc = false);
+      const std::string& order_by = "", bool order_desc = false);
 
   /**
    * @brief Count matching documents
@@ -221,8 +217,7 @@ class MygramClient {
    * @return CountResponse on success, Error on failure
    */
   std::variant<CountResponse, Error> Count(
-      const std::string& table,
-      const std::string& query,
+      const std::string& table, const std::string& query,
       const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {});
@@ -234,8 +229,7 @@ class MygramClient {
    * @param primary_key Primary key value
    * @return Document on success, Error on failure
    */
-  std::variant<Document, Error> Get(const std::string& table,
-                                    const std::string& primary_key);
+  std::variant<Document, Error> Get(const std::string& table, const std::string& primary_key);
 
   /**
    * @brief Get server information

@@ -5,8 +5,6 @@
 
 #pragma once
 
-#include "index/posting_list.h"
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +13,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "index/posting_list.h"
 
 namespace mygramdb {
 namespace index {
@@ -32,9 +32,7 @@ class Index {
    * @param kanji_ngram_size N-gram size for CJK characters (0 = use ngram_size)
    * @param roaring_threshold Density threshold for Roaring bitmaps
    */
-  explicit Index(int ngram_size = 2,
-                  int kanji_ngram_size = 1,
-                  double roaring_threshold = 0.18);
+  explicit Index(int ngram_size = 2, int kanji_ngram_size = 1, double roaring_threshold = 0.18);
 
   ~Index() = default;
 
@@ -81,8 +79,7 @@ class Index {
    * @param old_text Old text content
    * @param new_text New text content
    */
-  void UpdateDocument(DocId doc_id, const std::string& old_text,
-                     const std::string& new_text);
+  void UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text);
 
   /**
    * @brief Remove document from index
@@ -115,9 +112,8 @@ class Index {
    * @param terms Terms to exclude
    * @return Vector of document IDs not containing any of the terms
    */
-  [[nodiscard]] std::vector<DocId> SearchNot(
-      const std::vector<DocId>& all_docs,
-      const std::vector<std::string>& terms) const;
+  [[nodiscard]] std::vector<DocId> SearchNot(const std::vector<DocId>& all_docs,
+                                             const std::vector<std::string>& terms) const;
 
   /**
    * @brief Count documents containing term

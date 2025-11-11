@@ -4,7 +4,9 @@
  */
 
 #include "storage/document_store.h"
+
 #include <gtest/gtest.h>
+
 #include <thread>
 #include <vector>
 
@@ -362,7 +364,7 @@ TEST(DocumentStoreTest, ConcurrentReads) {
   }
 
   // Simulate concurrent reads
-  const int num_threads = 100;  // Simulate 100 concurrent threads
+  const int num_threads = 100;       // Simulate 100 concurrent threads
   const int reads_per_thread = 100;  // Each thread does 100 reads
 
   std::vector<std::thread> threads;
@@ -687,7 +689,7 @@ TEST(DocumentStoreTest, ComplexEmoji) {
 
   // Emoji with skin tone modifier
   std::unordered_map<std::string, FilterValue> filters;
-  filters["thumbs"] = FilterValue("👍🏽");  // Medium skin tone
+  filters["thumbs"] = FilterValue("👍🏽");                       // Medium skin tone
   filters["family"] = FilterValue("👨‍👩‍👧‍👦");  // Family with ZWJ
 
   DocId doc_id = store.AddDocument("complex", filters);

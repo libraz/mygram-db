@@ -3,12 +3,15 @@
  * @brief Unit tests for MySQL ROWS event parser
  */
 
-#include <gtest/gtest.h>
 #include "mysql/rows_parser.h"
-#include "mysql/table_metadata.h"
-#include "mysql/binlog_util.h"
-#include <vector>
+
+#include <gtest/gtest.h>
+
 #include <cstring>
+#include <vector>
+
+#include "mysql/binlog_util.h"
+#include "mysql/table_metadata.h"
 
 #ifdef USE_MYSQL
 
@@ -18,8 +21,7 @@ class RowsParserTest : public ::testing::Test {
  protected:
   // Helper function to create a simple WRITE_ROWS event buffer
   std::vector<unsigned char> CreateWriteRowsEvent(
-      const TableMetadata& table_meta,
-      const std::vector<std::vector<std::string>>& rows) {
+      const TableMetadata& table_meta, const std::vector<std::vector<std::string>>& rows) {
     std::vector<unsigned char> buffer;
 
     // Common header (19 bytes) - simplified
@@ -158,14 +160,11 @@ TEST_F(RowsParserTest, ParseSimpleIntRow) {
   table_meta.columns.push_back(col_value);
 
   // Create event with one row: id=123, value=456
-  std::vector<std::vector<std::string>> rows = {
-      {"123", "456"}
-  };
+  std::vector<std::vector<std::string>> rows = {{"123", "456"}};
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(
-      buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -196,14 +195,11 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
   table_meta.columns.push_back(col_name);
 
   // Create event with one row: id=1, name="test"
-  std::vector<std::vector<std::string>> rows = {
-      {"1", "test"}
-  };
+  std::vector<std::vector<std::string>> rows = {{"1", "test"}};
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(
-      buffer.data(), buffer.size(), &table_meta, "id", "name");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name");
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -234,14 +230,11 @@ TEST_F(RowsParserTest, ParseTextRow) {
   table_meta.columns.push_back(col_content);
 
   // Create event with one row: id=100, content="Hello, World!"
-  std::vector<std::vector<std::string>> rows = {
-      {"100", "Hello, World!"}
-  };
+  std::vector<std::vector<std::string>> rows = {{"100", "Hello, World!"}};
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(
-      buffer.data(), buffer.size(), &table_meta, "id", "content");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content");
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -272,16 +265,11 @@ TEST_F(RowsParserTest, ParseMultipleRows) {
   table_meta.columns.push_back(col_name);
 
   // Create event with three rows
-  std::vector<std::vector<std::string>> rows = {
-      {"1", "Alice"},
-      {"2", "Bob"},
-      {"3", "Charlie"}
-  };
+  std::vector<std::vector<std::string>> rows = {{"1", "Alice"}, {"2", "Bob"}, {"3", "Charlie"}};
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(
-      buffer.data(), buffer.size(), &table_meta, "id", "name");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name");
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(3, result->size());

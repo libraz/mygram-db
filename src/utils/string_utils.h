@@ -25,7 +25,7 @@ namespace utils {
  * @return Normalized text
  */
 std::string NormalizeText(const std::string& text, bool nfkc = true,
-                         const std::string& width = "narrow", bool lower = false);
+                          const std::string& width = "narrow", bool lower = false);
 
 #ifdef USE_ICU
 /**
@@ -37,8 +37,8 @@ std::string NormalizeText(const std::string& text, bool nfkc = true,
  * @param lower Convert to lowercase
  * @return Normalized text
  */
-std::string NormalizeTextICU(const std::string& text, bool nfkc,
-                             const std::string& width, bool lower);
+std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width,
+                             bool lower);
 #endif
 
 /**
@@ -62,9 +62,8 @@ std::vector<std::string> GenerateNgrams(const std::string& text, int n = 1);
  * @param kanji_ngram_size N-gram size for CJK characters (default: 1)
  * @return Vector of n-gram strings
  */
-std::vector<std::string> GenerateHybridNgrams(const std::string& text,
-                                               int ascii_ngram_size = 2,
-                                               int kanji_ngram_size = 1);
+std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii_ngram_size = 2,
+                                              int kanji_ngram_size = 1);
 
 /**
  * @brief Convert UTF-8 string to codepoint vector

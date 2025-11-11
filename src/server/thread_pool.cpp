@@ -4,13 +4,13 @@
  */
 
 #include "thread_pool.h"
+
 #include <spdlog/spdlog.h>
 
 namespace mygramdb {
 namespace server {
 
-ThreadPool::ThreadPool(size_t num_threads, size_t queue_size)
-    : max_queue_size_(queue_size) {
+ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
   // Default to CPU count if not specified
   if (num_threads == 0) {
     num_threads = std::thread::hardware_concurrency();
@@ -19,8 +19,8 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size)
     }
   }
 
-  spdlog::info("Creating thread pool with {} workers, queue size: {}",
-               num_threads, queue_size == 0 ? "unbounded" : std::to_string(queue_size));
+  spdlog::info("Creating thread pool with {} workers, queue size: {}", num_threads,
+               queue_size == 0 ? "unbounded" : std::to_string(queue_size));
 
   // Start worker threads
   workers_.reserve(num_threads);
@@ -91,9 +91,7 @@ void ThreadPool::WorkerThread() {
       std::unique_lock<std::mutex> lock(queue_mutex_);
 
       // Wait for task or shutdown
-      condition_.wait(lock, [this] {
-        return shutdown_ || !tasks_.empty();
-      });
+      condition_.wait(lock, [this] { return shutdown_ || !tasks_.empty(); });
 
       // Exit if shutting down and no more tasks
       if (shutdown_ && tasks_.empty()) {

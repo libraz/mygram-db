@@ -4,6 +4,7 @@
  */
 
 #include "utils/string_utils.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -11,10 +12,10 @@
 #include <sstream>
 
 #ifdef USE_ICU
-#include <unicode/normalizer2.h>
-#include <unicode/unistr.h>
 #include <unicode/brkiter.h>
+#include <unicode/normalizer2.h>
 #include <unicode/translit.h>
+#include <unicode/unistr.h>
 #endif
 
 namespace mygramdb {
@@ -62,8 +63,7 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& text) {
     if (char_len == 1) {
       codepoint = first_byte;
     } else if (char_len == 2) {
-      codepoint = ((first_byte & 0x1F) << 6) |
-                  (static_cast<unsigned char>(text[i + 1]) & 0x3F);
+      codepoint = ((first_byte & 0x1F) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3F);
     } else if (char_len == 3) {
       codepoint = ((first_byte & 0x0F) << 12) |
                   ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
@@ -108,8 +108,8 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
 }
 
 #ifdef USE_ICU
-std::string NormalizeTextICU(const std::string& text, bool nfkc,
-                             const std::string& width, bool lower) {
+std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width,
+                             bool lower) {
   UErrorCode status = U_ZERO_ERROR;
 
   // Convert UTF-8 to UnicodeString
@@ -130,15 +130,15 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc,
   // Width conversion
   if (width == "narrow") {
     // Full-width to half-width conversion
-    std::unique_ptr<icu::Transliterator> trans(icu::Transliterator::createInstance(
-        "Fullwidth-Halfwidth", UTRANS_FORWARD, status));
+    std::unique_ptr<icu::Transliterator> trans(
+        icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
     if ((U_SUCCESS(status) != 0) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
-    std::unique_ptr<icu::Transliterator> trans(icu::Transliterator::createInstance(
-        "Halfwidth-Fullwidth", UTRANS_FORWARD, status));
+    std::unique_ptr<icu::Transliterator> trans(
+        icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
     if ((U_SUCCESS(status) != 0) && trans != nullptr) {
       trans->transliterate(ustr);
     }
@@ -156,8 +156,8 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc,
 }
 #endif
 
-std::string NormalizeText(const std::string& text, bool nfkc,
-                         const std::string& width, bool lower) {
+std::string NormalizeText(const std::string& text, bool nfkc, const std::string& width,
+                          bool lower) {
 #ifdef USE_ICU
   return NormalizeTextICU(text, nfkc, width, lower);
 #else
@@ -231,9 +231,8 @@ bool IsCJKIdeograph(uint32_t codepoint) {
 
 }  // namespace
 
-std::vector<std::string> GenerateHybridNgrams(const std::string& text,
-                                               int ascii_ngram_size,
-                                               int kanji_ngram_size) {
+std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii_ngram_size,
+                                              int kanji_ngram_size) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level processing

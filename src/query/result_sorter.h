@@ -5,12 +5,13 @@
 
 #pragma once
 
-#include "query/query_parser.h"
-#include "storage/document_store.h"
 #include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "query/query_parser.h"
+#include "storage/document_store.h"
 
 namespace mygramdb {
 namespace query {
@@ -47,10 +48,9 @@ class ResultSorter {
    * @param query Query with ORDER BY, LIMIT, OFFSET clauses
    * @return Sorted and paginated document IDs
    */
-  static std::vector<DocId> SortAndPaginate(
-      std::vector<DocId>& results,
-      const storage::DocumentStore& doc_store,
-      const Query& query);
+  static std::vector<DocId> SortAndPaginate(std::vector<DocId>& results,
+                                            const storage::DocumentStore& doc_store,
+                                            const Query& query);
 
  private:
   /**
@@ -61,10 +61,8 @@ class ResultSorter {
    * @param order_by ORDER BY clause
    * @return Sort key as string (for comparison)
    */
-  static std::string GetSortKey(
-      DocId doc_id,
-      const storage::DocumentStore& doc_store,
-      const OrderByClause& order_by);
+  static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
+                                const OrderByClause& order_by);
 
   /**
    * @brief Compare function for sorting
@@ -74,10 +72,8 @@ class ResultSorter {
     const OrderByClause& order_by_;
     bool ascending_;
 
-    SortComparator(const storage::DocumentStore& ds,
-                   const OrderByClause& ob)
-        : doc_store_(ds), order_by_(ob),
-          ascending_(ob.order == SortOrder::ASC) {}
+    SortComparator(const storage::DocumentStore& ds, const OrderByClause& ob)
+        : doc_store_(ds), order_by_(ob), ascending_(ob.order == SortOrder::ASC) {}
 
     bool operator()(DocId a, DocId b) const;
   };

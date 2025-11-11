@@ -4,6 +4,7 @@
  */
 
 #include "utils/network_utils.h"
+
 #include <gtest/gtest.h>
 
 namespace mygramdb {
@@ -46,20 +47,20 @@ TEST(NetworkUtilsTest, IPv4ToString) {
 TEST(NetworkUtilsTest, CIDR_Parse_Valid) {
   auto cidr = CIDR::Parse("192.168.1.0/24");
   ASSERT_TRUE(cidr.has_value());
-  EXPECT_EQ(cidr->network, 0xC0A80100);      // 192.168.1.0
-  EXPECT_EQ(cidr->netmask, 0xFFFFFF00);      // 255.255.255.0
+  EXPECT_EQ(cidr->network, 0xC0A80100);  // 192.168.1.0
+  EXPECT_EQ(cidr->netmask, 0xFFFFFF00);  // 255.255.255.0
   EXPECT_EQ(cidr->prefix_length, 24);
 
   cidr = CIDR::Parse("10.0.0.0/8");
   ASSERT_TRUE(cidr.has_value());
-  EXPECT_EQ(cidr->network, 0x0A000000);      // 10.0.0.0
-  EXPECT_EQ(cidr->netmask, 0xFF000000);      // 255.0.0.0
+  EXPECT_EQ(cidr->network, 0x0A000000);  // 10.0.0.0
+  EXPECT_EQ(cidr->netmask, 0xFF000000);  // 255.0.0.0
   EXPECT_EQ(cidr->prefix_length, 8);
 
   cidr = CIDR::Parse("172.16.0.0/16");
   ASSERT_TRUE(cidr.has_value());
-  EXPECT_EQ(cidr->network, 0xAC100000);      // 172.16.0.0
-  EXPECT_EQ(cidr->netmask, 0xFFFF0000);      // 255.255.0.0
+  EXPECT_EQ(cidr->network, 0xAC100000);  // 172.16.0.0
+  EXPECT_EQ(cidr->netmask, 0xFFFF0000);  // 255.255.0.0
   EXPECT_EQ(cidr->prefix_length, 16);
 
   cidr = CIDR::Parse("0.0.0.0/0");
@@ -77,8 +78,8 @@ TEST(NetworkUtilsTest, CIDR_Parse_Valid) {
 
 TEST(NetworkUtilsTest, CIDR_Parse_Invalid) {
   EXPECT_FALSE(CIDR::Parse("").has_value());
-  EXPECT_FALSE(CIDR::Parse("192.168.1.0").has_value());  // No prefix
-  EXPECT_FALSE(CIDR::Parse("192.168.1.0/").has_value()); // Empty prefix
+  EXPECT_FALSE(CIDR::Parse("192.168.1.0").has_value());     // No prefix
+  EXPECT_FALSE(CIDR::Parse("192.168.1.0/").has_value());    // Empty prefix
   EXPECT_FALSE(CIDR::Parse("192.168.1.0/33").has_value());  // Invalid prefix
   EXPECT_FALSE(CIDR::Parse("192.168.1.0/-1").has_value());  // Negative prefix
   EXPECT_FALSE(CIDR::Parse("not-an-ip/24").has_value());
@@ -179,11 +180,7 @@ TEST(NetworkUtilsTest, IsIPAllowed_SingleCIDR) {
 }
 
 TEST(NetworkUtilsTest, IsIPAllowed_MultipleCIDRs) {
-  std::vector<std::string> allow_cidrs = {
-    "192.168.1.0/24",
-    "10.0.0.0/8",
-    "172.16.0.0/16"
-  };
+  std::vector<std::string> allow_cidrs = {"192.168.1.0/24", "10.0.0.0/8", "172.16.0.0/16"};
 
   // Within ranges
   EXPECT_TRUE(IsIPAllowed("192.168.1.100", allow_cidrs));
@@ -206,11 +203,9 @@ TEST(NetworkUtilsTest, IsIPAllowed_InvalidIP) {
 }
 
 TEST(NetworkUtilsTest, IsIPAllowed_InvalidCIDR) {
-  std::vector<std::string> allow_cidrs = {
-    "192.168.1.0/24",
-    "invalid-cidr",  // Invalid CIDR should be ignored
-    "10.0.0.0/8"
-  };
+  std::vector<std::string> allow_cidrs = {"192.168.1.0/24",
+                                          "invalid-cidr",  // Invalid CIDR should be ignored
+                                          "10.0.0.0/8"};
 
   // Should still work with valid CIDRs
   EXPECT_TRUE(IsIPAllowed("192.168.1.1", allow_cidrs));

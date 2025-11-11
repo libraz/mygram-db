@@ -85,8 +85,7 @@ struct SearchExpression {
  * @param expression Web-style search expression
  * @return Parsed expression components, or error message
  */
-std::variant<SearchExpression, std::string> ParseSearchExpression(
-    const std::string& expression);
+std::variant<SearchExpression, std::string> ParseSearchExpression(const std::string& expression);
 
 /**
  * @brief Convert search expression directly to QueryAST-compatible string
@@ -103,8 +102,7 @@ std::variant<SearchExpression, std::string> ParseSearchExpression(
  * @param expression Web-style search expression
  * @return QueryAST-compatible query string, or error message
  */
-std::variant<std::string, std::string> ConvertSearchExpression(
-    const std::string& expression);
+std::variant<std::string, std::string> ConvertSearchExpression(const std::string& expression);
 
 /**
  * @brief Simplify search expression to basic terms (for backward compatibility)
@@ -118,11 +116,9 @@ std::variant<std::string, std::string> ConvertSearchExpression(
  * @param not_terms Output: excluded terms
  * @return true on success, false on error (check error message)
  */
-bool SimplifySearchExpression(
-    const std::string& expression,
-    std::string& main_term,
-    std::vector<std::string>& and_terms,
-    std::vector<std::string>& not_terms);
+bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
+                              std::vector<std::string>& and_terms,
+                              std::vector<std::string>& not_terms);
 
 }  // namespace client
 }  // namespace mygramdb

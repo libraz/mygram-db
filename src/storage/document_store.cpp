@@ -5,19 +5,18 @@
 
 #include "storage/document_store.h"
 
-#include <cmath>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 
 namespace mygramdb {
 namespace storage {
 
-DocId DocumentStore::AddDocument(
-    const std::string& primary_key,
-    const std::unordered_map<std::string, FilterValue>& filters) {
+DocId DocumentStore::AddDocument(const std::string& primary_key,
+                                 const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if primary key already exists
@@ -39,14 +38,12 @@ DocId DocumentStore::AddDocument(
     doc_filters_[doc_id] = filters;
   }
 
-  spdlog::debug("Added document: DocID={}, PK={}, filters={}", doc_id, primary_key,
-                filters.size());
+  spdlog::debug("Added document: DocID={}, PK={}, filters={}", doc_id, primary_key, filters.size());
 
   return doc_id;
 }
 
-std::vector<DocId> DocumentStore::AddDocumentBatch(
-    const std::vector<DocumentItem>& documents) {
+std::vector<DocId> DocumentStore::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   std::vector<DocId> doc_ids;
   doc_ids.reserve(documents.size());
 
@@ -61,8 +58,8 @@ std::vector<DocId> DocumentStore::AddDocumentBatch(
     // Check if primary key already exists
     auto iterator = pk_to_doc_id_.find(doc.primary_key);
     if (iterator != pk_to_doc_id_.end()) {
-      spdlog::warn("Primary key {} already exists with DocID {}",
-                   doc.primary_key, iterator->second);
+      spdlog::warn("Primary key {} already exists with DocID {}", doc.primary_key,
+                   iterator->second);
       doc_ids.push_back(iterator->second);
       continue;
     }
@@ -87,8 +84,8 @@ std::vector<DocId> DocumentStore::AddDocumentBatch(
   return doc_ids;
 }
 
-bool DocumentStore::UpdateDocument(
-    DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+bool DocumentStore::UpdateDocument(DocId doc_id,
+                                   const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if document exists
@@ -168,8 +165,8 @@ std::optional<std::string> DocumentStore::GetPrimaryKey(DocId doc_id) const {
   return iterator->second;
 }
 
-std::optional<FilterValue> DocumentStore::GetFilterValue(
-    DocId doc_id, const std::string& filter_name) const {
+std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id,
+                                                         const std::string& filter_name) const {
   std::shared_lock lock(mutex_);
   auto doc_it = doc_filters_.find(doc_id);
   if (doc_it == doc_filters_.end()) {
@@ -274,7 +271,8 @@ void DocumentStore::Clear() {
   spdlog::info("Document store cleared");
 }
 
-bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& replication_gtid) const {
+bool DocumentStore::SaveToFile(const std::string& filepath,
+                               const std::string& replication_gtid) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) {
@@ -347,26 +345,28 @@ bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& r
             auto type_idx = static_cast<uint8_t>(value.index());
             ofs.write(reinterpret_cast<const char*>(&type_idx), sizeof(type_idx));
 
-            std::visit([&ofs](const auto& filter_value) {
-              using T = std::decay_t<decltype(filter_value)>;
-              if constexpr (std::is_same_v<T, std::monostate>) {
-                // std::monostate (NULL) has no data to write
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                auto str_len = static_cast<uint32_t>(filter_value.size());
-                ofs.write(reinterpret_cast<const char*>(&str_len), sizeof(str_len));
-                ofs.write(filter_value.data(), str_len);
-              } else {
-                ofs.write(reinterpret_cast<const char*>(&filter_value), sizeof(filter_value));
-              }
-            }, value);
+            std::visit(
+                [&ofs](const auto& filter_value) {
+                  using T = std::decay_t<decltype(filter_value)>;
+                  if constexpr (std::is_same_v<T, std::monostate>) {
+                    // std::monostate (NULL) has no data to write
+                  } else if constexpr (std::is_same_v<T, std::string>) {
+                    auto str_len = static_cast<uint32_t>(filter_value.size());
+                    ofs.write(reinterpret_cast<const char*>(&str_len), sizeof(str_len));
+                    ofs.write(filter_value.data(), str_len);
+                  } else {
+                    ofs.write(reinterpret_cast<const char*>(&filter_value), sizeof(filter_value));
+                  }
+                },
+                value);
           }
         }
       }
     }
 
     ofs.close();
-    spdlog::info("Saved document store to {}: {} documents, {} MB",
-                 filepath, doc_count, MemoryUsage() / (1024 * 1024));
+    spdlog::info("Saved document store to {}: {} documents, {} MB", filepath, doc_count,
+                 MemoryUsage() / (1024 * 1024));
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while saving document store: {}", e.what());
@@ -464,65 +464,65 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
           // Read filter value based on type
           FilterValue value;
           switch (type_idx) {
-            case 0: { // std::monostate (NULL)
+            case 0: {  // std::monostate (NULL)
               value = std::monostate{};
               break;
             }
-            case 1: { // bool
+            case 1: {  // bool
               bool bool_value = false;
               ifs.read(reinterpret_cast<char*>(&bool_value), sizeof(bool_value));
               value = bool_value;
               break;
             }
-            case 2: { // int8_t
+            case 2: {  // int8_t
               int8_t int8_value = 0;
               ifs.read(reinterpret_cast<char*>(&int8_value), sizeof(int8_value));
               value = int8_value;
               break;
             }
-            case 3: { // uint8_t
+            case 3: {  // uint8_t
               uint8_t uint8_value = 0;
               ifs.read(reinterpret_cast<char*>(&uint8_value), sizeof(uint8_value));
               value = uint8_value;
               break;
             }
-            case 4: { // int16_t
+            case 4: {  // int16_t
               int16_t int16_value = 0;
               ifs.read(reinterpret_cast<char*>(&int16_value), sizeof(int16_value));
               value = int16_value;
               break;
             }
-            case 5: { // uint16_t
+            case 5: {  // uint16_t
               uint16_t uint16_value = 0;
               ifs.read(reinterpret_cast<char*>(&uint16_value), sizeof(uint16_value));
               value = uint16_value;
               break;
             }
-            case 6: { // int32_t
+            case 6: {  // int32_t
               int32_t int32_value = 0;
               ifs.read(reinterpret_cast<char*>(&int32_value), sizeof(int32_value));
               value = int32_value;
               break;
             }
-            case 7: { // uint32_t
+            case 7: {  // uint32_t
               uint32_t uint32_value = 0;
               ifs.read(reinterpret_cast<char*>(&uint32_value), sizeof(uint32_value));
               value = uint32_value;
               break;
             }
-            case 8: { // int64_t
+            case 8: {  // int64_t
               int64_t int64_value = 0;
               ifs.read(reinterpret_cast<char*>(&int64_value), sizeof(int64_value));
               value = int64_value;
               break;
             }
-            case 9: { // uint64_t
+            case 9: {  // uint64_t
               uint64_t uint64_value = 0;
               ifs.read(reinterpret_cast<char*>(&uint64_value), sizeof(uint64_value));
               value = uint64_value;
               break;
             }
-            case 10: { // std::string
+            case 10: {  // std::string
               uint32_t str_len = 0;
               ifs.read(reinterpret_cast<char*>(&str_len), sizeof(str_len));
               std::string string_value(str_len, '\0');
@@ -530,7 +530,7 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
               value = string_value;
               break;
             }
-            case 11: { // double
+            case 11: {  // double
               double double_value = NAN;
               ifs.read(reinterpret_cast<char*>(&double_value), sizeof(double_value));
               value = double_value;
@@ -559,8 +559,8 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       next_doc_id_ = next_id;
     }
 
-    spdlog::info("Loaded document store from {}: {} documents, {} MB",
-                 filepath, doc_count, MemoryUsage() / (1024 * 1024));
+    spdlog::info("Loaded document store from {}: {} documents, {} MB", filepath, doc_count,
+                 MemoryUsage() / (1024 * 1024));
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading document store: {}", e.what());

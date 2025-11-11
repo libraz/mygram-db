@@ -3,11 +3,13 @@
  * @brief Concurrent access tests for DocumentStore
  */
 
-#include "storage/document_store.h"
 #include <gtest/gtest.h>
+
+#include <atomic>
 #include <thread>
 #include <vector>
-#include <atomic>
+
+#include "storage/document_store.h"
 
 using namespace mygramdb::storage;
 
@@ -128,7 +130,8 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
   for (int i = 0; i < 3; i++) {
     threads.emplace_back([&store2, &load_done]() {
       for (int j = 0; j < 100; j++) {
-        if (load_done) break;
+        if (load_done)
+          break;
         auto doc = store2.GetDocument(j + 1);
         (void)doc;
         std::this_thread::sleep_for(std::chrono::microseconds(100));

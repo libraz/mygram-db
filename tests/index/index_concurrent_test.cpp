@@ -3,11 +3,13 @@
  * @brief Concurrent access tests for Index
  */
 
-#include "index/index.h"
 #include <gtest/gtest.h>
+
+#include <atomic>
 #include <thread>
 #include <vector>
-#include <atomic>
+
+#include "index/index.h"
 
 using namespace mygramdb::index;
 
@@ -218,9 +220,11 @@ TEST(IndexConcurrentTest, LoadFromFile) {
   for (int i = 0; i < 3; i++) {
     threads.emplace_back([&index2, &load_done]() {
       for (int j = 0; j < 100; j++) {
-        if (load_done) break;
+        if (load_done)
+          break;
         auto results = index2.SearchAnd({"a"});
-        // Should be either 0 (before load - "xyz" docs) or 100 (after load - "abc" docs), never partial
+        // Should be either 0 (before load - "xyz" docs) or 100 (after load - "abc" docs), never
+        // partial
         EXPECT_TRUE(results.size() == 0 || results.size() == 100);
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       }

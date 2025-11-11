@@ -4,11 +4,13 @@
  */
 
 #include <gtest/gtest.h>
+
+#include <cstdio>
+#include <fstream>
+#include <variant>
+
 #include "config/config.h"
 #include "storage/document_store.h"
-#include <variant>
-#include <fstream>
-#include <cstdio>
 
 using namespace mygramdb;
 
@@ -191,9 +193,7 @@ TEST(RequiredFiltersTest, InvalidOperator) {
   ofs.close();
 
   // Should throw exception for invalid operator
-  EXPECT_THROW({
-    auto config = config::LoadConfig(temp_file);
-  }, std::runtime_error);
+  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
 
   std::remove(temp_file.c_str());
 }
@@ -229,9 +229,7 @@ TEST(RequiredFiltersTest, WhereClauseDeprecated) {
   ofs.close();
 
   // Should throw exception for deprecated where_clause
-  EXPECT_THROW({
-    auto config = config::LoadConfig(temp_file);
-  }, std::runtime_error);
+  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
 
   std::remove(temp_file.c_str());
 }
@@ -284,7 +282,8 @@ TEST(RequiredFiltersTest, AllOperators) {
       auto config = config::LoadConfig(temp_file);
       ASSERT_EQ(config.tables[0].required_filters.size(), 1);
       EXPECT_EQ(config.tables[0].required_filters[0].op, op);
-    }) << "Failed for operator: " << op;
+    }) << "Failed for operator: "
+       << op;
 
     std::remove(temp_file.c_str());
   }
@@ -328,9 +327,7 @@ TEST(RequiredFiltersTest, IsNullShouldNotHaveValue) {
   ofs.close();
 
   // Should throw exception
-  EXPECT_THROW({
-    auto config = config::LoadConfig(temp_file);
-  }, std::runtime_error);
+  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
 
   std::remove(temp_file.c_str());
 }
@@ -372,9 +369,7 @@ TEST(RequiredFiltersTest, ComparisonMustHaveValue) {
   ofs.close();
 
   // Should throw exception
-  EXPECT_THROW({
-    auto config = config::LoadConfig(temp_file);
-  }, std::runtime_error);
+  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
 
   std::remove(temp_file.c_str());
 }

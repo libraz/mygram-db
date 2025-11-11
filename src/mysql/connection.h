@@ -8,9 +8,10 @@
 #ifdef USE_MYSQL
 
 #include <mysql.h>
-#include <string>
+
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace mygramdb {
 namespace mysql {
@@ -33,13 +34,10 @@ struct GTID {
   std::string ToString() const;
 
   bool operator==(const GTID& other) const {
-    return server_uuid == other.server_uuid &&
-           transaction_id == other.transaction_id;
+    return server_uuid == other.server_uuid && transaction_id == other.transaction_id;
   }
 
-  bool operator!=(const GTID& other) const {
-    return !(*this == other);
-  }
+  bool operator!=(const GTID& other) const { return !(*this == other); }
 };
 
 /**

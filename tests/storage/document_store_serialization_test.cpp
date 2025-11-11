@@ -3,10 +3,12 @@
  * @brief Comprehensive serialization tests for DocumentStore FilterValue types
  */
 
-#include "storage/document_store.h"
 #include <gtest/gtest.h>
+
 #include <cmath>
 #include <cstdio>
+
+#include "storage/document_store.h"
 
 using namespace mygramdb::storage;
 
@@ -15,13 +17,9 @@ using namespace mygramdb::storage;
  */
 class DocumentStoreSerializationTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    test_file_ = "/tmp/test_docstore_" + std::to_string(std::time(nullptr));
-  }
+  void SetUp() override { test_file_ = "/tmp/test_docstore_" + std::to_string(std::time(nullptr)); }
 
-  void TearDown() override {
-    std::remove((test_file_ + ".docs").c_str());
-  }
+  void TearDown() override { std::remove((test_file_ + ".docs").c_str()); }
 
   std::string test_file_;
 };

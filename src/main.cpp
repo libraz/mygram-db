@@ -5,24 +5,25 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "server/http_server.h"
+#include "server/tcp_server.h"
 #include "storage/document_store.h"
 #include "storage/snapshot_builder.h"
-#include "server/tcp_server.h"
-#include "server/http_server.h"
 #include "version.h"
 
 #ifdef USE_MYSQL
-#include "mysql/connection.h"
 #include "mysql/binlog_reader.h"
+#include "mysql/connection.h"
 #include "storage/gtid_state.h"
 #endif
+
+#include <spdlog/spdlog.h>
 
 #include <csignal>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <unordered_map>
-#include <spdlog/spdlog.h>
 
 namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -169,12 +170,11 @@ int main(int argc, char* argv[]) {
   if (config_test_mode) {
     std::cout << "Configuration file syntax is OK\n";
     std::cout << "Configuration details:\n";
-    std::cout << "  MySQL: " << config.mysql.user << "@" << config.mysql.host
-              << ":" << config.mysql.port << "\n";
+    std::cout << "  MySQL: " << config.mysql.user << "@" << config.mysql.host << ":"
+              << config.mysql.port << "\n";
     std::cout << "  Tables: " << config.tables.size() << "\n";
     for (const auto& table : config.tables) {
-      std::cout << "    - " << table.name
-                << " (primary_key: " << table.primary_key
+      std::cout << "    - " << table.name << " (primary_key: " << table.primary_key
                 << ", ngram_size: " << table.ngram_size << ")\n";
     }
     std::cout << "  API TCP: " << config.api.tcp.bind << ":" << config.api.tcp.port << "\n";
@@ -221,31 +221,31 @@ int main(int argc, char* argv[]) {
     ctx->config = table_config;
 
     // Create index and document store for this table
-    ctx->index = std::make_unique<mygramdb::index::Index>(
-        table_config.ngram_size, table_config.kanji_ngram_size);
+    ctx->index = std::make_unique<mygramdb::index::Index>(table_config.ngram_size,
+                                                          table_config.kanji_ngram_size);
     ctx->doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
 
 #ifdef USE_MYSQL
     // Build snapshot for this table
     spdlog::info("Building snapshot from table '{}'...", table_config.name);
-    mygramdb::storage::SnapshotBuilder snapshot_builder(
-        *mysql_conn, *ctx->index, *ctx->doc_store, table_config, config.build);
+    mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store,
+                                                        table_config, config.build);
 
     bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
       if (progress.processed_rows % 10000 == 0) {
-        spdlog::info("[{}] Processed {} rows ({:.0f} rows/s)",
-                     table_config.name, progress.processed_rows, progress.rows_per_second);
+        spdlog::info("[{}] Processed {} rows ({:.0f} rows/s)", table_config.name,
+                     progress.processed_rows, progress.rows_per_second);
       }
     });
 
     if (!snapshot_success) {
-      spdlog::error("Failed to build snapshot for table '{}': {}",
-                    table_config.name, snapshot_builder.GetLastError());
+      spdlog::error("Failed to build snapshot for table '{}': {}", table_config.name,
+                    snapshot_builder.GetLastError());
       return 1;
     }
 
-    spdlog::info("Snapshot build completed for table '{}': {} documents indexed",
-                 table_config.name, snapshot_builder.GetProcessedRows());
+    spdlog::info("Snapshot build completed for table '{}': {} documents indexed", table_config.name,
+                 snapshot_builder.GetProcessedRows());
 
     // Capture GTID from first table's snapshot
     if (snapshot_gtid.empty() && config.replication.enable) {
@@ -348,17 +348,11 @@ int main(int argc, char* argv[]) {
   server_config.max_connections = 1000;  // Default value
 
 #ifdef USE_MYSQL
-  mygramdb::server::TcpServer tcp_server(server_config,
-                                         table_contexts_ptrs,
-                                         config.snapshot.dir,
-                                         &config,
-                                         binlog_reader.get());
+  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir,
+                                         &config, binlog_reader.get());
 #else
-  mygramdb::server::TcpServer tcp_server(server_config,
-                                         table_contexts_ptrs,
-                                         config.snapshot.dir,
-                                         &config,
-                                         nullptr);
+  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir,
+                                         &config, nullptr);
 #endif
 
   if (!tcp_server.Start()) {
@@ -376,11 +370,11 @@ int main(int argc, char* argv[]) {
     http_config.port = config.api.http.port;
 
 #ifdef USE_MYSQL
-    http_server = std::make_unique<mygramdb::server::HttpServer>(
-        http_config, table_contexts_ptrs, &config, binlog_reader.get());
+    http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs,
+                                                                 &config, binlog_reader.get());
 #else
-    http_server = std::make_unique<mygramdb::server::HttpServer>(
-        http_config, table_contexts_ptrs, &config, nullptr);
+    http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs,
+                                                                 &config, nullptr);
 #endif
 
     if (!http_server->Start()) {

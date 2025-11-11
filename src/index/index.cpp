@@ -4,15 +4,17 @@
  */
 
 #include "index/index.h"
-#include "utils/string_utils.h"
+
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <spdlog/spdlog.h>
 #include <unordered_set>
+
+#include "utils/string_utils.h"
 
 namespace mygramdb {
 namespace index {
@@ -24,7 +26,8 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
 
 void Index::AddDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams using hybrid mode
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams =
+      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
   // Remove duplicates while preserving uniqueness
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
@@ -36,8 +39,8 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
   }
 
   const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
-  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id,
-                unique_ngrams.size(), ngram_size_, mode);
+  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, unique_ngrams.size(),
+                ngram_size_, mode);
 }
 
 void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
@@ -77,15 +80,16 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     posting->AddBatch(doc_ids);
   }
 
-  spdlog::debug("Added batch of {} documents with {} unique terms",
-                documents.size(), term_to_docs.size());
+  spdlog::debug("Added batch of {} documents with {} unique terms", documents.size(),
+                term_to_docs.size());
 }
 
-void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
-                          const std::string& new_text) {
+void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text) {
   // Generate n-grams for both texts
-  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
-  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> old_ngrams =
+      utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> new_ngrams =
+      utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
 
   std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
   std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
@@ -111,7 +115,8 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
 
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams =
+      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
 
   // Remove document from posting list for each n-gram
@@ -148,9 +153,8 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const
 
     auto term_docs = posting->GetAll();
     std::vector<DocId> intersection;
-    std::set_intersection(result.begin(), result.end(),
-                         term_docs.begin(), term_docs.end(),
-                         std::back_inserter(intersection));
+    std::set_intersection(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
+                          std::back_inserter(intersection));
     result = std::move(intersection);
 
     if (result.empty()) {
@@ -170,9 +174,8 @@ std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms
     if (posting != nullptr) {
       auto term_docs = posting->GetAll();
       std::vector<DocId> union_result;
-      std::set_union(result.begin(), result.end(),
-                    term_docs.begin(), term_docs.end(),
-                    std::back_inserter(union_result));
+      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
+                     std::back_inserter(union_result));
       result = std::move(union_result);
     }
   }
@@ -198,9 +201,8 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
 
   // Return set difference: all_docs - excluded_docs
   std::vector<DocId> result;
-  std::set_difference(all_docs.begin(), all_docs.end(),
-                     excluded_docs.begin(), excluded_docs.end(),
-                     std::back_inserter(result));
+  std::set_difference(all_docs.begin(), all_docs.end(), excluded_docs.begin(), excluded_docs.end(),
+                      std::back_inserter(result));
 
   return result;
 }
@@ -215,7 +217,7 @@ size_t Index::MemoryUsage() const {
   std::scoped_lock lock(postings_mutex_);
   size_t total = 0;
   for (const auto& [term, posting] : term_postings_) {
-    total += term.size();  // Term string
+    total += term.size();             // Term string
     total += posting->MemoryUsage();  // Posting list
   }
   return total;
@@ -242,7 +244,7 @@ Index::IndexStatistics Index::GetStatistics() const {
     }
 
     // Memory usage
-    stats.memory_usage_bytes += term.size();  // Term string
+    stats.memory_usage_bytes += term.size();             // Term string
     stats.memory_usage_bytes += posting->MemoryUsage();  // Posting list
   }
 
@@ -277,8 +279,8 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  spdlog::info("Starting batch optimization: {} terms, batch_size={}",
-               term_postings_.size(), batch_size);
+  spdlog::info("Starting batch optimization: {} terms, batch_size={}", term_postings_.size(),
+               batch_size);
 
   auto start_time = std::chrono::steady_clock::now();
 
@@ -338,18 +340,18 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     // Log progress every 10% or at the end
     size_t progress = ((batch_end) * 100) / total_terms;
     if (progress % 10 == 0 || batch_end == total_terms) {
-      spdlog::info("Optimization progress: {}/{} terms ({}%)",
-                   batch_end, total_terms, progress);
+      spdlog::info("Optimization progress: {}/{} terms ({}%)", batch_end, total_terms, progress);
     }
   }
 
   auto end_time = std::chrono::steady_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-      end_time - start_time).count();
+  auto duration =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
-  spdlog::info("Batch optimization completed: {} terms processed, "
-               "{} strategy changes, {:.2f}s elapsed",
-               total_terms, converted_count, static_cast<double>(duration) / 1000.0);
+  spdlog::info(
+      "Batch optimization completed: {} terms processed, "
+      "{} strategy changes, {:.2f}s elapsed",
+      total_terms, converted_count, static_cast<double>(duration) / 1000.0);
 
   return true;
 }
@@ -431,8 +433,8 @@ bool Index::SaveToFile(const std::string& filepath) const {
     }
 
     ofs.close();
-    spdlog::info("Saved index to {}: {} terms, {} MB",
-                 filepath, term_count, MemoryUsage() / (1024 * 1024));
+    spdlog::info("Saved index to {}: {} terms, {} MB", filepath, term_count,
+                 MemoryUsage() / (1024 * 1024));
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while saving index: {}", e.what());
@@ -515,8 +517,8 @@ bool Index::LoadFromFile(const std::string& filepath) {
       term_postings_ = std::move(new_postings);
     }
 
-    spdlog::info("Loaded index from {}: {} terms, {} MB",
-                 filepath, term_count, MemoryUsage() / (1024 * 1024));
+    spdlog::info("Loaded index from {}: {} terms, {} MB", filepath, term_count,
+                 MemoryUsage() / (1024 * 1024));
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading index: {}", e.what());

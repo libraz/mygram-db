@@ -69,8 +69,9 @@ bool BinlogReader::Start() {
 
   // Check if GTID mode is enabled (using main connection)
   if (!connection_.IsGTIDModeEnabled()) {
-    last_error_ = "GTID mode is not enabled on MySQL server. "
-                  "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
+    last_error_ =
+        "GTID mode is not enabled on MySQL server. "
+        "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
     spdlog::error("Cannot start binlog reader: {}", last_error_);
     return false;
   }
@@ -103,12 +104,10 @@ bool BinlogReader::Start() {
 
   try {
     // Start worker thread first
-    worker_thread_ = std::make_unique<std::thread>(
-        &BinlogReader::WorkerThreadFunc, this);
+    worker_thread_ = std::make_unique<std::thread>(&BinlogReader::WorkerThreadFunc, this);
 
     // Start reader thread
-    reader_thread_ = std::make_unique<std::thread>(
-        &BinlogReader::ReaderThreadFunc, this);
+    reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
 
     spdlog::info("Binlog reader started from GTID: {}", current_gtid_);
     return true;
@@ -162,8 +161,7 @@ void BinlogReader::Stop() {
   }
 
   running_ = false;
-  spdlog::info("Binlog reader stopped. Processed {} events",
-               processed_events_.load());
+  spdlog::info("Binlog reader stopped. Processed {} events", processed_events_.load());
 }
 
 std::string BinlogReader::GetCurrentGTID() const {
@@ -202,8 +200,7 @@ void BinlogReader::ReaderThreadFunc() {
   while (!should_stop_) {
     // Disable binlog checksums for this connection
     // We don't verify checksums yet, so ask the server to send events without them
-    if (mysql_query(binlog_connection_->GetHandle(),
-                    "SET @source_binlog_checksum='NONE'") != 0) {
+    if (mysql_query(binlog_connection_->GetHandle(), "SET @source_binlog_checksum='NONE'") != 0) {
       last_error_ = "Failed to disable binlog checksum: " + binlog_connection_->GetLastError();
       spdlog::error("{}", last_error_);
 
@@ -222,7 +219,7 @@ void BinlogReader::ReaderThreadFunc() {
 
     // Initialize MYSQL_RPL structure for binlog reading
     MYSQL_RPL rpl{};
-    rpl.file_name_length = 0;    // 0 means start from current position
+    rpl.file_name_length = 0;  // 0 means start from current position
     rpl.file_name = nullptr;
     rpl.start_position = 4;      // Skip magic number at start of binlog
     rpl.server_id = 1001;        // Use non-zero server ID for replica
@@ -239,10 +236,11 @@ void BinlogReader::ReaderThreadFunc() {
 
       // Use callback approach: MySQL will call our callback to encode the GTID into the packet
       rpl.gtid_set_encoded_size = gtid_encoded_data_.size();
-      rpl.gtid_set_arg = &gtid_encoded_data_;  // Pass pointer to our encoded data
+      rpl.gtid_set_arg = &gtid_encoded_data_;                // Pass pointer to our encoded data
       rpl.fix_gtid_set = &BinlogReader::FixGtidSetCallback;  // Static callback function
 
-      spdlog::info("Using GTID set '{}' (encoded to {} bytes)", current_gtid, gtid_encoded_data_.size());
+      spdlog::info("Using GTID set '{}' (encoded to {} bytes)", current_gtid,
+                   gtid_encoded_data_.size());
     } else {
       // Empty GTID set: receive all events from current binlog position
       rpl.gtid_set_encoded_size = 0;
@@ -325,8 +323,8 @@ void BinlogReader::ReaderThreadFunc() {
       // Parse the binlog event
       auto event_opt = ParseBinlogEvent(rpl.buffer, rpl.size);
       if (event_opt) {
-        spdlog::debug("Parsed event: type={}, table={}",
-                      static_cast<int>(event_opt->type), event_opt->table_name);
+        spdlog::debug("Parsed event: type={}, table={}", static_cast<int>(event_opt->type),
+                      event_opt->table_name);
 
         // Log important data events at info level
         if (event_opt->type == BinlogEventType::INSERT ||
@@ -340,8 +338,8 @@ void BinlogReader::ReaderThreadFunc() {
           } else if (event_opt->type == BinlogEventType::DELETE) {
             event_type_str = "DELETE";
           }
-          spdlog::info("Binlog event: {} on table '{}', pk={}",
-                       event_type_str, event_opt->table_name, event_opt->primary_key);
+          spdlog::info("Binlog event: {} on table '{}', pk={}", event_type_str,
+                       event_opt->table_name, event_opt->primary_key);
         }
 
         PushEvent(event_opt.value());
@@ -374,16 +372,15 @@ void BinlogReader::WorkerThreadFunc() {
     }
 
     if (!ProcessEvent(event)) {
-      spdlog::error("Failed to process event for table {}, pk: {}",
-                   event.table_name, event.primary_key);
+      spdlog::error("Failed to process event for table {}, pk: {}", event.table_name,
+                    event.primary_key);
     }
 
     processed_events_++;
     UpdateCurrentGTID(event.gtid);
 
     // Periodically write GTID to state file
-    if (!config_.state_file_path.empty() &&
-        config_.state_write_interval_events > 0 &&
+    if (!config_.state_file_path.empty() && config_.state_write_interval_events > 0 &&
         processed_events_ % config_.state_write_interval_events == 0) {
       WriteGTIDToStateFile(event.gtid);
     }
@@ -404,9 +401,8 @@ void BinlogReader::PushEvent(const BinlogEvent& event) {
   std::unique_lock<std::mutex> lock(queue_mutex_);
 
   // Wait if queue is full
-  queue_full_cv_.wait(lock, [this] {
-    return should_stop_ || event_queue_.size() < config_.queue_size;
-  });
+  queue_full_cv_.wait(lock,
+                      [this] { return should_stop_ || event_queue_.size() < config_.queue_size; });
 
   if (should_stop_) {
     return;
@@ -420,9 +416,7 @@ bool BinlogReader::PopEvent(BinlogEvent& event) {
   std::unique_lock<std::mutex> lock(queue_mutex_);
 
   // Wait if queue is empty
-  queue_cv_.wait(lock, [this] {
-    return should_stop_ || !event_queue_.empty();
-  });
+  queue_cv_.wait(lock, [this] { return should_stop_ || !event_queue_.empty(); });
 
   if (should_stop_ && event_queue_.empty()) {
     return false;
@@ -449,8 +443,7 @@ bool BinlogReader::EvaluateRequiredFilters(
   for (const auto& required_filter : table_config.required_filters) {
     auto it = filters.find(required_filter.name);
     if (it == filters.end()) {
-      spdlog::warn("Required filter column '{}' not found in binlog event",
-                   required_filter.name);
+      spdlog::warn("Required filter column '{}' not found in binlog event", required_filter.name);
       return false;
     }
 
@@ -488,9 +481,8 @@ std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFi
   return all_filters;
 }
 
-bool BinlogReader::CompareFilterValue(
-    const storage::FilterValue& value,
-    const config::RequiredFilterConfig& filter) const {
+bool BinlogReader::CompareFilterValue(const storage::FilterValue& value,
+                                      const config::RequiredFilterConfig& filter) const {
   // Handle NULL checks
   if (filter.op == "IS NULL") {
     return std::holds_alternative<std::monostate>(value);
@@ -510,36 +502,54 @@ bool BinlogReader::CompareFilterValue(
     int64_t val = std::get<int64_t>(value);
     int64_t target = std::stoll(filter.value);
 
-    if (filter.op == "=") return val == target;
-    if (filter.op == "!=") return val != target;
-    if (filter.op == "<") return val < target;
-    if (filter.op == ">") return val > target;
-    if (filter.op == "<=") return val <= target;
-    if (filter.op == ">=") return val >= target;
+    if (filter.op == "=")
+      return val == target;
+    if (filter.op == "!=")
+      return val != target;
+    if (filter.op == "<")
+      return val < target;
+    if (filter.op == ">")
+      return val > target;
+    if (filter.op == "<=")
+      return val <= target;
+    if (filter.op == ">=")
+      return val >= target;
 
   } else if (std::holds_alternative<double>(value)) {
     // Float comparison
     double val = std::get<double>(value);
     double target = std::stod(filter.value);
 
-    if (filter.op == "=") return std::abs(val - target) < 1e-9;
-    if (filter.op == "!=") return std::abs(val - target) >= 1e-9;
-    if (filter.op == "<") return val < target;
-    if (filter.op == ">") return val > target;
-    if (filter.op == "<=") return val <= target;
-    if (filter.op == ">=") return val >= target;
+    if (filter.op == "=")
+      return std::abs(val - target) < 1e-9;
+    if (filter.op == "!=")
+      return std::abs(val - target) >= 1e-9;
+    if (filter.op == "<")
+      return val < target;
+    if (filter.op == ">")
+      return val > target;
+    if (filter.op == "<=")
+      return val <= target;
+    if (filter.op == ">=")
+      return val >= target;
 
   } else if (std::holds_alternative<std::string>(value)) {
     // String comparison
     const std::string& val = std::get<std::string>(value);
     const std::string& target = filter.value;
 
-    if (filter.op == "=") return val == target;
-    if (filter.op == "!=") return val != target;
-    if (filter.op == "<") return val < target;
-    if (filter.op == ">") return val > target;
-    if (filter.op == "<=") return val <= target;
-    if (filter.op == ">=") return val >= target;
+    if (filter.op == "=")
+      return val == target;
+    if (filter.op == "!=")
+      return val != target;
+    if (filter.op == "<")
+      return val < target;
+    if (filter.op == ">")
+      return val > target;
+    if (filter.op == "<=")
+      return val <= target;
+    if (filter.op == ">=")
+      return val >= target;
 
   } else if (std::holds_alternative<uint64_t>(value)) {
     // Datetime/timestamp (stored as uint64_t epoch)
@@ -550,12 +560,18 @@ bool BinlogReader::CompareFilterValue(
     // TODO: Add proper datetime parsing if needed
     uint64_t target = std::stoull(filter.value);
 
-    if (filter.op == "=") return val == target;
-    if (filter.op == "!=") return val != target;
-    if (filter.op == "<") return val < target;
-    if (filter.op == ">") return val > target;
-    if (filter.op == "<=") return val <= target;
-    if (filter.op == ">=") return val >= target;
+    if (filter.op == "=")
+      return val == target;
+    if (filter.op == "!=")
+      return val != target;
+    if (filter.op == "<")
+      return val < target;
+    if (filter.op == ">")
+      return val > target;
+    if (filter.op == "<=")
+      return val <= target;
+    if (filter.op == ">=")
+      return val >= target;
   }
 
   spdlog::warn("Unsupported filter value type for comparison");
@@ -600,8 +616,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
       case BinlogEventType::INSERT: {
         if (matches_required) {
           // Condition satisfied -> add to index
-          storage::DocId doc_id =
-              current_doc_store->AddDocument(event.primary_key, event.filters);
+          storage::DocId doc_id = current_doc_store->AddDocument(event.primary_key, event.filters);
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           current_index->AddDocument(doc_id, normalized);
@@ -610,7 +625,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         } else {
           // Condition not satisfied -> do not index
           spdlog::debug("INSERT: pk={} (skipped, does not match required_filters)",
-                       event.primary_key);
+                        event.primary_key);
         }
         break;
       }
@@ -629,18 +644,17 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           current_doc_store->RemoveDocument(doc_id);
 
           spdlog::info("UPDATE: pk={} (removed from index, no longer matches required_filters)",
-                      event.primary_key);
+                       event.primary_key);
 
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
-          storage::DocId doc_id =
-              current_doc_store->AddDocument(event.primary_key, event.filters);
+          storage::DocId doc_id = current_doc_store->AddDocument(event.primary_key, event.filters);
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           current_index->AddDocument(doc_id, normalized);
 
           spdlog::info("UPDATE: pk={} (added to index, now matches required_filters)",
-                      event.primary_key);
+                       event.primary_key);
 
         } else if (exists && matches_required) {
           // Still matches conditions -> UPDATE
@@ -660,7 +674,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         } else {
           // !exists && !matches_required -> do nothing
           spdlog::debug("UPDATE: pk={} (ignored, not in index and does not match required_filters)",
-                       event.primary_key);
+                        event.primary_key);
         }
         break;
       }
@@ -705,11 +719,14 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           spdlog::error("DROP TABLE detected for table {}: {}", event.table_name, query);
           current_index->Clear();
           current_doc_store->Clear();
-          spdlog::error("Table dropped! Index and document store cleared. Please reconfigure or stop MygramDB.");
+          spdlog::error(
+              "Table dropped! Index and document store cleared. Please reconfigure or stop "
+              "MygramDB.");
         } else if (query_upper.find("ALTER") != std::string::npos) {
           // ALTER TABLE - log warning about potential schema mismatch
           spdlog::warn("ALTER TABLE detected for table {}: {}", event.table_name, query);
-          spdlog::warn("Schema change may cause data inconsistency. Consider rebuilding from snapshot.");
+          spdlog::warn(
+              "Schema change may cause data inconsistency. Consider rebuilding from snapshot.");
           // Note: We cannot automatically detect what changed (column type, name, etc.)
           // Users should manually rebuild if text column type or PK changed
         }
@@ -750,8 +767,8 @@ void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) const {
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
-    const unsigned char* buffer, unsigned long length) {
+std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* buffer,
+                                                          unsigned long length) {
   if ((buffer == nullptr) || length < 19) {
     // Minimum event size is 19 bytes (header)
     return std::nullopt;
@@ -789,10 +806,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
         auto metadata_opt = ParseTableMapEvent(buffer, length);
         if (metadata_opt) {
           table_metadata_cache_.Add(metadata_opt->table_id, metadata_opt.value());
-          spdlog::debug("Cached TABLE_MAP: {}.{} (table_id={})",
-                       metadata_opt->database_name,
-                       metadata_opt->table_name,
-                       metadata_opt->table_id);
+          spdlog::debug("Cached TABLE_MAP: {}.{} (table_id={})", metadata_opt->database_name,
+                        metadata_opt->table_name, metadata_opt->table_id);
         }
       }
       return std::nullopt;  // TABLE_MAP events don't generate data events
@@ -826,10 +841,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
         text_column = "";
       }
 
-      auto rows_opt = ParseWriteRowsEvent(
-          buffer, length, table_meta,
-          table_config_.primary_key,
-          text_column);
+      auto rows_opt =
+          ParseWriteRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return std::nullopt;
@@ -847,8 +860,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       // Extract all filters (required + optional) from row data
       event.filters = ExtractAllFilters(row);
 
-      spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}",
-                   event.primary_key, event.text.length(), event.filters.size());
+      spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}", event.primary_key,
+                    event.text.length(), event.filters.size());
 
       return event;
     }
@@ -882,10 +895,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       }
 
       // Parse rows using rows_parser
-      auto row_pairs_opt = ParseUpdateRowsEvent(
-          buffer, length, table_meta,
-          table_config_.primary_key,
-          text_column);
+      auto row_pairs_opt =
+          ParseUpdateRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
 
       if (!row_pairs_opt || row_pairs_opt->empty()) {
         return std::nullopt;
@@ -908,8 +919,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       // Note: For proper index update, we should use before image text
       // to remove old n-grams. For now, simplified implementation.
 
-      spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}",
-                   event.primary_key, event.text.length(), event.filters.size());
+      spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}", event.primary_key,
+                    event.text.length(), event.filters.size());
 
       return event;
     }
@@ -943,10 +954,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       }
 
       // Parse rows using rows_parser
-      auto rows_opt = ParseDeleteRowsEvent(
-          buffer, length, table_meta,
-          table_config_.primary_key,
-          text_column);
+      auto rows_opt =
+          ParseDeleteRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return std::nullopt;
@@ -964,8 +973,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       // Extract all filters (required + optional) from row data (before image for DELETE)
       event.filters = ExtractAllFilters(row);
 
-      spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}",
-                   event.primary_key, event.text.length(), event.filters.size());
+      spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}", event.primary_key,
+                    event.text.length(), event.filters.size());
 
       return event;
     }
@@ -1003,8 +1012,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
   }
 }
 
-std::optional<std::string> BinlogReader::ExtractGTID(
-    const unsigned char* buffer, unsigned long length) {
+std::optional<std::string> BinlogReader::ExtractGTID(const unsigned char* buffer,
+                                                     unsigned long length) {
   if ((buffer == nullptr) || length < 42) {
     // GTID event minimum size
     return std::nullopt;
@@ -1020,23 +1029,17 @@ std::optional<std::string> BinlogReader::ExtractGTID(
 
   // Format UUID as string using std::ostringstream
   std::ostringstream uuid_oss;
-  uuid_oss << std::hex << std::setfill('0')
-           << std::setw(2) << static_cast<int>(sid_ptr[0])
-           << std::setw(2) << static_cast<int>(sid_ptr[1])
-           << std::setw(2) << static_cast<int>(sid_ptr[2])
-           << std::setw(2) << static_cast<int>(sid_ptr[3]) << '-'
-           << std::setw(2) << static_cast<int>(sid_ptr[4])
-           << std::setw(2) << static_cast<int>(sid_ptr[5]) << '-'
-           << std::setw(2) << static_cast<int>(sid_ptr[6])
-           << std::setw(2) << static_cast<int>(sid_ptr[7]) << '-'
-           << std::setw(2) << static_cast<int>(sid_ptr[8])
-           << std::setw(2) << static_cast<int>(sid_ptr[9]) << '-'
-           << std::setw(2) << static_cast<int>(sid_ptr[10])
-           << std::setw(2) << static_cast<int>(sid_ptr[11])
-           << std::setw(2) << static_cast<int>(sid_ptr[12])
-           << std::setw(2) << static_cast<int>(sid_ptr[13])
-           << std::setw(2) << static_cast<int>(sid_ptr[14])
-           << std::setw(2) << static_cast<int>(sid_ptr[15]);
+  uuid_oss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(sid_ptr[0])
+           << std::setw(2) << static_cast<int>(sid_ptr[1]) << std::setw(2)
+           << static_cast<int>(sid_ptr[2]) << std::setw(2) << static_cast<int>(sid_ptr[3]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[4]) << std::setw(2)
+           << static_cast<int>(sid_ptr[5]) << '-' << std::setw(2) << static_cast<int>(sid_ptr[6])
+           << std::setw(2) << static_cast<int>(sid_ptr[7]) << '-' << std::setw(2)
+           << static_cast<int>(sid_ptr[8]) << std::setw(2) << static_cast<int>(sid_ptr[9]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[10]) << std::setw(2)
+           << static_cast<int>(sid_ptr[11]) << std::setw(2) << static_cast<int>(sid_ptr[12])
+           << std::setw(2) << static_cast<int>(sid_ptr[13]) << std::setw(2)
+           << static_cast<int>(sid_ptr[14]) << std::setw(2) << static_cast<int>(sid_ptr[15]);
 
   // Extract GNO (8 bytes, little-endian)
   const unsigned char* gno_ptr = sid_ptr + 16;
@@ -1051,8 +1054,8 @@ std::optional<std::string> BinlogReader::ExtractGTID(
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
-    const unsigned char* buffer, unsigned long length) {
+std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(const unsigned char* buffer,
+                                                              unsigned long length) {
   if ((buffer == nullptr) || length < 8) {
     // Minimum TABLE_MAP event size (6 bytes table_id + 2 bytes flags)
     return std::nullopt;
@@ -1237,8 +1240,7 @@ std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
 
         default:
           // Unknown type - skip metadata
-          spdlog::warn("Unknown column type {} while parsing metadata",
-                      static_cast<int>(type));
+          spdlog::warn("Unknown column type {} while parsing metadata", static_cast<int>(type));
           break;
       }
     }
@@ -1258,9 +1260,8 @@ std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
     }
   }
 
-  spdlog::debug("TABLE_MAP: {}.{} (table_id={}, columns={})",
-                metadata.database_name, metadata.table_name,
-                metadata.table_id, column_count);
+  spdlog::debug("TABLE_MAP: {}.{} (table_id={}, columns={})", metadata.database_name,
+                metadata.table_name, metadata.table_id, column_count);
 
   return metadata;
 }
@@ -1271,8 +1272,8 @@ void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid
   std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
 }
 
-std::optional<std::string> BinlogReader::ExtractQueryString(
-    const unsigned char* buffer, unsigned long length) {
+std::optional<std::string> BinlogReader::ExtractQueryString(const unsigned char* buffer,
+                                                            unsigned long length) {
   if ((buffer == nullptr) || length < 19) {
     // Minimum: 19 bytes header
     return std::nullopt;
@@ -1340,8 +1341,7 @@ std::optional<std::string> BinlogReader::ExtractQueryString(
   return query;
 }
 
-bool BinlogReader::IsTableAffectingDDL(const std::string& query,
-                                         const std::string& table_name) {
+bool BinlogReader::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {
   // Convert to uppercase for case-insensitive matching
   std::string query_upper = query;
   std::string table_upper = table_name;

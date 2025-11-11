@@ -10,24 +10,26 @@
 #define NI_MAXHOST 1025
 #endif
 
-#include "query/query_parser.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "config/config.h"
-#include "server/server_stats.h"
 #include <httplib.h>
-#include <nlohmann/json.hpp>
-#include <string>
+
 #include <atomic>
 #include <memory>
+#include <nlohmann/json.hpp>
+#include <string>
 #include <thread>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "query/query_parser.h"
+#include "server/server_stats.h"
+#include "storage/document_store.h"
 
 #ifdef USE_MYSQL
 namespace mygramdb {
 namespace mysql {
 class BinlogReader;
 }
-}
+}  // namespace mygramdb
 #endif
 
 namespace mygramdb {
@@ -65,15 +67,14 @@ class HttpServer {
    * @param full_config Full application configuration
    * @param binlog_reader Optional BinlogReader for replication status
    */
-  HttpServer(HttpServerConfig config,
-             std::unordered_map<std::string, TableContext*> table_contexts,
+  HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
              mysql::BinlogReader* binlog_reader = nullptr
 #else
              void* binlog_reader = nullptr
 #endif
-             );
+  );
 
   ~HttpServer();
 

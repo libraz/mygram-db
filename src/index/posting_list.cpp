@@ -4,8 +4,10 @@
  */
 
 #include "index/posting_list.h"
-#include <algorithm>
+
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 namespace mygramdb {
 namespace index {
@@ -67,8 +69,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     auto existing = DecodeDelta(delta_compressed_);
     std::vector<DocId> merged;
     merged.reserve(existing.size() + doc_ids.size());
-    std::set_union(existing.begin(), existing.end(),
-                   doc_ids.begin(), doc_ids.end(),
+    std::set_union(existing.begin(), existing.end(), doc_ids.begin(), doc_ids.end(),
                    std::back_inserter(merged));
     delta_compressed_ = EncodeDelta(merged);
   } else {
@@ -134,9 +135,8 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     auto docs1 = GetAll();
     auto docs2 = other.GetAll();
     std::vector<DocId> intersection;
-    std::set_intersection(docs1.begin(), docs1.end(),
-                         docs2.begin(), docs2.end(),
-                         std::back_inserter(intersection));
+    std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(),
+                          std::back_inserter(intersection));
     result->delta_compressed_ = EncodeDelta(intersection);
   }
 
@@ -156,9 +156,8 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     auto docs1 = GetAll();
     auto docs2 = other.GetAll();
     std::vector<DocId> union_result;
-    std::set_union(docs1.begin(), docs1.end(),
-                  docs2.begin(), docs2.end(),
-                  std::back_inserter(union_result));
+    std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(),
+                   std::back_inserter(union_result));
     result->delta_compressed_ = EncodeDelta(union_result);
   }
 
@@ -361,8 +360,8 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       roaring_bitmap_free(roaring_bitmap_);
     }
 
-    roaring_bitmap_ = roaring_bitmap_portable_deserialize(
-        reinterpret_cast<const char*>(buffer.data() + offset));
+    roaring_bitmap_ =
+        roaring_bitmap_portable_deserialize(reinterpret_cast<const char*>(buffer.data() + offset));
 
     if (roaring_bitmap_ == nullptr) {
       return false;

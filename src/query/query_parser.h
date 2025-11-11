@@ -6,10 +6,10 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
-#include <vector>
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace mygramdb {
 namespace query {
@@ -59,15 +59,15 @@ struct FilterCondition {
  * @brief Sort order for ORDER BY clause
  */
 enum class SortOrder {
-  ASC,   // Ascending
-  DESC   // Descending (default)
+  ASC,  // Ascending
+  DESC  // Descending (default)
 };
 
 /**
  * @brief ORDER BY clause specification
  */
 struct OrderByClause {
-  std::string column;  // Column name (empty = primary key)
+  std::string column;                 // Column name (empty = primary key)
   SortOrder order = SortOrder::DESC;  // Default: descending
 
   /**
@@ -80,19 +80,19 @@ struct OrderByClause {
  * @brief Debug information for query execution
  */
 struct DebugInfo {
-  double query_time_ms = 0.0;                    // Total query execution time
-  double parse_time_ms = 0.0;                    // Query parsing time
-  double index_time_ms = 0.0;                    // Index search time
-  double filter_time_ms = 0.0;                   // Filter application time
-  std::vector<std::string> search_terms;         // Search terms used
-  std::vector<std::string> ngrams_used;          // N-grams generated
-  std::vector<size_t> posting_list_sizes;        // Size of each posting list
-  size_t total_candidates = 0;                   // Total candidates before filtering
-  size_t after_intersection = 0;                 // Results after term intersection
-  size_t after_not = 0;                          // Results after NOT filtering
-  size_t after_filters = 0;                      // Results after filter conditions
-  size_t final_results = 0;                      // Final result count
-  std::string optimization_used;                 // Optimization strategy used
+  double query_time_ms = 0.0;              // Total query execution time
+  double parse_time_ms = 0.0;              // Query parsing time
+  double index_time_ms = 0.0;              // Index search time
+  double filter_time_ms = 0.0;             // Filter application time
+  std::vector<std::string> search_terms;   // Search terms used
+  std::vector<std::string> ngrams_used;    // N-grams generated
+  std::vector<size_t> posting_list_sizes;  // Size of each posting list
+  size_t total_candidates = 0;             // Total candidates before filtering
+  size_t after_intersection = 0;           // Results after term intersection
+  size_t after_not = 0;                    // Results after NOT filtering
+  size_t after_filters = 0;                // Results after filter conditions
+  size_t final_results = 0;                // Final result count
+  std::string optimization_used;           // Optimization strategy used
 };
 
 /**
@@ -106,10 +106,10 @@ struct Query {
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
   std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
-  uint32_t limit = 100;    // Default limit
-  uint32_t offset = 0;     // Default offset
-  std::string primary_key; // For GET command
-  std::string filepath;    // For SAVE/LOAD command (optional)
+  uint32_t limit = 100;                   // Default limit
+  uint32_t offset = 0;                    // Default offset
+  std::string primary_key;                // For GET command
+  std::string filepath;                   // For SAVE/LOAD command (optional)
 
   /**
    * @brief Check if query is valid
@@ -121,7 +121,8 @@ struct Query {
  * @brief Query parser
  *
  * Parses text protocol commands:
- * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [ORDER BY <col> ASC|DESC] [LIMIT <n>] [OFFSET <n>]
+ * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [ORDER BY <col>
+ * ASC|DESC] [LIMIT <n>] [OFFSET <n>]
  * - COUNT <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
  * - INFO

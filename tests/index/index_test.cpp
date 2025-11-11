@@ -4,9 +4,12 @@
  */
 
 #include "index/index.h"
-#include "utils/string_utils.h"
+
 #include <gtest/gtest.h>
+
 #include <unordered_set>
+
+#include "utils/string_utils.h"
 
 using namespace mygramdb::index;
 using namespace mygramdb::utils;
@@ -653,7 +656,7 @@ TEST(IndexTest, AddDocumentBatchStructureIntegrity) {
 
   // Verify sorted order
   for (size_t i = 1; i < results_ab.size(); ++i) {
-    EXPECT_LT(results_ab[i-1], results_ab[i]) << "Results must be sorted";
+    EXPECT_LT(results_ab[i - 1], results_ab[i]) << "Results must be sorted";
   }
 
   // Test term "cd" (should have docs 1, 2, 3)
@@ -689,7 +692,7 @@ TEST(IndexTest, AddDocumentBatchManyOverlappingTerms) {
 
   // Verify sorted and no duplicates
   for (size_t i = 1; i < results_t.size(); ++i) {
-    EXPECT_LT(results_t[i-1], results_t[i]) << "Results must be strictly increasing";
+    EXPECT_LT(results_t[i - 1], results_t[i]) << "Results must be strictly increasing";
   }
 
   // Verify all doc_ids are present
@@ -740,12 +743,10 @@ TEST(IndexTest, AddDocumentBatchVsSingleIdenticalStructure) {
   Index index_batch(2);
 
   // Prepare test data with complex overlapping terms
-  std::vector<std::string> texts = {
-      NormalizeText("データベース", true, "keep", false),
-      NormalizeText("データ構造", true, "keep", false),
-      NormalizeText("構造化データ", true, "keep", false),
-      NormalizeText("データベース設計", true, "keep", false)
-  };
+  std::vector<std::string> texts = {NormalizeText("データベース", true, "keep", false),
+                                    NormalizeText("データ構造", true, "keep", false),
+                                    NormalizeText("構造化データ", true, "keep", false),
+                                    NormalizeText("データベース設計", true, "keep", false)};
 
   // Add to single index one by one
   for (DocId i = 0; i < texts.size(); ++i) {

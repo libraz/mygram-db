@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -36,10 +37,10 @@ struct MysqlConfig {
  * conditions will be added to the index.
  */
 struct RequiredFilterConfig {
-  std::string name;  // Column name
-  std::string type;  // Type options (same as FilterConfig)
-  std::string op;    // Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
-  std::string value; // Value (empty for IS NULL/IS NOT NULL operators)
+  std::string name;           // Column name
+  std::string type;           // Type options (same as FilterConfig)
+  std::string op;             // Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
+  std::string value;          // Value (empty for IS NULL/IS NOT NULL operators)
   bool bitmap_index = false;  // Enable bitmap index for search-time filtering
 };
 
@@ -66,7 +67,7 @@ struct FilterConfig {
  * @brief Text source configuration
  */
 struct TextSourceConfig {
-  std::string column;  // Single column
+  std::string column;               // Single column
   std::vector<std::string> concat;  // Multiple columns to concatenate
   std::string delimiter = " ";
 };
@@ -76,7 +77,7 @@ struct TextSourceConfig {
  */
 struct PostingConfig {
   int block_size = 128;
-  int freq_bits = 0;  // 0=boolean, 4, or 8
+  int freq_bits = 0;                 // 0=boolean, 4, or 8
   std::string use_roaring = "auto";  // "auto", "always", "never"
 };
 
@@ -88,9 +89,9 @@ struct TableConfig {
   std::string primary_key = "id";
   TextSourceConfig text_source;
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
-  std::vector<FilterConfig> filters;  // Optional filters for search-time filtering
-  int ngram_size = 2;              // N-gram size for ASCII/alphanumeric characters
-  int kanji_ngram_size = 0;        // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
+  std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
+  int ngram_size = 2;        // N-gram size for ASCII/alphanumeric characters
+  int kanji_ngram_size = 0;  // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
   PostingConfig posting;
 };
 
@@ -112,7 +113,7 @@ struct ReplicationConfig {
   uint32_t server_id = 0;  // MySQL server ID for replication (must be unique, 0 = disabled)
   std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest", "state_file"
   std::string state_file = "./mygramdb_replication.state";  // File to persist current GTID position
-  int queue_size = 10000;  // Queue size for binlog events
+  int queue_size = 10000;                                   // Queue size for binlog events
   int reconnect_backoff_min_ms = 500;
   int reconnect_backoff_max_ms = 10000;
 };

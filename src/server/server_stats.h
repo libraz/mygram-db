@@ -5,10 +5,11 @@
 
 #pragma once
 
-#include "query/query_parser.h"
 #include <atomic>
 #include <cstdint>
 #include <ctime>
+
+#include "query/query_parser.h"
 
 namespace mygramdb {
 namespace server {

@@ -208,8 +208,7 @@ TEST(SearchExpressionTest, SimplifySearchExpression) {
   std::vector<std::string> and_terms;
   std::vector<std::string> not_terms;
 
-  bool success = SimplifySearchExpression(
-      "golang tutorial -old", main_term, and_terms, not_terms);
+  bool success = SimplifySearchExpression("golang tutorial -old", main_term, and_terms, not_terms);
 
   EXPECT_TRUE(success);
   EXPECT_EQ(main_term, "golang");
@@ -238,8 +237,7 @@ TEST(SearchExpressionTest, InvalidMissingTermAfterPlus) {
   ASSERT_TRUE(std::holds_alternative<std::string>(result));
 
   std::string error = std::get<std::string>(result);
-  EXPECT_TRUE(error.find("Expected term after") != std::string::npos ||
-              !error.empty());
+  EXPECT_TRUE(error.find("Expected term after") != std::string::npos || !error.empty());
 }
 
 /**
@@ -250,8 +248,7 @@ TEST(SearchExpressionTest, InvalidUnbalancedParens) {
   ASSERT_TRUE(std::holds_alternative<std::string>(result));
 
   std::string error = std::get<std::string>(result);
-  EXPECT_TRUE(error.find("Unbalanced") != std::string::npos ||
-              !error.empty());
+  EXPECT_TRUE(error.find("Unbalanced") != std::string::npos || !error.empty());
 }
 
 /**

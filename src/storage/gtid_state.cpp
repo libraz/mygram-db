@@ -87,8 +87,7 @@ bool GTIDStateFile::Write(const std::string& gtid) {
 
     // Atomic rename
     if (std::rename(temp_path.c_str(), file_path_.c_str()) != 0) {
-      spdlog::error("Failed to rename temporary GTID state file: {} -> {}",
-                   temp_path, file_path_);
+      spdlog::error("Failed to rename temporary GTID state file: {} -> {}", temp_path, file_path_);
       std::filesystem::remove(temp_path);
       return false;
     }

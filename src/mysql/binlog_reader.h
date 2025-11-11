@@ -7,19 +7,20 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/connection.h"
-#include "mysql/table_metadata.h"
-#include "mysql/rows_parser.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "config/config.h"
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
 #include <unordered_map>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "mysql/connection.h"
+#include "mysql/rows_parser.h"
+#include "mysql/table_metadata.h"
+#include "storage/document_store.h"
 
 namespace mygramdb {
 
@@ -37,7 +38,7 @@ enum class BinlogEventType {
   INSERT,
   UPDATE,
   DELETE,
-  DDL,      // DDL operations (TRUNCATE, ALTER, DROP)
+  DDL,  // DDL operations (TRUNCATE, ALTER, DROP)
   UNKNOWN
 };
 
@@ -67,7 +68,7 @@ class BinlogReader {
     std::string start_gtid;     // Starting GTID
     size_t queue_size = 10000;  // Maximum queue size
     int reconnect_delay_ms = 1000;
-    std::string state_file_path;  // Path to GTID state file (empty = no persistence)
+    std::string state_file_path;            // Path to GTID state file (empty = no persistence)
     int state_write_interval_events = 100;  // Write state every N events
   };
 
@@ -133,7 +134,7 @@ class BinlogReader {
   const std::string& GetLastError() const { return last_error_; }
 
  private:
-  Connection& connection_;  // Main connection (used for queries, not binlog)
+  Connection& connection_;                         // Main connection (used for queries, not binlog)
   std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading
 
   // Multi-table support
@@ -212,7 +213,7 @@ class BinlogReader {
    * @return true if all required_filters conditions are satisfied
    */
   bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
-                                const config::TableConfig& table_config) const;
+                               const config::TableConfig& table_config) const;
 
   /**
    * @brief Compare filter value against required filter condition
@@ -228,7 +229,8 @@ class BinlogReader {
    * @param row_data Row data from binlog
    * @return Map of filter name to FilterValue
    */
-  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(const RowData& row_data) const;
+  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
+      const RowData& row_data) const;
 
   /**
    * @brief Update current GTID
@@ -246,8 +248,7 @@ class BinlogReader {
    * @param length Length of the buffer
    * @return BinlogEvent if successfully parsed, nullopt otherwise
    */
-  std::optional<BinlogEvent> ParseBinlogEvent(const unsigned char* buffer,
-                                                unsigned long length);
+  std::optional<BinlogEvent> ParseBinlogEvent(const unsigned char* buffer, unsigned long length);
 
   /**
    * @brief Extract GTID from GTID event

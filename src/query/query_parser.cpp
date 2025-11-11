@@ -4,10 +4,12 @@
  */
 
 #include "query/query_parser.h"
+
 #include <spdlog/spdlog.h>
-#include <sstream>
+
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 namespace mygramdb {
 namespace query {
@@ -35,15 +37,10 @@ bool Query::IsValid() const {
   }
 
   // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_* commands don't require a table
-  if (type != QueryType::INFO && type != QueryType::SAVE &&
-      type != QueryType::LOAD &&
-      type != QueryType::REPLICATION_STATUS &&
-      type != QueryType::REPLICATION_STOP &&
-      type != QueryType::REPLICATION_START &&
-      type != QueryType::CONFIG &&
-      type != QueryType::OPTIMIZE &&
-      type != QueryType::DEBUG_ON &&
-      type != QueryType::DEBUG_OFF &&
+  if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
+      type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
+      type != QueryType::REPLICATION_START && type != QueryType::CONFIG &&
+      type != QueryType::OPTIMIZE && type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF &&
       table.empty()) {
     return false;
   }
@@ -205,7 +202,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
       char c = token[i];
 
       // Handle quote state
-      if ((c == '"' || c == '\'') && (i == 0 || token[i-1] != '\\')) {
+      if ((c == '"' || c == '\'') && (i == 0 || token[i - 1] != '\\')) {
         if (!in_quote) {
           in_quote = true;
           quote_char = c;
@@ -217,8 +214,10 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(') open++;
-        if (c == ')') close++;
+        if (c == '(')
+          open++;
+        if (c == ')')
+          close++;
       }
     }
 
@@ -246,8 +245,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     return query;
   }
 
-  // Extract search text: consume tokens until we hit a keyword (AND, OR, NOT, FILTER, ORDER, LIMIT, OFFSET)
-  // Handle parentheses by tracking nesting level - but respect quoted strings
+  // Extract search text: consume tokens until we hit a keyword (AND, OR, NOT, FILTER, ORDER, LIMIT,
+  // OFFSET) Handle parentheses by tracking nesting level - but respect quoted strings
   size_t pos = 2;
   std::vector<std::string> search_tokens;
   int paren_depth = 0;
@@ -261,10 +260,9 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)
-    if (paren_depth == 0 &&
-        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
-         upper_token == "FILTER" || upper_token == "ORDER" ||
-         upper_token == "LIMIT" || upper_token == "OFFSET")) {
+    if (paren_depth == 0 && (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
+                             upper_token == "FILTER" || upper_token == "ORDER" ||
+                             upper_token == "LIMIT" || upper_token == "OFFSET")) {
       break;  // Stop consuming search text
     }
 
@@ -282,8 +280,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   for (size_t i = 1; i < search_tokens.size(); ++i) {
     const std::string& token = search_tokens[i];
     // Don't add space before closing parentheses or after opening parentheses
-    bool prev_ends_with_open_paren = !search_tokens[i-1].empty() &&
-                                      search_tokens[i-1].back() == '(';
+    bool prev_ends_with_open_paren =
+        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
     bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
@@ -381,7 +379,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
       char c = token[i];
 
       // Handle quote state
-      if ((c == '"' || c == '\'') && (i == 0 || token[i-1] != '\\')) {
+      if ((c == '"' || c == '\'') && (i == 0 || token[i - 1] != '\\')) {
         if (!in_quote) {
           in_quote = true;
           quote_char = c;
@@ -393,8 +391,10 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(') open++;
-        if (c == ')') close++;
+        if (c == '(')
+          open++;
+        if (c == ')')
+          close++;
       }
     }
 
@@ -438,10 +438,9 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
     // Check if this is a keyword (only when not inside parentheses)
     // Include LIMIT/OFFSET/ORDER so they stop token consumption and get rejected below
-    if (paren_depth == 0 &&
-        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
-         upper_token == "FILTER" || upper_token == "LIMIT" ||
-         upper_token == "OFFSET" || upper_token == "ORDER")) {
+    if (paren_depth == 0 && (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
+                             upper_token == "FILTER" || upper_token == "LIMIT" ||
+                             upper_token == "OFFSET" || upper_token == "ORDER")) {
       break;  // Stop consuming search text
     }
 
@@ -459,8 +458,8 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   for (size_t i = 1; i < search_tokens.size(); ++i) {
     const std::string& token = search_tokens[i];
     // Don't add space before closing parentheses or after opening parentheses
-    bool prev_ends_with_open_paren = !search_tokens[i-1].empty() &&
-                                      search_tokens[i-1].back() == '(';
+    bool prev_ends_with_open_paren =
+        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
     bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
@@ -530,10 +529,9 @@ Query QueryParser::ParseGet(const std::vector<std::string>& tokens) {
   return query;
 }
 
-bool QueryParser::ParseAnd(const std::vector<std::string>& tokens,
-                           size_t& pos, Query& query) {
+bool QueryParser::ParseAnd(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // AND <term>
-  pos++; // Skip "AND"
+  pos++;  // Skip "AND"
 
   if (pos >= tokens.size()) {
     SetError("AND requires a term");
@@ -544,10 +542,9 @@ bool QueryParser::ParseAnd(const std::vector<std::string>& tokens,
   return true;
 }
 
-bool QueryParser::ParseNot(const std::vector<std::string>& tokens,
-                           size_t& pos, Query& query) {
+bool QueryParser::ParseNot(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // NOT <term>
-  pos++; // Skip "NOT"
+  pos++;  // Skip "NOT"
 
   if (pos >= tokens.size()) {
     SetError("NOT requires a term");
@@ -558,10 +555,9 @@ bool QueryParser::ParseNot(const std::vector<std::string>& tokens,
   return true;
 }
 
-bool QueryParser::ParseFilters(const std::vector<std::string>& tokens,
-                               size_t& pos, Query& query) {
+bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // FILTER <col> <op> <value>
-  pos++; // Skip "FILTER"
+  pos++;  // Skip "FILTER"
 
   if (pos + 2 >= tokens.size()) {
     SetError("FILTER requires column, operator, and value");
@@ -584,10 +580,9 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens,
   return true;
 }
 
-bool QueryParser::ParseLimit(const std::vector<std::string>& tokens,
-                             size_t& pos, Query& query) {
+bool QueryParser::ParseLimit(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // LIMIT <n>
-  pos++; // Skip "LIMIT"
+  pos++;  // Skip "LIMIT"
 
   if (pos >= tokens.size()) {
     SetError("LIMIT requires a number");
@@ -609,10 +604,9 @@ bool QueryParser::ParseLimit(const std::vector<std::string>& tokens,
   return true;
 }
 
-bool QueryParser::ParseOffset(const std::vector<std::string>& tokens,
-                              size_t& pos, Query& query) {
+bool QueryParser::ParseOffset(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // OFFSET <n>
-  pos++; // Skip "OFFSET"
+  pos++;  // Skip "OFFSET"
 
   if (pos >= tokens.size()) {
     SetError("OFFSET requires a number");
@@ -634,12 +628,11 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens,
   return true;
 }
 
-bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens,
-                                size_t& pos, Query& query) {
+bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // ORDER BY <column> [ASC|DESC]
   // ORDER BY ASC/DESC (shorthand for primary key)
   // ORDER ASC/DESC (shorthand, BY is optional)
-  pos++; // Skip "ORDER"
+  pos++;  // Skip "ORDER"
 
   if (pos >= tokens.size()) {
     SetError("ORDER requires BY or ASC/DESC");
@@ -664,7 +657,7 @@ bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens,
     SetError("Expected BY or ASC/DESC after ORDER, got: " + next_token);
     return false;
   }
-  pos++; // Skip "BY"
+  pos++;  // Skip "BY"
 
   if (pos >= tokens.size()) {
     SetError("ORDER BY requires a column name or ASC/DESC");
@@ -715,13 +708,27 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
     if (escape_next) {
       // Handle escape sequences
       switch (character) {
-        case 'n':  token += '\n'; break;
-        case 't':  token += '\t'; break;
-        case 'r':  token += '\r'; break;
-        case '\\': token += '\\'; break;
-        case '"':  token += '"';  break;
-        case '\'': token += '\''; break;
-        default:   token += character;    break;  // Unknown escape, keep as-is
+        case 'n':
+          token += '\n';
+          break;
+        case 't':
+          token += '\t';
+          break;
+        case 'r':
+          token += '\r';
+          break;
+        case '\\':
+          token += '\\';
+          break;
+        case '"':
+          token += '"';
+          break;
+        case '\'':
+          token += '\'';
+          break;
+        default:
+          token += character;
+          break;  // Unknown escape, keep as-is
       }
       escape_next = false;
       continue;

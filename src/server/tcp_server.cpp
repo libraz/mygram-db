@@ -24,8 +24,8 @@
 #include <sstream>
 #include <utility>
 
-#include "utils/string_utils.h"
 #include "utils/network_utils.h"
+#include "utils/string_utils.h"
 #include "version.h"
 
 #ifdef USE_MYSQL
@@ -50,10 +50,10 @@ TcpServer::TcpServer(ServerConfig config,
       full_config_(full_config),
       binlog_reader_(binlog_reader) {
   // Create thread pool
-  thread_pool_ = std::make_unique<ThreadPool>(
-      config_.worker_threads > 0 ? config_.worker_threads : 0,
-      1000  // Queue size for backpressure
-  );
+  thread_pool_ =
+      std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0,
+                                   1000  // Queue size for backpressure
+      );
 }
 
 TcpServer::~TcpServer() {
@@ -89,8 +89,8 @@ bool TcpServer::Start() {
   address.sin_port = htons(config_.port);
 
   if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0) {
-    last_error_ = "Failed to bind to port " + std::to_string(config_.port) +
-                  ": " + std::string(strerror(errno));
+    last_error_ = "Failed to bind to port " + std::to_string(config_.port) + ": " +
+                  std::string(strerror(errno));
     spdlog::error(last_error_);
     close(server_fd_);
     server_fd_ = -1;
@@ -120,8 +120,7 @@ bool TcpServer::Start() {
   running_ = true;
 
   // Start accept thread
-  accept_thread_ = std::make_unique<std::thread>(
-      &TcpServer::AcceptThreadFunc, this);
+  accept_thread_ = std::make_unique<std::thread>(&TcpServer::AcceptThreadFunc, this);
 
   spdlog::info("TCP server started on {}:{}", config_.host, actual_port_);
   return true;
@@ -163,8 +162,7 @@ void TcpServer::Stop() {
   }
 
   running_ = false;
-  spdlog::info("TCP server stopped. Handled {} total requests",
-               stats_.GetTotalRequests());
+  spdlog::info("TCP server stopped. Handled {} total requests", stats_.GetTotalRequests());
 }
 
 void TcpServer::AcceptThreadFunc() {
@@ -174,8 +172,8 @@ void TcpServer::AcceptThreadFunc() {
     struct sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
 
-    int client_fd = accept(server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr),
-                          &client_len);
+    int client_fd =
+        accept(server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &client_len);
 
     if (client_fd < 0) {
       if (should_stop_) {
@@ -224,9 +222,7 @@ void TcpServer::AcceptThreadFunc() {
     }
 
     // Submit to thread pool
-    bool submitted = thread_pool_->Submit([this, client_fd]() {
-      HandleClient(client_fd);
-    });
+    bool submitted = thread_pool_->Submit([this, client_fd]() { HandleClient(client_fd); });
 
     if (!submitted) {
       spdlog::warn("Thread pool queue full, rejecting connection");
@@ -237,10 +233,8 @@ void TcpServer::AcceptThreadFunc() {
       continue;
     }
 
-    spdlog::debug("Accepted connection from {}:{} (active: {})",
-                 inet_ntoa(client_addr.sin_addr),
-                 ntohs(client_addr.sin_port),
-                 stats_.GetActiveConnections());
+    spdlog::debug("Accepted connection from {}:{} (active: {})", inet_ntoa(client_addr.sin_addr),
+                  ntohs(client_addr.sin_port), stats_.GetActiveConnections());
   }
 
   spdlog::info("Accept thread stopped");
@@ -368,9 +362,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
-        all_search_terms.insert(all_search_terms.end(),
-                               query.and_terms.begin(),
-                               query.and_terms.end());
+        all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(),
+                                query.and_terms.end());
 
         // Collect debug info for search terms
         if (ctx.debug_mode) {
@@ -419,9 +412,9 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Sort terms by estimated size (smallest first for faster intersection)
         std::sort(term_infos.begin(), term_infos.end(),
-                 [](const TermInfo& lhs, const TermInfo& rhs) {
-                   return lhs.estimated_size < rhs.estimated_size;
-                 });
+                  [](const TermInfo& lhs, const TermInfo& rhs) {
+                    return lhs.estimated_size < rhs.estimated_size;
+                  });
 
         // If any term has zero results, return empty immediately
         if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
@@ -429,9 +422,12 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             debug_info.optimization_used = "early-exit (empty posting list)";
             debug_info.final_results = 0;
             auto end_time = std::chrono::high_resolution_clock::now();
-            debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-            debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-            return FormatSearchResponse({}, query.limit, query.offset, current_doc_store, &debug_info);
+            debug_info.query_time_ms =
+                std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            debug_info.index_time_ms =
+                std::chrono::duration<double, std::milli>(end_time - index_start).count();
+            return FormatSearchResponse({}, query.limit, query.offset, current_doc_store,
+                                        &debug_info);
           }
           return FormatSearchResponse({}, query.limit, query.offset, current_doc_store);
         }
@@ -449,9 +445,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
           std::vector<storage::DocId> intersection;
           intersection.reserve(std::min(results.size(), and_results.size()));
-          std::set_intersection(results.begin(), results.end(),
-                              and_results.begin(), and_results.end(),
-                              std::back_inserter(intersection));
+          std::set_intersection(results.begin(), results.end(), and_results.begin(),
+                                and_results.end(), std::back_inserter(intersection));
           results = std::move(intersection);
         }
 
@@ -493,18 +488,20 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
               // For now, only support equality operator
               if (filter_cond.op == query::FilterOp::EQ) {
                 // Convert filter value string to appropriate type and compare
-                bool matches = stored_value &&
-                              std::visit([&](const auto& val) {
-                                using T = std::decay_t<decltype(val)>;
-                                if constexpr (std::is_same_v<T, std::monostate>) {
-                                  // NULL value never matches
-                                  return false;
-                                } else if constexpr (std::is_same_v<T, std::string>) {
-                                  return val == filter_cond.value;
-                                } else {
-                                  return std::to_string(val) == filter_cond.value;
-                                }
-                              }, stored_value.value());
+                bool matches =
+                    stored_value && std::visit(
+                                        [&](const auto& val) {
+                                          using T = std::decay_t<decltype(val)>;
+                                          if constexpr (std::is_same_v<T, std::monostate>) {
+                                            // NULL value never matches
+                                            return false;
+                                          } else if constexpr (std::is_same_v<T, std::string>) {
+                                            return val == filter_cond.value;
+                                          } else {
+                                            return std::to_string(val) == filter_cond.value;
+                                          }
+                                        },
+                                        stored_value.value());
 
                 if (!matches) {
                   matches_all_filters = false;
@@ -521,7 +518,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           results = filtered_results;
           if (ctx.debug_mode) {
             auto filter_end = std::chrono::high_resolution_clock::now();
-            debug_info.filter_time_ms = std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
+            debug_info.filter_time_ms =
+                std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
             debug_info.after_filters = results.size();
           }
         } else if (ctx.debug_mode) {
@@ -532,11 +530,15 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         if (ctx.debug_mode) {
           auto end_time = std::chrono::high_resolution_clock::now();
           auto index_end = std::chrono::high_resolution_clock::now();
-          debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-          debug_info.index_time_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
-          debug_info.final_results = std::min(static_cast<size_t>(query.limit),
-                                              results.size() > query.offset ? results.size() - query.offset : 0);
-          return FormatSearchResponse(results, query.limit, query.offset, current_doc_store, &debug_info);
+          debug_info.query_time_ms =
+              std::chrono::duration<double, std::milli>(end_time - start_time).count();
+          debug_info.index_time_ms =
+              std::chrono::duration<double, std::milli>(index_end - index_start).count();
+          debug_info.final_results =
+              std::min(static_cast<size_t>(query.limit),
+                       results.size() > query.offset ? results.size() - query.offset : 0);
+          return FormatSearchResponse(results, query.limit, query.offset, current_doc_store,
+                                      &debug_info);
         }
 
         return FormatSearchResponse(results, query.limit, query.offset, current_doc_store);
@@ -551,9 +553,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
-        all_search_terms.insert(all_search_terms.end(),
-                               query.and_terms.begin(),
-                               query.and_terms.end());
+        all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(),
+                                query.and_terms.end());
 
         // Generate n-grams for each term and estimate result sizes
         struct TermInfo {
@@ -589,9 +590,9 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Sort terms by estimated size (smallest first for faster intersection)
         std::sort(term_infos.begin(), term_infos.end(),
-                 [](const TermInfo& lhs, const TermInfo& rhs) {
-                   return lhs.estimated_size < rhs.estimated_size;
-                 });
+                  [](const TermInfo& lhs, const TermInfo& rhs) {
+                    return lhs.estimated_size < rhs.estimated_size;
+                  });
 
         // If any term has zero results, return 0 immediately
         if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
@@ -606,9 +607,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
           std::vector<storage::DocId> intersection;
           intersection.reserve(std::min(results.size(), and_results.size()));
-          std::set_intersection(results.begin(), results.end(),
-                              and_results.begin(), and_results.end(),
-                              std::back_inserter(intersection));
+          std::set_intersection(results.begin(), results.end(), and_results.begin(),
+                                and_results.end(), std::back_inserter(intersection));
           results = std::move(intersection);
         }
 
@@ -643,18 +643,20 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
               // For now, only support equality operator
               if (filter_cond.op == query::FilterOp::EQ) {
                 // Convert filter value string to appropriate type and compare
-                bool matches = stored_value &&
-                              std::visit([&](const auto& val) {
-                                using T = std::decay_t<decltype(val)>;
-                                if constexpr (std::is_same_v<T, std::monostate>) {
-                                  // NULL value never matches
-                                  return false;
-                                } else if constexpr (std::is_same_v<T, std::string>) {
-                                  return val == filter_cond.value;
-                                } else {
-                                  return std::to_string(val) == filter_cond.value;
-                                }
-                              }, stored_value.value());
+                bool matches =
+                    stored_value && std::visit(
+                                        [&](const auto& val) {
+                                          using T = std::decay_t<decltype(val)>;
+                                          if constexpr (std::is_same_v<T, std::monostate>) {
+                                            // NULL value never matches
+                                            return false;
+                                          } else if constexpr (std::is_same_v<T, std::string>) {
+                                            return val == filter_cond.value;
+                                          } else {
+                                            return std::to_string(val) == filter_cond.value;
+                                          }
+                                        },
+                                        stored_value.value());
 
                 if (!matches) {
                   matches_all_filters = false;
@@ -713,7 +715,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         // Get current GTID from shared binlog reader
         // TODO: Need access to shared binlog_reader from main
         std::string current_gtid;
-        spdlog::info("GTID capture in SAVE not yet implemented (need shared binlog_reader reference)");
+        spdlog::info(
+            "GTID capture in SAVE not yet implemented (need shared binlog_reader reference)");
 
         // Set read-only mode
         read_only_ = true;
@@ -753,7 +756,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             meta_file << "  \"tables\": [";
             bool first = true;
             for (const auto& [table_name, ctx] : table_contexts_) {
-              if (!first) meta_file << ", ";
+              if (!first)
+                meta_file << ", ";
               meta_file << "\"" << table_name << "\"";
               first = false;
             }
@@ -833,7 +837,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
           // Check if snapshot files exist for this table
           if (stat(table_index_path.c_str(), &st) != 0) {
-            spdlog::warn("Snapshot for table '{}' not found, skipping (table may be new)", table_name);
+            spdlog::warn("Snapshot for table '{}' not found, skipping (table may be new)",
+                         table_name);
             continue;
           }
 
@@ -851,7 +856,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // TODO: Restore GTID to shared binlog_reader
         if (success && !loaded_gtid.empty()) {
-          spdlog::info("Found GTID in snapshot: {} (TODO: apply to shared binlog_reader)", loaded_gtid);
+          spdlog::info("Found GTID in snapshot: {} (TODO: apply to shared binlog_reader)",
+                       loaded_gtid);
         }
 
         if (success) {
@@ -873,7 +879,6 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             return FormatReplicationStopResponse();
           }
           return FormatError("Replication is not running");
-
         }
         return FormatError("Replication is not configured");
 
@@ -891,10 +896,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
               return FormatReplicationStartResponse();
             }
             return FormatError("Failed to start replication: " + binlog_reader_->GetLastError());
-
           }
           return FormatError("Replication is already running");
-
         }
         return FormatError("Replication is not configured");
 #else
@@ -949,11 +952,10 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
   }
 }
 
-std::string TcpServer::FormatSearchResponse(
-    const std::vector<index::DocId>& results,
-    uint32_t limit, uint32_t offset,
-    storage::DocumentStore* doc_store,
-    const query::DebugInfo* debug_info) {
+std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& results,
+                                            uint32_t limit, uint32_t offset,
+                                            storage::DocumentStore* doc_store,
+                                            const query::DebugInfo* debug_info) {
   std::ostringstream oss;
   oss << "OK RESULTS " << results.size();
 
@@ -971,7 +973,8 @@ std::string TcpServer::FormatSearchResponse(
   // Add debug information if provided
   if (debug_info != nullptr) {
     oss << " DEBUG";
-    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
+    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms
+        << "ms";
     oss << " index_time=" << debug_info->index_time_ms << "ms";
     if (debug_info->filter_time_ms > 0.0) {
       oss << " filter_time=" << debug_info->filter_time_ms << "ms";
@@ -995,15 +998,15 @@ std::string TcpServer::FormatSearchResponse(
   return oss.str();
 }
 
-std::string TcpServer::FormatCountResponse(uint64_t count,
-                                          const query::DebugInfo* debug_info) {
+std::string TcpServer::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {
   std::ostringstream oss;
   oss << "OK COUNT " << count;
 
   // Add debug information if provided
   if (debug_info != nullptr) {
     oss << " DEBUG";
-    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
+    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms
+        << "ms";
     oss << " index_time=" << debug_info->index_time_ms << "ms";
     oss << " terms=" << debug_info->search_terms.size();
     oss << " ngrams=" << debug_info->ngrams_used.size();
@@ -1012,8 +1015,7 @@ std::string TcpServer::FormatCountResponse(uint64_t count,
   return oss.str();
 }
 
-std::string TcpServer::FormatGetResponse(
-    const std::optional<storage::Document>& doc) {
+std::string TcpServer::FormatGetResponse(const std::optional<storage::Document>& doc) {
   if (!doc) {
     return FormatError("Document not found");
   }
@@ -1047,7 +1049,8 @@ std::string TcpServer::FormatInfoResponse() {
   // Stats - Command counters
   oss << "# Stats\r\n";
   oss << "total_commands_processed: " << stats_.GetTotalCommands() << "\r\n";
-  oss << "total_connections_received: " << stats_.GetStatistics().total_connections_received << "\r\n";
+  oss << "total_connections_received: " << stats_.GetStatistics().total_connections_received
+      << "\r\n";
   oss << "total_requests: " << stats_.GetTotalRequests() << "\r\n";
   oss << "\r\n";
 
@@ -1128,9 +1131,10 @@ std::string TcpServer::FormatInfoResponse() {
   // Memory fragmentation estimate
   if (total_memory > 0) {
     size_t peak = stats_.GetPeakMemoryUsage();
-    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
-    oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2)
-        << fragmentation << "\r\n";
+    double fragmentation =
+        peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
+    oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2) << fragmentation
+        << "\r\n";
   }
   oss << "\r\n";
 
@@ -1141,8 +1145,8 @@ std::string TcpServer::FormatInfoResponse() {
   oss << "total_postings: " << total_postings << "\r\n";
   if (total_terms > 0) {
     double avg_postings = static_cast<double>(total_postings) / static_cast<double>(total_terms);
-    oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2)
-        << avg_postings << "\r\n";
+    oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2) << avg_postings
+        << "\r\n";
   }
   oss << "delta_encoded_lists: " << total_delta_encoded << "\r\n";
   oss << "roaring_bitmap_lists: " << total_roaring_bitmap << "\r\n";
@@ -1176,7 +1180,8 @@ std::string TcpServer::FormatInfoResponse() {
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
     oss << "# Replication\r\n";
-    oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
+    oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped")
+        << "\r\n";
     oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
     oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
     oss << "\r\n";

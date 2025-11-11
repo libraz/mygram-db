@@ -4,16 +4,19 @@
  */
 
 #include "server/http_server.h"
+
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <chrono>
+#include <nlohmann/json.hpp>
+#include <sstream>
+#include <variant>
+
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 #include "version.h"
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
-#include <sstream>
-#include <chrono>
-#include <variant>
-#include <algorithm>
 
 // Fix for httplib missing NI_MAXHOST on some platforms
 #ifndef NI_MAXHOST
@@ -270,10 +273,9 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Sort terms by estimated size (smallest first for faster intersection)
-    std::sort(term_infos.begin(), term_infos.end(),
-             [](const TermInfo& lhs, const TermInfo& rhs) {
-               return lhs.estimated_size < rhs.estimated_size;
-             });
+    std::sort(term_infos.begin(), term_infos.end(), [](const TermInfo& lhs, const TermInfo& rhs) {
+      return lhs.estimated_size < rhs.estimated_size;
+    });
 
     // If any term has zero results, return empty immediately
     std::vector<DocId> results;
@@ -289,9 +291,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           }
           auto term_results = current_index->SearchAnd(term_infos[i].ngrams);
           std::vector<DocId> intersection;
-          std::set_intersection(results.begin(), results.end(),
-                              term_results.begin(), term_results.end(),
-                              std::back_inserter(intersection));
+          std::set_intersection(results.begin(), results.end(), term_results.begin(),
+                                term_results.end(), std::back_inserter(intersection));
           results = std::move(intersection);
         }
       }
@@ -310,17 +311,15 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         }
         auto not_results = current_index->SearchOr(ngrams);
         std::vector<DocId> union_result;
-        std::set_union(not_results_union.begin(), not_results_union.end(),
-                      not_results.begin(), not_results.end(),
-                      std::back_inserter(union_result));
+        std::set_union(not_results_union.begin(), not_results_union.end(), not_results.begin(),
+                       not_results.end(), std::back_inserter(union_result));
         not_results_union = std::move(union_result);
       }
 
       // Remove documents matching NOT terms
       std::vector<DocId> filtered_results;
-      std::set_difference(results.begin(), results.end(),
-                        not_results_union.begin(), not_results_union.end(),
-                        std::back_inserter(filtered_results));
+      std::set_difference(results.begin(), results.end(), not_results_union.begin(),
+                          not_results_union.end(), std::back_inserter(filtered_results));
       results = std::move(filtered_results);
     }
 
@@ -342,16 +341,18 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           }
 
           const auto& stored_value = filter_it->second;
-          bool matches = std::visit([&filter_cond](auto&& val) -> bool {
-            using T = std::decay_t<decltype(val)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-              return false;
-            } else if constexpr (std::is_same_v<T, std::string>) {
-              return val == filter_cond.value;
-            } else {
-              return std::to_string(val) == filter_cond.value;
-            }
-          }, stored_value);
+          bool matches = std::visit(
+              [&filter_cond](auto&& val) -> bool {
+                using T = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                  return false;
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                  return val == filter_cond.value;
+                } else {
+                  return std::to_string(val) == filter_cond.value;
+                }
+              },
+              stored_value);
 
           if (!matches) {
             matches_all_filters = false;
@@ -398,18 +399,20 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           json filters_obj;
           for (const auto& [key, val] : doc->filters) {
             // Convert FilterValue to JSON
-            std::visit([&](auto&& arg) {
-              using T = std::decay_t<decltype(arg)>;
-              if constexpr (std::is_same_v<T, int64_t>) {
-                filters_obj[key] = arg;
-              } else if constexpr (std::is_same_v<T, double>) {
-                filters_obj[key] = arg;
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                filters_obj[key] = arg;
-              } else if constexpr (std::is_same_v<T, int64_t>) {
-                filters_obj[key] = arg;
-              }
-            }, val);
+            std::visit(
+                [&](auto&& arg) {
+                  using T = std::decay_t<decltype(arg)>;
+                  if constexpr (std::is_same_v<T, int64_t>) {
+                    filters_obj[key] = arg;
+                  } else if constexpr (std::is_same_v<T, double>) {
+                    filters_obj[key] = arg;
+                  } else if constexpr (std::is_same_v<T, std::string>) {
+                    filters_obj[key] = arg;
+                  } else if constexpr (std::is_same_v<T, int64_t>) {
+                    filters_obj[key] = arg;
+                  }
+                },
+                val);
           }
           doc_obj["filters"] = filters_obj;
         }
@@ -467,16 +470,18 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       json filters_obj;
       for (const auto& [key, val] : doc->filters) {
         // Convert FilterValue to JSON
-        std::visit([&](auto&& arg) {
-          using T = std::decay_t<decltype(arg)>;
-          if constexpr (std::is_same_v<T, int64_t>) {
-            filters_obj[key] = arg;
-          } else if constexpr (std::is_same_v<T, double>) {
-            filters_obj[key] = arg;
-          } else if constexpr (std::is_same_v<T, std::string>) {
-            filters_obj[key] = arg;
-          }
-        }, val);
+        std::visit(
+            [&](auto&& arg) {
+              using T = std::decay_t<decltype(arg)>;
+              if constexpr (std::is_same_v<T, int64_t>) {
+                filters_obj[key] = arg;
+              } else if constexpr (std::is_same_v<T, double>) {
+                filters_obj[key] = arg;
+              } else if constexpr (std::is_same_v<T, std::string>) {
+                filters_obj[key] = arg;
+              }
+            },
+            val);
       }
       response["filters"] = filters_obj;
     }
@@ -556,7 +561,8 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     index_obj["total_terms"] = total_terms;
     index_obj["total_postings"] = total_postings;
     if (total_terms > 0) {
-      index_obj["avg_postings_per_term"] = static_cast<double>(total_postings) / static_cast<double>(total_terms);
+      index_obj["avg_postings_per_term"] =
+          static_cast<double>(total_postings) / static_cast<double>(total_terms);
     }
     index_obj["delta_encoded_lists"] = total_delta_encoded;
     index_obj["roaring_bitmap_lists"] = total_roaring_bitmap;

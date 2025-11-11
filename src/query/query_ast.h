@@ -28,10 +28,10 @@ namespace query {
  * @brief AST node type
  */
 enum class NodeType {
-  AND,   // Logical AND (intersection)
-  OR,    // Logical OR (union)
-  NOT,   // Logical NOT (complement)
-  TERM   // Search term (leaf node)
+  AND,  // Logical AND (intersection)
+  OR,   // Logical OR (union)
+  NOT,  // Logical NOT (complement)
+  TERM  // Search term (leaf node)
 };
 
 /**
@@ -55,8 +55,7 @@ struct QueryNode {
   /**
    * @brief Construct term node
    */
-  explicit QueryNode(std::string term_value)
-      : type(NodeType::TERM), term(std::move(term_value)) {}
+  explicit QueryNode(std::string term_value) : type(NodeType::TERM), term(std::move(term_value)) {}
 
   /**
    * @brief Construct operator node
@@ -75,22 +74,21 @@ struct QueryNode {
    * @param doc_store Document store for NOT operations (to get all docs)
    * @return Vector of document IDs matching the query
    */
-  [[nodiscard]] std::vector<index::DocId> Evaluate(
-      const index::Index& index,
-      const storage::DocumentStore& doc_store) const;
+  [[nodiscard]] std::vector<index::DocId> Evaluate(const index::Index& index,
+                                                   const storage::DocumentStore& doc_store) const;
 };
 
 /**
  * @brief Token type for lexical analysis
  */
 enum class TokenType {
-  AND,       // AND keyword
-  OR,        // OR keyword
-  NOT,       // NOT keyword
-  LPAREN,    // Left parenthesis '('
-  RPAREN,    // Right parenthesis ')'
-  TERM,      // Search term (quoted or unquoted)
-  END        // End of input
+  AND,     // AND keyword
+  OR,      // OR keyword
+  NOT,     // NOT keyword
+  LPAREN,  // Left parenthesis '('
+  RPAREN,  // Right parenthesis ')'
+  TERM,    // Search term (quoted or unquoted)
+  END      // End of input
 };
 
 /**

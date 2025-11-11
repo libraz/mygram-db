@@ -4,6 +4,7 @@
  */
 
 #include "query/query_parser.h"
+
 #include <gtest/gtest.h>
 
 using namespace mygramdb::query;
@@ -448,7 +449,8 @@ TEST(QueryParserTest, SearchWithNotAndFilter) {
  */
 TEST(QueryParserTest, SearchWithNotFilterLimitOffset) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello NOT world FILTER status = 1 LIMIT 50 OFFSET 100");
+  auto query =
+      parser.Parse("SEARCH articles hello NOT world FILTER status = 1 LIMIT 50 OFFSET 100");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.not_terms.size(), 1);
@@ -696,7 +698,8 @@ TEST(QueryParserTest, JapaneseQuotedString) {
  */
 TEST(QueryParserTest, ComplexQueryWithQuotesAndNot) {
   QueryParser parser;
-  auto query = parser.Parse(R"(SEARCH articles "hello world" AND test NOT bad FILTER status = 1 LIMIT 50 OFFSET 100)");
+  auto query = parser.Parse(
+      R"(SEARCH articles "hello world" AND test NOT bad FILTER status = 1 LIMIT 50 OFFSET 100)");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.search_text, "hello world");
@@ -820,7 +823,8 @@ TEST(QueryParserTest, SearchWithOrderByCaseInsensitive) {
 
 TEST(QueryParserTest, SearchWithOrderByAndFilter) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
+  auto query = parser.Parse(
+      "SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.filters.size(), 1);
@@ -833,7 +837,9 @@ TEST(QueryParserTest, SearchWithOrderByAndFilter) {
 
 TEST(QueryParserTest, SearchComplexWithOrderBy) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles golang AND tutorial NOT beginner FILTER status = 1 ORDER BY score DESC LIMIT 10 OFFSET 20");
+  auto query = parser.Parse(
+      "SEARCH articles golang AND tutorial NOT beginner FILTER status = 1 ORDER BY score DESC "
+      "LIMIT 10 OFFSET 20");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.search_text, "golang");
@@ -982,7 +988,8 @@ TEST(QueryParserTest, SearchWithParenthesesAndOrderBy) {
  */
 TEST(QueryParserTest, SearchWithComplexExpressionAndOrderBy) {
   QueryParser parser;
-  auto query = parser.Parse(R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
+  auto query = parser.Parse(
+      R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "posts");

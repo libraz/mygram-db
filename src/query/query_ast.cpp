@@ -4,13 +4,15 @@
  */
 
 #include "query/query_ast.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "utils/string_utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <set>
 #include <sstream>
+
+#include "index/index.h"
+#include "storage/document_store.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb {
 namespace query {
@@ -76,9 +78,8 @@ std::string QueryNode::ToString() const {
   return oss.str();
 }
 
-std::vector<index::DocId> QueryNode::Evaluate(
-    const index::Index& index,
-    const storage::DocumentStore& doc_store) const {
+std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
+                                              const storage::DocumentStore& doc_store) const {
   using index::DocId;
 
   switch (type) {
@@ -123,10 +124,8 @@ std::vector<index::DocId> QueryNode::Evaluate(
         } else {
           // Intersect with previous results
           std::vector<DocId> intersection;
-          std::set_intersection(
-              current_result.begin(), current_result.end(),
-              child_result.begin(), child_result.end(),
-              std::back_inserter(intersection));
+          std::set_intersection(current_result.begin(), current_result.end(), child_result.begin(),
+                                child_result.end(), std::back_inserter(intersection));
           current_result = std::move(intersection);
         }
 
@@ -166,10 +165,8 @@ std::vector<index::DocId> QueryNode::Evaluate(
 
       // Return complement (all_docs - exclude_docs)
       std::vector<DocId> result;
-      std::set_difference(
-          all_docs.begin(), all_docs.end(),
-          exclude_docs.begin(), exclude_docs.end(),
-          std::back_inserter(result));
+      std::set_difference(all_docs.begin(), all_docs.end(), exclude_docs.begin(),
+                          exclude_docs.end(), std::back_inserter(result));
 
       return result;
     }
@@ -192,8 +189,7 @@ void Tokenizer::SkipWhitespace() {
 
 bool Tokenizer::IsTermChar(char character) {
   // Allow alphanumeric, underscore, and non-ASCII characters
-  return std::isalnum(static_cast<unsigned char>(character)) != 0 ||
-         character == '_' ||
+  return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_' ||
          static_cast<unsigned char>(character) > 127;
 }
 
@@ -208,13 +204,27 @@ std::string Tokenizer::ReadQuotedString(char quote_char) {
     if (escape_next) {
       // Handle escape sequences
       switch (character) {
-        case 'n':  result += '\n'; break;
-        case 't':  result += '\t'; break;
-        case 'r':  result += '\r'; break;
-        case '\\': result += '\\'; break;
-        case '"':  result += '"';  break;
-        case '\'': result += '\''; break;
-        default:   result += character; break;
+        case 'n':
+          result += '\n';
+          break;
+        case 't':
+          result += '\t';
+          break;
+        case 'r':
+          result += '\r';
+          break;
+        case '\\':
+          result += '\\';
+          break;
+        case '"':
+          result += '"';
+          break;
+        case '\'':
+          result += '\'';
+          break;
+        default:
+          result += character;
+          break;
       }
       escape_next = false;
       pos_++;

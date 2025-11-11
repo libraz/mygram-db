@@ -30,7 +30,7 @@ std::optional<GTID> GTID::Parse(const std::string& gtid_str) {
   gtid.server_uuid = gtid_str.substr(0, colon_pos);
 
   std::string txn_part = gtid_str.substr(colon_pos + 1);
-  
+
   // Handle range format (UUID:1-10) - take the end value
   size_t dash_pos = txn_part.find('-');
   if (dash_pos != std::string::npos) {
@@ -87,8 +87,7 @@ bool Connection::Connect() {
   }
 
   // Set connection timeouts
-  mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT,
-                &config_.connect_timeout);
+  mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout);
   mysql_options(mysql_, MYSQL_OPT_READ_TIMEOUT, &config_.read_timeout);
   mysql_options(mysql_, MYSQL_OPT_WRITE_TIMEOUT, &config_.write_timeout);
 
@@ -141,8 +140,7 @@ bool Connection::Reconnect() {
     return false;
   }
 
-  spdlog::info("Attempting to reconnect to MySQL {}:{}...",
-               config_.host, config_.port);
+  spdlog::info("Attempting to reconnect to MySQL {}:{}...", config_.host, config_.port);
 
   // Close existing connection if any
   if (mysql_ != nullptr) {

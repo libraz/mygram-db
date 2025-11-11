@@ -4,10 +4,12 @@
  */
 
 #include "query/query_ast.h"
+
+#include <gtest/gtest.h>
+
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
-#include <gtest/gtest.h>
 
 namespace mygramdb {
 namespace query {

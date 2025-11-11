@@ -5,8 +5,9 @@
 
 #pragma once
 
-#include "mysql/connection.h"
 #include <gmock/gmock.h>
+
+#include "mysql/connection.h"
 
 #ifdef USE_MYSQL
 

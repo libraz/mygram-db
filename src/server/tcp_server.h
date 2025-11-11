@@ -5,27 +5,28 @@
 
 #pragma once
 
-#include "query/query_parser.h"
-#include "index/index.h"
-#include "storage/document_store.h"
-#include "config/config.h"
-#include "server/thread_pool.h"
-#include "server/server_stats.h"
-#include <string>
-#include <thread>
 #include <atomic>
 #include <memory>
-#include <vector>
 #include <mutex>
 #include <set>
+#include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "query/query_parser.h"
+#include "server/server_stats.h"
+#include "server/thread_pool.h"
+#include "storage/document_store.h"
 
 #ifdef USE_MYSQL
 namespace mygramdb {
 namespace mysql {
 class BinlogReader;
 }
-}
+}  // namespace mygramdb
 #endif
 
 namespace mygramdb {
@@ -36,9 +37,9 @@ namespace server {
  */
 struct ServerConfig {
   std::string host = "0.0.0.0";
-  uint16_t port = 11211;  // memcached default port
+  uint16_t port = 11211;        // memcached default port
   int max_connections = 10000;  // Maximum concurrent connections
-  int worker_threads = 0;  // Number of worker threads (0 = CPU count)
+  int worker_threads = 0;       // Number of worker threads (0 = CPU count)
   int recv_buffer_size = 4096;
   int send_buffer_size = 65536;
 };
@@ -79,16 +80,14 @@ class TcpServer {
    * @param full_config Full application configuration (for CONFIG command)
    * @param binlog_reader Optional BinlogReader for replication status
    */
-  TcpServer(ServerConfig config,
-            std::unordered_map<std::string, TableContext*> table_contexts,
-            std::string snapshot_dir = "./snapshots",
-            const config::Config* full_config = nullptr,
+  TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
+            std::string snapshot_dir = "./snapshots", const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
             mysql::BinlogReader* binlog_reader = nullptr
 #else
             void* binlog_reader = nullptr
 #endif
-            );
+  );
 
   ~TcpServer();
 
@@ -159,10 +158,10 @@ class TcpServer {
   mutable std::mutex contexts_mutex_;
 
   std::string last_error_;
-  std::string snapshot_dir_;  // Snapshot directory
+  std::string snapshot_dir_;            // Snapshot directory
   std::atomic<bool> read_only_{false};  // Read-only mode flag
-  std::atomic<bool> loading_{false};  // Loading mode flag (blocks queries during LOAD)
-  const config::Config* full_config_;  // Full configuration for CONFIG command
+  std::atomic<bool> loading_{false};    // Loading mode flag (blocks queries during LOAD)
+  const config::Config* full_config_;   // Full configuration for CONFIG command
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;
@@ -197,9 +196,8 @@ class TcpServer {
    * @param debug_info Optional debug information
    * @return Formatted response
    */
-  std::string FormatSearchResponse(const std::vector<index::DocId>& results,
-                                   uint32_t limit, uint32_t offset,
-                                   storage::DocumentStore* doc_store,
+  std::string FormatSearchResponse(const std::vector<index::DocId>& results, uint32_t limit,
+                                   uint32_t offset, storage::DocumentStore* doc_store,
                                    const query::DebugInfo* debug_info = nullptr);
 
   /**
@@ -209,7 +207,7 @@ class TcpServer {
    * @return Formatted response
    */
   static std::string FormatCountResponse(uint64_t count,
-                                        const query::DebugInfo* debug_info = nullptr);
+                                         const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response

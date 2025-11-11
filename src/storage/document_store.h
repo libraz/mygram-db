@@ -36,20 +36,19 @@ using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::Doc
  * - double: FLOAT/DOUBLE
  * - std::string: VARCHAR/TEXT
  */
-using FilterValue = std::variant<
-    std::monostate, // NULL value
-    bool,        // BOOLEAN/TINYINT(1)
-    int8_t,      // TINYINT
-    uint8_t,     // TINYINT UNSIGNED
-    int16_t,     // SMALLINT
-    uint16_t,    // SMALLINT UNSIGNED
-    int32_t,     // INT/MEDIUMINT
-    uint32_t,    // INT UNSIGNED
-    int64_t,     // BIGINT
-    uint64_t,    // DATETIME/TIMESTAMP (epoch timestamp)
-    std::string, // VARCHAR/TEXT
-    double       // FLOAT/DOUBLE
->;
+using FilterValue = std::variant<std::monostate,  // NULL value
+                                 bool,            // BOOLEAN/TINYINT(1)
+                                 int8_t,          // TINYINT
+                                 uint8_t,         // TINYINT UNSIGNED
+                                 int16_t,         // SMALLINT
+                                 uint16_t,        // SMALLINT UNSIGNED
+                                 int32_t,         // INT/MEDIUMINT
+                                 uint32_t,        // INT UNSIGNED
+                                 int64_t,         // BIGINT
+                                 uint64_t,        // DATETIME/TIMESTAMP (epoch timestamp)
+                                 std::string,     // VARCHAR/TEXT
+                                 double           // FLOAT/DOUBLE
+                                 >;
 
 /**
  * @brief Document metadata
@@ -113,8 +112,7 @@ class DocumentStore {
    * @param filters New filter values
    * @return true if document exists
    */
-  bool UpdateDocument(DocId doc_id,
-                      const std::unordered_map<std::string, FilterValue>& filters);
+  bool UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
 
   /**
    * @brief Remove document
@@ -155,8 +153,8 @@ class DocumentStore {
    * @param filter_name Filter column name
    * @return Filter value if exists
    */
-  [[nodiscard]] std::optional<FilterValue> GetFilterValue(
-      DocId doc_id, const std::string& filter_name) const;
+  [[nodiscard]] std::optional<FilterValue> GetFilterValue(DocId doc_id,
+                                                          const std::string& filter_name) const;
 
   /**
    * @brief Filter documents by value
@@ -166,7 +164,7 @@ class DocumentStore {
    * @return Vector of matching DocIDs
    */
   [[nodiscard]] std::vector<DocId> FilterByValue(const std::string& filter_name,
-                                                  const FilterValue& value) const;
+                                                 const FilterValue& value) const;
 
   /**
    * @brief Get all document IDs
@@ -208,7 +206,7 @@ class DocumentStore {
    * @return true if successful
    */
   [[nodiscard]] bool SaveToFile(const std::string& filepath,
-                                 const std::string& replication_gtid = "") const;
+                                const std::string& replication_gtid = "") const;
 
   /**
    * @brief Deserialize document store from file
@@ -217,7 +215,7 @@ class DocumentStore {
    * @return true if successful
    */
   [[nodiscard]] bool LoadFromFile(const std::string& filepath,
-                                   std::string* replication_gtid = nullptr);
+                                  std::string* replication_gtid = nullptr);
 
  private:
   // Next DocID to assign

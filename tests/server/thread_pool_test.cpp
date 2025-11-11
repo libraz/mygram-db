@@ -4,7 +4,9 @@
  */
 
 #include "server/thread_pool.h"
+
 #include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -46,9 +48,7 @@ TEST_F(ThreadPoolTest, SubmitAndExecute) {
   std::atomic<int> counter{0};
 
   // Submit a simple task
-  bool submitted = pool.Submit([&counter]() {
-    counter++;
-  });
+  bool submitted = pool.Submit([&counter]() { counter++; });
 
   EXPECT_TRUE(submitted);
 
@@ -64,9 +64,7 @@ TEST_F(ThreadPoolTest, MultipleTasks) {
 
   // Submit multiple tasks
   for (int i = 0; i < num_tasks; ++i) {
-    bool submitted = pool.Submit([&counter]() {
-      counter.fetch_add(1);
-    });
+    bool submitted = pool.Submit([&counter]() { counter.fetch_add(1); });
     EXPECT_TRUE(submitted);
   }
 
@@ -195,18 +193,14 @@ TEST_F(ThreadPoolTest, ShutdownRejectsTasks) {
   std::atomic<int> counter{0};
 
   // Submit a task
-  bool sub1 = pool.Submit([&counter]() {
-    counter++;
-  });
+  bool sub1 = pool.Submit([&counter]() { counter++; });
   EXPECT_TRUE(sub1);
 
   // Shutdown
   pool.Shutdown();
 
   // Try to submit after shutdown
-  bool sub2 = pool.Submit([&counter]() {
-    counter++;
-  });
+  bool sub2 = pool.Submit([&counter]() { counter++; });
   EXPECT_FALSE(sub2);
 
   // Wait and verify only first task executed
@@ -245,9 +239,7 @@ TEST_F(ThreadPoolTest, ConcurrentSubmissions) {
   for (int i = 0; i < num_threads; ++i) {
     submitters.emplace_back([&pool, &counter]() {
       for (int j = 0; j < tasks_per_thread; ++j) {
-        pool.Submit([&counter]() {
-          counter.fetch_add(1);
-        });
+        pool.Submit([&counter]() { counter.fetch_add(1); });
       }
     });
   }
@@ -268,14 +260,10 @@ TEST_F(ThreadPoolTest, ExceptionHandling) {
   std::atomic<int> counter{0};
 
   // Submit a task that throws
-  pool.Submit([]() {
-    throw std::runtime_error("Test exception");
-  });
+  pool.Submit([]() { throw std::runtime_error("Test exception"); });
 
   // Submit a normal task
-  pool.Submit([&counter]() {
-    counter++;
-  });
+  pool.Submit([&counter]() { counter++; });
 
   // Wait for tasks to complete
   std::this_thread::sleep_for(std::chrono::milliseconds(100));

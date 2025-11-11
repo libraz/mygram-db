@@ -31,14 +31,14 @@ inline bool IsFullWidthSpace(const std::string& str, size_t pos) {
  * @brief Token types for lexical analysis
  */
 enum class TokenType {
-  kTerm,         // Regular term
-  kQuotedTerm,   // "quoted phrase"
-  kPlus,         // + prefix
-  kMinus,        // - prefix
-  kOr,           // OR operator
-  kLParen,       // (
-  kRParen,       // )
-  kEnd           // End of input
+  kTerm,        // Regular term
+  kQuotedTerm,  // "quoted phrase"
+  kPlus,        // + prefix
+  kMinus,       // - prefix
+  kOr,          // OR operator
+  kLParen,      // (
+  kRParen,      // )
+  kEnd          // End of input
 };
 
 /**
@@ -148,8 +148,8 @@ class Tokenizer {
       }
       char ch = input_[pos_];
       // Stop at whitespace or special characters
-      if (std::isspace(static_cast<unsigned char>(ch)) || ch == '+' || ch == '-' ||
-          ch == '(' || ch == ')' || ch == '"') {
+      if (std::isspace(static_cast<unsigned char>(ch)) || ch == '+' || ch == '-' || ch == '(' ||
+          ch == ')' || ch == '"') {
         break;
       }
       term += ch;
@@ -388,8 +388,7 @@ bool SearchExpression::HasComplexExpression() const {
 
   // Check if any term contains OR or parentheses
   auto has_or_or_parens = [](const std::string& term) {
-    return term.find("OR") != std::string::npos ||
-           term.find('(') != std::string::npos ||
+    return term.find("OR") != std::string::npos || term.find('(') != std::string::npos ||
            term.find(')') != std::string::npos;
   };
 
@@ -449,8 +448,7 @@ std::string SearchExpression::ToQueryString() const {
   return oss.str();
 }
 
-std::variant<SearchExpression, std::string> ParseSearchExpression(
-    const std::string& expression) {
+std::variant<SearchExpression, std::string> ParseSearchExpression(const std::string& expression) {
   if (expression.empty()) {
     return "Empty search expression";
   }
@@ -459,8 +457,7 @@ std::variant<SearchExpression, std::string> ParseSearchExpression(
   return parser.Parse();
 }
 
-std::variant<std::string, std::string> ConvertSearchExpression(
-    const std::string& expression) {
+std::variant<std::string, std::string> ConvertSearchExpression(const std::string& expression) {
   auto result = ParseSearchExpression(expression);
   if (auto* err = std::get_if<std::string>(&result)) {
     // Return error (index 1)
@@ -468,13 +465,12 @@ std::variant<std::string, std::string> ConvertSearchExpression(
   }
   auto expr = std::get<SearchExpression>(result);
   // Return success (index 0)
-  return std::variant<std::string, std::string>(std::in_place_index<0>,
-                                                 expr.ToQueryString());
+  return std::variant<std::string, std::string>(std::in_place_index<0>, expr.ToQueryString());
 }
 
 bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
-                               std::vector<std::string>& and_terms,
-                               std::vector<std::string>& not_terms) {
+                              std::vector<std::string>& and_terms,
+                              std::vector<std::string>& not_terms) {
   auto result = ParseSearchExpression(expression);
   if (std::get_if<std::string>(&result)) {
     return false;

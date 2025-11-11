@@ -7,13 +7,14 @@
 
 #ifdef USE_MYSQL
 
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "config/config.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
-#include "config/config.h"
-#include <string>
-#include <vector>
-#include <optional>
-#include <unordered_map>
 
 namespace mygramdb {
 namespace mysql {
@@ -23,7 +24,7 @@ namespace mysql {
  */
 struct RowData {
   std::string primary_key;
-  std::string text;  // Extracted text for full-text search
+  std::string text;                                      // Extracted text for full-text search
   std::unordered_map<std::string, std::string> columns;  // All column values as strings
 };
 
@@ -37,12 +38,11 @@ struct RowData {
  * @param text_column_name Text column name for search
  * @return Vector of rows if parsed successfully
  */
-std::optional<std::vector<RowData>> ParseWriteRowsEvent(
-    const unsigned char* buffer,
-    unsigned long length,
-    const TableMetadata* table_metadata,
-    const std::string& pk_column_name,
-    const std::string& text_column_name);
+std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer,
+                                                        unsigned long length,
+                                                        const TableMetadata* table_metadata,
+                                                        const std::string& pk_column_name,
+                                                        const std::string& text_column_name);
 
 /**
  * @brief Parse UPDATE_ROWS event
@@ -55,11 +55,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(
  * @return Vector of (old_row, new_row) pairs if parsed successfully
  */
 std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
-    const unsigned char* buffer,
-    unsigned long length,
-    const TableMetadata* table_metadata,
-    const std::string& pk_column_name,
-    const std::string& text_column_name);
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name);
 
 /**
  * @brief Parse DELETE_ROWS event
@@ -71,12 +68,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
  * @param text_column_name Text column name for search
  * @return Vector of rows if parsed successfully
  */
-std::optional<std::vector<RowData>> ParseDeleteRowsEvent(
-    const unsigned char* buffer,
-    unsigned long length,
-    const TableMetadata* table_metadata,
-    const std::string& pk_column_name,
-    const std::string& text_column_name);
+std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer,
+                                                         unsigned long length,
+                                                         const TableMetadata* table_metadata,
+                                                         const std::string& pk_column_name,
+                                                         const std::string& text_column_name);
 
 /**
  * @brief Extract filter values from row data
@@ -89,8 +85,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(
  * @return Map of filter name to typed FilterValue
  */
 std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
-    const RowData& row_data,
-    const std::vector<config::FilterConfig>& filter_configs);
+    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs);
 
 }  // namespace mysql
 }  // namespace mygramdb

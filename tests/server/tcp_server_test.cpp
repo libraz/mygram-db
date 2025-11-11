@@ -4,17 +4,20 @@
  */
 
 #include "server/tcp_server.h"
-#include "config/config.h"
+
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <thread>
+
 #include <chrono>
-#include <fstream>
 #include <cstdio>
+#include <fstream>
+#include <thread>
+
+#include "config/config.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb;
@@ -91,9 +94,8 @@ class TcpServerTest : public ::testing::Test {
     std::string response(buffer);
 
     // Remove trailing \r\n
-    if (response.size() >= 2 &&
-        response[response.size()-2] == '\r' &&
-        response[response.size()-1] == '\n') {
+    if (response.size() >= 2 && response[response.size() - 2] == '\r' &&
+        response[response.size() - 1] == '\n') {
       response = response.substr(0, response.size() - 2);
     }
 
@@ -101,7 +103,7 @@ class TcpServerTest : public ::testing::Test {
   }
 
   ServerConfig config_;
-  index::Index* index_;  // Raw pointer to table_context_.index
+  index::Index* index_;                // Raw pointer to table_context_.index
   storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
   TableContext table_context_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -557,7 +559,8 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
   for (int i = 0; i < 3; i++) {
     threads.emplace_back([this, port, &success_count]() {
       int sock = CreateClientSocket(port);
-      if (sock < 0) return;
+      if (sock < 0)
+        return;
 
       std::string response = SendRequest(sock, "COUNT test test");
       if (response == "OK COUNT 1") {
@@ -945,8 +948,8 @@ TEST_F(TcpServerTest, InfoCommandWithTables) {
   full_config.tables.push_back(table3);
 
   // Create server with config
-  auto server_with_config = std::make_unique<TcpServer>(
-      config_, multi_table_contexts, "./snapshots", &full_config);
+  auto server_with_config =
+      std::make_unique<TcpServer>(config_, multi_table_contexts, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -1014,8 +1017,8 @@ TEST_F(TcpServerTest, InfoCommandWithSingleTable) {
   full_config.tables.push_back(table);
 
   // Create server with config
-  auto server_with_config = std::make_unique<TcpServer>(
-      config_, table_contexts_, "./snapshots", &full_config);
+  auto server_with_config =
+      std::make_unique<TcpServer>(config_, table_contexts_, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -1046,8 +1049,7 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
   // Add documents and save them
   for (int i = 1; i <= 1000; i++) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id),
-                       "test document " + std::to_string(i));
+    index_->AddDocument(static_cast<index::DocId>(doc_id), "test document " + std::to_string(i));
   }
 
   // Create snapshot directory with new format
@@ -1078,12 +1080,12 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
   std::string load_response;
 
   // Start LOAD in a separate thread
-  std::thread load_thread([this, load_sock, &test_file, &load_response,
-                          &load_started, &load_finished]() {
-    load_started = true;
-    load_response = SendRequest(load_sock, "LOAD " + test_file);
-    load_finished = true;
-  });
+  std::thread load_thread(
+      [this, load_sock, &test_file, &load_response, &load_started, &load_finished]() {
+        load_started = true;
+        load_response = SendRequest(load_sock, "LOAD " + test_file);
+        load_finished = true;
+      });
 
   // Wait for LOAD to start
   while (!load_started) {

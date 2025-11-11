@@ -4,16 +4,18 @@
  */
 
 #include "config/config.h"
-#include "config_schema_embedded.h"  // Auto-generated embedded schema
+
+#include <spdlog/spdlog.h>
+#include <yaml-cpp/yaml.h>
 
 #include <fstream>
 #include <nlohmann/json-schema.hpp>
 #include <nlohmann/json.hpp>
 #include <set>
-#include <spdlog/spdlog.h>
 #include <sstream>
 #include <stdexcept>
-#include <yaml-cpp/yaml.h>
+
+#include "config_schema_embedded.h"  // Auto-generated embedded schema
 
 #ifdef USE_MYSQL
 #include "mysql/connection.h"
@@ -111,9 +113,8 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   }
   if (json_obj.contains("op") || json_obj.contains("operator")) {
     // Support both "op" and "operator" as key names
-    config.op = json_obj.contains("op") ?
-                json_obj["op"].get<std::string>() :
-                json_obj["operator"].get<std::string>();
+    config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>()
+                                        : json_obj["operator"].get<std::string>();
   }
   if (json_obj.contains("value")) {
     // value can be string or number, convert to string
@@ -144,8 +145,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
 
   // Validate: Other operators should have a value
   if (config.op != "IS NULL" && config.op != "IS NOT NULL" && config.value.empty()) {
-    throw std::runtime_error("Required filter with operator '" + config.op +
-                             "' must have a value");
+    throw std::runtime_error("Required filter with operator '" + config.op + "' must have a value");
   }
 
   return config;
@@ -507,9 +507,8 @@ void ValidateConfigJson(const std::string& config_json_str, const std::string& s
     json config_json = json::parse(config_json_str);
 
     // Use embedded schema if no custom schema provided
-    std::string schema_to_use = schema_json_str.empty()
-                                  ? std::string(kConfigSchemaJson)
-                                  : schema_json_str;
+    std::string schema_to_use =
+        schema_json_str.empty() ? std::string(kConfigSchemaJson) : schema_json_str;
 
     json schema_json = json::parse(schema_to_use);
 
