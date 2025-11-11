@@ -9,6 +9,19 @@ target_link_libraries(config_test PRIVATE
 
 gtest_discover_tests(config_test)
 
+# Required filters test
+add_executable(required_filters_test
+  required_filters_test.cpp
+)
+
+target_link_libraries(required_filters_test PRIVATE
+  mygramdb_config
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(required_filters_test)
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

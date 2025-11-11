@@ -34,13 +34,13 @@ tables:
     primary_key: "id"
     text_source:
       column: "content"
+    required_filters: []
     filters: []
     ngram_size: 1
     posting:
       block_size: 128
       freq_bits: 0
       use_roaring: "auto"
-    where_clause: ""
 
 build:
   mode: "select_snapshot"
@@ -114,14 +114,14 @@ The same configuration in JSON format:
       "text_source": {
         "column": "content"
       },
+      "required_filters": [],
       "filters": [],
       "ngram_size": 1,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,
         "use_roaring": "auto"
-      },
-      "where_clause": ""
+      }
     }
   ],
   "build": {
@@ -226,9 +226,44 @@ text_source:
   delimiter: " "
 ```
 
-### Filters
+### Required Filters (Data Existence Conditions)
 
-Optional filter columns for search refinement:
+Required filters define conditions that data must satisfy to be indexed. Data that does not match these conditions will **NOT be indexed at all**.
+
+During binlog replication:
+- Data transitioning **OUT** of these conditions will be **REMOVED** from the index
+- Data transitioning **INTO** these conditions will be **ADDED** to the index
+- Data that remains within these conditions will be updated normally
+
+```yaml
+required_filters:
+  - name: "enabled"                 # Column name
+    type: "int"                     # Column type (see types below)
+    op: "="                         # Operator
+    value: 1                        # Comparison value
+    bitmap_index: false             # Enable bitmap index for search-time filtering
+
+  - name: "deleted_at"
+    type: "datetime"
+    op: "IS NULL"                   # Only index non-deleted records
+    bitmap_index: false
+```
+
+**Supported operators:**
+
+- Comparison: `=`, `!=`, `<`, `>`, `<=`, `>=`
+- NULL checks: `IS NULL`, `IS NOT NULL`
+
+**Important notes:**
+
+- All `required_filters` conditions are combined with AND logic
+- The `value` field should be omitted for `IS NULL` and `IS NOT NULL` operators
+- Columns used in `required_filters` must be included in the table schema
+- These filters are evaluated during both snapshot build and binlog replication
+
+### Optional Filters (Search-Time Filtering)
+
+Optional filters are used for filtering during searches. They do **NOT** affect which data is indexed.
 
 ```yaml
 filters:
@@ -269,14 +304,6 @@ posting:
   block_size: 128                   # Default: 128
   freq_bits: 0                      # 0=boolean, 4 or 8 for term frequency (default: 0)
   use_roaring: "auto"               # "auto", "always", "never" (default: auto)
-```
-
-### WHERE Clause
-
-Optional WHERE clause for snapshot build:
-
-```yaml
-where_clause: "status = 1"          # Default: "" (empty)
 ```
 
 ## Build Section

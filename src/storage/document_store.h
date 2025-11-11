@@ -22,6 +22,7 @@ using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::Doc
  * @brief Filter value types
  *
  * Supports multiple types for memory efficiency:
+ * - std::monostate: NULL value
  * - bool: BOOLEAN/TINYINT(1) (1 byte)
  * - int8_t: TINYINT (-128 to 127)
  * - uint8_t: TINYINT UNSIGNED (0 to 255)
@@ -30,10 +31,12 @@ using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::Doc
  * - int32_t: INT/MEDIUMINT (-2B to 2B)
  * - uint32_t: INT UNSIGNED (0 to 4B)
  * - int64_t: BIGINT
+ * - uint64_t: DATETIME/TIMESTAMP (epoch timestamp)
  * - double: FLOAT/DOUBLE
  * - std::string: VARCHAR/TEXT
  */
 using FilterValue = std::variant<
+    std::monostate, // NULL value
     bool,        // BOOLEAN/TINYINT(1)
     int8_t,      // TINYINT
     uint8_t,     // TINYINT UNSIGNED
@@ -42,6 +45,7 @@ using FilterValue = std::variant<
     int32_t,     // INT/MEDIUMINT
     uint32_t,    // INT UNSIGNED
     int64_t,     // BIGINT
+    uint64_t,    // DATETIME/TIMESTAMP (epoch timestamp)
     std::string, // VARCHAR/TEXT
     double       // FLOAT/DOUBLE
 >;

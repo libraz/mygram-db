@@ -1,0 +1,148 @@
+# MygramDB Configuration Example
+#
+# This is a complete example configuration file with all available options.
+# Copy this file and customize it for your environment.
+#
+# Documentation: See docs/en/configuration.md or docs/ja/configuration.md
+#
+# Note: All configuration files (YAML and JSON) are automatically validated
+# against the built-in JSON Schema at startup. Invalid settings such as
+# typos, wrong types, or unknown keys will be detected and reported.
+
+# MySQL Connection Settings
+mysql:
+  host: "127.0.0.1"                 # MySQL server hostname or IP (default: 127.0.0.1)
+  port: 3306                        # MySQL server port (default: 3306)
+  user: "repl_user"                 # MySQL username for replication
+  password: "your_password_here"    # MySQL user password
+  database: "mydb"                  # Database name
+  use_gtid: true                    # Enable GTID-based replication (default: true, required for replication)
+  binlog_format: "ROW"              # Binary log format (default: ROW, required for replication)
+  binlog_row_image: "FULL"          # Row image format (default: FULL, required for replication)
+  connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
+
+# Table Configuration (supports one table per instance)
+tables:
+  - name: "articles"                # Table name in MySQL database
+    primary_key: "id"               # Primary key column name (default: id, must be single-column)
+
+    # Text Source Configuration
+    # Option 1: Single column
+    text_source:
+      column: "content"             # Column to index for full-text search
+      delimiter: " "                # Delimiter for concatenation (default: " ", used when concat is specified)
+
+    # Option 2: Multiple columns (concatenated)
+    # Uncomment to use multiple columns:
+    # text_source:
+    #   concat: ["title", "body"]   # Columns to concatenate
+    #   delimiter: " "              # Delimiter for concatenation
+
+    # Required Filters (data existence conditions)
+    # Data that does not match these conditions will NOT be indexed
+    # During binlog replication:
+    #  - Data transitioning OUT of these conditions will be REMOVED from index
+    #  - Data transitioning INTO these conditions will be ADDED to index
+    required_filters:
+      - name: "enabled"             # Filter column name
+        type: "int"                 # Column type (same options as filters)
+        op: "="                     # Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
+        value: 1                    # Comparison value (omit for IS NULL/IS NOT NULL)
+        bitmap_index: false         # Enable bitmap index for search-time filtering (default: false)
+
+      - name: "deleted_at"
+        type: "datetime"
+        op: "IS NULL"               # Only index non-deleted records
+        bitmap_index: false
+
+    # Optional Filters (search-time filtering)
+    # These filters are used for filtering during searches
+    # They do NOT affect which data is indexed
+    filters:
+      - name: "status"              # Filter column name
+        type: "int"                 # Column type (see docs for all types)
+        dict_compress: false        # Enable dictionary compression (default: false, recommended for low-cardinality)
+        bitmap_index: false         # Enable bitmap indexing (default: false, faster filtering)
+
+      - name: "category"
+        type: "string"
+        dict_compress: false
+        bitmap_index: false
+
+      - name: "created_at"
+        type: "datetime"
+        bucket: ""                  # Bucket datetime values: "minute", "hour", "day" (optional, reduces cardinality)
+
+    # N-gram Configuration
+    ngram_size: 1                   # N-gram size (default: 1)
+                                    # 1=unigram, 2=bigram, etc.
+                                    # For Japanese/CJK: use 1 or 2
+                                    # For English: use 3 or more
+
+    # Posting List Configuration
+    posting:
+      block_size: 128               # Block size for delta encoding (default: 128)
+      freq_bits: 0                  # Term frequency bits: 0=boolean, 4, or 8 (default: 0)
+      use_roaring: "auto"           # Roaring bitmap usage: "auto", "always", "never" (default: auto)
+
+# Index Build Configuration
+build:
+  mode: "select_snapshot"           # Build mode (default: select_snapshot, currently only option)
+  batch_size: 5000                  # Rows per batch during snapshot (default: 5000)
+  parallelism: 2                    # Number of parallel build threads (default: 2)
+  throttle_ms: 0                    # Throttle delay between batches in milliseconds (default: 0)
+
+# Replication Configuration
+replication:
+  enable: true                      # Enable binlog replication (default: true)
+  server_id: 12345                  # MySQL server ID (REQUIRED, must be non-zero and unique in replication topology)
+                                    # Generate a random number or use a unique value for your environment
+
+  # Replication start position
+  # - "snapshot": Start from snapshot GTID (recommended, ensures consistency)
+  # - "latest": Start from current GTID (only new changes)
+  # - "gtid=<UUID:txn>": Start from specific GTID (e.g., gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1)
+  # - "state_file": Resume from saved state file (for restart/recovery)
+  start_from: "snapshot"            # Default: snapshot
+
+  state_file: "./mygramdb_replication.state"  # GTID state persistence file (default: ./mygramdb_replication.state)
+  queue_size: 10000                 # Binlog event queue size (default: 10000)
+  reconnect_backoff_min_ms: 500     # Minimum reconnect backoff delay (default: 500)
+  reconnect_backoff_max_ms: 10000   # Maximum reconnect backoff delay (default: 10000)
+
+# Memory Management
+memory:
+  hard_limit_mb: 8192               # Hard memory limit in MB (default: 8192)
+  soft_target_mb: 4096              # Soft memory target in MB (default: 4096)
+  arena_chunk_mb: 64                # Arena chunk size in MB (default: 64)
+  roaring_threshold: 0.18           # Roaring bitmap threshold (default: 0.18)
+  minute_epoch: true                # Use minute-precision epoch (default: true)
+
+  # Text Normalization
+  normalize:
+    nfkc: true                      # NFKC normalization (default: true, recommended for Japanese)
+    width: "narrow"                 # Width conversion: "keep", "narrow", "wide" (default: narrow)
+    lower: false                    # Lowercase conversion (default: false)
+
+# Snapshot Persistence
+snapshot:
+  dir: "/var/lib/mygramdb/snapshots"  # Snapshot directory path (default: /var/lib/mygramdb/snapshots)
+  interval_sec: 600                 # Snapshot interval in seconds (default: 600)
+  retain: 3                         # Number of snapshots to retain (default: 3)
+
+# API Server Configuration
+api:
+  tcp:
+    bind: "0.0.0.0"                 # TCP bind address (default: 0.0.0.0, all interfaces)
+    port: 11311                     # TCP port (default: 11311)
+
+# Network Security (optional)
+network:
+  allow_cidrs: []                   # Allow CIDR list (default: empty = allow all)
+                                    # Example: ["192.168.1.0/24", "10.0.0.0/8"]
+                                    # When specified, only connections from these IP ranges are accepted
+
+# Logging Configuration
+logging:
+  level: "info"                     # Log level: "debug", "info", "warn", "error" (default: info)
+  json: true                        # JSON format output (default: true)

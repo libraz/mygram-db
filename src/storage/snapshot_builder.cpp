@@ -155,16 +155,44 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
     }
   }
 
-  // Filter columns
+  // Required filter columns (for binlog replication condition checking)
+  for (const auto& filter : table_config_.required_filters) {
+    query << ", " << filter.name;
+  }
+
+  // Optional filter columns (for search-time filtering)
   for (const auto& filter : table_config_.filters) {
     query << ", " << filter.name;
   }
 
   query << " FROM " << table_config_.name;
 
-  // Add WHERE clause if specified
-  if (!table_config_.where_clause.empty()) {
-    query << " WHERE " << table_config_.where_clause;
+  // Add WHERE clause from required_filters
+  if (!table_config_.required_filters.empty()) {
+    query << " WHERE ";
+    bool first = true;
+    for (const auto& filter : table_config_.required_filters) {
+      if (!first) {
+        query << " AND ";
+      }
+      first = false;
+
+      query << filter.name << " ";
+
+      if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
+        query << filter.op;
+      } else {
+        query << filter.op << " ";
+
+        // Quote string values
+        if (filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
+            filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp") {
+          query << "'" << filter.value << "'";
+        } else {
+          query << filter.value;
+        }
+      }
+    }
   }
 
   // Add ORDER BY for efficient processing

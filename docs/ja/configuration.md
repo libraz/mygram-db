@@ -34,13 +34,13 @@ tables:
     primary_key: "id"
     text_source:
       column: "content"
+    required_filters: []
     filters: []
     ngram_size: 1
     posting:
       block_size: 128
       freq_bits: 0
       use_roaring: "auto"
-    where_clause: ""
 
 build:
   mode: "select_snapshot"
@@ -110,14 +110,14 @@ JSON 形式での同じ設定：
       "text_source": {
         "column": "content"
       },
+      "required_filters": [],
       "filters": [],
       "ngram_size": 1,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,
         "use_roaring": "auto"
-      },
-      "where_clause": ""
+      }
     }
   ],
   "build": {
@@ -217,9 +217,44 @@ text_source:
   delimiter: " "
 ```
 
-### Filters
+### 必須フィルタ（データ存在条件）
 
-検索絞り込み用のオプションフィルターカラム：
+必須フィルタは、データをインデックスに含めるための条件を定義します。この条件に合致しないデータは**一切インデックス化されません**。
+
+Binlogレプリケーション時の動作：
+- この条件から**外れた**データはインデックスから**削除**されます
+- この条件に**入った**データはインデックスに**追加**されます
+- この条件内で変更されたデータは通常通り更新されます
+
+```yaml
+required_filters:
+  - name: "enabled"                 # カラム名
+    type: "int"                     # カラム型（下記参照）
+    op: "="                         # 演算子
+    value: 1                        # 比較値
+    bitmap_index: false             # 検索時フィルタリング用のビットマップインデックスを有効化
+
+  - name: "deleted_at"
+    type: "datetime"
+    op: "IS NULL"                   # 削除されていないレコードのみインデックス化
+    bitmap_index: false
+```
+
+**サポートされる演算子:**
+
+- 比較演算子: `=`, `!=`, `<`, `>`, `<=`, `>=`
+- NULL チェック: `IS NULL`, `IS NOT NULL`
+
+**重要な注意事項:**
+
+- すべての `required_filters` 条件は AND ロジックで結合されます
+- `IS NULL` および `IS NOT NULL` 演算子の場合、`value` フィールドは省略する必要があります
+- `required_filters` で使用するカラムはテーブルスキーマに含まれている必要があります
+- これらのフィルタはスナップショットビルド時と Binlog レプリケーション時の両方で評価されます
+
+### オプションフィルタ（検索時フィルタリング）
+
+オプションフィルタは検索時のフィルタリングに使用されます。データのインデックス化には**影響しません**。
 
 ```yaml
 filters:
@@ -260,14 +295,6 @@ posting:
   block_size: 128                   # デフォルト: 128
   freq_bits: 0                      # 0=ブール値、4 または 8 で語頻度（デフォルト: 0）
   use_roaring: "auto"               # "auto", "always", "never"（デフォルト: auto）
-```
-
-### WHERE 句
-
-スナップショットビルド用のオプション WHERE 句：
-
-```yaml
-where_clause: "status = 1"          # デフォルト: ""（空）
 ```
 
 ## Build セクション

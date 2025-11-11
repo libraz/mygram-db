@@ -424,6 +424,130 @@ bool BinlogReader::PopEvent(BinlogEvent& event) {
   return true;
 }
 
+bool BinlogReader::EvaluateRequiredFilters(
+    const std::unordered_map<std::string, storage::FilterValue>& filters) const {
+  // If no required_filters, all data is accepted
+  if (table_config_.required_filters.empty()) {
+    return true;
+  }
+
+  // Check each required filter condition
+  for (const auto& required_filter : table_config_.required_filters) {
+    auto it = filters.find(required_filter.name);
+    if (it == filters.end()) {
+      spdlog::warn("Required filter column '{}' not found in binlog event",
+                   required_filter.name);
+      return false;
+    }
+
+    if (!CompareFilterValue(it->second, required_filter)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFilters(
+    const RowData& row_data) const {
+  std::unordered_map<std::string, storage::FilterValue> all_filters;
+
+  // Convert required_filters to FilterConfig format for extraction
+  std::vector<config::FilterConfig> required_as_filters;
+  for (const auto& req_filter : table_config_.required_filters) {
+    config::FilterConfig filter_config;
+    filter_config.name = req_filter.name;
+    filter_config.type = req_filter.type;
+    filter_config.dict_compress = false;
+    filter_config.bitmap_index = req_filter.bitmap_index;
+    required_as_filters.push_back(filter_config);
+  }
+
+  // Extract required_filters columns
+  auto required_filters = ExtractFilters(row_data, required_as_filters);
+  all_filters.insert(required_filters.begin(), required_filters.end());
+
+  // Extract optional filters columns
+  auto optional_filters = ExtractFilters(row_data, table_config_.filters);
+  all_filters.insert(optional_filters.begin(), optional_filters.end());
+
+  return all_filters;
+}
+
+bool BinlogReader::CompareFilterValue(
+    const storage::FilterValue& value,
+    const config::RequiredFilterConfig& filter) const {
+  // Handle NULL checks
+  if (filter.op == "IS NULL") {
+    return std::holds_alternative<std::monostate>(value);
+  }
+  if (filter.op == "IS NOT NULL") {
+    return !std::holds_alternative<std::monostate>(value);
+  }
+
+  // If value is NULL and operator is not IS NULL/IS NOT NULL, condition fails
+  if (std::holds_alternative<std::monostate>(value)) {
+    return false;
+  }
+
+  // Compare based on type
+  if (std::holds_alternative<int64_t>(value)) {
+    // Integer comparison
+    int64_t val = std::get<int64_t>(value);
+    int64_t target = std::stoll(filter.value);
+
+    if (filter.op == "=") return val == target;
+    if (filter.op == "!=") return val != target;
+    if (filter.op == "<") return val < target;
+    if (filter.op == ">") return val > target;
+    if (filter.op == "<=") return val <= target;
+    if (filter.op == ">=") return val >= target;
+
+  } else if (std::holds_alternative<double>(value)) {
+    // Float comparison
+    double val = std::get<double>(value);
+    double target = std::stod(filter.value);
+
+    if (filter.op == "=") return std::abs(val - target) < 1e-9;
+    if (filter.op == "!=") return std::abs(val - target) >= 1e-9;
+    if (filter.op == "<") return val < target;
+    if (filter.op == ">") return val > target;
+    if (filter.op == "<=") return val <= target;
+    if (filter.op == ">=") return val >= target;
+
+  } else if (std::holds_alternative<std::string>(value)) {
+    // String comparison
+    const std::string& val = std::get<std::string>(value);
+    const std::string& target = filter.value;
+
+    if (filter.op == "=") return val == target;
+    if (filter.op == "!=") return val != target;
+    if (filter.op == "<") return val < target;
+    if (filter.op == ">") return val > target;
+    if (filter.op == "<=") return val <= target;
+    if (filter.op == ">=") return val >= target;
+
+  } else if (std::holds_alternative<uint64_t>(value)) {
+    // Datetime/timestamp (stored as uint64_t epoch)
+    uint64_t val = std::get<uint64_t>(value);
+
+    // For datetime comparison, we need to parse target value
+    // For now, assume target is numeric (epoch timestamp)
+    // TODO: Add proper datetime parsing if needed
+    uint64_t target = std::stoull(filter.value);
+
+    if (filter.op == "=") return val == target;
+    if (filter.op == "!=") return val != target;
+    if (filter.op == "<") return val < target;
+    if (filter.op == ">") return val > target;
+    if (filter.op == "<=") return val <= target;
+    if (filter.op == ">=") return val >= target;
+  }
+
+  spdlog::warn("Unsupported filter value type for comparison");
+  return false;
+}
+
 bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   // Skip events for other tables
   if (event.table_name != table_config_.name) {
@@ -431,64 +555,102 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   }
 
   try {
+    // Evaluate required_filters to determine if data should exist in index
+    bool matches_required = EvaluateRequiredFilters(event.filters);
+
+    // Check if document already exists in index
+    auto doc_id_opt = doc_store_.GetDocId(event.primary_key);
+    bool exists = doc_id_opt.has_value();
+
     switch (event.type) {
       case BinlogEventType::INSERT: {
-        // Add new document
-        storage::DocId doc_id = 
-            doc_store_.AddDocument(event.primary_key, event.filters);
-        
-        std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-        index_.AddDocument(doc_id, normalized);
-        
-        spdlog::debug("INSERT: pk={}", event.primary_key);
+        if (matches_required) {
+          // Condition satisfied -> add to index
+          storage::DocId doc_id =
+              doc_store_.AddDocument(event.primary_key, event.filters);
+
+          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          index_.AddDocument(doc_id, normalized);
+
+          spdlog::debug("INSERT: pk={} (added to index)", event.primary_key);
+        } else {
+          // Condition not satisfied -> do not index
+          spdlog::debug("INSERT: pk={} (skipped, does not match required_filters)",
+                       event.primary_key);
+        }
         break;
       }
 
       case BinlogEventType::UPDATE: {
-        // Update existing document
-        auto doc_id_opt = doc_store_.GetDocId(event.primary_key);
-        if (!doc_id_opt) {
-          spdlog::warn("UPDATE: document not found for pk={}", event.primary_key);
-          return false;
+        if (exists && !matches_required) {
+          // Transitioned out of required conditions -> DELETE from index
+          storage::DocId doc_id = doc_id_opt.value();
+
+          // Extract text to remove from index
+          if (!event.text.empty()) {
+            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+            index_.RemoveDocument(doc_id, normalized);
+          }
+
+          doc_store_.RemoveDocument(doc_id);
+
+          spdlog::info("UPDATE: pk={} (removed from index, no longer matches required_filters)",
+                      event.primary_key);
+
+        } else if (!exists && matches_required) {
+          // Transitioned into required conditions -> INSERT into index
+          storage::DocId doc_id =
+              doc_store_.AddDocument(event.primary_key, event.filters);
+
+          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          index_.AddDocument(doc_id, normalized);
+
+          spdlog::info("UPDATE: pk={} (added to index, now matches required_filters)",
+                      event.primary_key);
+
+        } else if (exists && matches_required) {
+          // Still matches conditions -> UPDATE
+          storage::DocId doc_id = doc_id_opt.value();
+
+          // Update document store filters
+          doc_store_.UpdateDocument(doc_id, event.filters);
+
+          // For full-text index update, we would need the old text to remove old n-grams
+          // The rows_parser provides both before and after images in UPDATE events
+          // For now, we use simplified approach: update filters only
+          // Future optimization: extract old text from before image and update index properly
+          std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+
+          spdlog::debug("UPDATE: pk={} (filters updated)", event.primary_key);
+
+        } else {
+          // !exists && !matches_required -> do nothing
+          spdlog::debug("UPDATE: pk={} (ignored, not in index and does not match required_filters)",
+                       event.primary_key);
         }
-
-        storage::DocId doc_id = doc_id_opt.value();
-
-        // Update document store filters
-        doc_store_.UpdateDocument(doc_id, event.filters);
-
-        // For full-text index update, we would need the old text to remove old n-grams
-        // The rows_parser provides both before and after images in UPDATE events
-        // For now, we use simplified approach: update filters only
-        // Future optimization: extract old text from before image and update index properly
-        std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
-
-        spdlog::debug("UPDATE: pk={} (filters updated, text index update simplified)",
-                     event.primary_key);
         break;
       }
 
       case BinlogEventType::DELETE: {
-        // Remove document
-        auto doc_id_opt = doc_store_.GetDocId(event.primary_key);
-        if (!doc_id_opt) {
-          spdlog::warn("DELETE: document not found for pk={}", event.primary_key);
-          return false;
+        if (exists) {
+          // Remove document from index
+          storage::DocId doc_id = doc_id_opt.value();
+
+          // For deletion, we extract text from binlog DELETE event (before image)
+          // The rows_parser provides the deleted row data including text column
+          if (!event.text.empty()) {
+            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+            index_.RemoveDocument(doc_id, normalized);
+          }
+
+          // Remove from document store
+          doc_store_.RemoveDocument(doc_id);
+
+          spdlog::debug("DELETE: pk={} (removed from index)", event.primary_key);
+        } else {
+          // Not in index, nothing to do
+          spdlog::debug("DELETE: pk={} (not in index, ignored)", event.primary_key);
         }
-
-        storage::DocId doc_id = doc_id_opt.value();
-
-        // For deletion, we extract text from binlog DELETE event (before image)
-        // The rows_parser provides the deleted row data including text column
-        if (!event.text.empty()) {
-          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-          index_.RemoveDocument(doc_id, normalized);
-        }
-
-        // Remove from document store
-        doc_store_.RemoveDocument(doc_id);
-
-        spdlog::debug("DELETE: pk={}", event.primary_key);
         break;
       }
 
@@ -648,8 +810,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // Extract filters from row data
-      event.filters = ExtractFilters(row, table_config_.filters);
+      // Extract all filters (required + optional) from row data
+      event.filters = ExtractAllFilters(row);
 
       spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}",
                    event.primary_key, event.text.length(), event.filters.size());
@@ -706,8 +868,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = after_row.text;
       event.gtid = current_gtid_;
 
-      // Extract filters from after image
-      event.filters = ExtractFilters(after_row, table_config_.filters);
+      // Extract all filters (required + optional) from after image
+      event.filters = ExtractAllFilters(after_row);
 
       // Note: For proper index update, we should use before image text
       // to remove old n-grams. For now, simplified implementation.
@@ -765,8 +927,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // Extract filters from row data (before image for DELETE)
-      event.filters = ExtractFilters(row, table_config_.filters);
+      // Extract all filters (required + optional) from row data (before image for DELETE)
+      event.filters = ExtractAllFilters(row);
 
       spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}",
                    event.primary_key, event.text.length(), event.filters.size());

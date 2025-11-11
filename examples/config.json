@@ -18,6 +18,21 @@
         "column": "content",
         "delimiter": " "
       },
+      "required_filters": [
+        {
+          "name": "enabled",
+          "type": "int",
+          "op": "=",
+          "value": 1,
+          "bitmap_index": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "datetime",
+          "op": "IS NULL",
+          "bitmap_index": false
+        }
+      ],
       "filters": [
         {
           "name": "status",
@@ -41,8 +56,7 @@
         "block_size": 128,
         "freq_bits": 0,
         "use_roaring": "auto"
-      },
-      "where_clause": ""
+      }
     }
   ],
   "build": {

@@ -55,10 +55,6 @@ third_party/*
 *.snap
 snapshots/
 
-# Config files (may contain sensitive info)
-config.yaml
-config.yml
-
 # SQL files (may contain sensitive data)
 *.sql
 

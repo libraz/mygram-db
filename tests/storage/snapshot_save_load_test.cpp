@@ -26,11 +26,25 @@ int main() {
     mygramdb::config::TableConfig table_config;
     table_config.name = "threads";
     table_config.primary_key = "id";
-    table_config.where_clause = "enabled = 1 AND id < 10000";
     table_config.text_source.column = "name";
     table_config.ngram_size = 2;
 
-    // Filter config
+    // Required filters (data existence conditions)
+    mygramdb::config::RequiredFilterConfig req_filter1;
+    req_filter1.name = "enabled";
+    req_filter1.type = "int";
+    req_filter1.op = "=";
+    req_filter1.value = "1";
+    table_config.required_filters.push_back(req_filter1);
+
+    mygramdb::config::RequiredFilterConfig req_filter2;
+    req_filter2.name = "id";
+    req_filter2.type = "int";
+    req_filter2.op = "<";
+    req_filter2.value = "10000";
+    table_config.required_filters.push_back(req_filter2);
+
+    // Optional filter config (for search-time filtering)
     mygramdb::config::FilterConfig filter;
     filter.name = "comic_type_id";
     filter.type = "int";

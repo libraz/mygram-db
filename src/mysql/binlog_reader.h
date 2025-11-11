@@ -9,6 +9,7 @@
 
 #include "mysql/connection.h"
 #include "mysql/table_metadata.h"
+#include "mysql/rows_parser.h"
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "config/config.h"
@@ -178,6 +179,29 @@ class BinlogReader {
    * @brief Process single event
    */
   bool ProcessEvent(const BinlogEvent& event);
+
+  /**
+   * @brief Evaluate required_filters conditions for a binlog event
+   * @param filters Filter values from binlog event
+   * @return true if all required_filters conditions are satisfied
+   */
+  bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters) const;
+
+  /**
+   * @brief Compare filter value against required filter condition
+   * @param value Filter value from binlog
+   * @param filter Required filter configuration
+   * @return true if condition is satisfied
+   */
+  bool CompareFilterValue(const storage::FilterValue& value,
+                          const config::RequiredFilterConfig& filter) const;
+
+  /**
+   * @brief Extract all filter columns (both required and optional) from row data
+   * @param row_data Row data from binlog
+   * @return Map of filter name to FilterValue
+   */
+  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(const RowData& row_data) const;
 
   /**
    * @brief Update current GTID

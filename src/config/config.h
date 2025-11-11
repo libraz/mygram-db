@@ -27,7 +27,27 @@ struct MysqlConfig {
 };
 
 /**
- * @brief Filter configuration for a table column
+ * @brief Required filter configuration (data existence condition)
+ *
+ * Required filters define conditions that data must satisfy to be indexed.
+ * Data that does not match these conditions will not be indexed at all.
+ * During binlog replication, data that transitions out of these conditions
+ * will be removed from the index, and data that transitions into these
+ * conditions will be added to the index.
+ */
+struct RequiredFilterConfig {
+  std::string name;  // Column name
+  std::string type;  // Type options (same as FilterConfig)
+  std::string op;    // Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
+  std::string value; // Value (empty for IS NULL/IS NOT NULL operators)
+  bool bitmap_index = false;  // Enable bitmap index for search-time filtering
+};
+
+/**
+ * @brief Optional filter configuration (search-time filtering)
+ *
+ * Optional filters are used for filtering during searches.
+ * They do not affect which data is indexed.
  */
 struct FilterConfig {
   std::string name;
@@ -67,10 +87,10 @@ struct TableConfig {
   std::string name;
   std::string primary_key = "id";
   TextSourceConfig text_source;
-  std::vector<FilterConfig> filters;
+  std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
+  std::vector<FilterConfig> filters;  // Optional filters for search-time filtering
   int ngram_size = 1;
   PostingConfig posting;
-  std::string where_clause;  // Optional WHERE clause for snapshot (e.g., "enabled = 1")
 };
 
 /**

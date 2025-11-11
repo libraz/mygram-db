@@ -407,7 +407,10 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
                 bool matches = stored_value &&
                               std::visit([&](const auto& val) {
                                 using T = std::decay_t<decltype(val)>;
-                                if constexpr (std::is_same_v<T, std::string>) {
+                                if constexpr (std::is_same_v<T, std::monostate>) {
+                                  // NULL value never matches
+                                  return false;
+                                } else if constexpr (std::is_same_v<T, std::string>) {
                                   return val == filter_cond.value;
                                 } else {
                                   return std::to_string(val) == filter_cond.value;
@@ -531,7 +534,10 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
                 bool matches = stored_value &&
                               std::visit([&](const auto& val) {
                                 using T = std::decay_t<decltype(val)>;
-                                if constexpr (std::is_same_v<T, std::string>) {
+                                if constexpr (std::is_same_v<T, std::monostate>) {
+                                  // NULL value never matches
+                                  return false;
+                                } else if constexpr (std::is_same_v<T, std::string>) {
                                   return val == filter_cond.value;
                                 } else {
                                   return std::to_string(val) == filter_cond.value;

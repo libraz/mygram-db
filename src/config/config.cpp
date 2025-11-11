@@ -98,6 +98,60 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
 }
 
 /**
+ * @brief Parse required filter configuration from JSON
+ */
+RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
+  RequiredFilterConfig config;
+
+  if (json_obj.contains("name")) {
+    config.name = json_obj["name"].get<std::string>();
+  }
+  if (json_obj.contains("type")) {
+    config.type = json_obj["type"].get<std::string>();
+  }
+  if (json_obj.contains("op") || json_obj.contains("operator")) {
+    // Support both "op" and "operator" as key names
+    config.op = json_obj.contains("op") ?
+                json_obj["op"].get<std::string>() :
+                json_obj["operator"].get<std::string>();
+  }
+  if (json_obj.contains("value")) {
+    // value can be string or number, convert to string
+    if (json_obj["value"].is_string()) {
+      config.value = json_obj["value"].get<std::string>();
+    } else if (json_obj["value"].is_number()) {
+      config.value = std::to_string(json_obj["value"].get<double>());
+    } else if (json_obj["value"].is_boolean()) {
+      config.value = json_obj["value"].get<bool>() ? "1" : "0";
+    }
+  }
+  if (json_obj.contains("bitmap_index")) {
+    config.bitmap_index = json_obj["bitmap_index"].get<bool>();
+  }
+
+  // Validate operator
+  std::vector<std::string> valid_ops = {"=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"};
+  if (std::find(valid_ops.begin(), valid_ops.end(), config.op) == valid_ops.end()) {
+    throw std::runtime_error("Invalid operator in required_filters: '" + config.op +
+                             "'. Valid operators: =, !=, <, >, <=, >=, IS NULL, IS NOT NULL");
+  }
+
+  // Validate: IS NULL/IS NOT NULL should not have a value
+  if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && !config.value.empty()) {
+    throw std::runtime_error("Required filter with operator '" + config.op +
+                             "' should not have a value");
+  }
+
+  // Validate: Other operators should have a value
+  if (config.op != "IS NULL" && config.op != "IS NOT NULL" && config.value.empty()) {
+    throw std::runtime_error("Required filter with operator '" + config.op +
+                             "' must have a value");
+  }
+
+  return config;
+}
+
+/**
  * @brief Parse filter configuration from JSON
  */
 FilterConfig ParseFilterConfig(const json& json_obj) {
@@ -139,8 +193,12 @@ TableConfig ParseTableConfig(const json& json_obj) {
   if (json_obj.contains("ngram_size")) {
     config.ngram_size = json_obj["ngram_size"].get<int>();
   }
+
+  // Check for deprecated where_clause
   if (json_obj.contains("where_clause")) {
-    config.where_clause = json_obj["where_clause"].get<std::string>();
+    throw std::runtime_error(
+        "Configuration error: 'where_clause' is no longer supported. "
+        "Please use 'required_filters' instead. See documentation for details.");
   }
 
   // Parse text_source
@@ -157,7 +215,14 @@ TableConfig ParseTableConfig(const json& json_obj) {
     }
   }
 
-  // Parse filters
+  // Parse required_filters
+  if (json_obj.contains("required_filters")) {
+    for (const auto& filter_json : json_obj["required_filters"]) {
+      config.required_filters.push_back(ParseRequiredFilterConfig(filter_json));
+    }
+  }
+
+  // Parse filters (optional filters for search-time filtering)
   if (json_obj.contains("filters")) {
     for (const auto& filter_json : json_obj["filters"]) {
       config.filters.push_back(ParseFilterConfig(filter_json));

@@ -116,9 +116,50 @@
               }
             ]
           },
+          "required_filters": {
+            "type": "array",
+            "description": "Required filter conditions (data existence conditions)",
+            "items": {
+              "type": "object",
+              "required": ["name", "type", "op"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filter column name"
+                },
+                "type": {
+                  "type": "string",
+                  "description": "Column type",
+                  "enum": [
+                    "tinyint", "tinyint_unsigned",
+                    "smallint", "smallint_unsigned",
+                    "int", "int_unsigned",
+                    "bigint",
+                    "float", "double",
+                    "string", "varchar", "text",
+                    "datetime", "date", "timestamp"
+                  ]
+                },
+                "op": {
+                  "type": "string",
+                  "description": "Comparison operator",
+                  "enum": ["=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"]
+                },
+                "value": {
+                  "description": "Comparison value (not required for IS NULL/IS NOT NULL)"
+                },
+                "bitmap_index": {
+                  "type": "boolean",
+                  "description": "Enable bitmap index for search-time filtering",
+                  "default": false
+                }
+              }
+            }
+          },
           "filters": {
             "type": "array",
-            "description": "Filter columns configuration",
+            "description": "Optional filter columns for search-time filtering",
             "items": {
               "type": "object",
               "required": ["name", "type"],
@@ -191,10 +232,6 @@
                 "enum": ["auto", "always", "never"]
               }
             }
-          },
-          "where_clause": {
-            "type": "string",
-            "description": "Optional WHERE clause for snapshot build"
           }
         }
       }
