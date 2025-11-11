@@ -1,7 +1,7 @@
 # Generate embedded schema header
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/config-schema.json SCHEMA_JSON_CONTENT)
 configure_file(
-  ${CMAKE_SOURCE_DIR}/cmake/config_schema_embedded.h.in
+  ${CMAKE_CURRENT_SOURCE_DIR}/config_schema_embedded.h.in
   ${CMAKE_CURRENT_BINARY_DIR}/config_schema_embedded.h
   @ONLY
 )
