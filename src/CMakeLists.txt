@@ -19,6 +19,7 @@ add_subdirectory(server)
 add_subdirectory(utils)
 add_subdirectory(query)
 add_subdirectory(cli)
+add_subdirectory(client)
 
 # Main executable
 add_executable(mygramdb main.cpp)

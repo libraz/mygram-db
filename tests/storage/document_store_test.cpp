@@ -555,3 +555,149 @@ TEST(DocumentStoreTest, AddDocumentBatchDuplicates) {
   ASSERT_TRUE(status1.has_value());
   EXPECT_EQ(std::get<int32_t>(status1.value()), 1);  // Original value
 }
+
+/**
+ * @brief Test storing documents with 4-byte emoji characters
+ */
+TEST(DocumentStoreTest, EmojiInDocuments) {
+  DocumentStore store;
+
+  // Add document with emoji in primary key
+  DocId doc_id1 = store.AddDocument("😀_pk1", {});
+  EXPECT_GT(doc_id1, 0);
+
+  // Add document with emoji in filter value (string)
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["title"] = FilterValue("Tutorial😀🎉");
+  filters["category"] = FilterValue("楽しい😀学習");
+  DocId doc_id2 = store.AddDocument("pk2", filters);
+  EXPECT_GT(doc_id2, 0);
+
+  // Verify retrieval
+  auto doc1 = store.GetDocument(doc_id1);
+  ASSERT_TRUE(doc1.has_value());
+  EXPECT_EQ(doc1->primary_key, "😀_pk1");
+
+  auto doc2 = store.GetDocument(doc_id2);
+  ASSERT_TRUE(doc2.has_value());
+  auto title = store.GetFilterValue(doc_id2, "title");
+  ASSERT_TRUE(title.has_value());
+  EXPECT_EQ(std::get<std::string>(title.value()), "Tutorial😀🎉");
+
+  auto category = store.GetFilterValue(doc_id2, "category");
+  ASSERT_TRUE(category.has_value());
+  EXPECT_EQ(std::get<std::string>(category.value()), "楽しい😀学習");
+}
+
+/**
+ * @brief Test GetDocId with emoji
+ */
+TEST(DocumentStoreTest, EmojiPrimaryKeyLookup) {
+  DocumentStore store;
+
+  // Add documents with emoji primary keys
+  store.AddDocument("😀", {});
+  store.AddDocument("🎉", {});
+  store.AddDocument("👍", {});
+
+  // Lookup by emoji
+  auto doc_id1 = store.GetDocId("😀");
+  ASSERT_TRUE(doc_id1.has_value());
+  EXPECT_EQ(doc_id1.value(), 1);
+
+  auto doc_id2 = store.GetDocId("🎉");
+  ASSERT_TRUE(doc_id2.has_value());
+  EXPECT_EQ(doc_id2.value(), 2);
+
+  auto doc_id3 = store.GetDocId("👍");
+  ASSERT_TRUE(doc_id3.has_value());
+  EXPECT_EQ(doc_id3.value(), 3);
+
+  // Non-existent emoji
+  auto not_found = store.GetDocId("🚀");
+  EXPECT_FALSE(not_found.has_value());
+}
+
+/**
+ * @brief Test emoji in filter values
+ */
+TEST(DocumentStoreTest, EmojiFilterValues) {
+  DocumentStore store;
+
+  // Add document with various emoji filter values
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["mood"] = FilterValue("😀");
+  filters["celebration"] = FilterValue("🎉");
+  filters["rating"] = FilterValue("👍");
+  filters["mixed"] = FilterValue("Hello😀World🎉");
+
+  DocId doc_id = store.AddDocument("pk1", filters);
+
+  // Verify all emoji filter values
+  auto mood = store.GetFilterValue(doc_id, "mood");
+  ASSERT_TRUE(mood.has_value());
+  EXPECT_EQ(std::get<std::string>(mood.value()), "😀");
+
+  auto celebration = store.GetFilterValue(doc_id, "celebration");
+  ASSERT_TRUE(celebration.has_value());
+  EXPECT_EQ(std::get<std::string>(celebration.value()), "🎉");
+
+  auto rating = store.GetFilterValue(doc_id, "rating");
+  ASSERT_TRUE(rating.has_value());
+  EXPECT_EQ(std::get<std::string>(rating.value()), "👍");
+
+  auto mixed = store.GetFilterValue(doc_id, "mixed");
+  ASSERT_TRUE(mixed.has_value());
+  EXPECT_EQ(std::get<std::string>(mixed.value()), "Hello😀World🎉");
+}
+
+/**
+ * @brief Test batch operations with emojis
+ */
+TEST(DocumentStoreTest, EmojiBatchOperations) {
+  DocumentStore store;
+
+  // Create batch with emoji data
+  std::vector<DocumentStore::DocumentItem> batch;
+  for (int i = 0; i < 100; ++i) {
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["emoji"] = FilterValue("😀");
+    filters["number"] = FilterValue(i);
+    batch.push_back({"emoji_pk_" + std::to_string(i), filters});
+  }
+
+  // Add batch
+  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  EXPECT_EQ(doc_ids.size(), 100);
+  EXPECT_EQ(store.Size(), 100);
+
+  // Verify emoji filter values
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    auto emoji = store.GetFilterValue(doc_ids[i], "emoji");
+    ASSERT_TRUE(emoji.has_value());
+    EXPECT_EQ(std::get<std::string>(emoji.value()), "😀");
+  }
+}
+
+/**
+ * @brief Test complex emoji (with modifiers)
+ */
+TEST(DocumentStoreTest, ComplexEmoji) {
+  DocumentStore store;
+
+  // Emoji with skin tone modifier
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["thumbs"] = FilterValue("👍🏽");  // Medium skin tone
+  filters["family"] = FilterValue("👨‍👩‍👧‍👦");  // Family with ZWJ
+
+  DocId doc_id = store.AddDocument("complex", filters);
+
+  // Verify retrieval
+  auto thumbs = store.GetFilterValue(doc_id, "thumbs");
+  ASSERT_TRUE(thumbs.has_value());
+  EXPECT_EQ(std::get<std::string>(thumbs.value()), "👍🏽");
+
+  auto family = store.GetFilterValue(doc_id, "family");
+  ASSERT_TRUE(family.has_value());
+  EXPECT_EQ(std::get<std::string>(family.value()), "👨‍👩‍👧‍👦");
+}

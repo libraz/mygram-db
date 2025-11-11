@@ -197,6 +197,7 @@ For detailed documentation, see:
 - [Protocol Reference](docs/en/protocol.md) - Complete command reference
 - [Replication Guide](docs/en/replication.md) - MySQL replication setup
 - [Development Guide](docs/en/development.md) - Development environment setup
+- [Client Library (libmygramclient)](docs/en/libmygramclient.md) - C/C++ client library for building language bindings
 
 ## Requirements and Limitations
 

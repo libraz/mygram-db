@@ -779,3 +779,144 @@ TEST(IndexTest, AddDocumentBatchVsSingleIdenticalStructure) {
     }
   }
 }
+
+/**
+ * @brief Test indexing documents with 4-byte emoji characters
+ */
+TEST(IndexTest, EmojiIndexing) {
+  Index index(1);  // Unigram
+
+  // Add documents with emojis
+  index.AddDocument(1, "Hello😀World");
+  index.AddDocument(2, "😀🎉👍");
+  index.AddDocument(3, "楽しい😀チュートリアル");
+
+  // Search for emoji (should find all 3 documents containing this emoji)
+  auto results = index.SearchAnd({"😀"});
+  EXPECT_EQ(results.size(), 3);
+
+  // Search for different emoji (should find only doc 2)
+  results = index.SearchAnd({"🎉"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 2);
+
+  // Search for emoji AND another character
+  results = index.SearchAnd({"😀", "W"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 1);
+}
+
+/**
+ * @brief Test emoji n-gram generation
+ */
+TEST(IndexTest, EmojiNgrams) {
+  Index index(2);  // Bigram
+
+  // Add document with pure emoji sequence
+  std::string text = "😀🎉👍";
+  index.AddDocument(1, text);
+
+  // Should generate bigrams: "😀🎉", "🎉👍"
+  auto results = index.SearchAnd({"😀🎉"});
+  EXPECT_EQ(results.size(), 1);
+
+  results = index.SearchAnd({"🎉👍"});
+  EXPECT_EQ(results.size(), 1);
+
+  // Add another document to test multiple matches
+  index.AddDocument(2, "🎉👍😎");
+
+  // Should find both documents containing "🎉👍"
+  results = index.SearchAnd({"🎉👍"});
+  EXPECT_EQ(results.size(), 2);
+}
+
+/**
+ * @brief Test AND search with emojis
+ */
+TEST(IndexTest, EmojiAndSearch) {
+  Index index(1);  // Unigram
+
+  index.AddDocument(1, "😀A");
+  index.AddDocument(2, "😀🎉");
+  index.AddDocument(3, "A🎉");
+
+  // Both "😀" AND "A"
+  auto results = index.SearchAnd({"😀", "A"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 1);
+
+  // Both "😀" AND "🎉"
+  results = index.SearchAnd({"😀", "🎉"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 2);
+
+  // Both "A" AND "🎉"
+  results = index.SearchAnd({"A", "🎉"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 3);
+}
+
+/**
+ * @brief Test OR search with emojis
+ */
+TEST(IndexTest, EmojiOrSearch) {
+  Index index(1);  // Unigram
+
+  index.AddDocument(1, "😀A");
+  index.AddDocument(2, "🎉B");
+  index.AddDocument(3, "👍C");
+
+  // "😀" OR "🎉"
+  auto results = index.SearchOr({"😀", "🎉"});
+  EXPECT_EQ(results.size(), 2);
+
+  // "😀" OR "🎉" OR "👍"
+  results = index.SearchOr({"😀", "🎉", "👍"});
+  EXPECT_EQ(results.size(), 3);
+}
+
+/**
+ * @brief Test NOT search with emojis
+ */
+TEST(IndexTest, EmojiNotSearch) {
+  Index index(1);  // Unigram
+
+  index.AddDocument(1, "😀X");
+  index.AddDocument(2, "🎉X");
+  index.AddDocument(3, "X");
+
+  // Get all documents with "X"
+  auto all_x = index.SearchAnd({"X"});
+  EXPECT_EQ(all_x.size(), 3);
+
+  // "X" NOT "😀"
+  auto results = index.SearchNot(all_x, {"😀"});
+  EXPECT_EQ(results.size(), 2);
+  EXPECT_TRUE(std::find(results.begin(), results.end(), 2) != results.end());
+  EXPECT_TRUE(std::find(results.begin(), results.end(), 3) != results.end());
+}
+
+/**
+ * @brief Test complex emoji (skin tone, ZWJ sequences)
+ */
+TEST(IndexTest, ComplexEmoji) {
+  Index index(1);  // Unigram
+
+  // Emoji with skin tone modifier: 👍🏽 (thumbs up + medium skin tone)
+  index.AddDocument(1, "👍🏽Y");
+  index.AddDocument(2, "👍Z");  // Without skin tone
+
+  // Search for the base emoji
+  auto results = index.SearchAnd({"👍"});
+  EXPECT_GE(results.size(), 1);  // Should find at least the plain thumbs up
+
+  // Search for the skin tone modifier
+  results = index.SearchAnd({"🏽"});
+  EXPECT_GE(results.size(), 1);  // Should find document with skin tone
+
+  // Search for common character
+  results = index.SearchAnd({"Y"});
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], 1);
+}

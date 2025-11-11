@@ -196,6 +196,7 @@ GET articles 12345
 - [プロトコルリファレンス](docs/ja/protocol.md) - 完全なコマンドリファレンス
 - [レプリケーションガイド](docs/ja/replication.md) - MySQL レプリケーションのセットアップ
 - [開発ガイド](docs/ja/development.md) - 開発環境のセットアップ
+- [クライアントライブラリ (libmygramclient)](docs/ja/libmygramclient.md) - 言語バインディング構築用のC/C++クライアントライブラリ
 
 ## 要件と制限事項
 

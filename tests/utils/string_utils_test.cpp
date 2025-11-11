@@ -266,3 +266,137 @@ TEST(StringUtilsTest, NormalizeTextEdgeCases) {
   EXPECT_EQ(normalized, " !?");  // Full-width space/punctuation to half-width
 }
 #endif  // USE_ICU
+
+/**
+ * @brief Test 4-byte UTF-8 characters (emojis)
+ */
+TEST(StringUtilsTest, FourByteEmoji) {
+  // Single emoji (U+1F600 - 😀)
+  auto codepoints = Utf8ToCodepoints("😀");
+  ASSERT_EQ(codepoints.size(), 1);
+  EXPECT_EQ(codepoints[0], 0x1F600);
+
+  // Round trip
+  std::string emoji = CodepointsToUtf8({0x1F600});
+  EXPECT_EQ(emoji, "😀");
+
+  // Multiple emojis
+  codepoints = Utf8ToCodepoints("😀🎉👍");
+  ASSERT_EQ(codepoints.size(), 3);
+  EXPECT_EQ(codepoints[0], 0x1F600);  // 😀
+  EXPECT_EQ(codepoints[1], 0x1F389);  // 🎉
+  EXPECT_EQ(codepoints[2], 0x1F44D);  // 👍
+}
+
+/**
+ * @brief Test emoji with text
+ */
+TEST(StringUtilsTest, EmojiWithText) {
+  // Mixed: ASCII + Japanese + emoji
+  auto codepoints = Utf8ToCodepoints("Hello😀世界🎉");
+  ASSERT_EQ(codepoints.size(), 9);   // H e l l o 😀 世 界 🎉
+  EXPECT_EQ(codepoints[0], 0x48);    // 'H'
+  EXPECT_EQ(codepoints[5], 0x1F600); // 😀
+  EXPECT_EQ(codepoints[6], 0x4E16);  // 世
+  EXPECT_EQ(codepoints[7], 0x754C);  // 界
+  EXPECT_EQ(codepoints[8], 0x1F389); // 🎉
+
+  // Round trip
+  std::string text = "Hello😀世界🎉";
+  auto cp = Utf8ToCodepoints(text);
+  std::string result = CodepointsToUtf8(cp);
+  EXPECT_EQ(result, text);
+}
+
+/**
+ * @brief Test emoji unigram generation
+ */
+TEST(StringUtilsTest, EmojiUnigrams) {
+  auto ngrams = GenerateNgrams("😀🎉👍", 1);
+  ASSERT_EQ(ngrams.size(), 3);
+  EXPECT_EQ(ngrams[0], "😀");
+  EXPECT_EQ(ngrams[1], "🎉");
+  EXPECT_EQ(ngrams[2], "👍");
+}
+
+/**
+ * @brief Test emoji bigram generation
+ */
+TEST(StringUtilsTest, EmojiBigrams) {
+  auto ngrams = GenerateNgrams("😀🎉👍", 2);
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "😀🎉");
+  EXPECT_EQ(ngrams[1], "🎉👍");
+}
+
+/**
+ * @brief Test emoji with mixed text ngrams
+ */
+TEST(StringUtilsTest, EmojiMixedNgrams) {
+  // "Hello😀" - unigrams
+  auto ngrams = GenerateNgrams("Hello😀", 1);
+  ASSERT_EQ(ngrams.size(), 6);
+  EXPECT_EQ(ngrams[0], "H");
+  EXPECT_EQ(ngrams[1], "e");
+  EXPECT_EQ(ngrams[2], "l");
+  EXPECT_EQ(ngrams[3], "l");
+  EXPECT_EQ(ngrams[4], "o");
+  EXPECT_EQ(ngrams[5], "😀");
+
+  // "日本😀語" - bigrams
+  ngrams = GenerateNgrams("日本😀語", 2);
+  ASSERT_EQ(ngrams.size(), 3);
+  EXPECT_EQ(ngrams[0], "日本");
+  EXPECT_EQ(ngrams[1], "本😀");
+  EXPECT_EQ(ngrams[2], "😀語");
+}
+
+/**
+ * @brief Test complex emoji (with ZWJ - Zero Width Joiner)
+ */
+TEST(StringUtilsTest, ComplexEmoji) {
+  // Family emoji: 👨‍👩‍👧‍👦 (U+1F468 U+200D U+1F469 U+200D U+1F467 U+200D U+1F466)
+  // This is actually multiple codepoints joined with ZWJ (U+200D)
+  std::string family = "👨‍👩‍👧‍👦";
+  auto codepoints = Utf8ToCodepoints(family);
+
+  // Should have 7 codepoints: man, ZWJ, woman, ZWJ, girl, ZWJ, boy
+  EXPECT_GE(codepoints.size(), 4);  // At least the base emojis
+
+  // Round trip should preserve the emoji
+  std::string result = CodepointsToUtf8(codepoints);
+  EXPECT_EQ(result, family);
+}
+
+/**
+ * @brief Test emoji with skin tone modifiers
+ */
+TEST(StringUtilsTest, EmojiSkinTone) {
+  // Thumbs up with medium skin tone: 👍🏽 (U+1F44D U+1F3FD)
+  std::string thumbs = "👍🏽";
+  auto codepoints = Utf8ToCodepoints(thumbs);
+
+  // Should have 2 codepoints: thumbs up + skin tone modifier
+  ASSERT_EQ(codepoints.size(), 2);
+  EXPECT_EQ(codepoints[0], 0x1F44D);  // 👍
+  EXPECT_EQ(codepoints[1], 0x1F3FD);  // 🏽 (medium skin tone)
+
+  // Round trip
+  std::string result = CodepointsToUtf8(codepoints);
+  EXPECT_EQ(result, thumbs);
+}
+
+#ifdef USE_ICU
+/**
+ * @brief Test emoji normalization
+ */
+TEST(StringUtilsTest, EmojiNormalization) {
+  // Emojis should pass through normalization unchanged
+  std::string normalized = NormalizeText("Hello😀世界🎉", true, "keep", true);
+  EXPECT_EQ(normalized, "hello😀世界🎉");  // Only ASCII lowercased
+
+  // Emoji with Japanese text
+  normalized = NormalizeText("ライブ😀楽しい🎉", true, "keep", false);
+  EXPECT_EQ(normalized, "ライブ😀楽しい🎉");  // Emojis preserved
+}
+#endif  // USE_ICU

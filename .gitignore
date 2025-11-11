@@ -20,6 +20,7 @@ _deps/
 *.swp
 *.swo
 *~
+*.bak
 .DS_Store
 
 # Claude Code configuration
