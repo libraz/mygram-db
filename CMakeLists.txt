@@ -63,6 +63,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 option(BUILD_TESTS "Build tests" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(ENABLE_COVERAGE "Enable code coverage" OFF)
 option(USE_ICU "Use ICU for Unicode normalization" ON)
 
 # AddressSanitizer
@@ -75,6 +76,19 @@ endif()
 if(ENABLE_TSAN)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
   set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=thread")
+endif()
+
+# Code Coverage
+if(ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS "Enabling code coverage")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage -O0 -g")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0 -g")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+  else()
+    message(WARNING "Code coverage is only supported with GCC or Clang")
+  endif()
 endif()
 
 # Find packages
@@ -387,6 +401,41 @@ add_subdirectory(src)
 if(BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+# Code Coverage Report Targets
+if(ENABLE_COVERAGE)
+  find_program(LCOV_PATH lcov)
+  find_program(GENHTML_PATH genhtml)
+
+  if(LCOV_PATH AND GENHTML_PATH)
+    # Add target to generate HTML coverage report
+    add_custom_target(coverage
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
+      COMMAND ${LCOV_PATH} --directory . --zerocounters
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+      COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
+      COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
+        '${CMAKE_SOURCE_DIR}/src/*'
+        --output-file ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info --ignore-errors inconsistent,format,mismatch,negative,unused,source --rc derive_function_end_line=0
+      COMMAND ${GENHTML_PATH} ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info
+        --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
+      COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "Generating code coverage report"
+    )
+
+    # Add target to clean coverage data
+    add_custom_target(coverage-clean
+      COMMAND ${LCOV_PATH} --directory . --zerocounters
+      COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/coverage
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "Cleaning coverage data"
+    )
+  else()
+    message(WARNING "lcov and genhtml not found. Coverage report target will not be available.")
+    message(WARNING "Install with: brew install lcov (macOS) or sudo apt-get install lcov (Linux)")
+  endif()
 endif()
 
 # Install
