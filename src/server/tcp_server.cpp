@@ -82,7 +82,7 @@ bool TcpServer::Start() {
   }
 
   // Bind
-  struct sockaddr_in address{};
+  struct sockaddr_in address = {};
   std::memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = INADDR_ANY;
@@ -169,7 +169,7 @@ void TcpServer::AcceptThreadFunc() {
   spdlog::info("Accept thread started");
 
   while (!should_stop_) {
-    struct sockaddr_in client_addr{};
+    struct sockaddr_in client_addr = {};
     socklen_t client_len = sizeof(client_addr);
 
     int client_fd =
@@ -824,7 +824,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Load from directory
         // Check if directory exists
-        struct stat file_stat{};
+        struct stat file_stat = {};
         if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
           loading_ = false;
           return FormatError("Snapshot directory not found: " + filepath);

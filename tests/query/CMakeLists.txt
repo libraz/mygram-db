@@ -32,7 +32,6 @@ add_executable(result_sorter_test
 
 target_link_libraries(result_sorter_test
   mygramdb_query
-  mygramdb_storage
   GTest::gtest_main
 )
 

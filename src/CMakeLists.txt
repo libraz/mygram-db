@@ -26,13 +26,7 @@ add_executable(mygramdb main.cpp)
 
 target_link_libraries(mygramdb PRIVATE
   mygramdb_config
-  mygramdb_index
-  mygramdb_storage
   mygramdb_server
-  mygramdb_utils
-  mygramdb_query
-  spdlog::spdlog
-  Threads::Threads
 )
 
 # Link MySQL library if available

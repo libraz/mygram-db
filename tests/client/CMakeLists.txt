@@ -8,8 +8,6 @@ target_link_libraries(mygramclient_test
   mygramclient_static
   mygramdb_server
   mygramdb_mysql
-  mygramdb_index
-  mygramdb_storage
   GTest::gtest_main
 )
 

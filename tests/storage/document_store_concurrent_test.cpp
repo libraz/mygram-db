@@ -122,7 +122,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
   // Thread that loads from file
   threads.emplace_back([&store2, &test_file, &load_done]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    store2.LoadFromFile(test_file + ".docs");
+    [[maybe_unused]] auto result = store2.LoadFromFile(test_file + ".docs");
     load_done = true;
   });
 

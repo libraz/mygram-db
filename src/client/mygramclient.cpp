@@ -147,14 +147,14 @@ class MygramClient::Impl {
     }
 
     // Set socket timeout
-    struct timeval timeout_val{};
+    struct timeval timeout_val = {};
     timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / 1000);
     timeout_val.tv_usec =
         static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % 1000) * 1000);
     setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
     setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
 
-    struct sockaddr_in server_addr{};
+    struct sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(config_.port);
 

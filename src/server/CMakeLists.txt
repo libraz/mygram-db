@@ -11,10 +11,6 @@ target_include_directories(mygramdb_server PUBLIC
 
 target_link_libraries(mygramdb_server PUBLIC
   mygramdb_query
-  mygramdb_index
-  mygramdb_storage
-  mygramdb_utils
-  spdlog::spdlog
   httplib::httplib
   nlohmann_json::nlohmann_json
   Threads::Threads

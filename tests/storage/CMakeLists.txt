@@ -54,11 +54,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(snapshot_save_load_test
-    mygramdb_storage
-    mygramdb_index
-    mygramdb_mysql
     mygramdb_query
-    mygramdb_utils
+    mygramdb_mysql
     mygramdb_config
   )
 endif()
