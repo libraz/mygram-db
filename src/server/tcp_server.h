@@ -152,6 +152,7 @@ class TcpServer {
   int ngram_size_;  // N-gram size (0 for hybrid mode)
   std::string snapshot_dir_;  // Snapshot directory
   std::atomic<bool> read_only_{false};  // Read-only mode flag
+  std::atomic<bool> loading_{false};  // Loading mode flag (blocks queries during LOAD)
   const config::Config* full_config_;  // Full configuration for CONFIG command
 
 #ifdef USE_MYSQL

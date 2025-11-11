@@ -169,6 +169,24 @@ class DocumentStore {
                                                   const FilterValue& value) const;
 
   /**
+   * @brief Get all document IDs
+   *
+   * @return Sorted vector of all document IDs
+   */
+  [[nodiscard]] std::vector<DocId> GetAllDocIds() const;
+
+  /**
+   * @brief Check if a filter column exists in any document
+   *
+   * This method is useful for validating ORDER BY and FILTER clauses.
+   * Returns true if at least one document has the specified filter column.
+   *
+   * @param filter_name Filter column name
+   * @return true if the column exists in at least one document
+   */
+  [[nodiscard]] bool HasFilterColumn(const std::string& filter_name) const;
+
+  /**
    * @brief Get total document count
    */
   [[nodiscard]] size_t Size() const { return doc_id_to_pk_.size(); }

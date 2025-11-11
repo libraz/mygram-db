@@ -202,6 +202,34 @@ std::vector<DocId> DocumentStore::FilterByValue(const std::string& filter_name,
   return results;
 }
 
+std::vector<DocId> DocumentStore::GetAllDocIds() const {
+  std::shared_lock lock(mutex_);
+  std::vector<DocId> results;
+  results.reserve(doc_id_to_pk_.size());
+
+  for (const auto& [doc_id, _] : doc_id_to_pk_) {
+    results.push_back(doc_id);
+  }
+
+  // Sort results for consistency with set operations
+  std::sort(results.begin(), results.end());
+
+  return results;
+}
+
+bool DocumentStore::HasFilterColumn(const std::string& filter_name) const {
+  std::shared_lock lock(mutex_);
+
+  // Check if any document has this filter column
+  for (const auto& [doc_id, filters] : doc_filters_) {
+    if (filters.find(filter_name) != filters.end()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 size_t DocumentStore::MemoryUsage() const {
   std::shared_lock lock(mutex_);
   size_t total = 0;

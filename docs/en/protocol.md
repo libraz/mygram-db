@@ -393,6 +393,84 @@ Error (if already optimizing):
 ERROR Optimization already in progress
 ```
 
+## DEBUG Command
+
+Enable or disable debug mode for the current connection to see detailed query execution metrics.
+
+### Syntax
+
+```
+DEBUG ON
+DEBUG OFF
+```
+
+### How it works
+
+- **Per-Connection State**: Debug mode is enabled/disabled for the current connection only
+- **Query Timing**: Shows execution time breakdown (index search, filtering)
+- **Search Details**: Displays n-grams generated, posting list sizes, and candidate counts
+- **Optimization Visibility**: Reports which optimization strategies were applied
+- **Performance Impact**: Minimal overhead, only collects metrics when enabled
+
+### Examples
+
+Enable debug mode:
+```
+DEBUG ON
+```
+
+Disable debug mode:
+```
+DEBUG OFF
+```
+
+### Response
+
+```
+OK DEBUG_ON
+```
+
+or
+
+```
+OK DEBUG_OFF
+```
+
+### Debug Output Format
+
+When debug mode is enabled, SEARCH and COUNT commands return additional debug information:
+
+```
+OK RESULTS <count> <id1> <id2> ...
+query_time=<ms> index_time=<ms> filter_time=<ms> terms=<n> ngrams=<n> candidates=<n> after_intersection=<n> after_not=<n> after_filters=<n> final=<n> optimization=<strategy>
+```
+
+Example:
+```
+> DEBUG ON
+OK DEBUG_ON
+
+> SEARCH articles tech AND AI FILTER status=1 LIMIT 10
+OK RESULTS 10 101 205 387 ...
+
+[DEBUG INFO]
+query_time=2.45ms index_time=1.20ms filter_time=0.85ms terms=2 ngrams=8 candidates=15000 after_intersection=5000 after_not=5000 after_filters=1200 final=10 optimization=early_exit
+```
+
+### Debug Metrics Explained
+
+- **query_time**: Total query execution time in milliseconds
+- **index_time**: Time spent searching the index
+- **filter_time**: Time spent applying filters and conditions
+- **terms**: Number of search terms
+- **ngrams**: Total n-grams generated from search terms
+- **candidates**: Initial candidate documents from index
+- **after_intersection**: Results after AND term intersection
+- **after_not**: Results after NOT term filtering
+- **after_filters**: Results after FILTER conditions
+- **final**: Final result count returned
+- **optimization**: Strategy used (e.g., `early_exit`, `none`)
+
 ## Error Response
 
 All errors follow this format:
@@ -444,5 +522,6 @@ Available commands:
   SAVE, LOAD            - Snapshot management
   REPLICATION STATUS/STOP/START - Replication control
   OPTIMIZE              - Index optimization
+  DEBUG ON/OFF          - Enable/disable debug mode
   quit, exit            - Exit client
 ```

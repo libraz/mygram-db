@@ -194,10 +194,121 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   }
 
   query.table = tokens[1];
-  query.search_text = tokens[2];
+
+  // Helper lambda to count parentheses in a token, respecting quotes
+  auto count_parens = [](const std::string& token) -> std::pair<int, int> {
+    int open = 0, close = 0;
+    bool in_quote = false;
+    char quote_char = '\0';
+
+    for (size_t i = 0; i < token.size(); ++i) {
+      char c = token[i];
+
+      // Handle quote state
+      if ((c == '"' || c == '\'') && (i == 0 || token[i-1] != '\\')) {
+        if (!in_quote) {
+          in_quote = true;
+          quote_char = c;
+        } else if (c == quote_char) {
+          in_quote = false;
+          quote_char = '\0';
+        }
+      }
+
+      // Count parentheses only when not inside quotes
+      if (!in_quote) {
+        if (c == '(') open++;
+        if (c == ')') close++;
+      }
+    }
+
+    return {open, close};
+  };
+
+  // First pass: check parentheses balance across ALL tokens
+  int total_paren_depth = 0;
+  for (size_t i = 2; i < tokens.size(); ++i) {
+    auto [open, close] = count_parens(tokens[i]);
+    total_paren_depth += open - close;
+
+    // Check for unmatched closing parentheses
+    if (total_paren_depth < 0) {
+      SetError("Unmatched closing parenthesis");
+      query.type = QueryType::UNKNOWN;
+      return query;
+    }
+  }
+
+  // Check for unclosed parentheses
+  if (total_paren_depth > 0) {
+    SetError("Unclosed parenthesis");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
+
+  // Extract search text: consume tokens until we hit a keyword (AND, OR, NOT, FILTER, ORDER, LIMIT, OFFSET)
+  // Handle parentheses by tracking nesting level - but respect quoted strings
+  size_t pos = 2;
+  std::vector<std::string> search_tokens;
+  int paren_depth = 0;
+
+  while (pos < tokens.size()) {
+    const std::string& token = tokens[pos];
+    std::string upper_token = ToUpper(token);
+
+    // Track parentheses depth (respecting quotes)
+    auto [open, close] = count_parens(token);
+    paren_depth += open - close;
+
+    // Check if this is a keyword (only when not inside parentheses)
+    if (paren_depth == 0 &&
+        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
+         upper_token == "FILTER" || upper_token == "ORDER" ||
+         upper_token == "LIMIT" || upper_token == "OFFSET")) {
+      break;  // Stop consuming search text
+    }
+
+    search_tokens.push_back(token);
+    pos++;
+  }
+
+  if (search_tokens.empty()) {
+    SetError("SEARCH requires search text");
+    return query;
+  }
+
+  // Join search tokens with spaces to form complete search expression
+  query.search_text = search_tokens[0];
+  for (size_t i = 1; i < search_tokens.size(); ++i) {
+    const std::string& token = search_tokens[i];
+    // Don't add space before closing parentheses or after opening parentheses
+    bool prev_ends_with_open_paren = !search_tokens[i-1].empty() &&
+                                      search_tokens[i-1].back() == '(';
+    bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
+
+    if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
+      query.search_text += " ";
+    }
+    query.search_text += token;
+  }
+
+  // Check for empty search text (e.g., empty quoted strings)
+  // After tokenization, empty quoted strings become empty string tokens
+  bool is_empty = true;
+  for (const auto& token : search_tokens) {
+    if (!token.empty()) {
+      is_empty = false;
+      break;
+    }
+  }
+
+  if (is_empty) {
+    SetError("SEARCH requires non-empty search text");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
 
   // Parse optional clauses
-  size_t pos = 3;
   while (pos < tokens.size()) {
     std::string keyword = ToUpper(tokens[pos]);
 
@@ -213,6 +324,11 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
       }
     } else if (keyword == "FILTER") {
       if (!ParseFilters(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return query;
+      }
+    } else if (keyword == "ORDER") {
+      if (!ParseOrderBy(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
         return query;
       }
@@ -254,10 +370,122 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   }
 
   query.table = tokens[1];
-  query.search_text = tokens[2];
+
+  // Helper lambda to count parentheses in a token, respecting quotes
+  auto count_parens = [](const std::string& token) -> std::pair<int, int> {
+    int open = 0, close = 0;
+    bool in_quote = false;
+    char quote_char = '\0';
+
+    for (size_t i = 0; i < token.size(); ++i) {
+      char c = token[i];
+
+      // Handle quote state
+      if ((c == '"' || c == '\'') && (i == 0 || token[i-1] != '\\')) {
+        if (!in_quote) {
+          in_quote = true;
+          quote_char = c;
+        } else if (c == quote_char) {
+          in_quote = false;
+          quote_char = '\0';
+        }
+      }
+
+      // Count parentheses only when not inside quotes
+      if (!in_quote) {
+        if (c == '(') open++;
+        if (c == ')') close++;
+      }
+    }
+
+    return {open, close};
+  };
+
+  // First pass: check parentheses balance across ALL tokens
+  int total_paren_depth = 0;
+  for (size_t i = 2; i < tokens.size(); ++i) {
+    auto [open, close] = count_parens(tokens[i]);
+    total_paren_depth += open - close;
+
+    // Check for unmatched closing parentheses
+    if (total_paren_depth < 0) {
+      SetError("Unmatched closing parenthesis");
+      query.type = QueryType::UNKNOWN;
+      return query;
+    }
+  }
+
+  // Check for unclosed parentheses
+  if (total_paren_depth > 0) {
+    SetError("Unclosed parenthesis");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
+
+  // Extract search text: consume tokens until we hit a keyword
+  // Handle parentheses by tracking nesting level - but respect quoted strings
+  size_t pos = 2;
+  std::vector<std::string> search_tokens;
+  int paren_depth = 0;
+
+  while (pos < tokens.size()) {
+    const std::string& token = tokens[pos];
+    std::string upper_token = ToUpper(token);
+
+    // Track parentheses depth (respecting quotes)
+    auto [open, close] = count_parens(token);
+    paren_depth += open - close;
+
+    // Check if this is a keyword (only when not inside parentheses)
+    // Include LIMIT/OFFSET/ORDER so they stop token consumption and get rejected below
+    if (paren_depth == 0 &&
+        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
+         upper_token == "FILTER" || upper_token == "LIMIT" ||
+         upper_token == "OFFSET" || upper_token == "ORDER")) {
+      break;  // Stop consuming search text
+    }
+
+    search_tokens.push_back(token);
+    pos++;
+  }
+
+  if (search_tokens.empty()) {
+    SetError("COUNT requires search text");
+    return query;
+  }
+
+  // Join search tokens with spaces
+  query.search_text = search_tokens[0];
+  for (size_t i = 1; i < search_tokens.size(); ++i) {
+    const std::string& token = search_tokens[i];
+    // Don't add space before closing parentheses or after opening parentheses
+    bool prev_ends_with_open_paren = !search_tokens[i-1].empty() &&
+                                      search_tokens[i-1].back() == '(';
+    bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
+
+    if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
+      query.search_text += " ";
+    }
+    query.search_text += token;
+  }
+
+  // Check for empty search text (e.g., empty quoted strings)
+  // After tokenization, empty quoted strings become empty string tokens
+  bool is_empty = true;
+  for (const auto& token : search_tokens) {
+    if (!token.empty()) {
+      is_empty = false;
+      break;
+    }
+  }
+
+  if (is_empty) {
+    SetError("COUNT requires non-empty search text");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
 
   // Parse optional clauses
-  size_t pos = 3;
   while (pos < tokens.size()) {
     std::string keyword = ToUpper(tokens[pos]);
 
@@ -406,6 +634,74 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens,
   return true;
 }
 
+bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens,
+                                size_t& pos, Query& query) {
+  // ORDER BY <column> [ASC|DESC]
+  // ORDER BY ASC/DESC (shorthand for primary key)
+  // ORDER ASC/DESC (shorthand, BY is optional)
+  pos++; // Skip "ORDER"
+
+  if (pos >= tokens.size()) {
+    SetError("ORDER requires BY or ASC/DESC");
+    return false;
+  }
+
+  OrderByClause order_by;
+  std::string next_token = ToUpper(tokens[pos]);
+
+  // Check for shorthand: ORDER ASC/DESC (without BY)
+  if (next_token == "ASC" || next_token == "DESC") {
+    // Shorthand for primary key ordering
+    order_by.column = "";  // Empty = primary key
+    order_by.order = (next_token == "ASC") ? SortOrder::ASC : SortOrder::DESC;
+    pos++;
+    query.order_by = order_by;
+    return true;
+  }
+
+  // Expect BY keyword
+  if (next_token != "BY") {
+    SetError("Expected BY or ASC/DESC after ORDER, got: " + next_token);
+    return false;
+  }
+  pos++; // Skip "BY"
+
+  if (pos >= tokens.size()) {
+    SetError("ORDER BY requires a column name or ASC/DESC");
+    return false;
+  }
+
+  // Check if next token is ASC/DESC (shorthand for primary key)
+  next_token = ToUpper(tokens[pos]);
+  if (next_token == "ASC" || next_token == "DESC") {
+    // ORDER BY ASC/DESC (shorthand for primary key)
+    order_by.column = "";  // Empty = primary key
+    order_by.order = (next_token == "ASC") ? SortOrder::ASC : SortOrder::DESC;
+    pos++;
+    query.order_by = order_by;
+    return true;
+  }
+
+  // Normal case: ORDER BY <column> [ASC|DESC]
+  order_by.column = tokens[pos++];
+
+  // Check for ASC/DESC (optional, default is DESC)
+  if (pos < tokens.size()) {
+    std::string order_str = ToUpper(tokens[pos]);
+    if (order_str == "ASC") {
+      order_by.order = SortOrder::ASC;
+      pos++;
+    } else if (order_str == "DESC") {
+      order_by.order = SortOrder::DESC;
+      pos++;
+    }
+    // If not ASC or DESC, leave it for next clause to handle
+  }
+
+  query.order_by = order_by;
+  return true;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   std::vector<std::string> tokens;
@@ -460,11 +756,10 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
     } else {
       // Inside quotes
       if (character == quote_char) {
-        // End of quoted string
-        if (!token.empty()) {
-          tokens.push_back(token);
-          token.clear();
-        }
+        // End of quoted string - always add token, even if empty
+        // Empty quoted strings are significant (e.g., to detect errors)
+        tokens.push_back(token);
+        token.clear();
         quote_char = '\0';
         continue;
       }

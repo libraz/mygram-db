@@ -357,14 +357,21 @@ TEST(QueryParserTest, CountUnsupportedClause) {
 }
 
 /**
- * @brief Test SEARCH with unknown keyword
+ * @brief Test SEARCH with unknown keyword (treated as search text)
+ *
+ * With parentheses-aware parsing, unknown keywords are consumed as search text
+ * until a known keyword is encountered. This is more user-friendly and allows
+ * flexible search expressions without worrying about keyword conflicts.
  */
 TEST(QueryParserTest, SearchUnknownKeyword) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles hello UNKNOWN keyword");
 
-  EXPECT_FALSE(query.IsValid());
-  EXPECT_NE(parser.GetError().find("Unknown keyword"), std::string::npos);
+  // UNKNOWN and keyword are treated as part of search text
+  EXPECT_TRUE(query.IsValid());
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello UNKNOWN keyword");
 }
 
 /**
@@ -747,4 +754,367 @@ TEST(QueryParserTest, DebugInvalidMode) {
   EXPECT_EQ(query.type, QueryType::UNKNOWN);
   EXPECT_FALSE(query.IsValid());
   EXPECT_FALSE(parser.GetError().empty());
+}
+
+// ORDER BY Tests
+TEST(QueryParserTest, SearchWithOrderByDesc) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at DESC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello");
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "created_at");
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchWithOrderByAsc) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at ASC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "created_at");
+  EXPECT_EQ(query.order_by->order, SortOrder::ASC);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchWithOrderByDefaultDesc) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "created_at");
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);  // Default
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchWithOrderByPrimaryKey) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY id DESC");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "id");
+  EXPECT_FALSE(query.order_by->IsPrimaryKey());  // id is a column name, not empty
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchWithOrderByCaseInsensitive) {
+  QueryParser parser;
+  auto query1 = parser.Parse("SEARCH articles hello order by created_at asc");
+  auto query2 = parser.Parse("SEARCH articles hello OrDeR By score DeSc");
+
+  EXPECT_EQ(query1.type, QueryType::SEARCH);
+  EXPECT_TRUE(query1.order_by.has_value());
+  EXPECT_EQ(query1.order_by->order, SortOrder::ASC);
+
+  EXPECT_EQ(query2.type, QueryType::SEARCH);
+  EXPECT_TRUE(query2.order_by.has_value());
+  EXPECT_EQ(query2.order_by->order, SortOrder::DESC);
+}
+
+TEST(QueryParserTest, SearchWithOrderByAndFilter) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.filters.size(), 1);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "created_at");
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_EQ(query.limit, 20);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchComplexWithOrderBy) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles golang AND tutorial NOT beginner FILTER status = 1 ORDER BY score DESC LIMIT 10 OFFSET 20");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.search_text, "golang");
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.not_terms.size(), 1);
+  EXPECT_EQ(query.filters.size(), 1);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "score");
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_EQ(query.offset, 20);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, OrderByWithoutBy) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER created_at");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("BY"), std::string::npos);
+}
+
+TEST(QueryParserTest, OrderByWithoutColumn) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("column name"), std::string::npos);
+}
+
+/**
+ * @brief Test ORDER BY ASC shorthand (primary key)
+ */
+TEST(QueryParserTest, SearchWithOrderByAscShorthand) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY ASC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "articles");
+  EXPECT_EQ(query.search_text, "hello");
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.order_by->order, SortOrder::ASC);
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER BY DESC shorthand (primary key)
+ */
+TEST(QueryParserTest, SearchWithOrderByDescShorthand) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY DESC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER ASC shorthand (without BY)
+ */
+TEST(QueryParserTest, SearchWithOrderAscShorthand) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER ASC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.order_by->order, SortOrder::ASC);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER DESC shorthand (without BY)
+ */
+TEST(QueryParserTest, SearchWithOrderDescShorthand) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER DESC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER DESC shorthand with filters
+ */
+TEST(QueryParserTest, SearchWithOrderDescShorthandAndFilter) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER status = 1 ORDER DESC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.filters.size(), 1);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, SearchWithoutOrderBy) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_FALSE(query.order_by.has_value());  // No ORDER BY specified
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER BY with parenthesized search expression (no quotes needed!)
+ *
+ * The parser now tracks parentheses depth, so OR inside parentheses
+ * is not interpreted as a keyword
+ */
+TEST(QueryParserTest, SearchWithParenthesesAndOrderBy) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads (golang OR python) AND tutorial ORDER DESC LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "threads");
+  // Parenthesized expression is extracted as search_text
+  EXPECT_EQ(query.search_text, "(golang OR python)");
+  // AND after closing paren is recognized as keyword
+  EXPECT_EQ(query.and_terms.size(), 1);
+  EXPECT_EQ(query.and_terms[0], "tutorial");
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
+  EXPECT_TRUE(query.order_by->IsPrimaryKey());
+  EXPECT_EQ(query.limit, 10);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER BY with nested parentheses and quoted phrase
+ */
+TEST(QueryParserTest, SearchWithComplexExpressionAndOrderBy) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.table, "posts");
+  // The entire complex expression up to NOT (quotes are removed by tokenizer)
+  EXPECT_EQ(query.search_text, "((mysql OR postgresql) AND hello world)");
+  EXPECT_EQ(query.not_terms.size(), 1);
+  EXPECT_EQ(query.not_terms[0], "sqlite");
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "score");
+  EXPECT_EQ(query.order_by->order, SortOrder::ASC);
+  EXPECT_EQ(query.limit, 20);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test COUNT with parentheses
+ */
+TEST(QueryParserTest, CountWithParentheses) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT threads (golang OR python) FILTER status = 1");
+
+  EXPECT_EQ(query.type, QueryType::COUNT);
+  EXPECT_EQ(query.table, "threads");
+  EXPECT_EQ(query.search_text, "(golang OR python)");
+  EXPECT_EQ(query.filters.size(), 1);
+  EXPECT_TRUE(query.IsValid());
+}
+
+// ============================================================================
+// Syntax Error Tests
+// ============================================================================
+
+/**
+ * @brief Test SEARCH with unclosed parenthesis
+ */
+TEST(QueryParserTest, SearchUnclosedParenthesis) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads (golang OR python LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with unmatched closing parenthesis
+ */
+TEST(QueryParserTest, SearchUnmatchedClosingParenthesis) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads golang OR python) LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unmatched closing parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with multiple unclosed parentheses
+ */
+TEST(QueryParserTest, SearchMultipleUnclosedParentheses) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads ((golang OR python) AND (rust ORDER BY id DESC");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with nested parentheses - one unclosed
+ */
+TEST(QueryParserTest, SearchNestedUnclosedParenthesis) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads ((golang OR python) AND rust LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with quoted string containing unbalanced parentheses
+ *
+ * Note: After tokenization, quotes are removed, so the tokenized result
+ * contains an unbalanced parenthesis. This is detected as an error because
+ * the parenthesis balance check happens after tokenization.
+ *
+ * Users should either balance parentheses even inside quotes, or use
+ * different delimiters for such searches.
+ */
+TEST(QueryParserTest, SearchQuotedParentheses) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH threads "hello (world" LIMIT 10)");
+
+  // Unbalanced parenthesis detected after tokenization
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test COUNT with unclosed parenthesis
+ */
+TEST(QueryParserTest, CountUnclosedParenthesis) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT threads (golang OR python");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unclosed parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test COUNT with unmatched closing parenthesis
+ */
+TEST(QueryParserTest, CountUnmatchedClosingParenthesis) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT threads golang OR python)");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Unmatched closing parenthesis"), std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with complex nested parentheses - properly balanced
+ */
+TEST(QueryParserTest, SearchComplexNestedParenthesesBalanced) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads ((golang OR python) AND (rust OR cpp)) LIMIT 10");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.IsValid());
+  EXPECT_EQ(query.search_text, "((golang OR python) AND (rust OR cpp))");
 }

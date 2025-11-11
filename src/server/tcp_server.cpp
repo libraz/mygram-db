@@ -339,6 +339,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
   try {
     switch (query.type) {
       case query::QueryType::SEARCH: {
+        // Check if server is loading
+        if (loading_) {
+          return FormatError("Server is loading, please try again later");
+        }
+
         // Start index search timing
         auto index_start = std::chrono::high_resolution_clock::now();
 
@@ -520,6 +525,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       }
 
       case query::QueryType::COUNT: {
+        // Check if server is loading
+        if (loading_) {
+          return FormatError("Server is loading, please try again later");
+        }
+
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
@@ -647,6 +657,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       }
 
       case query::QueryType::GET: {
+        // Check if server is loading
+        if (loading_) {
+          return FormatError("Server is loading, please try again later");
+        }
+
         auto doc_id_opt = doc_store_.GetDocId(query.primary_key);
         if (!doc_id_opt) {
           return FormatError("Document not found");
@@ -742,8 +757,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         }
 #endif
 
-        // Set read-only mode
-        read_only_ = true;
+        // Set loading mode (blocks queries)
+        loading_ = true;
 
         // Load index and document store with GTID
         std::string index_path = filepath + ".index";
@@ -753,8 +768,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         bool success = index_.LoadFromFile(index_path) &&
                       doc_store_.LoadFromFile(doc_path, &loaded_gtid);
 
-        // Clear read-only mode
-        read_only_ = false;
+        // Clear loading mode
+        loading_ = false;
 
         // Restore GTID if snapshot had one
 #ifdef USE_MYSQL
@@ -1055,6 +1070,20 @@ std::string TcpServer::FormatInfoResponse() {
     oss << "optimization_status: in_progress\r\n";
   } else {
     oss << "optimization_status: idle\r\n";
+  }
+  oss << "\r\n";
+
+  // Tables
+  oss << "# Tables\r\n";
+  if (full_config_ != nullptr) {
+    oss << "tables: ";
+    for (size_t i = 0; i < full_config_->tables.size(); ++i) {
+      if (i > 0) {
+        oss << ",";
+      }
+      oss << full_config_->tables[i].name;
+    }
+    oss << "\r\n";
   }
   oss << "\r\n";
 

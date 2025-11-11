@@ -107,6 +107,11 @@ char* KeywordGenerator(const std::vector<std::string>& keywords, const char* tex
  */
 static std::vector<std::string> current_keywords;
 
+/**
+ * @brief Global storage for table names fetched from server
+ */
+static std::vector<std::string> available_tables;
+
 char* KeywordGeneratorWrapper(const char* text, int state) {
   return KeywordGenerator(current_keywords, text, state);
 }
@@ -139,11 +144,55 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
   size_t token_count = tokens.size();
 
-  // SEARCH <table> <text> [NOT <term>] [FILTER <col=val>] [LIMIT <n>] [OFFSET <n>]
+  // Helper: find if a keyword exists in the token list
+  auto has_keyword = [&tokens](const std::string& keyword) {
+    for (const auto& token : tokens) {
+      std::string upper_token = token;
+      for (char& c : upper_token) {
+        c = static_cast<char>(toupper(c));
+      }
+      if (upper_token == keyword) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Helper: get the previous token (uppercase)
+  auto get_prev_token = [&tokens]() -> std::string {
+    if (tokens.size() >= 2) {
+      std::string prev = tokens[tokens.size() - 1];
+      for (char& c : prev) {
+        c = static_cast<char>(toupper(c));
+      }
+      return prev;
+    }
+    return "";
+  };
+
+  // SEARCH <table> <text> [AND/OR/NOT <term>] [FILTER <col=val>] [ORDER [BY] [ASC|DESC]] [LIMIT <n>] [OFFSET <n>]
   if (command == "SEARCH") {
+    std::string prev = get_prev_token();
+
+    // Special handling for ORDER BY clause
+    if (prev == "ORDER") {
+      // After ORDER: suggest BY, ASC, DESC (shorthand)
+      current_keywords = {"BY", "ASC", "DESC"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (prev == "BY" && has_keyword("ORDER")) {
+      // After ORDER BY: suggest ASC, DESC, or <column_name>
+      current_keywords = {"ASC", "DESC", "<column_name>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+
     if (token_count == 1) {
-      // After SEARCH: suggest table name hint
-      current_keywords = {"<table_name>"};
+      // After SEARCH: suggest table names from server
+      if (!available_tables.empty()) {
+        current_keywords = available_tables;
+      } else {
+        current_keywords = {"<table_name>"};
+      }
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     if (token_count == 2) {
@@ -152,14 +201,19 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     // After search text: suggest optional keywords
-    current_keywords = {"NOT", "FILTER", "LIMIT", "OFFSET"};
+    current_keywords = {"AND", "OR", "NOT", "FILTER", "ORDER", "LIMIT", "OFFSET"};
     return rl_completion_matches(text, KeywordGeneratorWrapper);
   }
 
   // COUNT <table> <text> [NOT <term>] [FILTER <col=val>]
   if (command == "COUNT") {
     if (token_count == 1) {
-      current_keywords = {"<table_name>"};
+      // After COUNT: suggest table names from server
+      if (!available_tables.empty()) {
+        current_keywords = available_tables;
+      } else {
+        current_keywords = {"<table_name>"};
+      }
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     if (token_count == 2) {
@@ -173,7 +227,12 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
   // GET <table> <primary_key>
   if (command == "GET") {
     if (token_count == 1) {
-      current_keywords = {"<table_name>"};
+      // After GET: suggest table names from server
+      if (!available_tables.empty()) {
+        current_keywords = available_tables;
+      } else {
+        current_keywords = {"<table_name>"};
+      }
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     if (token_count == 2) {
@@ -335,6 +394,45 @@ class MygramClient {
 
   [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
 
+  /**
+   * @brief Fetch table names from server INFO command
+   * Updates global available_tables vector
+   */
+  void FetchTableNames() {
+    if (!IsConnected()) {
+      return;
+    }
+
+    std::string response = SendCommand("INFO");
+
+    // Parse response to extract table names
+    // Look for line: "tables: table1,table2,table3"
+    size_t pos = response.find("tables: ");
+    if (pos != std::string::npos) {
+      pos += 8;  // Skip "tables: "
+      size_t end_pos = response.find("\r\n", pos);
+      if (end_pos == std::string::npos) {
+        end_pos = response.find("\n", pos);
+      }
+      if (end_pos != std::string::npos) {
+        std::string tables_str = response.substr(pos, end_pos - pos);
+
+        // Split by comma
+        available_tables.clear();
+        std::istringstream iss(tables_str);
+        std::string table;
+        while (std::getline(iss, table, ',')) {
+          // Trim whitespace
+          table.erase(0, table.find_first_not_of(" \t\r\n"));
+          table.erase(table.find_last_not_of(" \t\r\n") + 1);
+          if (!table.empty()) {
+            available_tables.push_back(table);
+          }
+        }
+      }
+    }
+  }
+
   [[nodiscard]] std::string SendCommand(const std::string& command) const {
     if (!IsConnected()) {
       return "(error) Not connected";
@@ -374,7 +472,7 @@ class MygramClient {
     return response;
   }
 
-  void RunInteractive() const {
+  void RunInteractive() {
     std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
 #ifdef USE_READLINE
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';
@@ -385,6 +483,9 @@ class MygramClient {
     std::cout << '\n';
 
 #ifdef USE_READLINE
+    // Fetch table names from server for tab completion
+    FetchTableNames();
+
     // Setup readline completion
     rl_attempted_completion_function = CommandCompletion;
 #endif
@@ -461,10 +562,9 @@ class MygramClient {
  private:
   static void PrintHelp() {
     std::cout << "Available commands:" << '\n';
-    std::cout
-        << "  SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]"
-        << '\n';
-    std::cout << "  COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]" << '\n';
+    std::cout << "  SEARCH <table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]" << '\n';
+    std::cout << "         [ORDER [BY] <col>|ASC|DESC] [LIMIT <n>] [OFFSET <n>]" << '\n';
+    std::cout << "  COUNT <table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]" << '\n';
     std::cout << "  GET <table> <primary_key>" << '\n';
     std::cout << "  INFO - Show server statistics" << '\n';
     std::cout << "  CONFIG - Show current configuration" << '\n';
@@ -475,6 +575,14 @@ class MygramClient {
     std::cout << "  REPLICATION START - Start replication" << '\n';
     std::cout << "  DEBUG ON - Enable debug mode (shows query execution details)" << '\n';
     std::cout << "  DEBUG OFF - Disable debug mode" << '\n';
+    std::cout << '\n';
+    std::cout << "Query syntax examples:" << '\n';
+    std::cout << "  SEARCH threads golang                          # Simple search" << '\n';
+    std::cout << "  SEARCH threads (golang OR python) AND tutorial # Boolean query" << '\n';
+    std::cout << "  SEARCH threads golang ORDER DESC LIMIT 10      # With sorting" << '\n';
+    std::cout << "  SEARCH threads golang ORDER BY created_at ASC  # Sort by column" << '\n';
+    std::cout << '\n';
+    std::cout << "Other commands:" << '\n';
     std::cout << "  quit/exit - Exit the client" << '\n';
     std::cout << "  help - Show this help" << '\n';
   }

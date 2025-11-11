@@ -199,6 +199,18 @@ class Index {
    */
   [[nodiscard]] const PostingList* GetPostingList(const std::string& term) const;
 
+  /**
+   * @brief Get n-gram size for regular text
+   * @return N-gram size (0 for hybrid mode)
+   */
+  [[nodiscard]] int GetNgramSize() const { return ngram_size_; }
+
+  /**
+   * @brief Get n-gram size for Kanji characters
+   * @return Kanji n-gram size
+   */
+  [[nodiscard]] int GetKanjiNgramSize() const { return kanji_ngram_size_; }
+
  private:
   int ngram_size_;
   int kanji_ngram_size_;

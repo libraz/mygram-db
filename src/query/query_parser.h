@@ -56,6 +56,27 @@ struct FilterCondition {
 };
 
 /**
+ * @brief Sort order for ORDER BY clause
+ */
+enum class SortOrder {
+  ASC,   // Ascending
+  DESC   // Descending (default)
+};
+
+/**
+ * @brief ORDER BY clause specification
+ */
+struct OrderByClause {
+  std::string column;  // Column name (empty = primary key)
+  SortOrder order = SortOrder::DESC;  // Default: descending
+
+  /**
+   * @brief Check if ordering by primary key
+   */
+  bool IsPrimaryKey() const { return column.empty(); }
+};
+
+/**
  * @brief Debug information for query execution
  */
 struct DebugInfo {
@@ -84,6 +105,7 @@ struct Query {
   std::vector<std::string> and_terms;  // Additional terms for AND search
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
+  std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
   uint32_t limit = 100;    // Default limit
   uint32_t offset = 0;     // Default offset
   std::string primary_key; // For GET command
@@ -99,7 +121,7 @@ struct Query {
  * @brief Query parser
  *
  * Parses text protocol commands:
- * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>] [OFFSET <n>]
+ * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [ORDER BY <col> ASC|DESC] [LIMIT <n>] [OFFSET <n>]
  * - COUNT <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
  * - INFO
@@ -113,6 +135,8 @@ struct Query {
  * - Use quotes for phrases: SEARCH threads "hello world" will search for the exact phrase
  * - AND operator: SEARCH threads term1 AND term2 AND term3
  * - NOT operator: SEARCH threads term1 NOT excluded
+ * - ORDER BY: SEARCH threads golang ORDER BY created_at DESC LIMIT 10
+ * - Default order: primary key DESC (if ORDER BY not specified)
  */
 class QueryParser {
  public:
@@ -174,6 +198,11 @@ class QueryParser {
    * @brief Parse OFFSET clause
    */
   bool ParseOffset(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+
+  /**
+   * @brief Parse ORDER BY clause
+   */
+  bool ParseOrderBy(const std::vector<std::string>& tokens, size_t& pos, Query& query);
 
   /**
    * @brief Tokenize query string

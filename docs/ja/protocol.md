@@ -477,6 +477,84 @@ OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000
 ERROR Optimization already in progress
 ```
 
+## DEBUG コマンド
+
+現在の接続でデバッグモードを有効/無効にし、詳細なクエリ実行メトリクスを表示します。
+
+### 構文
+
+```
+DEBUG ON
+DEBUG OFF
+```
+
+### 動作
+
+- **接続ごとの状態**: デバッグモードは現在の接続のみで有効/無効
+- **クエリタイミング**: 実行時間の内訳を表示（インデックス検索、フィルタリング）
+- **検索詳細**: 生成されたn-gram、転置リストサイズ、候補数を表示
+- **最適化の可視化**: 適用された最適化戦略を報告
+- **パフォーマンス影響**: 最小限のオーバーヘッド、有効時のみメトリクスを収集
+
+### 例
+
+デバッグモードを有効化:
+```
+DEBUG ON
+```
+
+デバッグモードを無効化:
+```
+DEBUG OFF
+```
+
+### レスポンス
+
+```
+OK DEBUG_ON
+```
+
+または
+
+```
+OK DEBUG_OFF
+```
+
+### デバッグ出力形式
+
+デバッグモードが有効な場合、SEARCH および COUNT コマンドは追加のデバッグ情報を返します：
+
+```
+OK RESULTS <count> <id1> <id2> ...
+query_time=<ms> index_time=<ms> filter_time=<ms> terms=<n> ngrams=<n> candidates=<n> after_intersection=<n> after_not=<n> after_filters=<n> final=<n> optimization=<strategy>
+```
+
+例:
+```
+> DEBUG ON
+OK DEBUG_ON
+
+> SEARCH articles 技術 AND AI FILTER status=1 LIMIT 10
+OK RESULTS 10 101 205 387 ...
+
+[DEBUG INFO]
+query_time=2.45ms index_time=1.20ms filter_time=0.85ms terms=2 ngrams=8 candidates=15000 after_intersection=5000 after_not=5000 after_filters=1200 final=10 optimization=early_exit
+```
+
+### デバッグメトリクスの説明
+
+- **query_time**: クエリ実行の合計時間（ミリ秒）
+- **index_time**: インデックス検索に費やした時間
+- **filter_time**: フィルターと条件の適用に費やした時間
+- **terms**: 検索項の数
+- **ngrams**: 検索項から生成されたn-gramの総数
+- **candidates**: インデックスからの初期候補ドキュメント数
+- **after_intersection**: AND項の交差後の結果数
+- **after_not**: NOT項のフィルタリング後の結果数
+- **after_filters**: FILTER条件適用後の結果数
+- **final**: 返された最終結果数
+- **optimization**: 使用された戦略（例: `early_exit`, `none`）
+
 ## エラーレスポンス
 
 すべてのエラーは以下の形式に従います：
@@ -528,5 +606,6 @@ OK RESULTS 5 1 2 3 4 5
   SAVE, LOAD            - スナップショット管理
   REPLICATION STATUS/STOP/START - レプリケーション制御
   OPTIMIZE              - インデックス最適化
+  DEBUG ON/OFF          - デバッグモードの有効化/無効化
   quit, exit            - クライアント終了
 ```
