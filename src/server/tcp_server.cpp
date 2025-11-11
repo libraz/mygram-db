@@ -23,6 +23,7 @@
 
 #include "utils/string_utils.h"
 #include "utils/network_utils.h"
+#include "version.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -957,7 +958,7 @@ std::string TcpServer::FormatInfoResponse() {
 
   // Server information
   oss << "# Server\r\n";
-  oss << "version: MygramDB 1.0.0\r\n";
+  oss << "version: " << mygramdb::Version::FullString() << "\r\n";
   oss << "uptime_seconds: " << stats_.GetUptimeSeconds() << "\r\n";
   oss << "\r\n";
 

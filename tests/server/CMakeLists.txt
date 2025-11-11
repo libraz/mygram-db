@@ -39,4 +39,6 @@ target_link_libraries(http_server_test
   GTest::gtest_main
 )
 
+target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
 gtest_discover_tests(http_server_test)

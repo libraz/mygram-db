@@ -5,6 +5,7 @@
 
 #include "server/http_server.h"
 #include "utils/string_utils.h"
+#include "version.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <sstream>
@@ -332,7 +333,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     // Server info
     response["server"] = "MygramDB";
-    response["version"] = "1.0.0";
+    response["version"] = mygramdb::Version::String();
     response["uptime_seconds"] = stats_.GetUptimeSeconds();
 
     // Statistics

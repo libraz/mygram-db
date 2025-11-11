@@ -7,6 +7,7 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "config/config.h"
+#include "version.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -123,7 +124,7 @@ TEST_F(HttpServerTest, InfoEndpoint) {
 
   // Server info
   EXPECT_EQ(body["server"], "MygramDB");
-  EXPECT_EQ(body["version"], "1.0.0");
+  EXPECT_EQ(body["version"], mygramdb::Version::String());
   EXPECT_TRUE(body.contains("uptime_seconds"));
 
   // Stats
