@@ -113,6 +113,23 @@ class Index {
   [[nodiscard]] size_t MemoryUsage() const;
 
   /**
+   * @brief Index statistics
+   */
+  struct IndexStatistics {
+    size_t total_terms = 0;
+    size_t total_postings = 0;
+    size_t delta_encoded_lists = 0;
+    size_t roaring_bitmap_lists = 0;
+    size_t memory_usage_bytes = 0;
+  };
+
+  /**
+   * @brief Get index statistics
+   * @return Index statistics structure
+   */
+  [[nodiscard]] IndexStatistics GetStatistics() const;
+
+  /**
    * @brief Optimize all posting lists
    * @param total_docs Total document count
    */

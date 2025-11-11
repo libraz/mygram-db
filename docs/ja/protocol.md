@@ -165,7 +165,7 @@ OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 
 ## INFO コマンド
 
-サーバー情報と統計を取得します。
+サーバー情報と統計を取得します（Redis風の詳細統計）。
 
 ### 構文
 
@@ -175,13 +175,96 @@ INFO
 
 ### レスポンス
 
+Redis スタイルのセクション形式で詳細な統計情報を返します：
+
 ```
-OK INFO version=<version> uptime=<seconds> total_requests=<count> connections=<count> index_size=<bytes> doc_count=<count>
+OK INFO
+
+# Server
+version: MygramDB 1.0.0
+uptime_seconds: <seconds>
+
+# Stats
+total_commands_processed: <count>
+total_connections_received: <count>
+total_requests: <count>
+
+# Commandstats
+cmd_search: <count>
+cmd_count: <count>
+cmd_get: <count>
+cmd_info: <count>
+...
+
+# Memory
+used_memory_bytes: <bytes>
+used_memory_human: <human_readable>
+used_memory_peak_bytes: <bytes>
+used_memory_peak_human: <human_readable>
+used_memory_index: <human_readable>
+used_memory_documents: <human_readable>
+memory_fragmentation_ratio: <ratio>
+
+# Index
+total_documents: <count>
+total_terms: <count>
+total_postings: <count>
+avg_postings_per_term: <average>
+delta_encoded_lists: <count>
+roaring_bitmap_lists: <count>
+ngram_size: <size>
+
+# Clients
+connected_clients: <count>
+
+# Replication (MySQL が有効な場合)
+replication_status: running|stopped
+replication_gtid: <gtid>
+replication_events: <count>
+
+END
 ```
 
 例:
 ```
-OK INFO version=1.0.0 uptime=3600 total_requests=10000 connections=5 index_size=1048576 doc_count=1000000
+OK INFO
+
+# Server
+version: MygramDB 1.0.0
+uptime_seconds: 3600
+
+# Stats
+total_commands_processed: 15000
+total_connections_received: 250
+total_requests: 15000
+
+# Commandstats
+cmd_search: 10000
+cmd_count: 3000
+cmd_get: 2000
+
+# Memory
+used_memory_bytes: 524288000
+used_memory_human: 500MB
+used_memory_peak_bytes: 629145600
+used_memory_peak_human: 600MB
+used_memory_index: 400MB
+used_memory_documents: 100MB
+memory_fragmentation_ratio: 1.20
+
+# Index
+total_documents: 1000000
+total_terms: 1500000
+total_postings: 5000000
+avg_postings_per_term: 3.33
+delta_encoded_lists: 1200000
+roaring_bitmap_lists: 300000
+ngram_size: 1
+
+# Clients
+connected_clients: 5
+
+END
 ```
 
 ## CONFIG コマンド

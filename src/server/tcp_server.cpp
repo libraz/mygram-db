@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -114,9 +115,6 @@ bool TcpServer::Start() {
   should_stop_ = false;
   running_ = true;
 
-  // Record start time
-  start_time_ = static_cast<uint64_t>(std::time(nullptr));
-
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(
       &TcpServer::AcceptThreadFunc, this);
@@ -160,10 +158,9 @@ void TcpServer::Stop() {
     connection_fds_.clear();
   }
 
-  active_connections_ = 0;
   running_ = false;
   spdlog::info("TCP server stopped. Handled {} total requests",
-               total_requests_.load());
+               stats_.GetTotalRequests());
 }
 
 void TcpServer::AcceptThreadFunc() {
@@ -203,7 +200,7 @@ void TcpServer::AcceptThreadFunc() {
     }
 
     // Check connection limit
-    size_t current_connections = active_connections_.load();
+    size_t current_connections = stats_.GetActiveConnections();
     if (current_connections >= static_cast<size_t>(config_.max_connections)) {
       spdlog::warn("Connection limit reached ({}), rejecting new connection",
                    config_.max_connections);
@@ -212,8 +209,9 @@ void TcpServer::AcceptThreadFunc() {
       continue;
     }
 
-    // Increment active connection count
-    active_connections_.fetch_add(1);
+    // Increment active connection count and total connection counter
+    stats_.IncrementConnections();
+    stats_.IncrementTotalConnections();
 
     // Add to connection set
     {
@@ -231,14 +229,14 @@ void TcpServer::AcceptThreadFunc() {
       RemoveConnection(client_fd);
       shutdown(client_fd, SHUT_RDWR);
       close(client_fd);
-      active_connections_.fetch_sub(1);
+      stats_.DecrementConnections();
       continue;
     }
 
     spdlog::debug("Accepted connection from {}:{} (active: {})",
                  inet_ntoa(client_addr.sin_addr),
                  ntohs(client_addr.sin_port),
-                 active_connections_.load());
+                 stats_.GetActiveConnections());
   }
 
   spdlog::info("Accept thread stopped");
@@ -273,7 +271,7 @@ void TcpServer::HandleClient(int client_fd) {
 
       // Process request
       std::string response = ProcessRequest(request);
-      total_requests_++;
+      stats_.IncrementRequests();
 
       // Send response
       response += "\r\n";
@@ -288,9 +286,9 @@ void TcpServer::HandleClient(int client_fd) {
   // Clean up connection
   RemoveConnection(client_fd);
   close(client_fd);
-  active_connections_.fetch_sub(1);
+  stats_.DecrementConnections();
 
-  spdlog::debug("Connection closed (active: {})", active_connections_.load());
+  spdlog::debug("Connection closed (active: {})", stats_.GetActiveConnections());
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -303,6 +301,9 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
   if (!query.IsValid()) {
     return FormatError(query_parser_.GetError());
   }
+
+  // Increment command statistics
+  stats_.IncrementCommand(query.type);
 
   try {
     switch (query.type) {
@@ -790,22 +791,94 @@ std::string TcpServer::FormatGetResponse(
 
 std::string TcpServer::FormatInfoResponse() {
   std::ostringstream oss;
-  oss << "OK INFO\r\n";
+  oss << "OK INFO\r\n\r\n";
 
-  // Server version
+  // Server information
+  oss << "# Server\r\n";
   oss << "version: MygramDB 1.0.0\r\n";
+  oss << "uptime_seconds: " << stats_.GetUptimeSeconds() << "\r\n";
+  oss << "\r\n";
 
-  // Uptime
-  auto current_time = static_cast<uint64_t>(std::time(nullptr));
-  uint64_t uptime_seconds = current_time - start_time_;
-  oss << "uptime_seconds: " << uptime_seconds << "\r\n";
+  // Stats - Command counters
+  oss << "# Stats\r\n";
+  oss << "total_commands_processed: " << stats_.GetTotalCommands() << "\r\n";
+  oss << "total_connections_received: " << stats_.GetStatistics().total_connections_received << "\r\n";
+  oss << "total_requests: " << stats_.GetTotalRequests() << "\r\n";
+  oss << "\r\n";
 
-  // Request statistics
-  oss << "total_requests: " << total_requests_.load() << "\r\n";
-  oss << "active_connections: " << GetConnectionCount() << "\r\n";
+  // Command counters
+  oss << "# Commandstats\r\n";
+  auto cmd_stats = stats_.GetStatistics();
+  if (cmd_stats.cmd_search > 0) {
+    oss << "cmd_search: " << cmd_stats.cmd_search << "\r\n";
+  }
+  if (cmd_stats.cmd_count > 0) {
+    oss << "cmd_count: " << cmd_stats.cmd_count << "\r\n";
+  }
+  if (cmd_stats.cmd_get > 0) {
+    oss << "cmd_get: " << cmd_stats.cmd_get << "\r\n";
+  }
+  if (cmd_stats.cmd_info > 0) {
+    oss << "cmd_info: " << cmd_stats.cmd_info << "\r\n";
+  }
+  if (cmd_stats.cmd_save > 0) {
+    oss << "cmd_save: " << cmd_stats.cmd_save << "\r\n";
+  }
+  if (cmd_stats.cmd_load > 0) {
+    oss << "cmd_load: " << cmd_stats.cmd_load << "\r\n";
+  }
+  if (cmd_stats.cmd_replication_status > 0) {
+    oss << "cmd_replication_status: " << cmd_stats.cmd_replication_status << "\r\n";
+  }
+  if (cmd_stats.cmd_replication_stop > 0) {
+    oss << "cmd_replication_stop: " << cmd_stats.cmd_replication_stop << "\r\n";
+  }
+  if (cmd_stats.cmd_replication_start > 0) {
+    oss << "cmd_replication_start: " << cmd_stats.cmd_replication_start << "\r\n";
+  }
+  if (cmd_stats.cmd_config > 0) {
+    oss << "cmd_config: " << cmd_stats.cmd_config << "\r\n";
+  }
+  oss << "\r\n";
+
+  // Memory statistics
+  oss << "# Memory\r\n";
+  size_t index_memory = index_.MemoryUsage();
+  size_t doc_memory = doc_store_.MemoryUsage();
+  size_t total_memory = index_memory + doc_memory;
+
+  // Update memory stats in real-time
+  const_cast<ServerStats&>(stats_).UpdateMemoryUsage(total_memory);
+
+  oss << "used_memory_bytes: " << total_memory << "\r\n";
+  oss << "used_memory_human: " << utils::FormatBytes(total_memory) << "\r\n";
+  oss << "used_memory_peak_bytes: " << stats_.GetPeakMemoryUsage() << "\r\n";
+  oss << "used_memory_peak_human: " << utils::FormatBytes(stats_.GetPeakMemoryUsage()) << "\r\n";
+  oss << "used_memory_index: " << utils::FormatBytes(index_memory) << "\r\n";
+  oss << "used_memory_documents: " << utils::FormatBytes(doc_memory) << "\r\n";
+
+  // Memory fragmentation estimate
+  if (total_memory > 0) {
+    size_t peak = stats_.GetPeakMemoryUsage();
+    double fragmentation = peak > 0 ? static_cast<double>(peak) / total_memory : 1.0;
+    oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2)
+        << fragmentation << "\r\n";
+  }
+  oss << "\r\n";
 
   // Index statistics
+  oss << "# Index\r\n";
+  auto index_stats = index_.GetStatistics();
   oss << "total_documents: " << doc_store_.Size() << "\r\n";
+  oss << "total_terms: " << index_stats.total_terms << "\r\n";
+  oss << "total_postings: " << index_stats.total_postings << "\r\n";
+  if (index_stats.total_terms > 0) {
+    double avg_postings = static_cast<double>(index_stats.total_postings) / index_stats.total_terms;
+    oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2)
+        << avg_postings << "\r\n";
+  }
+  oss << "delta_encoded_lists: " << index_stats.delta_encoded_lists << "\r\n";
+  oss << "roaring_bitmap_lists: " << index_stats.roaring_bitmap_lists << "\r\n";
 
   // N-gram configuration
   if (ngram_size_ == 0) {
@@ -813,13 +886,21 @@ std::string TcpServer::FormatInfoResponse() {
   } else {
     oss << "ngram_size: " << ngram_size_ << "\r\n";
   }
+  oss << "\r\n";
+
+  // Clients
+  oss << "# Clients\r\n";
+  oss << "connected_clients: " << stats_.GetActiveConnections() << "\r\n";
+  oss << "\r\n";
 
   // Replication information
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
+    oss << "# Replication\r\n";
     oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
     oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
     oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
+    oss << "\r\n";
   }
 #endif
 
@@ -925,7 +1006,7 @@ std::string TcpServer::FormatConfigResponse() {
   oss << "    connections: " << GetConnectionCount() << "\n";
   oss << "    max_connections: " << config_.max_connections << "\n";
   oss << "    read_only: " << (read_only_ ? "true" : "false") << "\n";
-  oss << "    uptime: " << (std::time(nullptr) - start_time_) << "s\n";
+  oss << "    uptime: " << stats_.GetUptimeSeconds() << "s\n";
 
   return oss.str();
 }

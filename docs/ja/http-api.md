@@ -138,7 +138,7 @@ GET /threads/12345 HTTP/1.1
 
 ### GET /info
 
-サーバー情報と統計。
+サーバー情報と詳細統計（Redis風の監視情報）。
 
 **リクエスト:**
 
@@ -153,11 +153,52 @@ GET /info HTTP/1.1
   "server": "MygramDB",
   "version": "1.0.0",
   "uptime_seconds": 3600,
-  "total_requests": 15234,
-  "document_count": 1000000,
-  "ngram_size": 1
+  "total_requests": 15000,
+  "total_commands_processed": 15000,
+  "memory": {
+    "used_memory_bytes": 524288000,
+    "used_memory_human": "500MB",
+    "peak_memory_bytes": 629145600,
+    "peak_memory_human": "600MB",
+    "used_memory_index": "400MB",
+    "used_memory_documents": "100MB"
+  },
+  "index": {
+    "total_documents": 1000000,
+    "total_terms": 1500000,
+    "total_postings": 5000000,
+    "avg_postings_per_term": 3.33,
+    "delta_encoded_lists": 1200000,
+    "roaring_bitmap_lists": 300000,
+    "ngram_size": 1
+  }
 }
 ```
+
+**レスポンスフィールド:**
+
+| フィールド | 説明 |
+|-----------|------|
+| `server` | サーバー名（MygramDB） |
+| `version` | サーバーバージョン |
+| `uptime_seconds` | サーバー稼働時間（秒） |
+| `total_requests` | 処理されたリクエストの総数 |
+| `total_commands_processed` | 処理されたコマンドの総数 |
+| `memory.used_memory_bytes` | 現在のメモリ使用量（バイト） |
+| `memory.used_memory_human` | 人間が読みやすい形式のメモリ使用量 |
+| `memory.peak_memory_bytes` | ピーク時のメモリ使用量（バイト） |
+| `memory.peak_memory_human` | 人間が読みやすい形式のピークメモリ使用量 |
+| `memory.used_memory_index` | インデックスが使用しているメモリ |
+| `memory.used_memory_documents` | ドキュメントストアが使用しているメモリ |
+| `index.total_documents` | インデックス内のドキュメント総数 |
+| `index.total_terms` | インデックス内のユニーク語句総数 |
+| `index.total_postings` | インデックス内のポスティング総数 |
+| `index.avg_postings_per_term` | 語句あたりの平均ポスティング数 |
+| `index.delta_encoded_lists` | Delta圧縮を使用しているポスティングリスト数 |
+| `index.roaring_bitmap_lists` | Roaring Bitmapを使用しているポスティングリスト数 |
+| `index.ngram_size` | N-gramサイズ（0はハイブリッドモード） |
+
+このエンドポイントはPrometheusやその他の監視ツールとの統合に適しています。
 
 ### GET /health
 

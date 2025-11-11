@@ -77,5 +77,13 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& text);
  */
 std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints);
 
+/**
+ * @brief Format bytes to human-readable string (e.g., "1.5MB", "500KB")
+ *
+ * @param bytes Number of bytes
+ * @return Human-readable string
+ */
+std::string FormatBytes(size_t bytes);
+
 }  // namespace utils
 }  // namespace mygramdb

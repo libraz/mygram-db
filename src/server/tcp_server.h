@@ -10,6 +10,7 @@
 #include "storage/document_store.h"
 #include "config/config.h"
 #include "server/thread_pool.h"
+#include "server/server_stats.h"
 #include <string>
 #include <thread>
 #include <atomic>
@@ -96,12 +97,12 @@ class TcpServer {
   /**
    * @brief Get active connection count
    */
-  size_t GetConnectionCount() const { return active_connections_.load(); }
+  size_t GetConnectionCount() const { return stats_.GetActiveConnections(); }
 
   /**
    * @brief Get total requests handled
    */
-  uint64_t GetTotalRequests() const { return total_requests_; }
+  uint64_t GetTotalRequests() const { return stats_.GetTotalRequests(); }
 
   /**
    * @brief Get last error message
@@ -111,7 +112,12 @@ class TcpServer {
   /**
    * @brief Get server start time (Unix timestamp)
    */
-  uint64_t GetStartTime() const { return start_time_; }
+  uint64_t GetStartTime() const { return stats_.GetStartTime(); }
+
+  /**
+   * @brief Get server statistics
+   */
+  const ServerStats& GetStats() const { return stats_; }
 
  private:
   ServerConfig config_;
@@ -121,9 +127,9 @@ class TcpServer {
 
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
-  std::atomic<uint64_t> total_requests_{0};
-  std::atomic<size_t> active_connections_{0};
-  uint64_t start_time_ = 0;  // Server start time (Unix timestamp)
+
+  // Statistics
+  ServerStats stats_;
 
   int server_fd_ = -1;
   uint16_t actual_port_ = 0;

@@ -4,6 +4,7 @@
  */
 
 #include "server/http_server.h"
+#include "utils/string_utils.h"
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <sstream>
@@ -111,10 +112,6 @@ bool HttpServer::Start() {
     return false;
   }
 
-  start_time_ = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count();
-
   // Start server in separate thread
   server_thread_ = std::make_unique<std::thread>([this]() {
     spdlog::info("Starting HTTP server on {}:{}", config_.bind, config_.port);
@@ -162,7 +159,7 @@ void HttpServer::Stop() {
 }
 
 void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
   try {
     // Extract table name from URL
@@ -273,7 +270,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 }
 
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
   try {
     // Extract table name and ID from URL
@@ -327,19 +324,50 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 }
 
 void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
   try {
     json response;
+
+    // Server info
     response["server"] = "MygramDB";
     response["version"] = "1.0.0";
-    response["uptime_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(
-                                      std::chrono::system_clock::now().time_since_epoch())
-                                      .count() -
-                                  start_time_;
-    response["total_requests"] = total_requests_.load();
-    response["document_count"] = doc_store_.Size();
-    response["ngram_size"] = ngram_size_;
+    response["uptime_seconds"] = stats_.GetUptimeSeconds();
+
+    // Statistics
+    auto srv_stats = stats_.GetStatistics();
+    response["total_requests"] = srv_stats.total_requests;
+    response["total_commands_processed"] = srv_stats.total_commands_processed;
+
+    // Memory statistics
+    size_t index_memory = index_.MemoryUsage();
+    size_t doc_memory = doc_store_.MemoryUsage();
+    size_t total_memory = index_memory + doc_memory;
+
+    const_cast<ServerStats&>(stats_).UpdateMemoryUsage(total_memory);
+
+    json memory_obj;
+    memory_obj["used_memory_bytes"] = total_memory;
+    memory_obj["used_memory_human"] = utils::FormatBytes(total_memory);
+    memory_obj["peak_memory_bytes"] = stats_.GetPeakMemoryUsage();
+    memory_obj["peak_memory_human"] = utils::FormatBytes(stats_.GetPeakMemoryUsage());
+    memory_obj["used_memory_index"] = utils::FormatBytes(index_memory);
+    memory_obj["used_memory_documents"] = utils::FormatBytes(doc_memory);
+    response["memory"] = memory_obj;
+
+    // Index statistics
+    auto index_stats = index_.GetStatistics();
+    json index_obj;
+    index_obj["total_documents"] = doc_store_.Size();
+    index_obj["total_terms"] = index_stats.total_terms;
+    index_obj["total_postings"] = index_stats.total_postings;
+    if (index_stats.total_terms > 0) {
+      index_obj["avg_postings_per_term"] = static_cast<double>(index_stats.total_postings) / index_stats.total_terms;
+    }
+    index_obj["delta_encoded_lists"] = index_stats.delta_encoded_lists;
+    index_obj["roaring_bitmap_lists"] = index_stats.roaring_bitmap_lists;
+    index_obj["ngram_size"] = ngram_size_;
+    response["index"] = index_obj;
 
     SendJson(res, 200, response);
 
@@ -349,7 +377,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 }
 
 void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
   json response;
   response["status"] = "ok";
@@ -361,7 +389,7 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
 }
 
 void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
   if (!full_config_) {
     SendError(res, 500, "Configuration not available");
@@ -402,7 +430,7 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
 }
 
 void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httplib::Response& res) {
-  total_requests_++;
+  stats_.IncrementRequests();
 
 #ifdef USE_MYSQL
   if (!binlog_reader_) {

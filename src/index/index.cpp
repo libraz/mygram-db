@@ -182,6 +182,33 @@ size_t Index::MemoryUsage() const {
   return total;
 }
 
+Index::IndexStatistics Index::GetStatistics() const {
+  IndexStatistics stats;
+  stats.total_terms = term_postings_.size();
+  stats.total_postings = 0;
+  stats.delta_encoded_lists = 0;
+  stats.roaring_bitmap_lists = 0;
+  stats.memory_usage_bytes = 0;
+
+  for (const auto& [term, posting] : term_postings_) {
+    // Count postings
+    stats.total_postings += posting->Size();
+
+    // Count strategy types
+    if (posting->GetStrategy() == PostingStrategy::kDeltaCompressed) {
+      stats.delta_encoded_lists++;
+    } else if (posting->GetStrategy() == PostingStrategy::kRoaringBitmap) {
+      stats.roaring_bitmap_lists++;
+    }
+
+    // Memory usage
+    stats.memory_usage_bytes += term.size();  // Term string
+    stats.memory_usage_bytes += posting->MemoryUsage();  // Posting list
+  }
+
+  return stats;
+}
+
 void Index::Optimize(uint64_t total_docs) {
   for (auto& [term, posting] : term_postings_) {
     posting->Optimize(total_docs);

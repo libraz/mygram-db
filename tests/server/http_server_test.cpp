@@ -120,11 +120,32 @@ TEST_F(HttpServerTest, InfoEndpoint) {
   EXPECT_EQ(res->status, 200);
 
   auto body = json::parse(res->body);
+
+  // Server info
   EXPECT_EQ(body["server"], "MygramDB");
   EXPECT_EQ(body["version"], "1.0.0");
-  EXPECT_EQ(body["document_count"], 3);
-  EXPECT_EQ(body["ngram_size"], 1);
   EXPECT_TRUE(body.contains("uptime_seconds"));
+
+  // Stats
+  EXPECT_TRUE(body.contains("total_requests"));
+  EXPECT_TRUE(body.contains("total_commands_processed"));
+
+  // Memory object
+  EXPECT_TRUE(body.contains("memory"));
+  EXPECT_TRUE(body["memory"].contains("used_memory_bytes"));
+  EXPECT_TRUE(body["memory"].contains("used_memory_human"));
+  EXPECT_TRUE(body["memory"].contains("peak_memory_bytes"));
+  EXPECT_TRUE(body["memory"].contains("used_memory_index"));
+  EXPECT_TRUE(body["memory"].contains("used_memory_documents"));
+
+  // Index object
+  EXPECT_TRUE(body.contains("index"));
+  EXPECT_EQ(body["index"]["total_documents"], 3);
+  EXPECT_EQ(body["index"]["ngram_size"], 1);
+  EXPECT_TRUE(body["index"].contains("total_terms"));
+  EXPECT_TRUE(body["index"].contains("total_postings"));
+  EXPECT_TRUE(body["index"].contains("delta_encoded_lists"));
+  EXPECT_TRUE(body["index"].contains("roaring_bitmap_lists"));
 }
 
 TEST_F(HttpServerTest, ConfigEndpoint) {

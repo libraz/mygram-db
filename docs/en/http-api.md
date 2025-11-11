@@ -138,7 +138,7 @@ GET /threads/12345 HTTP/1.1
 
 ### GET /info
 
-Server information and statistics.
+Server information and detailed statistics (Redis-style monitoring).
 
 **Request:**
 
@@ -153,11 +153,52 @@ GET /info HTTP/1.1
   "server": "MygramDB",
   "version": "1.0.0",
   "uptime_seconds": 3600,
-  "total_requests": 15234,
-  "document_count": 1000000,
-  "ngram_size": 1
+  "total_requests": 15000,
+  "total_commands_processed": 15000,
+  "memory": {
+    "used_memory_bytes": 524288000,
+    "used_memory_human": "500MB",
+    "peak_memory_bytes": 629145600,
+    "peak_memory_human": "600MB",
+    "used_memory_index": "400MB",
+    "used_memory_documents": "100MB"
+  },
+  "index": {
+    "total_documents": 1000000,
+    "total_terms": 1500000,
+    "total_postings": 5000000,
+    "avg_postings_per_term": 3.33,
+    "delta_encoded_lists": 1200000,
+    "roaring_bitmap_lists": 300000,
+    "ngram_size": 1
+  }
 }
 ```
+
+**Response Fields:**
+
+| Field | Description |
+|-------|-------------|
+| `server` | Server name (MygramDB) |
+| `version` | Server version |
+| `uptime_seconds` | Server uptime in seconds |
+| `total_requests` | Total number of requests processed |
+| `total_commands_processed` | Total number of commands processed |
+| `memory.used_memory_bytes` | Current memory usage in bytes |
+| `memory.used_memory_human` | Human-readable current memory usage |
+| `memory.peak_memory_bytes` | Peak memory usage in bytes |
+| `memory.peak_memory_human` | Human-readable peak memory usage |
+| `memory.used_memory_index` | Memory used by index |
+| `memory.used_memory_documents` | Memory used by document store |
+| `index.total_documents` | Total number of documents in index |
+| `index.total_terms` | Total number of unique terms in index |
+| `index.total_postings` | Total number of postings in index |
+| `index.avg_postings_per_term` | Average postings per term |
+| `index.delta_encoded_lists` | Number of posting lists using delta encoding |
+| `index.roaring_bitmap_lists` | Number of posting lists using Roaring Bitmaps |
+| `index.ngram_size` | N-gram size (0 for hybrid mode) |
+
+This endpoint is suitable for integration with Prometheus and other monitoring tools.
 
 ### GET /health
 

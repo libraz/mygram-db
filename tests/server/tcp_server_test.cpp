@@ -574,15 +574,38 @@ TEST_F(TcpServerTest, InfoCommand) {
   // Send INFO command
   std::string response = SendRequest(sock, "INFO");
 
-  // Should return OK INFO with server statistics
+  // Should return OK INFO with server statistics (Redis-style)
   EXPECT_TRUE(response.find("OK INFO") == 0);
+
+  // Server section
+  EXPECT_TRUE(response.find("# Server") != std::string::npos);
   EXPECT_TRUE(response.find("version:") != std::string::npos);
   EXPECT_TRUE(response.find("uptime_seconds:") != std::string::npos);
+
+  // Stats section
+  EXPECT_TRUE(response.find("# Stats") != std::string::npos);
+  EXPECT_TRUE(response.find("total_commands_processed:") != std::string::npos);
   EXPECT_TRUE(response.find("total_requests:") != std::string::npos);
-  EXPECT_TRUE(response.find("active_connections:") != std::string::npos);
+
+  // Commandstats section
+  EXPECT_TRUE(response.find("# Commandstats") != std::string::npos);
+
+  // Memory section
+  EXPECT_TRUE(response.find("# Memory") != std::string::npos);
+  EXPECT_TRUE(response.find("used_memory_bytes:") != std::string::npos);
+  EXPECT_TRUE(response.find("used_memory_human:") != std::string::npos);
+
+  // Index section
+  EXPECT_TRUE(response.find("# Index") != std::string::npos);
   EXPECT_TRUE(response.find("total_documents:") != std::string::npos);
-  EXPECT_TRUE(response.find("ngram_mode:") != std::string::npos ||
-              response.find("ngram_size:") != std::string::npos);
+  EXPECT_TRUE(response.find("total_terms:") != std::string::npos);
+  EXPECT_TRUE(response.find("delta_encoded_lists:") != std::string::npos);
+  EXPECT_TRUE(response.find("roaring_bitmap_lists:") != std::string::npos);
+
+  // Clients section
+  EXPECT_TRUE(response.find("# Clients") != std::string::npos);
+  EXPECT_TRUE(response.find("connected_clients:") != std::string::npos);
+
   EXPECT_TRUE(response.find("END") != std::string::npos);
 
   close(sock);

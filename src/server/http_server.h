@@ -14,6 +14,7 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "config/config.h"
+#include "server/server_stats.h"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -99,12 +100,17 @@ class HttpServer {
   /**
    * @brief Get total requests handled
    */
-  uint64_t GetTotalRequests() const { return total_requests_; }
+  uint64_t GetTotalRequests() const { return stats_.GetTotalRequests(); }
 
   /**
    * @brief Get last error message
    */
   const std::string& GetLastError() const { return last_error_; }
+
+  /**
+   * @brief Get server statistics
+   */
+  const ServerStats& GetStats() const { return stats_; }
 
  private:
   HttpServerConfig config_;
@@ -113,8 +119,9 @@ class HttpServer {
   query::QueryParser query_parser_;
 
   std::atomic<bool> running_{false};
-  std::atomic<uint64_t> total_requests_{0};
-  uint64_t start_time_ = 0;  // Server start time (Unix timestamp)
+
+  // Statistics
+  ServerStats stats_;
 
   std::unique_ptr<httplib::Server> server_;
   std::unique_ptr<std::thread> server_thread_;

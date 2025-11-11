@@ -269,5 +269,34 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
   return ngrams;
 }
 
+std::string FormatBytes(size_t bytes) {
+  const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+  const size_t num_units = sizeof(units) / sizeof(units[0]);
+
+  if (bytes == 0) {
+    return "0B";
+  }
+
+  size_t unit_index = 0;
+  double size = static_cast<double>(bytes);
+
+  while (size >= 1024.0 && unit_index < num_units - 1) {
+    size /= 1024.0;
+    unit_index++;
+  }
+
+  // Format with appropriate precision
+  char buffer[64];
+  if (size >= 100.0) {
+    snprintf(buffer, sizeof(buffer), "%.0f%s", size, units[unit_index]);
+  } else if (size >= 10.0) {
+    snprintf(buffer, sizeof(buffer), "%.1f%s", size, units[unit_index]);
+  } else {
+    snprintf(buffer, sizeof(buffer), "%.2f%s", size, units[unit_index]);
+  }
+
+  return std::string(buffer);
+}
+
 }  // namespace utils
 }  // namespace mygramdb
