@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
   // Load configuration
   mygramdb::config::Config config;
   try {
-    config = mygramdb::config::LoadConfig(config_path, schema_path ? schema_path : "");
+    config = mygramdb::config::LoadConfig(config_path, schema_path != nullptr ? schema_path : "");
   } catch (const std::exception& e) {
     spdlog::error("Failed to load configuration: {}", e.what());
     return 1;

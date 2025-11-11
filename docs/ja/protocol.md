@@ -260,6 +260,7 @@ avg_postings_per_term: 3.33
 delta_encoded_lists: 1200000
 roaring_bitmap_lists: 300000
 ngram_size: 1
+optimization_status: idle
 
 # Clients
 connected_clients: 5
@@ -430,6 +431,52 @@ REPLICATION START
 OK REPLICATION STARTED
 ```
 
+## OPTIMIZE コマンド
+
+インデックスの転置リストを最適化します（密度に応じてDelta EncodingからRoaring Bitmapに変換）。
+
+### 構文
+
+```
+OPTIMIZE
+```
+
+### 動作
+
+- Binlogレプリケーションを一時停止
+- バッチ単位で転置リストをコピー＆最適化
+- クエリ処理は継続（古いインデックスで動作）
+- 最適化完了後にアトミックにスイッチ
+- Binlogレプリケーションを再開
+
+### メモリ使用量
+
+- 一時的に**インデックス部分のみ約2倍**（ドキュメントストアは変化なし）
+- 全体では約1.05〜1.1倍のメモリ使用量増加
+- バッチ処理により段階的にメモリを解放
+
+### 注意事項
+
+- 最適化中は新しいOPTIMIZEコマンドは受け付けません
+- `INFO`コマンドで`optimization_status`を確認可能
+- 大規模なインデックスでは数秒〜数十秒かかる場合があります
+
+### レスポンス
+
+```
+OK OPTIMIZED terms=<total> delta=<count> roaring=<count>
+```
+
+例:
+```
+OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000
+```
+
+エラー（既に最適化中の場合）:
+```
+ERROR Optimization already in progress
+```
+
 ## エラーレスポンス
 
 すべてのエラーは以下の形式に従います：
@@ -480,5 +527,6 @@ OK RESULTS 5 1 2 3 4 5
   INFO, CONFIG          - サーバー情報
   SAVE, LOAD            - スナップショット管理
   REPLICATION STATUS/STOP/START - レプリケーション制御
+  OPTIMIZE              - インデックス最適化
   quit, exit            - クライアント終了
 ```

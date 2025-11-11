@@ -347,6 +347,52 @@ REPLICATION START
 OK REPLICATION STARTED
 ```
 
+## OPTIMIZE Command
+
+Optimize index posting lists (convert Delta Encoding to Roaring Bitmap based on density).
+
+### Syntax
+
+```
+OPTIMIZE
+```
+
+### How it works
+
+- Temporarily stops binlog replication
+- Copies and optimizes posting lists in batches
+- Query processing continues (using old index)
+- Atomically switches after optimization completes
+- Resumes binlog replication
+
+### Memory Usage
+
+- **Index portion only** temporarily doubles (document store unchanged)
+- Overall memory usage increases by approximately 1.05-1.1x
+- Memory is freed gradually through batch processing
+
+### Notes
+
+- New OPTIMIZE commands are rejected while optimization is in progress
+- Check `optimization_status` via `INFO` command
+- May take several seconds to tens of seconds for large indexes
+
+### Response
+
+```
+OK OPTIMIZED terms=<total> delta=<count> roaring=<count>
+```
+
+Example:
+```
+OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000
+```
+
+Error (if already optimizing):
+```
+ERROR Optimization already in progress
+```
+
 ## Error Response
 
 All errors follow this format:
@@ -397,5 +443,6 @@ Available commands:
   INFO, CONFIG          - Server information
   SAVE, LOAD            - Snapshot management
   REPLICATION STATUS/STOP/START - Replication control
+  OPTIMIZE              - Index optimization
   quit, exit            - Exit client
 ```

@@ -34,12 +34,14 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_* commands don't require a table
+  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE &&
       type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS &&
       type != QueryType::REPLICATION_STOP &&
       type != QueryType::REPLICATION_START &&
+      type != QueryType::CONFIG &&
+      type != QueryType::OPTIMIZE &&
       table.empty()) {
     return false;
   }
@@ -143,6 +145,13 @@ Query QueryParser::Parse(const std::string& query_str) {
     Query query;
     query.type = QueryType::CONFIG;
     query.table = "";  // CONFIG doesn't need a table
+    return query;
+  }
+  if (command == "OPTIMIZE") {
+    // OPTIMIZE - optimize index posting lists
+    Query query;
+    query.type = QueryType::OPTIMIZE;
+    query.table = "";  // OPTIMIZE doesn't need a table
     return query;
   }
 

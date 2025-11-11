@@ -28,6 +28,7 @@ enum class QueryType {
   REPLICATION_STOP,    // Stop replication
   REPLICATION_START,   // Start replication
   CONFIG,              // Get current configuration
+  OPTIMIZE,            // Optimize index (convert to Roaring bitmaps)
   UNKNOWN
 };
 

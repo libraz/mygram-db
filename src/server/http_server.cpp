@@ -34,7 +34,7 @@ HttpServer::HttpServer(HttpServerConfig config, index::Index& index,
                        void* binlog_reader
 #endif
                        )
-    : config_(config),
+    : config_(std::move(config)),
       index_(index),
       doc_store_(doc_store),
       ngram_size_(ngram_size),
@@ -117,7 +117,7 @@ bool HttpServer::Start() {
     spdlog::info("Starting HTTP server on {}:{}", config_.bind, config_.port);
     running_ = true;
 
-    if (!server_->listen(config_.bind.c_str(), config_.port)) {
+    if (!server_->listen(config_.bind, config_.port)) {
       last_error_ = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
       spdlog::error("{}", last_error_);
       running_ = false;
@@ -158,6 +158,7 @@ void HttpServer::Stop() {
   spdlog::info("HTTP server stopped");
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
   stats_.IncrementRequests();
 
@@ -186,7 +187,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     // Add filters
     if (body.contains("filters") && body["filters"].is_object()) {
-      for (auto& [key, val] : body["filters"].items()) {
+      for (const auto& [key, val] : body["filters"].items()) {
         query_str << " FILTER " << key << "=";
         if (val.is_string()) {
           query_str << val.get<std::string>();
@@ -344,7 +345,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     size_t doc_memory = doc_store_.MemoryUsage();
     size_t total_memory = index_memory + doc_memory;
 
-    const_cast<ServerStats&>(stats_).UpdateMemoryUsage(total_memory);
+    stats_.UpdateMemoryUsage(total_memory);
 
     json memory_obj;
     memory_obj["used_memory_bytes"] = total_memory;
@@ -362,7 +363,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     index_obj["total_terms"] = index_stats.total_terms;
     index_obj["total_postings"] = index_stats.total_postings;
     if (index_stats.total_terms > 0) {
-      index_obj["avg_postings_per_term"] = static_cast<double>(index_stats.total_postings) / index_stats.total_terms;
+      index_obj["avg_postings_per_term"] = static_cast<double>(index_stats.total_postings) / static_cast<double>(index_stats.total_terms);
     }
     index_obj["delta_encoded_lists"] = index_stats.delta_encoded_lists;
     index_obj["roaring_bitmap_lists"] = index_stats.roaring_bitmap_lists;
@@ -391,7 +392,7 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
 void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response& res) {
   stats_.IncrementRequests();
 
-  if (!full_config_) {
+  if (full_config_ == nullptr) {
     SendError(res, 500, "Configuration not available");
     return;
   }
@@ -433,7 +434,7 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
   stats_.IncrementRequests();
 
 #ifdef USE_MYSQL
-  if (!binlog_reader_) {
+  if (binlog_reader_ == nullptr) {
     SendError(res, 503, "Replication not configured");
     return;
   }

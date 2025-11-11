@@ -5,7 +5,10 @@
 
 #include "utils/string_utils.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <iomanip>
+#include <sstream>
 
 #ifdef USE_ICU
 #include <unicode/normalizer2.h>
@@ -270,32 +273,33 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
 }
 
 std::string FormatBytes(size_t bytes) {
-  const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-  const size_t num_units = sizeof(units) / sizeof(units[0]);
+  constexpr std::array<const char*, 5> kUnits = {"B", "KB", "MB", "GB", "TB"};
 
   if (bytes == 0) {
     return "0B";
   }
 
   size_t unit_index = 0;
-  double size = static_cast<double>(bytes);
+  auto size = static_cast<double>(bytes);
 
-  while (size >= 1024.0 && unit_index < num_units - 1) {
+  while (size >= 1024.0 && unit_index < kUnits.size() - 1) {
     size /= 1024.0;
     unit_index++;
   }
 
   // Format with appropriate precision
-  char buffer[64];
+  std::ostringstream oss;
+  // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index)
   if (size >= 100.0) {
-    snprintf(buffer, sizeof(buffer), "%.0f%s", size, units[unit_index]);
+    oss << std::fixed << std::setprecision(0) << size << kUnits[unit_index];
   } else if (size >= 10.0) {
-    snprintf(buffer, sizeof(buffer), "%.1f%s", size, units[unit_index]);
+    oss << std::fixed << std::setprecision(1) << size << kUnits[unit_index];
   } else {
-    snprintf(buffer, sizeof(buffer), "%.2f%s", size, units[unit_index]);
+    oss << std::fixed << std::setprecision(2) << size << kUnits[unit_index];
   }
+  // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)
 
-  return std::string(buffer);
+  return oss.str();
 }
 
 }  // namespace utils

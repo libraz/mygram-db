@@ -13,7 +13,7 @@ namespace mygramdb {
 namespace utils {
 
 std::optional<uint32_t> ParseIPv4(const std::string& ip_str) {
-  struct in_addr addr;
+  struct in_addr addr = {};
   if (inet_pton(AF_INET, ip_str.c_str(), &addr) != 1) {
     return std::nullopt;
   }
@@ -21,18 +21,20 @@ std::optional<uint32_t> ParseIPv4(const std::string& ip_str) {
   return ntohl(addr.s_addr);
 }
 
-std::string IPv4ToString(uint32_t ip) {
-  struct in_addr addr;
-  addr.s_addr = htonl(ip);  // Convert to network byte order
+std::string IPv4ToString(uint32_t ip_address) {
+  struct in_addr addr = {};
+  addr.s_addr = htonl(ip_address);  // Convert to network byte order
+  // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   char buf[INET_ADDRSTRLEN];
   if (inet_ntop(AF_INET, &addr, buf, sizeof(buf)) == nullptr) {
     return "";
   }
-  return std::string(buf);
+  return {buf};
+  // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 }
 
-bool CIDR::Contains(uint32_t ip) const {
-  return (ip & netmask) == network;
+bool CIDR::Contains(uint32_t ip_address) const {
+  return (ip_address & netmask) == network;
 }
 
 std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
@@ -51,7 +53,7 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
 
   // Parse prefix length part
   std::string prefix_str = cidr_str.substr(slash_pos + 1);
-  int prefix_length;
+  int prefix_length = 0;
   try {
     prefix_length = std::stoi(prefix_str);
   } catch (...) {
@@ -66,16 +68,13 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
   // Calculate netmask
   uint32_t netmask = 0;
   if (prefix_length > 0) {
-    netmask = ~((1u << (32 - prefix_length)) - 1);
+    netmask = ~((1U << (32 - prefix_length)) - 1);
   }
 
   // Calculate network address
   uint32_t network = ip_opt.value() & netmask;
 
-  CIDR cidr;
-  cidr.network = network;
-  cidr.netmask = netmask;
-  cidr.prefix_length = prefix_length;
+  CIDR cidr = {network, netmask, prefix_length};
 
   return cidr;
 }

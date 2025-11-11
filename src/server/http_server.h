@@ -174,12 +174,12 @@ class HttpServer {
   /**
    * @brief Send JSON response
    */
-  void SendJson(httplib::Response& res, int status_code, const nlohmann::json& body);
+  static void SendJson(httplib::Response& res, int status_code, const nlohmann::json& body);
 
   /**
    * @brief Send error response
    */
-  void SendError(httplib::Response& res, int status_code, const std::string& message);
+  static void SendError(httplib::Response& res, int status_code, const std::string& message);
 
   /**
    * @brief CORS middleware

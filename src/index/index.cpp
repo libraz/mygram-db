@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <spdlog/spdlog.h>
@@ -215,6 +216,103 @@ void Index::Optimize(uint64_t total_docs) {
   }
   spdlog::info("Optimized index: {} terms, {} MB", term_postings_.size(),
                MemoryUsage() / (1024 * 1024));
+}
+
+bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
+  // Check if already optimizing
+  bool expected = false;
+  if (!is_optimizing_.compare_exchange_strong(expected, true)) {
+    spdlog::warn("Optimization already in progress, ignoring request");
+    return false;
+  }
+
+  // RAII guard to ensure flag is cleared even if exception occurs
+  struct OptimizationGuard {
+    std::atomic<bool>& flag;
+    explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
+    OptimizationGuard(const OptimizationGuard&) = delete;
+    OptimizationGuard& operator=(const OptimizationGuard&) = delete;
+    OptimizationGuard(OptimizationGuard&&) = delete;
+    OptimizationGuard& operator=(OptimizationGuard&&) = delete;
+    ~OptimizationGuard() { flag.store(false); }
+  };
+  OptimizationGuard guard(is_optimizing_);
+
+  spdlog::info("Starting batch optimization: {} terms, batch_size={}",
+               term_postings_.size(), batch_size);
+
+  auto start_time = std::chrono::steady_clock::now();
+
+  // Collect all term names to iterate over
+  std::vector<std::string> terms;
+  terms.reserve(term_postings_.size());
+  for (const auto& [term, posting] : term_postings_) {
+    (void)posting;  // Suppress unused variable warning
+    terms.push_back(term);
+  }
+
+  size_t total_terms = terms.size();
+  size_t converted_count = 0;
+
+  // Process in batches
+  for (size_t i = 0; i < total_terms; i += batch_size) {
+    size_t batch_end = std::min(i + batch_size, total_terms);
+
+    // Create optimized copies for this batch
+    std::unordered_map<std::string, std::unique_ptr<PostingList>> optimized_batch;
+
+    for (size_t j = i; j < batch_end; ++j) {
+      const auto& term = terms[j];
+
+      // Find the posting list (check if still exists)
+      auto iterator = term_postings_.find(term);
+      if (iterator == term_postings_.end()) {
+        continue;  // Term was removed during optimization
+      }
+
+      const auto& posting = iterator->second;
+      auto old_strategy = posting->GetStrategy();
+
+      // Clone and optimize
+      auto optimized = posting->Clone(total_docs);
+
+      // Track if strategy changed
+      if (optimized->GetStrategy() != old_strategy) {
+        converted_count++;
+      }
+
+      optimized_batch[term] = std::move(optimized);
+    }
+
+    // Swap in the optimized batch (short lock duration)
+    {
+      std::scoped_lock lock(postings_mutex_);
+      for (auto& [term, optimized] : optimized_batch) {
+        // Check if term still exists before replacing
+        auto iterator = term_postings_.find(term);
+        if (iterator != term_postings_.end()) {
+          iterator->second = std::move(optimized);
+        }
+      }
+    }
+
+    // Log progress every 10% or at the end
+    size_t progress = ((batch_end) * 100) / total_terms;
+    if (progress % 10 == 0 || batch_end == total_terms) {
+      spdlog::info("Optimization progress: {}/{} terms ({}%)",
+                   batch_end, total_terms, progress);
+    }
+  }
+
+  auto end_time = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      end_time - start_time).count();
+
+  spdlog::info("Batch optimization completed: {} terms processed, "
+               "{} strategy changes, {:.2f}s elapsed",
+               total_terms, converted_count, static_cast<double>(duration) / 1000.0);
+
+  return true;
 }
 
 void Index::Clear() {

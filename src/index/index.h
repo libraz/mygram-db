@@ -7,9 +7,11 @@
 
 #include "index/posting_list.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,9 +39,9 @@ class Index {
   Index(const Index&) = delete;
   Index& operator=(const Index&) = delete;
 
-  // Move constructor and assignment
-  Index(Index&&) noexcept = default;
-  Index& operator=(Index&&) noexcept = default;
+  // Delete move constructor and assignment (contains mutex)
+  Index(Index&&) = delete;
+  Index& operator=(Index&&) = delete;
 
   /**
    * @brief Add document to index
@@ -136,6 +138,19 @@ class Index {
   void Optimize(uint64_t total_docs);
 
   /**
+   * @brief Optimize posting lists in batches (thread-safe, minimal memory overhead)
+   * @param total_docs Total document count
+   * @param batch_size Number of terms to optimize per batch (default: 10000)
+   * @return true if optimization started, false if already in progress
+   */
+  bool OptimizeInBatches(uint64_t total_docs, size_t batch_size = 10000);
+
+  /**
+   * @brief Check if optimization is currently running
+   */
+  bool IsOptimizing() const { return is_optimizing_.load(); }
+
+  /**
    * @brief Clear all data from index
    */
   void Clear();
@@ -167,6 +182,12 @@ class Index {
 
   // Term -> Posting list mapping
   std::unordered_map<std::string, std::unique_ptr<PostingList>> term_postings_;
+
+  // Mutex for protecting term_postings_ during batch optimization
+  mutable std::mutex postings_mutex_;
+
+  // Flag to prevent concurrent optimization
+  std::atomic<bool> is_optimizing_{false};
 
   /**
    * @brief Get or create posting list for term

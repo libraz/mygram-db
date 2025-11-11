@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <regex>
+#include <sstream>
 #include <utility>
 
 #include "mysql/binlog_event_types.h"
@@ -167,6 +169,7 @@ size_t BinlogReader::GetQueueSize() const {
   return event_queue_.size();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void BinlogReader::ReaderThreadFunc() {
   spdlog::info("Binlog reader thread started");
 
@@ -316,10 +319,16 @@ void BinlogReader::ReaderThreadFunc() {
         if (event_opt->type == BinlogEventType::INSERT ||
             event_opt->type == BinlogEventType::UPDATE ||
             event_opt->type == BinlogEventType::DELETE) {
+          const char* event_type_str = "UNKNOWN";
+          if (event_opt->type == BinlogEventType::INSERT) {
+            event_type_str = "INSERT";
+          } else if (event_opt->type == BinlogEventType::UPDATE) {
+            event_type_str = "UPDATE";
+          } else if (event_opt->type == BinlogEventType::DELETE) {
+            event_type_str = "DELETE";
+          }
           spdlog::info("Binlog event: {} on table '{}', pk={}",
-                       event_opt->type == BinlogEventType::INSERT ? "INSERT" :
-                       event_opt->type == BinlogEventType::UPDATE ? "UPDATE" : "DELETE",
-                       event_opt->table_name, event_opt->primary_key);
+                       event_type_str, event_opt->table_name, event_opt->primary_key);
         }
 
         PushEvent(event_opt.value());
@@ -544,6 +553,7 @@ void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) const {
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 19) {
@@ -611,11 +621,14 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
 
       // Parse rows using rows_parser
       // Determine text column from config
-      std::string text_column = !table_config_.text_source.column.empty()
-                                   ? table_config_.text_source.column
-                                   : (table_config_.text_source.concat.empty()
-                                         ? ""
-                                         : table_config_.text_source.concat[0]);
+      std::string text_column;
+      if (!table_config_.text_source.column.empty()) {
+        text_column = table_config_.text_source.column;
+      } else if (!table_config_.text_source.concat.empty()) {
+        text_column = table_config_.text_source.concat[0];
+      } else {
+        text_column = "";
+      }
 
       auto rows_opt = ParseWriteRowsEvent(
           buffer, length, table_meta,
@@ -663,11 +676,14 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       }
 
       // Determine text column from config
-      std::string text_column = !table_config_.text_source.column.empty()
-                                   ? table_config_.text_source.column
-                                   : (table_config_.text_source.concat.empty()
-                                         ? ""
-                                         : table_config_.text_source.concat[0]);
+      std::string text_column;
+      if (!table_config_.text_source.column.empty()) {
+        text_column = table_config_.text_source.column;
+      } else if (!table_config_.text_source.concat.empty()) {
+        text_column = table_config_.text_source.concat[0];
+      } else {
+        text_column = "";
+      }
 
       // Parse rows using rows_parser
       auto row_pairs_opt = ParseUpdateRowsEvent(
@@ -721,11 +737,14 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
       }
 
       // Determine text column from config
-      std::string text_column = !table_config_.text_source.column.empty()
-                                   ? table_config_.text_source.column
-                                   : (table_config_.text_source.concat.empty()
-                                         ? ""
-                                         : table_config_.text_source.concat[0]);
+      std::string text_column;
+      if (!table_config_.text_source.column.empty()) {
+        text_column = table_config_.text_source.column;
+      } else if (!table_config_.text_source.concat.empty()) {
+        text_column = table_config_.text_source.concat[0];
+      } else {
+        text_column = "";
+      }
 
       // Parse rows using rows_parser
       auto rows_opt = ParseDeleteRowsEvent(
@@ -803,14 +822,25 @@ std::optional<std::string> BinlogReader::ExtractGTID(
   // Skip header (19 bytes) and commit_flag (1 byte)
   const unsigned char* sid_ptr = buffer + 20;
 
-  // Format UUID as string
-  char uuid_str[37];
-  snprintf(uuid_str, sizeof(uuid_str),
-           "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-           sid_ptr[0], sid_ptr[1], sid_ptr[2], sid_ptr[3],
-           sid_ptr[4], sid_ptr[5], sid_ptr[6], sid_ptr[7],
-           sid_ptr[8], sid_ptr[9], sid_ptr[10], sid_ptr[11],
-           sid_ptr[12], sid_ptr[13], sid_ptr[14], sid_ptr[15]);
+  // Format UUID as string using std::ostringstream
+  std::ostringstream uuid_oss;
+  uuid_oss << std::hex << std::setfill('0')
+           << std::setw(2) << static_cast<int>(sid_ptr[0])
+           << std::setw(2) << static_cast<int>(sid_ptr[1])
+           << std::setw(2) << static_cast<int>(sid_ptr[2])
+           << std::setw(2) << static_cast<int>(sid_ptr[3]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[4])
+           << std::setw(2) << static_cast<int>(sid_ptr[5]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[6])
+           << std::setw(2) << static_cast<int>(sid_ptr[7]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[8])
+           << std::setw(2) << static_cast<int>(sid_ptr[9]) << '-'
+           << std::setw(2) << static_cast<int>(sid_ptr[10])
+           << std::setw(2) << static_cast<int>(sid_ptr[11])
+           << std::setw(2) << static_cast<int>(sid_ptr[12])
+           << std::setw(2) << static_cast<int>(sid_ptr[13])
+           << std::setw(2) << static_cast<int>(sid_ptr[14])
+           << std::setw(2) << static_cast<int>(sid_ptr[15]);
 
   // Extract GNO (8 bytes, little-endian)
   const unsigned char* gno_ptr = sid_ptr + 16;
@@ -820,10 +850,11 @@ std::optional<std::string> BinlogReader::ExtractGTID(
   }
 
   // Format as "UUID:GNO"
-  std::string gtid = std::string(uuid_str) + ":" + std::to_string(gno);
+  std::string gtid = uuid_oss.str() + ":" + std::to_string(gno);
   return gtid;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
     const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 8) {

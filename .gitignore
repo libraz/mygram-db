@@ -61,3 +61,6 @@ config.yml
 
 # SQL files (may contain sensitive data)
 *.sql
+
+# Backup directory
+backup/

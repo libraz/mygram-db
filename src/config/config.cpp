@@ -33,7 +33,7 @@ using nlohmann::json_schema::json_validator;
 json YamlToJson(const YAML::Node& node) {
   switch (node.Type()) {
     case YAML::NodeType::Null:
-      return json();
+      return {};
     case YAML::NodeType::Scalar: {
       try {
         return json::parse(node.as<std::string>());
@@ -50,48 +50,48 @@ json YamlToJson(const YAML::Node& node) {
     }
     case YAML::NodeType::Map: {
       json result = json::object();
-      for (const auto& kv : node) {
-        result[kv.first.as<std::string>()] = YamlToJson(kv.second);
+      for (const auto& key_value : node) {
+        result[key_value.first.as<std::string>()] = YamlToJson(key_value.second);
       }
       return result;
     }
     default:
-      return json();
+      return {};
   }
 }
 
 /**
  * @brief Parse MySQL configuration from JSON
  */
-MysqlConfig ParseMysqlConfig(const json& j) {
+MysqlConfig ParseMysqlConfig(const json& json_obj) {
   MysqlConfig config;
 
-  if (j.contains("host")) {
-    config.host = j["host"].get<std::string>();
+  if (json_obj.contains("host")) {
+    config.host = json_obj["host"].get<std::string>();
   }
-  if (j.contains("port")) {
-    config.port = j["port"].get<int>();
+  if (json_obj.contains("port")) {
+    config.port = json_obj["port"].get<int>();
   }
-  if (j.contains("user")) {
-    config.user = j["user"].get<std::string>();
+  if (json_obj.contains("user")) {
+    config.user = json_obj["user"].get<std::string>();
   }
-  if (j.contains("password")) {
-    config.password = j["password"].get<std::string>();
+  if (json_obj.contains("password")) {
+    config.password = json_obj["password"].get<std::string>();
   }
-  if (j.contains("database")) {
-    config.database = j["database"].get<std::string>();
+  if (json_obj.contains("database")) {
+    config.database = json_obj["database"].get<std::string>();
   }
-  if (j.contains("use_gtid")) {
-    config.use_gtid = j["use_gtid"].get<bool>();
+  if (json_obj.contains("use_gtid")) {
+    config.use_gtid = json_obj["use_gtid"].get<bool>();
   }
-  if (j.contains("binlog_format")) {
-    config.binlog_format = j["binlog_format"].get<std::string>();
+  if (json_obj.contains("binlog_format")) {
+    config.binlog_format = json_obj["binlog_format"].get<std::string>();
   }
-  if (j.contains("binlog_row_image")) {
-    config.binlog_row_image = j["binlog_row_image"].get<std::string>();
+  if (json_obj.contains("binlog_row_image")) {
+    config.binlog_row_image = json_obj["binlog_row_image"].get<std::string>();
   }
-  if (j.contains("connect_timeout_ms")) {
-    config.connect_timeout_ms = j["connect_timeout_ms"].get<int>();
+  if (json_obj.contains("connect_timeout_ms")) {
+    config.connect_timeout_ms = json_obj["connect_timeout_ms"].get<int>();
   }
 
   return config;
@@ -100,23 +100,23 @@ MysqlConfig ParseMysqlConfig(const json& j) {
 /**
  * @brief Parse filter configuration from JSON
  */
-FilterConfig ParseFilterConfig(const json& j) {
+FilterConfig ParseFilterConfig(const json& json_obj) {
   FilterConfig config;
 
-  if (j.contains("name")) {
-    config.name = j["name"].get<std::string>();
+  if (json_obj.contains("name")) {
+    config.name = json_obj["name"].get<std::string>();
   }
-  if (j.contains("type")) {
-    config.type = j["type"].get<std::string>();
+  if (json_obj.contains("type")) {
+    config.type = json_obj["type"].get<std::string>();
   }
-  if (j.contains("dict_compress")) {
-    config.dict_compress = j["dict_compress"].get<bool>();
+  if (json_obj.contains("dict_compress")) {
+    config.dict_compress = json_obj["dict_compress"].get<bool>();
   }
-  if (j.contains("bitmap_index")) {
-    config.bitmap_index = j["bitmap_index"].get<bool>();
+  if (json_obj.contains("bitmap_index")) {
+    config.bitmap_index = json_obj["bitmap_index"].get<bool>();
   }
-  if (j.contains("bucket")) {
-    config.bucket = j["bucket"].get<std::string>();
+  if (json_obj.contains("bucket")) {
+    config.bucket = json_obj["bucket"].get<std::string>();
   }
 
   return config;
@@ -125,27 +125,27 @@ FilterConfig ParseFilterConfig(const json& j) {
 /**
  * @brief Parse table configuration from JSON
  */
-TableConfig ParseTableConfig(const json& j) {
+TableConfig ParseTableConfig(const json& json_obj) {
   TableConfig config;
 
-  if (!j.contains("name")) {
+  if (!json_obj.contains("name")) {
     throw std::runtime_error("Table configuration missing 'name' field");
   }
-  config.name = j["name"].get<std::string>();
+  config.name = json_obj["name"].get<std::string>();
 
-  if (j.contains("primary_key")) {
-    config.primary_key = j["primary_key"].get<std::string>();
+  if (json_obj.contains("primary_key")) {
+    config.primary_key = json_obj["primary_key"].get<std::string>();
   }
-  if (j.contains("ngram_size")) {
-    config.ngram_size = j["ngram_size"].get<int>();
+  if (json_obj.contains("ngram_size")) {
+    config.ngram_size = json_obj["ngram_size"].get<int>();
   }
-  if (j.contains("where_clause")) {
-    config.where_clause = j["where_clause"].get<std::string>();
+  if (json_obj.contains("where_clause")) {
+    config.where_clause = json_obj["where_clause"].get<std::string>();
   }
 
   // Parse text_source
-  if (j.contains("text_source")) {
-    const auto& text_source = j["text_source"];
+  if (json_obj.contains("text_source")) {
+    const auto& text_source = json_obj["text_source"];
     if (text_source.contains("column")) {
       config.text_source.column = text_source["column"].get<std::string>();
     }
@@ -158,15 +158,15 @@ TableConfig ParseTableConfig(const json& j) {
   }
 
   // Parse filters
-  if (j.contains("filters")) {
-    for (const auto& filter_json : j["filters"]) {
+  if (json_obj.contains("filters")) {
+    for (const auto& filter_json : json_obj["filters"]) {
       config.filters.push_back(ParseFilterConfig(filter_json));
     }
   }
 
   // Parse posting config
-  if (j.contains("posting")) {
-    const auto& posting = j["posting"];
+  if (json_obj.contains("posting")) {
+    const auto& posting = json_obj["posting"];
     if (posting.contains("block_size")) {
       config.posting.block_size = posting["block_size"].get<int>();
     }
@@ -184,6 +184,7 @@ TableConfig ParseTableConfig(const json& j) {
 /**
  * @brief Parse configuration from JSON object
  */
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Config ParseConfigFromJson(const json& root) {
   Config config;
 
@@ -411,19 +412,20 @@ std::string ReadFileToString(const std::string& path) {
 /**
  * @brief Detect file format based on extension
  */
-enum class FileFormat { YAML, JSON, UNKNOWN };
+// NOLINTNEXTLINE(performance-enum-size)
+enum class FileFormat { kYaml, kJson, kUnknown };
 
 FileFormat DetectFileFormat(const std::string& path) {
   if (path.size() >= 5 && path.substr(path.size() - 5) == ".json") {
-    return FileFormat::JSON;
+    return FileFormat::kJson;
   }
   if (path.size() >= 5 && path.substr(path.size() - 5) == ".yaml") {
-    return FileFormat::YAML;
+    return FileFormat::kYaml;
   }
   if (path.size() >= 4 && path.substr(path.size() - 4) == ".yml") {
-    return FileFormat::YAML;
+    return FileFormat::kYaml;
   }
-  return FileFormat::UNKNOWN;
+  return FileFormat::kUnknown;
 }
 
 }  // namespace
@@ -507,11 +509,11 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
   FileFormat format = DetectFileFormat(path);
 
   switch (format) {
-    case FileFormat::JSON:
+    case FileFormat::kJson:
       spdlog::debug("Detected JSON format for config file: {}", path);
       return LoadConfigJson(path, schema_path);
 
-    case FileFormat::YAML:
+    case FileFormat::kYaml:
       spdlog::debug("Detected YAML format for config file: {}", path);
       // Always validate YAML configs - convert to JSON first
       try {
@@ -529,7 +531,7 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
       }
       return LoadConfigYaml(path);
 
-    case FileFormat::UNKNOWN:
+    case FileFormat::kUnknown:
     default:
       // Try YAML first (legacy default), then JSON
       try {

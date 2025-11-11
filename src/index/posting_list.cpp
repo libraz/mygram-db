@@ -183,6 +183,25 @@ void PostingList::Optimize(uint64_t total_docs) {
   }
 }
 
+std::unique_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
+  auto cloned = std::make_unique<PostingList>(roaring_threshold_);
+
+  // Get all document IDs from current posting list
+  auto docs = GetAll();
+
+  // Build the cloned posting list
+  if (!docs.empty()) {
+    cloned->AddBatch(docs);
+  }
+
+  // Optimize the cloned posting list based on density
+  if (total_docs > 0) {
+    cloned->Optimize(total_docs);
+  }
+
+  return cloned;
+}
+
 void PostingList::ConvertToRoaring() {
   if (strategy_ == PostingStrategy::kRoaringBitmap) {
     return;

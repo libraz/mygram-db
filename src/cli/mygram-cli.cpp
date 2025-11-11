@@ -82,10 +82,17 @@ struct Config {
   bool interactive = true;
 };
 
-// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class MygramClient {
  public:
   MygramClient(Config config) : config_(std::move(config)) {}
+
+  // Non-copyable (manages socket file descriptor)
+  MygramClient(const MygramClient&) = delete;
+  MygramClient& operator=(const MygramClient&) = delete;
+
+  // Movable (default)
+  MygramClient(MygramClient&&) = default;
+  MygramClient& operator=(MygramClient&&) = default;
 
   ~MygramClient() {
     Disconnect();
@@ -154,6 +161,7 @@ class MygramClient {
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     buffer[received] = '\0';
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     std::string response(buffer);
 
     // Remove trailing \r\n
@@ -206,6 +214,7 @@ class MygramClient {
         add_history(input);
       }
 
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       free(input);
 #else
       // Fallback to std::getline

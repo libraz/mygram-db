@@ -735,6 +735,29 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
         return FormatConfigResponse();
       }
 
+      case query::QueryType::OPTIMIZE: {
+        // Check if optimization is already running
+        if (index_.IsOptimizing()) {
+          return FormatError("Optimization already in progress");
+        }
+
+        spdlog::info("Starting index optimization by user request");
+        uint64_t total_docs = doc_store_.Size();
+
+        // Run optimization (this will block, but it's intentional for now)
+        bool started = index_.OptimizeInBatches(total_docs);
+
+        if (started) {
+          auto stats = index_.GetStatistics();
+          std::ostringstream oss;
+          oss << "OK OPTIMIZED terms=" << stats.total_terms
+              << " delta=" << stats.delta_encoded_lists
+              << " roaring=" << stats.roaring_bitmap_lists;
+          return oss.str();
+        }
+        return FormatError("Failed to start optimization");
+      }
+
       default:
         return FormatError("Unknown query type");
     }
@@ -848,7 +871,7 @@ std::string TcpServer::FormatInfoResponse() {
   size_t total_memory = index_memory + doc_memory;
 
   // Update memory stats in real-time
-  const_cast<ServerStats&>(stats_).UpdateMemoryUsage(total_memory);
+  stats_.UpdateMemoryUsage(total_memory);
 
   oss << "used_memory_bytes: " << total_memory << "\r\n";
   oss << "used_memory_human: " << utils::FormatBytes(total_memory) << "\r\n";
@@ -860,7 +883,7 @@ std::string TcpServer::FormatInfoResponse() {
   // Memory fragmentation estimate
   if (total_memory > 0) {
     size_t peak = stats_.GetPeakMemoryUsage();
-    double fragmentation = peak > 0 ? static_cast<double>(peak) / total_memory : 1.0;
+    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
     oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2)
         << fragmentation << "\r\n";
   }
@@ -873,7 +896,7 @@ std::string TcpServer::FormatInfoResponse() {
   oss << "total_terms: " << index_stats.total_terms << "\r\n";
   oss << "total_postings: " << index_stats.total_postings << "\r\n";
   if (index_stats.total_terms > 0) {
-    double avg_postings = static_cast<double>(index_stats.total_postings) / index_stats.total_terms;
+    double avg_postings = static_cast<double>(index_stats.total_postings) / static_cast<double>(index_stats.total_terms);
     oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2)
         << avg_postings << "\r\n";
   }
@@ -885,6 +908,13 @@ std::string TcpServer::FormatInfoResponse() {
     oss << "ngram_mode: hybrid (kanji=1, others=2)\r\n";
   } else {
     oss << "ngram_size: " << ngram_size_ << "\r\n";
+  }
+
+  // Optimization status
+  if (index_.IsOptimizing()) {
+    oss << "optimization_status: in_progress\r\n";
+  } else {
+    oss << "optimization_status: idle\r\n";
   }
   oss << "\r\n";
 
