@@ -10,7 +10,7 @@ MygramDB は、WebアプリケーションやHTTPクライアントとの統合�
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
   http:
     enable: true          # HTTPサーバーを有効化
     bind: "127.0.0.1"     # バインドアドレス（デフォルト: ローカルホストのみ）
@@ -242,7 +242,7 @@ GET /config HTTP/1.1
   "api": {
     "tcp": {
       "bind": "0.0.0.0",
-      "port": 11311
+      "port": 11016
     },
     "http": {
       "enable": true,

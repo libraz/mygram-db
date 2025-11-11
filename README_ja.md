@@ -1,18 +1,26 @@
 # MygramDB
 
+[![CI](https://img.shields.io/github/actions/workflow/status/libraz/mygram-db/ci.yml?branch=main&label=CI)](https://github.com/libraz/mygram-db/actions)
+[![Version](https://img.shields.io/github/v/release/libraz/mygram-db?label=version)](https://github.com/libraz/mygram-db/releases)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
+[![codecov](https://codecov.io/gh/libraz/mygram-db/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mygram-db)
+[![License](https://img.shields.io/github/license/libraz/mygram-db)](https://github.com/libraz/mygram-db/blob/main/LICENSE)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
+
 MySQL レプリケーションに対応した高性能インメモリ全文検索エンジン
 
 ## なぜ MygramDB なのか？
 
-MySQL FULLTEXT (ngram) が遅いからです。
-恐ろしく遅い。ディスク上の B-tree ページを通して数百万行をスキャンし、
-転置インデックスを圧縮せず、「の」や「a」のような短い語で苦戦します。
+MySQL の FULLTEXT (ngram) は遅いのです。
+数百万行のデータをディスク上の B-tree ページから読み込み、転置インデックスも圧縮されず、
+「の」や「a」といった頻出する短い語句の検索でパフォーマンスが低下します。
 
-あなたのせいではありません — MySQL は本格的な全文検索用に設計されていないのです。
+これは MySQL の設計上の問題で、そもそも本格的な全文検索エンジンとして作られていません。
 
-そこで私は **MygramDB** を作りました — MySQL のためのインメモリ検索レプリカです。
-一貫性のあるスナップショットからインデックスを構築し、GTID binlog で同期し、
-Elasticsearch の複雑さも痛みもなく、ミリ秒クラスの検索を提供します。
+**MygramDB** は、この課題を解決するために開発した MySQL 用のインメモリ検索レプリカです。
+一貫性のあるスナップショットからインデックスを構築し、GTID binlog でリアルタイム同期を実現。
+Elasticsearch のような複雑なセットアップは不要で、ミリ秒単位の高速検索を提供します。
 
 ## 特徴
 
@@ -29,21 +37,28 @@ Elasticsearch の複雑さも痛みもなく、ミリ秒クラスの検索を提
 
 ```mermaid
 graph TD
-    MySQL[MySQL RW] -->|binlog GTID| MygramDB1[MygramDB #1]
+    MySQL[MySQL プライマリ/RW] -->|binlog GTID| MySQLReplica[MySQL レプリカ]
+    MySQL -->|binlog GTID| MygramDB1[MygramDB #1]
     MySQL -->|binlog GTID| MygramDB2[MygramDB #2]
 
-    subgraph MygramDB1[MygramDB #1 - 読み取りレプリカ]
+    subgraph MySQLReplica[MySQL レプリカ - 読み取り専用]
+        MySQLEngine[MySQL エンジン]
+    end
+
+    subgraph MygramDB1[MygramDB #1 - 全文検索レプリカ]
         Index1[N-gram インデックス]
         DocStore1[ドキュメントストア]
     end
 
-    subgraph MygramDB2[MygramDB #2 - 読み取りレプリカ]
+    subgraph MygramDB2[MygramDB #2 - 全文検索レプリカ]
         Index2[N-gram インデックス]
         DocStore2[ドキュメントストア]
     end
 
-    MygramDB1 <-->|TCP プロトコル| App[アプリケーション]
-    MygramDB2 <-->|TCP プロトコル| App
+    App[アプリケーション] -->|書き込み| MySQL
+    App -->|通常のクエリ| MySQLReplica
+    App <-->|全文検索| MygramDB1
+    App <-->|全文検索| MygramDB2
 ```
 
 ## クイックスタート
@@ -115,7 +130,7 @@ tables:
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
 
 replication:
   enable: true
@@ -151,10 +166,18 @@ replication:
 ### サーバー起動
 
 ```bash
+# ヘルプを表示
+./build/bin/mygramdb --help
+
+# バージョンを表示
+./build/bin/mygramdb --version
+
 # 設定をテスト
 ./build/bin/mygramdb -t config.yaml
 
-# サーバーを起動
+# サーバーを起動（両方の形式をサポート）
+./build/bin/mygramdb -c config.yaml
+# または
 ./build/bin/mygramdb config.yaml
 ```
 

@@ -58,7 +58,7 @@ snapshot:
 api:
   tcp:
     bind: "127.0.0.1"
-    port: 11311
+    port: 11016
   http:
     enable: false
     bind: "127.0.0.1"

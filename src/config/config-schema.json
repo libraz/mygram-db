@@ -441,7 +441,7 @@
             "port": {
               "type": "integer",
               "description": "TCP port",
-              "default": 11311,
+              "default": 11016,
               "minimum": 1,
               "maximum": 65535
             }

@@ -23,9 +23,10 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
 #include <optional>
+#include <string>
+#include <variant>
+#include <vector>
 
 namespace mygramdb {
 namespace client {

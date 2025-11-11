@@ -161,4 +161,4 @@ mygram-cli --help
 
 1. [設定ガイド](configuration.md) を参照して設定ファイルをセットアップ
 2. [レプリケーションガイド](replication.md) を参照して MySQL レプリケーションを設定
-3. `mygramdb config.yaml` を実行してサーバーを起動
+3. `mygramdb -c config.yaml`（または `mygramdb config.yaml`）を実行してサーバーを起動

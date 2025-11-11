@@ -7,13 +7,13 @@ MygramDB は TCP 上でシンプルなテキストベースのプロトコルを
 TCP 経由で MygramDB に接続：
 
 ```bash
-telnet localhost 11311
+telnet localhost 11016
 ```
 
 または CLI クライアントを使用：
 
 ```bash
-./build/bin/mygram-cli -h localhost -p 11311
+./build/bin/mygram-cli -h localhost -p 11016
 ```
 
 ## コマンド形式
@@ -307,7 +307,7 @@ OK CONFIG
       filters: 3
   api:
     tcp.bind: 0.0.0.0
-    tcp.port: 11311
+    tcp.port: 11016
   replication:
     enable: true
     server_id: 12345

@@ -77,7 +77,7 @@ snapshot:
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
   http:
     enable: true
     bind: "127.0.0.1"
@@ -161,7 +161,7 @@ The same configuration in JSON format:
   "api": {
     "tcp": {
       "bind": "0.0.0.0",
-      "port": 11311
+      "port": 11016
     },
     "http": {
       "enable": true,
@@ -376,7 +376,7 @@ API server configuration:
 api:
   tcp:
     bind: "0.0.0.0"                 # Default: 0.0.0.0 (all interfaces)
-    port: 11311                     # Default: 11311
+    port: 11016                     # Default: 11016
 ```
 
 ### HTTP API (Optional)
@@ -504,3 +504,30 @@ Minimal configuration examples to get started quickly:
 - JSON: `examples/config-minimal.json`
 
 See `examples/README.md` for more information about each example file.
+
+## Usage
+
+Once you have a configuration file, you can start MygramDB:
+
+```bash
+# Show help
+./build/bin/mygramdb --help
+
+# Show version
+./build/bin/mygramdb --version
+
+# Test configuration
+./build/bin/mygramdb -t config.yaml
+
+# Start server (both formats supported)
+./build/bin/mygramdb -c config.yaml
+# or
+./build/bin/mygramdb config.yaml
+```
+
+**Command-line Options:**
+- `-c, --config <file>` - Configuration file path
+- `-t, --config-test` - Test configuration and exit
+- `-h, --help` - Show help message
+- `-v, --version` - Show version information
+- `-s, --schema <file>` - Use custom JSON Schema (advanced)

@@ -1,5 +1,13 @@
 # MygramDB
 
+[![CI](https://img.shields.io/github/actions/workflow/status/libraz/mygram-db/ci.yml?branch=main&label=CI)](https://github.com/libraz/mygram-db/actions)
+[![Version](https://img.shields.io/github/v/release/libraz/mygram-db?label=version)](https://github.com/libraz/mygram-db/releases)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
+[![codecov](https://codecov.io/gh/libraz/mygram-db/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mygram-db)
+[![License](https://img.shields.io/github/license/libraz/mygram-db)](https://github.com/libraz/mygram-db/blob/main/LICENSE)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
+
 High-performance in-memory full-text search engine with MySQL replication support.
 
 ## Why MygramDB?
@@ -29,21 +37,28 @@ and gives you millisecond-class search without Elasticsearch or pain.
 
 ```mermaid
 graph TD
-    MySQL[MySQL RW] -->|binlog GTID| MygramDB1[MygramDB #1]
+    MySQL[MySQL Primary/RW] -->|binlog GTID| MySQLReplica[MySQL Replica]
+    MySQL -->|binlog GTID| MygramDB1[MygramDB #1]
     MySQL -->|binlog GTID| MygramDB2[MygramDB #2]
 
-    subgraph MygramDB1[MygramDB #1 - Read Replica]
+    subgraph MySQLReplica[MySQL Replica - Read Only]
+        MySQLEngine[MySQL Engine]
+    end
+
+    subgraph MygramDB1[MygramDB #1 - FTS Replica]
         Index1[N-gram Index]
         DocStore1[Document Store]
     end
 
-    subgraph MygramDB2[MygramDB #2 - Read Replica]
+    subgraph MygramDB2[MygramDB #2 - FTS Replica]
         Index2[N-gram Index]
         DocStore2[Document Store]
     end
 
-    MygramDB1 <-->|TCP Protocol| App[Application]
-    MygramDB2 <-->|TCP Protocol| App
+    App[Application] -->|Write| MySQL
+    App -->|Normal Queries| MySQLReplica
+    App <-->|Full-Text Search| MygramDB1
+    App <-->|Full-Text Search| MygramDB2
 ```
 
 ## Quick Start
@@ -116,7 +131,7 @@ tables:
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
 
 replication:
   enable: true
@@ -152,10 +167,18 @@ Or in JSON format:
 ### Start Server
 
 ```bash
+# Show help
+./build/bin/mygramdb --help
+
+# Show version
+./build/bin/mygramdb --version
+
 # Test configuration
 ./build/bin/mygramdb -t config.yaml
 
-# Start server
+# Start server (both formats supported)
+./build/bin/mygramdb -c config.yaml
+# or
 ./build/bin/mygramdb config.yaml
 ```
 

@@ -243,7 +243,7 @@ Use the CLI or TCP protocol:
 ./build/bin/mygram-cli REPLICATION STATUS
 
 # Using telnet
-echo "REPLICATION STATUS" | nc localhost 11311
+echo "REPLICATION STATUS" | nc localhost 11016
 ```
 
 Response:

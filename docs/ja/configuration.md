@@ -77,7 +77,7 @@ snapshot:
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
 
 network:
   allow_cidrs: []
@@ -157,7 +157,7 @@ JSON 形式での同じ設定：
   "api": {
     "tcp": {
       "bind": "0.0.0.0",
-      "port": 11311
+      "port": 11016
     }
   },
   "network": {
@@ -367,7 +367,7 @@ API サーバー設定：
 api:
   tcp:
     bind: "0.0.0.0"                 # デフォルト: 0.0.0.0（全インターフェース）
-    port: 11311                     # デフォルト: 11311
+    port: 11016                     # デフォルト: 11016
 ```
 
 ## Network セクション（オプション）
@@ -471,3 +471,30 @@ MygramDB は起動時に組み込みの JSON Schema を使用して、すべて�
 - JSON: `examples/config-minimal.json`
 
 各サンプルファイルの詳細については `examples/README.md` を参照してください。
+
+## 使い方
+
+設定ファイルを作成したら、MygramDB を起動できます：
+
+```bash
+# ヘルプを表示
+./build/bin/mygramdb --help
+
+# バージョンを表示
+./build/bin/mygramdb --version
+
+# 設定をテスト
+./build/bin/mygramdb -t config.yaml
+
+# サーバーを起動（両方の形式をサポート）
+./build/bin/mygramdb -c config.yaml
+# または
+./build/bin/mygramdb config.yaml
+```
+
+**コマンドラインオプション:**
+- `-c, --config <file>` - 設定ファイルのパス
+- `-t, --config-test` - 設定をテストして終了
+- `-h, --help` - ヘルプメッセージを表示
+- `-v, --version` - バージョン情報を表示
+- `-s, --schema <file>` - カスタム JSON Schema を使用（上級者向け）

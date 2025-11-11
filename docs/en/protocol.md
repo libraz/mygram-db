@@ -7,13 +7,13 @@ MygramDB uses a simple text-based protocol over TCP (similar to memcached).
 Connect to MygramDB via TCP:
 
 ```bash
-telnet localhost 11311
+telnet localhost 11016
 ```
 
 Or use the CLI client:
 
 ```bash
-./build/bin/mygram-cli -h localhost -p 11311
+./build/bin/mygram-cli -h localhost -p 11016
 ```
 
 ## Command Format
@@ -223,7 +223,7 @@ OK CONFIG
       filters: 3
   api:
     tcp.bind: 0.0.0.0
-    tcp.port: 11311
+    tcp.port: 11016
   replication:
     enable: true
     server_id: 12345

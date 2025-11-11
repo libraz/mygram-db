@@ -161,4 +161,4 @@ After successful installation:
 
 1. See [Configuration Guide](configuration.md) to set up your config file
 2. See [Replication Guide](replication.md) to configure MySQL replication
-3. Run `mygramdb config.yaml` to start the server
+3. Run `mygramdb -c config.yaml` (or `mygramdb config.yaml`) to start the server

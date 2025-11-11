@@ -243,7 +243,7 @@ CLI または TCP プロトコルを使用：
 ./build/bin/mygram-cli REPLICATION STATUS
 
 # telnet を使用
-echo "REPLICATION STATUS" | nc localhost 11311
+echo "REPLICATION STATUS" | nc localhost 11016
 ```
 
 レスポンス:

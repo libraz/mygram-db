@@ -58,6 +58,18 @@ snapshots/
 
 # SQL files (may contain sensitive data)
 *.sql
+!docker/mysql/init/*.sql
 
 # Backup directory
 backup/
+
+# Docker
+.env
+.env.prod
+.env.local
+docker-compose.override.yml
+logs/
+
+# Coverage reports
+coverage/
+*.info

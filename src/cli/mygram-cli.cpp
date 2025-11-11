@@ -394,6 +394,7 @@ class MygramClient {
 
   [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
 
+#ifdef USE_READLINE
   /**
    * @brief Fetch table names from server INFO command
    * Updates global available_tables vector
@@ -432,6 +433,7 @@ class MygramClient {
       }
     }
   }
+#endif
 
   [[nodiscard]] std::string SendCommand(const std::string& command) const {
     if (!IsConnected()) {

@@ -64,25 +64,49 @@ int main(int argc, char* argv[]) {
   const char* config_path = nullptr;
   const char* schema_path = nullptr;
 
+  // Handle help and version flags first
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-h" || arg == "--help") {
+      std::cout << "Usage: " << argv[0] << " [OPTIONS] <config.yaml|config.json>\n";
+      std::cout << "       " << argv[0] << " -c <config.yaml|config.json> [OPTIONS]\n";
+      std::cout << "\n";
+      std::cout << "Options:\n";
+      std::cout << "  -c, --config <file>            Configuration file path\n";
+      std::cout << "  -t, --config-test              Test configuration file and exit\n";
+      std::cout << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
+      std::cout << "  -h, --help                     Show this help message\n";
+      std::cout << "  -v, --version                  Show version information\n";
+      std::cout << "\n";
+      std::cout << "Configuration file format (auto-detected):\n";
+      std::cout << "  - YAML (.yaml, .yml) - validated against built-in schema\n";
+      std::cout << "  - JSON (.json)       - validated against built-in schema\n";
+      std::cout << "\n";
+      std::cout << "Note: All configurations are validated automatically using the built-in\n";
+      std::cout << "      JSON Schema. Use --schema only to override with a custom schema.\n";
+      return 0;
+    } else if (arg == "-v" || arg == "--version") {
+      std::cout << mygramdb::Version::FullString() << "\n";
+      return 0;
+    }
+  }
+
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0] << " [OPTIONS] <config.yaml|config.json>\n";
-    std::cerr << "Options:\n";
-    std::cerr << "  -t, --config-test              Test configuration file and exit\n";
-    std::cerr << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
-    std::cerr << "\n";
-    std::cerr << "Configuration file format (auto-detected):\n";
-    std::cerr << "  - YAML (.yaml, .yml) - validated against built-in schema\n";
-    std::cerr << "  - JSON (.json)       - validated against built-in schema\n";
-    std::cerr << "\n";
-    std::cerr << "Note: All configurations are validated automatically using the built-in\n";
-    std::cerr << "      JSON Schema. Use --schema only to override with a custom schema.\n";
+    std::cerr << "Try '" << argv[0] << " --help' for more information.\n";
     return 1;
   }
 
   // Parse arguments
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "-t" || arg == "--config-test") {
+    if (arg == "-c" || arg == "--config") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --config requires an argument\n";
+        return 1;
+      }
+      config_path = argv[++i];
+    } else if (arg == "-t" || arg == "--config-test") {
       config_test_mode = true;
     } else if (arg == "-s" || arg == "--schema") {
       if (i + 1 >= argc) {
@@ -90,7 +114,8 @@ int main(int argc, char* argv[]) {
         return 1;
       }
       schema_path = argv[++i];
-    } else if (config_path == nullptr) {
+    } else if (config_path == nullptr && arg[0] != '-') {
+      // Positional argument for config file (backward compatibility)
       config_path = argv[i];
     } else {
       std::cerr << "Error: Unexpected argument: " << argv[i] << "\n";

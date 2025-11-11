@@ -10,7 +10,7 @@ Enable the HTTP server in your `config.yaml`:
 api:
   tcp:
     bind: "0.0.0.0"
-    port: 11311
+    port: 11016
   http:
     enable: true          # Enable HTTP server
     bind: "127.0.0.1"     # Bind address (default: localhost only)
@@ -242,7 +242,7 @@ GET /config HTTP/1.1
   "api": {
     "tcp": {
       "bind": "0.0.0.0",
-      "port": 11311
+      "port": 11016
     },
     "http": {
       "enable": true,

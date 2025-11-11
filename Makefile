@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test clean rebuild install uninstall format configure run
+.PHONY: help build test clean rebuild install uninstall format configure run docker-build docker-up docker-down docker-logs docker-test
 
 # Build directory
 BUILD_DIR := build
@@ -27,6 +27,13 @@ help:
 	@echo "  make run       - Build and run mygramdb"
 	@echo "  make help      - Show this help message"
 	@echo ""
+	@echo "Docker targets:"
+	@echo "  make docker-build - Build Docker image"
+	@echo "  make docker-up    - Start services with docker-compose"
+	@echo "  make docker-down  - Stop services with docker-compose"
+	@echo "  make docker-logs  - View docker-compose logs"
+	@echo "  make docker-test  - Test Docker environment"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make                    # Build the project"
 	@echo "  make test               # Run tests"
@@ -34,6 +41,8 @@ help:
 	@echo "  make PREFIX=/opt/mygramdb install  # Install to custom location"
 	@echo "  make CMAKE_OPTIONS=\"-DENABLE_ASAN=ON\" configure  # Enable AddressSanitizer"
 	@echo "  make CMAKE_OPTIONS=\"-DBUILD_TESTS=OFF\" configure # Disable tests"
+	@echo "  make docker-up          # Start Docker environment"
+	@echo "  make docker-logs        # View logs"
 
 # Configure CMake
 configure:
@@ -99,3 +108,45 @@ run: build
 quick-test: build
 	@echo "Running quick test..."
 	cd $(BUILD_DIR) && ctest --output-on-failure -R "StringUtils|Config"
+
+# Docker targets
+docker-build:
+	@echo "Building Docker image..."
+	docker build -t mygramdb:latest .
+	@echo "Docker image built successfully!"
+
+docker-up:
+	@echo "Starting Docker services..."
+	docker-compose up -d
+	@echo "Services started!"
+	@echo "Run 'make docker-logs' to view logs"
+
+docker-down:
+	@echo "Stopping Docker services..."
+	docker-compose down
+	@echo "Services stopped!"
+
+docker-logs:
+	@echo "Viewing Docker logs (Ctrl+C to exit)..."
+	docker-compose logs -f
+
+docker-test:
+	@echo "Testing Docker environment..."
+	@echo ""
+	@echo "1. Checking if .env file exists..."
+	@if [ ! -f .env ]; then \
+		echo "   WARNING: .env file not found. Copying from .env.example..."; \
+		cp .env.example .env; \
+		echo "   Please edit .env and update passwords before running docker-up"; \
+	else \
+		echo "   OK: .env file found"; \
+	fi
+	@echo ""
+	@echo "2. Building Docker image..."
+	docker build -t mygramdb:test .
+	@echo ""
+	@echo "3. Testing entrypoint script..."
+	docker run --rm -e MYSQL_HOST=testhost mygramdb:test test-config || echo "   Config test completed (expected to fail without MySQL)"
+	@echo ""
+	@echo "Docker environment test completed!"
+	@echo "Run 'make docker-up' to start the full environment"

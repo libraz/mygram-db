@@ -149,7 +149,7 @@ snapshot:
 api:
   tcp:
     bind: "0.0.0.0"                 # TCP bind address (default: 0.0.0.0, all interfaces)
-    port: 11311                     # TCP port (default: 11311)
+    port: 11016                     # TCP port (default: 11016)
 
 # Network Security (optional)
 network:
