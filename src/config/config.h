@@ -89,7 +89,8 @@ struct TableConfig {
   TextSourceConfig text_source;
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
   std::vector<FilterConfig> filters;  // Optional filters for search-time filtering
-  int ngram_size = 1;
+  int ngram_size = 2;              // N-gram size for ASCII/alphanumeric characters
+  int kanji_ngram_size = 0;        // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
   PostingConfig posting;
 };
 

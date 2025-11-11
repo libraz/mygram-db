@@ -159,7 +159,8 @@ int main(int argc, char* argv[]) {
   spdlog::info("Configured table: {}", table_config.name);
 
   // Create index and document store
-  auto index = std::make_unique<mygramdb::index::Index>(table_config.ngram_size);
+  auto index = std::make_unique<mygramdb::index::Index>(
+      table_config.ngram_size, table_config.kanji_ngram_size);
   auto doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
 
 #ifdef USE_MYSQL
@@ -184,7 +185,7 @@ int main(int argc, char* argv[]) {
   // Build snapshot
   spdlog::info("Building snapshot from table '{}'...", table_config.name);
   mygramdb::storage::SnapshotBuilder snapshot_builder(
-      *mysql_conn, *index, *doc_store, table_config);
+      *mysql_conn, *index, *doc_store, table_config, config.build);
 
   bool snapshot_success = snapshot_builder.Build([](const auto& progress) {
     if (progress.processed_rows % 10000 == 0) {

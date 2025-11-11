@@ -71,13 +71,15 @@ tables:
 
       - name: "created_at"
         type: "datetime"
-        bucket: ""                  # Bucket datetime values: "minute", "hour", "day" (optional, reduces cardinality)
+        # bucket: "minute"          # Bucket datetime values: "minute", "hour", "day" (optional, reduces cardinality)
 
     # N-gram Configuration
-    ngram_size: 1                   # N-gram size (default: 1)
+    ngram_size: 2                   # N-gram size for ASCII/alphanumeric characters (default: 2)
                                     # 1=unigram, 2=bigram, etc.
-                                    # For Japanese/CJK: use 1 or 2
-                                    # For English: use 3 or more
+                                    # For mixed-language content: recommended 2
+    kanji_ngram_size: 1             # N-gram size for CJK (kanji/kana/hanzi) characters (default: 0 = use ngram_size)
+                                    # For Japanese/Chinese: recommended 1
+                                    # Set to 0 to use ngram_size for all characters
 
     # Posting List Configuration
     posting:

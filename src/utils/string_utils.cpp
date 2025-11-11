@@ -231,7 +231,9 @@ bool IsCJKIdeograph(uint32_t codepoint) {
 
 }  // namespace
 
-std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
+std::vector<std::string> GenerateHybridNgrams(const std::string& text,
+                                               int ascii_ngram_size,
+                                               int kanji_ngram_size) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level processing
@@ -247,24 +249,22 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
     uint32_t codepoint = codepoints[i];
 
     if (IsCJKIdeograph(codepoint)) {
-      // Kanji: tokenize as single character (unigram)
-      ngrams.push_back(CodepointsToUtf8({codepoint}));
-    } else {
-      // Non-Kanji: tokenize as bigram with next character
-      if (i + 1 < codepoints.size()) {
-        uint32_t next_codepoint = codepoints[i + 1];
-        ngrams.push_back(CodepointsToUtf8({codepoint, next_codepoint}));
-
-        // If next is also non-Kanji, we'll create overlapping bigrams
-        // This ensures "abc" -> ["ab", "bc"] not just ["ab", "c"]
-      }
-      // Last non-Kanji character: include as single if it's the only one left
-      else if (i == codepoints.size() - 1 && i > 0) {
-        // Check if previous was also non-Kanji (already handled in bigram)
-        if (IsCJKIdeograph(codepoints[i - 1])) {
-          // Previous was Kanji, this is standalone non-Kanji at end
-          // Skip single non-Kanji at end (not searchable by design)
+      // CJK character: use kanji_ngram_size
+      if (i + kanji_ngram_size <= codepoints.size()) {
+        std::vector<uint32_t> ngram_codepoints;
+        for (int j = 0; j < kanji_ngram_size; ++j) {
+          ngram_codepoints.push_back(codepoints[i + j]);
         }
+        ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
+      }
+    } else {
+      // Non-CJK character: use ascii_ngram_size
+      if (i + ascii_ngram_size <= codepoints.size()) {
+        std::vector<uint32_t> ngram_codepoints;
+        for (int j = 0; j < ascii_ngram_size; ++j) {
+          ngram_codepoints.push_back(codepoints[i + j]);
+        }
+        ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
       }
     }
   }

@@ -36,7 +36,8 @@ tables:
       column: "content"
     required_filters: []
     filters: []
-    ngram_size: 1
+    ngram_size: 2
+    kanji_ngram_size: 1
     posting:
       block_size: 128
       freq_bits: 0
@@ -112,7 +113,8 @@ JSON 形式での同じ設定：
       },
       "required_filters": [],
       "filters": [],
-      "ngram_size": 1,
+      "ngram_size": 2,
+      "kanji_ngram_size": 1,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,
@@ -192,10 +194,14 @@ MySQL サーバーの接続設定：
 
 - **name**: MySQL データベースのテーブル名（必須）
 - **primary_key**: プライマリキーのカラム名（デフォルト: `id`、単一カラムである必要があります）
-- **ngram_size**: トークン化の N-gram サイズ（デフォルト: `1`）
+- **ngram_size**: ASCII/英数字文字の N-gram サイズ（デフォルト: `2`）
   - 1 = ユニグラム、2 = バイグラム等
-  - 日本語/CJK: 1 または 2 を使用
-  - 英語: 3 以上を使用
+  - 多言語混在コンテンツ: 2 を推奨
+  - 英語のみ: 3 以上を使用
+- **kanji_ngram_size**: CJK文字（漢字/仮名/汉字）の N-gram サイズ（デフォルト: `0`）
+  - 0 に設定または省略すると、すべての文字に `ngram_size` の値を使用
+  - 日本語/中国語テキスト: 1（ユニグラム）を推奨
+  - ハイブリッドトークン化: ASCII文字とCJK文字で異なるN-gramサイズを使用可能
 
 ### Text Source
 

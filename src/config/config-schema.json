@@ -202,9 +202,16 @@
           },
           "ngram_size": {
             "type": "integer",
-            "description": "N-gram size (1=unigram, 2=bigram, etc.)",
-            "default": 1,
+            "description": "N-gram size for ASCII/alphanumeric characters (1=unigram, 2=bigram, etc.)",
+            "default": 2,
             "minimum": 1,
+            "maximum": 10
+          },
+          "kanji_ngram_size": {
+            "type": "integer",
+            "description": "N-gram size for CJK (kanji/kana/hanzi) characters. 0 or omit to use ngram_size.",
+            "default": 0,
+            "minimum": 0,
             "maximum": 10
           },
           "posting": {

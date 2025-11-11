@@ -45,6 +45,48 @@ DocId DocumentStore::AddDocument(
   return doc_id;
 }
 
+std::vector<DocId> DocumentStore::AddDocumentBatch(
+    const std::vector<DocumentItem>& documents) {
+  std::vector<DocId> doc_ids;
+  doc_ids.reserve(documents.size());
+
+  if (documents.empty()) {
+    return doc_ids;
+  }
+
+  // Single lock for entire batch
+  std::unique_lock lock(mutex_);
+
+  for (const auto& doc : documents) {
+    // Check if primary key already exists
+    auto iterator = pk_to_doc_id_.find(doc.primary_key);
+    if (iterator != pk_to_doc_id_.end()) {
+      spdlog::warn("Primary key {} already exists with DocID {}",
+                   doc.primary_key, iterator->second);
+      doc_ids.push_back(iterator->second);
+      continue;
+    }
+
+    // Assign new DocID
+    DocId doc_id = next_doc_id_++;
+
+    // Store mappings
+    doc_id_to_pk_[doc_id] = doc.primary_key;
+    pk_to_doc_id_[doc.primary_key] = doc_id;
+
+    // Store filters
+    if (!doc.filters.empty()) {
+      doc_filters_[doc_id] = doc.filters;
+    }
+
+    doc_ids.push_back(doc_id);
+  }
+
+  spdlog::debug("Added batch of {} documents", documents.size());
+
+  return doc_ids;
+}
+
 bool DocumentStore::UpdateDocument(
     DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);

@@ -51,7 +51,8 @@
           "type": "datetime"
         }
       ],
-      "ngram_size": 1,
+      "ngram_size": 2,
+      "kanji_ngram_size": 1,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,

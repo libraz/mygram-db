@@ -43,11 +43,13 @@ class SnapshotBuilder {
    * @param index N-gram index
    * @param doc_store Document store
    * @param table_config Table configuration
+   * @param build_config Build configuration (batch_size, parallelism)
    */
   SnapshotBuilder(mysql::Connection& connection,
                   index::Index& index,
                   DocumentStore& doc_store,
-                  config::TableConfig table_config);
+                  config::TableConfig table_config,
+                  config::BuildConfig build_config = {});
 
   ~SnapshotBuilder() = default;
 
@@ -92,6 +94,7 @@ class SnapshotBuilder {
   index::Index& index_;
   DocumentStore& doc_store_;
   config::TableConfig table_config_;
+  config::BuildConfig build_config_;
 
   std::string last_error_;
   uint64_t processed_rows_ = 0;

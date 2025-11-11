@@ -443,3 +443,115 @@ TEST(DocumentStoreTest, MixedFilterTypes) {
   ASSERT_TRUE(score.has_value());
   EXPECT_DOUBLE_EQ(std::get<double>(score.value()), 98.5);
 }
+
+/**
+ * @brief Test batch document addition
+ */
+TEST(DocumentStoreTest, AddDocumentBatch) {
+  DocumentStore store;
+
+  // Prepare batch of documents
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk1", {}});
+  batch.push_back({"pk2", {{"status", static_cast<int32_t>(1)}}});
+  batch.push_back({"pk3", {{"status", static_cast<int32_t>(2)}}});
+
+  // Add batch
+  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+
+  // Verify doc_ids were assigned sequentially
+  EXPECT_EQ(doc_ids.size(), 3);
+  EXPECT_EQ(doc_ids[0], 1);
+  EXPECT_EQ(doc_ids[1], 2);
+  EXPECT_EQ(doc_ids[2], 3);
+
+  // Verify documents can be retrieved
+  auto doc1 = store.GetDocument(doc_ids[0]);
+  ASSERT_TRUE(doc1.has_value());
+  EXPECT_EQ(doc1->primary_key, "pk1");
+
+  auto doc2 = store.GetDocument(doc_ids[1]);
+  ASSERT_TRUE(doc2.has_value());
+  EXPECT_EQ(doc2->primary_key, "pk2");
+
+  // Verify filter values
+  auto status2 = store.GetFilterValue(doc_ids[1], "status");
+  ASSERT_TRUE(status2.has_value());
+  EXPECT_EQ(std::get<int32_t>(status2.value()), 1);
+}
+
+/**
+ * @brief Test empty batch addition
+ */
+TEST(DocumentStoreTest, AddDocumentBatchEmpty) {
+  DocumentStore store;
+
+  std::vector<DocumentStore::DocumentItem> batch;
+  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+
+  EXPECT_EQ(doc_ids.size(), 0);
+  EXPECT_EQ(store.Size(), 0);
+}
+
+/**
+ * @brief Test large batch addition
+ */
+TEST(DocumentStoreTest, AddDocumentBatchLarge) {
+  DocumentStore store;
+
+  // Create large batch (10000 documents)
+  std::vector<DocumentStore::DocumentItem> batch;
+  for (int i = 1; i <= 10000; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    batch.push_back({pk, {{"index", static_cast<int32_t>(i)}}});
+  }
+
+  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+
+  // Verify all documents were added
+  EXPECT_EQ(doc_ids.size(), 10000);
+  EXPECT_EQ(store.Size(), 10000);
+
+  // Verify sequential doc_id assignment
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    EXPECT_EQ(doc_ids[i], static_cast<DocId>(i + 1));
+  }
+
+  // Spot check a few documents
+  auto doc1 = store.GetDocument(1);
+  ASSERT_TRUE(doc1.has_value());
+  EXPECT_EQ(doc1->primary_key, "pk1");
+
+  auto doc5000 = store.GetDocument(5000);
+  ASSERT_TRUE(doc5000.has_value());
+  EXPECT_EQ(doc5000->primary_key, "pk5000");
+}
+
+/**
+ * @brief Test batch addition with duplicate primary keys
+ */
+TEST(DocumentStoreTest, AddDocumentBatchDuplicates) {
+  DocumentStore store;
+
+  // Add initial document
+  store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}});
+
+  // Try to add batch with duplicate primary key
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk1", {{"status", static_cast<int32_t>(2)}}});  // Duplicate
+  batch.push_back({"pk2", {{"status", static_cast<int32_t>(3)}}});  // New
+
+  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+
+  // Verify duplicate returns existing doc_id
+  EXPECT_EQ(doc_ids[0], 1);  // Existing doc_id
+  EXPECT_EQ(doc_ids[1], 2);  // New doc_id
+
+  // Verify only 2 documents in store (not 3)
+  EXPECT_EQ(store.Size(), 2);
+
+  // Verify first document was not modified
+  auto status1 = store.GetFilterValue(1, "status");
+  ASSERT_TRUE(status1.has_value());
+  EXPECT_EQ(std::get<int32_t>(status1.value()), 1);  // Original value
+}

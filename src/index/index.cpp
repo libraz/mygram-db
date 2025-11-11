@@ -17,17 +17,14 @@
 namespace mygramdb {
 namespace index {
 
-Index::Index(int ngram_size, double roaring_threshold)
-    : ngram_size_(ngram_size), roaring_threshold_(roaring_threshold) {}
+Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
+    : ngram_size_(ngram_size),
+      kanji_ngram_size_(kanji_ngram_size > 0 ? kanji_ngram_size : ngram_size),
+      roaring_threshold_(roaring_threshold) {}
 
 void Index::AddDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams (hybrid mode if ngram_size_ == 0)
-  std::vector<std::string> ngrams;
-  if (ngram_size_ == 0) {
-    ngrams = utils::GenerateHybridNgrams(text);
-  } else {
-    ngrams = utils::GenerateNgrams(text, ngram_size_);
-  }
+  // Generate n-grams using hybrid mode
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
   // Remove duplicates while preserving uniqueness
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
@@ -43,18 +40,52 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
                 unique_ngrams.size(), ngram_size_, mode);
 }
 
+void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
+  if (documents.empty()) {
+    return;
+  }
+
+  // Phase 1: Generate n-grams for all documents (no locking, CPU-intensive)
+  // Map: term -> vector of doc_ids containing that term
+  std::unordered_map<std::string, std::vector<DocId>> term_to_docs;
+
+  for (const auto& doc : documents) {
+    // Generate n-grams
+    std::vector<std::string> ngrams;
+    ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_);
+
+    // Remove duplicates
+    std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+
+    // Build term->docs mapping
+    for (const auto& ngram : unique_ngrams) {
+      term_to_docs[ngram].push_back(doc.doc_id);
+    }
+  }
+
+  // Phase 2: Sort doc_ids for each term (enables batch insertion optimization)
+  for (auto& [term, doc_ids] : term_to_docs) {
+    std::sort(doc_ids.begin(), doc_ids.end());
+  }
+
+  // Phase 3: Add to posting lists (with locking, minimal lock time)
+  // Use PostingList::AddBatch() for better performance
+  std::lock_guard<std::mutex> lock(postings_mutex_);
+
+  for (const auto& [term, doc_ids] : term_to_docs) {
+    auto* posting = GetOrCreatePostingList(term);
+    posting->AddBatch(doc_ids);
+  }
+
+  spdlog::debug("Added batch of {} documents with {} unique terms",
+                documents.size(), term_to_docs.size());
+}
+
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
                           const std::string& new_text) {
-  // Generate n-grams for both texts (hybrid mode if ngram_size_ == 0)
-  std::vector<std::string> old_ngrams;
-  std::vector<std::string> new_ngrams;
-  if (ngram_size_ == 0) {
-    old_ngrams = utils::GenerateHybridNgrams(old_text);
-    new_ngrams = utils::GenerateHybridNgrams(new_text);
-  } else {
-    old_ngrams = utils::GenerateNgrams(old_text, ngram_size_);
-    new_ngrams = utils::GenerateNgrams(new_text, ngram_size_);
-  }
+  // Generate n-grams for both texts
+  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
 
   std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
   std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
@@ -79,13 +110,8 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
 }
 
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams (hybrid mode if ngram_size_ == 0)
-  std::vector<std::string> ngrams;
-  if (ngram_size_ == 0) {
-    ngrams = utils::GenerateHybridNgrams(text);
-  } else {
-    ngrams = utils::GenerateNgrams(text, ngram_size_);
-  }
+  // Generate n-grams
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
 
   // Remove document from posting list for each n-gram

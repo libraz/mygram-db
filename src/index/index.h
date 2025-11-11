@@ -28,10 +28,13 @@ class Index {
  public:
   /**
    * @brief Construct index
-   * @param ngram_size N-gram size (typically 1 for unigrams)
+   * @param ngram_size N-gram size for ASCII/alphanumeric characters (typically 2 for bigrams)
+   * @param kanji_ngram_size N-gram size for CJK characters (0 = use ngram_size)
    * @param roaring_threshold Density threshold for Roaring bitmaps
    */
-  explicit Index(int ngram_size = 1, double roaring_threshold = 0.18);
+  explicit Index(int ngram_size = 2,
+                  int kanji_ngram_size = 1,
+                  double roaring_threshold = 0.18);
 
   ~Index() = default;
 
@@ -44,12 +47,32 @@ class Index {
   Index& operator=(Index&&) = delete;
 
   /**
+   * @brief Document item for batch processing
+   */
+  struct DocumentItem {
+    DocId doc_id;
+    std::string text;  // Normalized text content
+  };
+
+  /**
    * @brief Add document to index
    *
    * @param doc_id Document ID
    * @param text Normalized text content
    */
   void AddDocument(DocId doc_id, const std::string& text);
+
+  /**
+   * @brief Add multiple documents to index (batch operation, thread-safe)
+   *
+   * This method is optimized for bulk insertions during snapshot builds.
+   * It processes documents in batches to reduce lock contention and improve
+   * cache locality.
+   *
+   * @param documents Vector of documents to add
+   * @note This method is thread-safe and can be called from multiple threads
+   */
+  void AddDocumentBatch(const std::vector<DocumentItem>& documents);
 
   /**
    * @brief Update document in index
@@ -178,6 +201,7 @@ class Index {
 
  private:
   int ngram_size_;
+  int kanji_ngram_size_;
   double roaring_threshold_;
 
   // Term -> Posting list mapping

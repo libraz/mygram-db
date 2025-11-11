@@ -18,11 +18,13 @@ namespace storage {
 SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection,
                                  index::Index& index,
                                  DocumentStore& doc_store,
-                                 config::TableConfig table_config)
+                                 config::TableConfig table_config,
+                                 config::BuildConfig build_config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
-      table_config_(std::move(table_config)) {}
+      table_config_(std::move(table_config)),
+      build_config_(std::move(build_config)) {}
 
 bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   if (!connection_.IsConnected()) {
@@ -86,33 +88,96 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   spdlog::info("Processing {} rows from table {}", total_rows,
                table_config_.name);
 
-  // Process rows
+  // Process rows in batches
   MYSQL_ROW row = nullptr;
   processed_rows_ = 0;
 
+  // Determine batch size (default to 1000 if not specified)
+  size_t batch_size = build_config_.batch_size > 0 ? build_config_.batch_size : 1000;
+
+  std::vector<DocumentStore::DocumentItem> doc_batch;
+  std::vector<index::Index::DocumentItem> index_batch;
+  doc_batch.reserve(batch_size);
+  index_batch.reserve(batch_size);
+
   while ((row = mysql_fetch_row(result)) != nullptr && !cancelled_) {
-    if (!ProcessRow(row, fields, num_fields)) {
+    // Extract primary key
+    std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
+    if (primary_key.empty()) {
+      last_error_ = "Failed to extract primary key";
+      spdlog::error(last_error_);
       mysql_free_result(result);
-      connection_.ExecuteUpdate("ROLLBACK");  // Clean up on error
+      connection_.ExecuteUpdate("ROLLBACK");
       return false;
     }
 
-    processed_rows_++;
-
-    // Progress callback every 1000 rows
-    if (progress_callback && processed_rows_ % 1000 == 0) {
-      auto now = std::chrono::steady_clock::now();
-      double elapsed = std::chrono::duration<double>(now - start_time).count();
-
-      SnapshotProgress progress;
-      progress.total_rows = total_rows;
-      progress.processed_rows = processed_rows_;
-      progress.elapsed_seconds = elapsed;
-      progress.rows_per_second =
-          elapsed > 0 ? static_cast<double>(processed_rows_) / elapsed : 0.0;
-
-      progress_callback(progress);
+    // Extract text
+    std::string text = ExtractText(row, fields, num_fields);
+    if (text.empty()) {
+      spdlog::debug("Empty text for primary key {}, skipping", primary_key);
+      continue;
     }
+
+    // Normalize text
+    std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+
+    // Extract filters
+    auto filters = ExtractFilters(row, fields, num_fields);
+
+    // Add to batch
+    doc_batch.push_back({primary_key, filters});
+    index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
+
+    // Process batch when full
+    if (doc_batch.size() >= batch_size) {
+      // Add documents to document store
+      std::vector<DocId> doc_ids = doc_store_.AddDocumentBatch(doc_batch);
+
+      // Update index_batch with assigned doc_ids
+      for (size_t i = 0; i < doc_ids.size(); ++i) {
+        index_batch[i].doc_id = doc_ids[i];
+      }
+
+      // Add to index
+      index_.AddDocumentBatch(index_batch);
+
+      processed_rows_ += doc_batch.size();
+
+      // Clear batches
+      doc_batch.clear();
+      index_batch.clear();
+
+      // Progress callback
+      if (progress_callback) {
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - start_time).count();
+
+        SnapshotProgress progress;
+        progress.total_rows = total_rows;
+        progress.processed_rows = processed_rows_;
+        progress.elapsed_seconds = elapsed;
+        progress.rows_per_second =
+            elapsed > 0 ? static_cast<double>(processed_rows_) / elapsed : 0.0;
+
+        progress_callback(progress);
+      }
+    }
+  }
+
+  // Process remaining rows in batch
+  if (!doc_batch.empty() && !cancelled_) {
+    // Add documents to document store
+    std::vector<DocId> doc_ids = doc_store_.AddDocumentBatch(doc_batch);
+
+    // Update index_batch with assigned doc_ids
+    for (size_t i = 0; i < doc_ids.size(); ++i) {
+      index_batch[i].doc_id = doc_ids[i];
+    }
+
+    // Add to index
+    index_.AddDocumentBatch(index_batch);
+
+    processed_rows_ += doc_batch.size();
   }
 
   mysql_free_result(result);

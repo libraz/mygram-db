@@ -77,6 +77,14 @@ class DocumentStore {
   DocumentStore& operator=(DocumentStore&&) = delete;
 
   /**
+   * @brief Document item for batch addition
+   */
+  struct DocumentItem {
+    std::string primary_key;
+    std::unordered_map<std::string, FilterValue> filters;
+  };
+
+  /**
    * @brief Add document
    *
    * @param primary_key Primary key from MySQL
@@ -85,6 +93,18 @@ class DocumentStore {
    */
   DocId AddDocument(const std::string& primary_key,
                     const std::unordered_map<std::string, FilterValue>& filters = {});
+
+  /**
+   * @brief Add multiple documents (batch operation, thread-safe)
+   *
+   * This method is optimized for bulk insertions during snapshot builds.
+   * It processes documents in a single lock acquisition for better performance.
+   *
+   * @param documents Vector of documents to add
+   * @return Vector of assigned DocIDs (same order as input)
+   * @note This method is thread-safe
+   */
+  std::vector<DocId> AddDocumentBatch(const std::vector<DocumentItem>& documents);
 
   /**
    * @brief Update document

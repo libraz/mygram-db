@@ -36,7 +36,8 @@ tables:
       column: "content"
     required_filters: []
     filters: []
-    ngram_size: 1
+    ngram_size: 2
+    kanji_ngram_size: 1
     posting:
       block_size: 128
       freq_bits: 0
@@ -116,7 +117,8 @@ The same configuration in JSON format:
       },
       "required_filters": [],
       "filters": [],
-      "ngram_size": 1,
+      "ngram_size": 2,
+      "kanji_ngram_size": 1,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,
@@ -201,10 +203,14 @@ Table configuration (supports one table per instance):
 
 - **name**: Table name in MySQL database (required)
 - **primary_key**: Primary key column name (default: `id`, must be single-column)
-- **ngram_size**: N-gram size for tokenization (default: `1`)
+- **ngram_size**: N-gram size for ASCII/alphanumeric characters (default: `2`)
   - 1 = unigram, 2 = bigram, etc.
-  - For Japanese/CJK: use 1 or 2
-  - For English: use 3 or more
+  - For mixed-language content: recommended 2
+  - For English-only: use 3 or more
+- **kanji_ngram_size**: N-gram size for CJK (kanji/kana/hanzi) characters (default: `0`)
+  - Set to 0 or omit to use `ngram_size` value for all characters
+  - For Japanese/Chinese text: recommended 1 (unigram)
+  - Allows hybrid tokenization: different n-gram sizes for ASCII vs CJK text
 
 ### Text Source
 

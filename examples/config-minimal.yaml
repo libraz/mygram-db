@@ -21,7 +21,8 @@ tables:
     primary_key: "id"
     text_source:
       column: "content"
-    ngram_size: 1
+    # ngram_size: 2           # Optional: N-gram size for ASCII (default: 2)
+    # kanji_ngram_size: 1     # Optional: N-gram size for CJK (default: 1)
 
 # API Server
 api:

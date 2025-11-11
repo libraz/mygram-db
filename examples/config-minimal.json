@@ -13,8 +13,7 @@
       "primary_key": "id",
       "text_source": {
         "column": "content"
-      },
-      "ngram_size": 1
+      }
     }
   ],
   "api": {

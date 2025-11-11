@@ -193,6 +193,13 @@ TableConfig ParseTableConfig(const json& json_obj) {
   if (json_obj.contains("ngram_size")) {
     config.ngram_size = json_obj["ngram_size"].get<int>();
   }
+  if (json_obj.contains("kanji_ngram_size")) {
+    config.kanji_ngram_size = json_obj["kanji_ngram_size"].get<int>();
+  }
+  // If kanji_ngram_size is 0 or not specified, use ngram_size
+  if (config.kanji_ngram_size == 0) {
+    config.kanji_ngram_size = config.ngram_size;
+  }
 
   // Check for deprecated where_clause
   if (json_obj.contains("where_clause")) {

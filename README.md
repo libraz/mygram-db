@@ -110,7 +110,8 @@ tables:
     primary_key: "id"
     text_source:
       column: "content"
-    ngram_size: 1
+    ngram_size: 2          # ASCII/alphanumeric: bigram
+    kanji_ngram_size: 1    # CJK characters: unigram
 
 api:
   tcp:
