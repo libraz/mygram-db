@@ -4,18 +4,20 @@
  */
 
 #include "storage/gtid_state.h"
+
 #include <spdlog/spdlog.h>
-#include <fstream>
-#include <filesystem>
+
 #include <cstdio>  // for std::rename
+#include <filesystem>
+#include <fstream>
+#include <utility>
 
 #ifdef USE_MYSQL
 
 namespace mygramdb {
 namespace storage {
 
-GTIDStateFile::GTIDStateFile(const std::string& file_path)
-    : file_path_(file_path) {}
+GTIDStateFile::GTIDStateFile(std::string file_path) : file_path_(std::move(file_path)) {}
 
 std::optional<std::string> GTIDStateFile::Read() const {
   if (!Exists()) {
@@ -71,7 +73,7 @@ bool GTIDStateFile::Write(const std::string& gtid) {
       return false;
     }
 
-    temp_file << gtid << std::endl;
+    temp_file << gtid << '\n';
     temp_file.flush();
 
     if (!temp_file.good()) {
@@ -126,10 +128,10 @@ bool GTIDStateFile::Delete() {
     if (std::filesystem::remove(file_path_)) {
       spdlog::info("Deleted GTID state file: {}", file_path_);
       return true;
-    } else {
-      spdlog::error("Failed to delete GTID state file: {}", file_path_);
-      return false;
     }
+    spdlog::error("Failed to delete GTID state file: {}", file_path_);
+    return false;
+
   } catch (const std::exception& e) {
     spdlog::error("Exception while deleting GTID state file: {}", e.what());
     return false;

@@ -5,10 +5,13 @@
 
 #include "index/index.h"
 #include "utils/string_utils.h"
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <fstream>
 #include <spdlog/spdlog.h>
 #include <unordered_set>
-#include <fstream>
-#include <cstring>
 
 namespace mygramdb {
 namespace index {
@@ -42,7 +45,8 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text,
                           const std::string& new_text) {
   // Generate n-grams for both texts (hybrid mode if ngram_size_ == 0)
-  std::vector<std::string> old_ngrams, new_ngrams;
+  std::vector<std::string> old_ngrams;
+  std::vector<std::string> new_ngrams;
   if (ngram_size_ == 0) {
     old_ngrams = utils::GenerateHybridNgrams(old_text);
     new_ngrams = utils::GenerateHybridNgrams(new_text);
@@ -93,11 +97,15 @@ void Index::RemoveDocument(DocId doc_id, const std::string& text) {
 }
 
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const {
-  if (terms.empty()) return {};
+  if (terms.empty()) {
+    return {};
+  }
 
   // Get posting list for first term
   const auto* first_posting = GetPostingList(terms[0]);
-  if (first_posting == nullptr) return {};
+  if (first_posting == nullptr) {
+    return {};
+  }
 
   // Start with first term's documents
   auto result = first_posting->GetAll();
@@ -105,7 +113,9 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const
   // Intersect with each subsequent term
   for (size_t i = 1; i < terms.size(); ++i) {
     const auto* posting = GetPostingList(terms[i]);
-    if (posting == nullptr) return {};  // No documents if any term is missing
+    if (posting == nullptr) {
+      return {};  // No documents if any term is missing
+    }
 
     auto term_docs = posting->GetAll();
     std::vector<DocId> intersection;
@@ -114,7 +124,9 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const
                          std::back_inserter(intersection));
     result = std::move(intersection);
 
-    if (result.empty()) break;  // Early termination
+    if (result.empty()) {
+      break;  // Early termination
+    }
   }
 
   return result;
@@ -140,7 +152,9 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
 
 std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
                                     const std::vector<std::string>& terms) const {
-  if (terms.empty()) return all_docs;
+  if (terms.empty()) {
+    return all_docs;
+  }
 
   // Get union of all documents containing any of the NOT terms
   std::vector<DocId> excluded_docs = SearchOr(terms);
@@ -156,7 +170,7 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
 
 uint64_t Index::Count(const std::string& term) const {
   const auto* posting = GetPostingList(term);
-  return posting ? posting->Size() : 0;
+  return (posting != nullptr) ? posting->Size() : 0;
 }
 
 size_t Index::MemoryUsage() const {
@@ -182,9 +196,9 @@ void Index::Clear() {
 }
 
 PostingList* Index::GetOrCreatePostingList(const std::string& term) {
-  auto it = term_postings_.find(term);
-  if (it != term_postings_.end()) {
-    return it->second.get();
+  auto iterator = term_postings_.find(term);
+  if (iterator != term_postings_.end()) {
+    return iterator->second.get();
   }
 
   // Create new posting list
@@ -195,8 +209,8 @@ PostingList* Index::GetOrCreatePostingList(const std::string& term) {
 }
 
 const PostingList* Index::GetPostingList(const std::string& term) const {
-  auto it = term_postings_.find(term);
-  return it != term_postings_.end() ? it->second.get() : nullptr;
+  auto iterator = term_postings_.find(term);
+  return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }
 
 bool Index::SaveToFile(const std::string& filepath) const {
@@ -219,7 +233,7 @@ bool Index::SaveToFile(const std::string& filepath) const {
     ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
     // Write ngram_size
-    uint32_t ngram = static_cast<uint32_t>(ngram_size_);
+    auto ngram = static_cast<uint32_t>(ngram_size_);
     ofs.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
 
     // Write term count
@@ -229,9 +243,9 @@ bool Index::SaveToFile(const std::string& filepath) const {
     // Write each term and its posting list
     for (const auto& [term, posting] : term_postings_) {
       // Write term length and term
-      uint32_t term_len = static_cast<uint32_t>(term.size());
+      auto term_len = static_cast<uint32_t>(term.size());
       ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
-      ofs.write(term.data(), term_len);
+      ofs.write(term.data(), static_cast<std::streamsize>(term_len));
 
       // Serialize posting list to buffer
       std::vector<uint8_t> posting_data;
@@ -240,7 +254,8 @@ bool Index::SaveToFile(const std::string& filepath) const {
       // Write posting list size and data
       uint64_t posting_size = posting_data.size();
       ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-      ofs.write(reinterpret_cast<const char*>(posting_data.data()), posting_size);
+      ofs.write(reinterpret_cast<const char*>(posting_data.data()),
+                static_cast<std::streamsize>(posting_size));
     }
 
     ofs.close();
@@ -262,15 +277,15 @@ bool Index::LoadFromFile(const std::string& filepath) {
     }
 
     // Read and verify magic number
-    char magic[4];
-    ifs.read(magic, 4);
-    if (std::memcmp(magic, "MGIX", 4) != 0) {
+    std::array<char, 4> magic{};
+    ifs.read(magic.data(), magic.size());
+    if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
       spdlog::error("Invalid index file format (bad magic number)");
       return false;
     }
 
     // Read version
-    uint32_t version;
+    uint32_t version = 0;
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (version != 1) {
       spdlog::error("Unsupported index file version: {}", version);
@@ -278,7 +293,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
     }
 
     // Read ngram_size
-    uint32_t ngram;
+    uint32_t ngram = 0;
     ifs.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
     if (static_cast<int>(ngram) != ngram_size_) {
       spdlog::warn("Index ngram_size mismatch: file={}, current={}", ngram, ngram_size_);
@@ -286,7 +301,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
     }
 
     // Read term count
-    uint64_t term_count;
+    uint64_t term_count = 0;
     ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Clear existing data
@@ -295,18 +310,19 @@ bool Index::LoadFromFile(const std::string& filepath) {
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
       // Read term length and term
-      uint32_t term_len;
+      uint32_t term_len = 0;
       ifs.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
 
       std::string term(term_len, '\0');
-      ifs.read(&term[0], term_len);
+      ifs.read(term.data(), static_cast<std::streamsize>(term_len));
 
       // Read posting list size and data
-      uint64_t posting_size;
+      uint64_t posting_size = 0;
       ifs.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
 
       std::vector<uint8_t> posting_data(posting_size);
-      ifs.read(reinterpret_cast<char*>(posting_data.data()), posting_size);
+      ifs.read(reinterpret_cast<char*>(posting_data.data()),
+               static_cast<std::streamsize>(posting_size));
 
       // Deserialize posting list
       auto posting = std::make_unique<PostingList>(roaring_threshold_);

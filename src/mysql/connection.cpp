@@ -8,8 +8,10 @@
 #ifdef USE_MYSQL
 
 #include <spdlog/spdlog.h>
-#include <sstream>
+
 #include <cstring>
+#include <sstream>
+#include <utility>
 
 namespace mygramdb {
 namespace mysql {
@@ -50,9 +52,8 @@ std::string GTID::ToString() const {
 
 // Connection implementation
 
-Connection::Connection(const Config& config) : config_(config) {
-  mysql_ = mysql_init(nullptr);
-  if (!mysql_) {
+Connection::Connection(Config config) : config_(std::move(config)), mysql_(mysql_init(nullptr)) {
+  if (mysql_ == nullptr) {
     last_error_ = "Failed to initialize MySQL handle";
   }
 }
@@ -80,7 +81,7 @@ Connection& Connection::operator=(Connection&& other) noexcept {
 }
 
 bool Connection::Connect() {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "MySQL handle not initialized";
     return false;
   }
@@ -96,11 +97,10 @@ bool Connection::Connect() {
   mysql_options(mysql_, MYSQL_OPT_RECONNECT, &reconnect);
 
   // Connect to MySQL
-  if (!mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(),
-                          config_.password.c_str(),
-                          config_.database.empty() ? nullptr
-                                                   : config_.database.c_str(),
-                          config_.port, nullptr, 0)) {
+  if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(),
+                         config_.password.c_str(),
+                         config_.database.empty() ? nullptr : config_.database.c_str(),
+                         config_.port, nullptr, 0) == nullptr) {
     SetMySQLError();
     spdlog::error("MySQL connection failed: {}", last_error_);
     return false;
@@ -111,7 +111,7 @@ bool Connection::Connect() {
 }
 
 bool Connection::IsConnected() const {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     return false;
   }
 
@@ -120,7 +120,7 @@ bool Connection::IsConnected() const {
 }
 
 bool Connection::Ping() {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "Not connected";
     return false;
   }
@@ -136,7 +136,7 @@ bool Connection::Ping() {
 }
 
 bool Connection::Reconnect() {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "MySQL handle not initialized";
     return false;
   }
@@ -145,14 +145,14 @@ bool Connection::Reconnect() {
                config_.host, config_.port);
 
   // Close existing connection if any
-  if (mysql_) {
+  if (mysql_ != nullptr) {
     mysql_close(mysql_);
     mysql_ = nullptr;
   }
 
   // Reinitialize
   mysql_ = mysql_init(nullptr);
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "Failed to initialize MySQL handle";
     spdlog::error("MySQL reconnection failed: {}", last_error_);
     return false;
@@ -163,7 +163,7 @@ bool Connection::Reconnect() {
 }
 
 void Connection::Close() {
-  if (mysql_) {
+  if (mysql_ != nullptr) {
     mysql_close(mysql_);
     mysql_ = nullptr;
     spdlog::debug("MySQL connection closed");
@@ -171,7 +171,7 @@ void Connection::Close() {
 }
 
 MYSQL_RES* Connection::Execute(const std::string& query) {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "Not connected";
     return nullptr;
   }
@@ -185,7 +185,7 @@ MYSQL_RES* Connection::Execute(const std::string& query) {
   }
 
   MYSQL_RES* result = mysql_store_result(mysql_);
-  if (!result && mysql_field_count(mysql_) > 0) {
+  if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
     SetMySQLError();
     spdlog::error("Failed to store result: {}", last_error_);
     return nullptr;
@@ -195,7 +195,7 @@ MYSQL_RES* Connection::Execute(const std::string& query) {
 }
 
 bool Connection::ExecuteUpdate(const std::string& query) {
-  if (!mysql_) {
+  if (mysql_ == nullptr) {
     last_error_ = "Not connected";
     return false;
   }
@@ -213,12 +213,12 @@ bool Connection::ExecuteUpdate(const std::string& query) {
 
 std::optional<std::string> Connection::GetExecutedGTID() {
   MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_executed");
-  if (!result) {
+  if (result == nullptr) {
     return std::nullopt;
   }
 
   MYSQL_ROW row = mysql_fetch_row(result);
-  if (!row || !row[0]) {
+  if ((row == nullptr) || (row[0] == nullptr)) {
     mysql_free_result(result);
     return std::nullopt;
   }
@@ -232,12 +232,12 @@ std::optional<std::string> Connection::GetExecutedGTID() {
 
 std::optional<std::string> Connection::GetPurgedGTID() {
   MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_purged");
-  if (!result) {
+  if (result == nullptr) {
     return std::nullopt;
   }
 
   MYSQL_ROW row = mysql_fetch_row(result);
-  if (!row || !row[0]) {
+  if ((row == nullptr) || (row[0] == nullptr)) {
     mysql_free_result(result);
     return std::nullopt;
   }
@@ -256,12 +256,12 @@ bool Connection::SetGTIDNext(const std::string& gtid) {
 
 std::optional<std::string> Connection::GetServerUUID() {
   MYSQL_RES* result = Execute("SELECT @@GLOBAL.server_uuid");
-  if (!result) {
+  if (result == nullptr) {
     return std::nullopt;
   }
 
   MYSQL_ROW row = mysql_fetch_row(result);
-  if (!row || !row[0]) {
+  if ((row == nullptr) || (row[0] == nullptr)) {
     mysql_free_result(result);
     return std::nullopt;
   }
@@ -275,13 +275,13 @@ std::optional<std::string> Connection::GetServerUUID() {
 
 bool Connection::IsGTIDModeEnabled() {
   MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_mode");
-  if (!result) {
+  if (result == nullptr) {
     spdlog::warn("Failed to query GTID mode");
     return false;
   }
 
   MYSQL_ROW row = mysql_fetch_row(result);
-  if (!row || !row[0]) {
+  if ((row == nullptr) || (row[0] == nullptr)) {
     mysql_free_result(result);
     return false;
   }
@@ -301,12 +301,12 @@ std::optional<std::string> Connection::GetLatestGTID() {
   MYSQL_RES* result = Execute("SHOW BINARY LOG STATUS");
 
   // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
-  if (!result) {
+  if (result == nullptr) {
     spdlog::debug("SHOW BINARY LOG STATUS failed, trying SHOW MASTER STATUS");
     result = Execute("SHOW MASTER STATUS");
   }
 
-  if (!result) {
+  if (result == nullptr) {
     spdlog::error("Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS");
     return std::nullopt;
   }
@@ -319,7 +319,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
   int gtid_column_index = -1;
   for (unsigned int i = 0; i < num_fields; i++) {
     if (std::string(fields[i].name) == "Executed_Gtid_Set") {
-      gtid_column_index = i;
+      gtid_column_index = static_cast<int>(i);
       break;
     }
   }
@@ -332,7 +332,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
 
   // Fetch the row
   MYSQL_ROW row = mysql_fetch_row(result);
-  if (!row || !row[gtid_column_index]) {
+  if ((row == nullptr) || (row[gtid_column_index] == nullptr)) {
     mysql_free_result(result);
     return std::nullopt;
   }
@@ -353,7 +353,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
 }
 
 void Connection::SetMySQLError() {
-  if (mysql_) {
+  if (mysql_ != nullptr) {
     last_error_ = std::string(mysql_error(mysql_));
   }
 }

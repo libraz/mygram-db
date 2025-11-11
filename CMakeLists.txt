@@ -363,6 +363,23 @@ endif()
 # Third-party dependencies
 add_subdirectory(third_party)
 
+# Suppress warnings from third-party libraries
+if(TARGET roaring)
+  target_compile_options(roaring PRIVATE -w)
+endif()
+if(TARGET spdlog)
+  target_compile_options(spdlog PRIVATE -w)
+endif()
+if(TARGET yaml-cpp)
+  target_compile_options(yaml-cpp PRIVATE -w)
+endif()
+if(TARGET nlohmann_json)
+  target_compile_options(nlohmann_json INTERFACE -w)
+endif()
+if(TARGET nlohmann_json_schema_validator)
+  target_compile_options(nlohmann_json_schema_validator PRIVATE -w)
+endif()
+
 # Source
 add_subdirectory(src)
 
@@ -375,8 +392,14 @@ endif()
 # Install
 install(TARGETS mygramdb DESTINATION bin)
 
-# Install configuration example
-install(FILES config.yaml.example DESTINATION etc/mygramdb)
+# Install configuration examples
+install(FILES examples/config.yaml DESTINATION etc/mygramdb RENAME config.yaml.example)
+install(FILES examples/config-minimal.yaml DESTINATION etc/mygramdb)
+install(FILES examples/config.json DESTINATION etc/mygramdb RENAME config.json.example)
+install(FILES examples/config-minimal.json DESTINATION etc/mygramdb)
+
+# Install JSON Schema (for reference - embedded in binary)
+install(FILES src/config/config-schema.json DESTINATION share/mygramdb)
 
 # Install documentation
 install(FILES README.md LICENSE DESTINATION share/doc/mygramdb)

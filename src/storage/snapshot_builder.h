@@ -47,7 +47,7 @@ class SnapshotBuilder {
   SnapshotBuilder(mysql::Connection& connection,
                   index::Index& index,
                   DocumentStore& doc_store,
-                  const config::TableConfig& table_config);
+                  config::TableConfig table_config);
 
   ~SnapshotBuilder() = default;
 
@@ -60,7 +60,7 @@ class SnapshotBuilder {
    * @param progress_callback Optional progress callback
    * @return true if successful
    */
-  bool Build(ProgressCallback progress_callback = nullptr);
+  bool Build(const ProgressCallback& progress_callback = {});
 
   /**
    * @brief Get GTID captured at snapshot time
@@ -111,7 +111,7 @@ class SnapshotBuilder {
   /**
    * @brief Check if column type is text (VARCHAR/TEXT)
    */
-  bool IsTextColumn(enum_field_types type) const;
+  static bool IsTextColumn(enum_field_types type);
 
   /**
    * @brief Extract text from row based on text_source configuration
@@ -134,8 +134,8 @@ class SnapshotBuilder {
   /**
    * @brief Find field index by name
    */
-  int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields,
-                     unsigned int num_fields) const;
+  static int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields,
+                            unsigned int num_fields);
 };
 
 }  // namespace storage

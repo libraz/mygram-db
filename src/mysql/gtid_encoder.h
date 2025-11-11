@@ -1,6 +1,7 @@
 #ifndef MYGRAM_MYSQL_GTID_ENCODER_H_
 #define MYGRAM_MYSQL_GTID_ENCODER_H_
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,7 +45,7 @@ class GtidEncoder {
   };
 
   struct Sid {
-    uint8_t uuid[16];
+    std::array<uint8_t, 16> uuid;
     std::vector<Interval> intervals;
   };
 

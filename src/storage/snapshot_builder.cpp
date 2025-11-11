@@ -18,13 +18,13 @@ namespace storage {
 SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection,
                                  index::Index& index,
                                  DocumentStore& doc_store,
-                                 const config::TableConfig& table_config)
+                                 config::TableConfig table_config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
-      table_config_(table_config) {}
+      table_config_(std::move(table_config)) {}
 
-bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
+bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   if (!connection_.IsConnected()) {
     last_error_ = "MySQL connection not established";
     spdlog::error(last_error_);
@@ -49,9 +49,9 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
 
   // Capture GTID at this point (represents snapshot state)
   MYSQL_RES* gtid_result = connection_.Execute("SELECT @@global.gtid_executed");
-  if (gtid_result) {
+  if (gtid_result != nullptr) {
     MYSQL_ROW row = mysql_fetch_row(gtid_result);
-    if (row && row[0]) {
+    if (row != nullptr && row[0] != nullptr) {
       snapshot_gtid_ = std::string(row[0]);
       spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
     }
@@ -69,7 +69,7 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
 
   // Execute query (within the consistent snapshot transaction)
   MYSQL_RES* result = connection_.Execute(query);
-  if (!result) {
+  if (result == nullptr) {
     last_error_ = "Failed to execute SELECT query: " + connection_.GetLastError();
     spdlog::error(last_error_);
     connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
@@ -87,10 +87,10 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
                table_config_.name);
 
   // Process rows
-  MYSQL_ROW row;
+  MYSQL_ROW row = nullptr;
   processed_rows_ = 0;
 
-  while ((row = mysql_fetch_row(result)) && !cancelled_) {
+  while ((row = mysql_fetch_row(result)) != nullptr && !cancelled_) {
     if (!ProcessRow(row, fields, num_fields)) {
       mysql_free_result(result);
       connection_.ExecuteUpdate("ROLLBACK");  // Clean up on error
@@ -108,7 +108,8 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
       progress.total_rows = total_rows;
       progress.processed_rows = processed_rows_;
       progress.elapsed_seconds = elapsed;
-      progress.rows_per_second = elapsed > 0 ? processed_rows_ / elapsed : 0;
+      progress.rows_per_second =
+          elapsed > 0 ? static_cast<double>(processed_rows_) / elapsed : 0.0;
 
       progress_callback(progress);
     }
@@ -133,7 +134,7 @@ bool SnapshotBuilder::Build(ProgressCallback progress_callback) {
 
   spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)",
                processed_rows_, total_elapsed,
-               total_elapsed > 0 ? processed_rows_ / total_elapsed : 0);
+               total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
 
   return true;
 }
@@ -204,7 +205,7 @@ bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
   return true;
 }
 
-bool SnapshotBuilder::IsTextColumn(enum_field_types type) const {
+bool SnapshotBuilder::IsTextColumn(enum_field_types type) {
   // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
   return type == MYSQL_TYPE_VARCHAR ||
          type == MYSQL_TYPE_VAR_STRING ||
@@ -215,6 +216,7 @@ bool SnapshotBuilder::IsTextColumn(enum_field_types type) const {
          type == MYSQL_TYPE_BLOB;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
                                          unsigned int num_fields) const {
   if (!table_config_.text_source.column.empty()) {
@@ -229,8 +231,8 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
                       static_cast<int>(fields[idx].type));
         return "";
       }
-      if (row[idx]) {
-        return std::string(row[idx]);
+      if (row[idx] != nullptr) {
+        return {row[idx]};
       }
     }
   } else {
@@ -245,7 +247,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
                         "Type: {}", col, static_cast<int>(fields[idx].type));
           continue;  // Skip this column
         }
-        if (row[idx]) {
+        if (row[idx] != nullptr) {
           if (text.tellp() > 0) {
             text << table_config_.text_source.delimiter;
           }
@@ -263,8 +265,8 @@ std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row,
                                                MYSQL_FIELD* fields,
                                                unsigned int num_fields) const {
   int idx = FindFieldIndex(table_config_.primary_key, fields, num_fields);
-  if (idx >= 0 && row[idx]) {
-    return std::string(row[idx]);
+  if (idx >= 0 && row[idx] != nullptr) {
+    return {row[idx]};
   }
   return "";
 }
@@ -276,7 +278,7 @@ SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
 
   for (const auto& filter_config : table_config_.filters) {
     int idx = FindFieldIndex(filter_config.name, fields, num_fields);
-    if (idx < 0 || !row[idx]) {
+    if (idx < 0 || row[idx] == nullptr) {
       continue;
     }
 
@@ -327,7 +329,7 @@ SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
 
 int SnapshotBuilder::FindFieldIndex(const std::string& field_name,
                                     MYSQL_FIELD* fields,
-                                    unsigned int num_fields) const {
+                                    unsigned int num_fields) {
   for (unsigned int i = 0; i < num_fields; ++i) {
     if (field_name == fields[i].name) {
       return static_cast<int>(i);

@@ -60,18 +60,15 @@ class TcpServer {
    * @param full_config Full application configuration (for CONFIG command)
    * @param binlog_reader Optional binlog reader pointer (for stopping/starting replication)
    */
-  TcpServer(const ServerConfig& config,
-            index::Index& index,
-            storage::DocumentStore& doc_store,
-            int ngram_size = 1,
-            const std::string& snapshot_dir = "./snapshots",
+  TcpServer(ServerConfig config, index::Index& index, storage::DocumentStore& doc_store,
+            int ngram_size = 1, std::string snapshot_dir = "./snapshots",
             const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
             mysql::BinlogReader* binlog_reader = nullptr
 #else
             void* binlog_reader = nullptr
 #endif
-            );
+  );
 
   ~TcpServer();
 
@@ -171,12 +168,12 @@ class TcpServer {
   /**
    * @brief Format COUNT response
    */
-  std::string FormatCountResponse(uint64_t count);
+  static std::string FormatCountResponse(uint64_t count);
 
   /**
    * @brief Format GET response
    */
-  std::string FormatGetResponse(const std::optional<storage::Document>& doc);
+  static std::string FormatGetResponse(const std::optional<storage::Document>& doc);
 
   /**
    * @brief Format INFO response
@@ -186,12 +183,12 @@ class TcpServer {
   /**
    * @brief Format SAVE response
    */
-  std::string FormatSaveResponse(const std::string& filepath);
+  static std::string FormatSaveResponse(const std::string& filepath);
 
   /**
    * @brief Format LOAD response
    */
-  std::string FormatLoadResponse(const std::string& filepath);
+  static std::string FormatLoadResponse(const std::string& filepath);
 
   /**
    * @brief Format REPLICATION STATUS response
@@ -201,12 +198,12 @@ class TcpServer {
   /**
    * @brief Format REPLICATION STOP response
    */
-  std::string FormatReplicationStopResponse();
+  static std::string FormatReplicationStopResponse();
 
   /**
    * @brief Format REPLICATION START response
    */
-  std::string FormatReplicationStartResponse();
+  static std::string FormatReplicationStartResponse();
 
   /**
    * @brief Format CONFIG response
@@ -216,17 +213,17 @@ class TcpServer {
   /**
    * @brief Format error response
    */
-  std::string FormatError(const std::string& message);
+  static std::string FormatError(const std::string& message);
 
   /**
    * @brief Set socket options
    */
-  bool SetSocketOptions(int fd);
+  bool SetSocketOptions(int socket_fd);
 
   /**
    * @brief Remove connection from active list
    */
-  void RemoveConnection(int fd);
+  void RemoveConnection(int socket_fd);
 };
 
 }  // namespace server

@@ -324,9 +324,9 @@ TEST_F(RowsParserTest, ExtractFiltersBasic) {
   row_data.columns["count"] = "42";
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
-  filter_configs.push_back({"status", "tinyint_unsigned"});
-  filter_configs.push_back({"category", "string"});
-  filter_configs.push_back({"count", "int"});
+  filter_configs.push_back({"status", "tinyint_unsigned", false, false, ""});
+  filter_configs.push_back({"category", "string", false, false, ""});
+  filter_configs.push_back({"count", "int", false, false, ""});
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
@@ -346,8 +346,8 @@ TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
   row_data.columns["category"] = "tech";
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
-  filter_configs.push_back({"status", "int"});
-  filter_configs.push_back({"category", "string"});
+  filter_configs.push_back({"status", "int", false, false, ""});
+  filter_configs.push_back({"category", "string", false, false, ""});
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
@@ -364,8 +364,8 @@ TEST_F(RowsParserTest, ExtractFiltersMissingColumn) {
   row_data.columns["status"] = "1";
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
-  filter_configs.push_back({"status", "int"});
-  filter_configs.push_back({"missing_col", "string"});  // Column not in row data
+  filter_configs.push_back({"status", "int", false, false, ""});
+  filter_configs.push_back({"missing_col", "string", false, false, ""});  // Column not in row data
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
@@ -381,7 +381,7 @@ TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {
   row_data.columns["count"] = "invalid_number";  // Invalid integer string
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
-  filter_configs.push_back({"count", "int"});
+  filter_configs.push_back({"count", "int", false, false, ""});
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
@@ -404,16 +404,16 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
   row_data.columns["string_col"] = "test";
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
-  filter_configs.push_back({"bool_col", "boolean"});
-  filter_configs.push_back({"tinyint_col", "tinyint"});
-  filter_configs.push_back({"tinyint_u_col", "tinyint_unsigned"});
-  filter_configs.push_back({"smallint_col", "smallint"});
-  filter_configs.push_back({"smallint_u_col", "smallint_unsigned"});
-  filter_configs.push_back({"int_col", "int"});
-  filter_configs.push_back({"int_u_col", "int_unsigned"});
-  filter_configs.push_back({"bigint_col", "bigint"});
-  filter_configs.push_back({"float_col", "float"});
-  filter_configs.push_back({"string_col", "string"});
+  filter_configs.push_back({"bool_col", "boolean", false, false, ""});
+  filter_configs.push_back({"tinyint_col", "tinyint", false, false, ""});
+  filter_configs.push_back({"tinyint_u_col", "tinyint_unsigned", false, false, ""});
+  filter_configs.push_back({"smallint_col", "smallint", false, false, ""});
+  filter_configs.push_back({"smallint_u_col", "smallint_unsigned", false, false, ""});
+  filter_configs.push_back({"int_col", "int", false, false, ""});
+  filter_configs.push_back({"int_u_col", "int_unsigned", false, false, ""});
+  filter_configs.push_back({"bigint_col", "bigint", false, false, ""});
+  filter_configs.push_back({"float_col", "float", false, false, ""});
+  filter_configs.push_back({"string_col", "string", false, false, ""});
 
   auto filters = ExtractFilters(row_data, filter_configs);
 

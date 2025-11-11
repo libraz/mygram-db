@@ -15,9 +15,9 @@ void TableMetadataCache::Add(uint64_t table_id, const TableMetadata& metadata) {
 }
 
 const TableMetadata* TableMetadataCache::Get(uint64_t table_id) const {
-  auto it = cache_.find(table_id);
-  if (it != cache_.end()) {
-    return &it->second;
+  auto iterator = cache_.find(table_id);
+  if (iterator != cache_.end()) {
+    return &iterator->second;
   }
   return nullptr;
 }

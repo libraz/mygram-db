@@ -3,20 +3,23 @@
  * @brief Command-line client for MygramDB (redis-cli style)
  */
 
-#include <iostream>
-#include <string>
-#include <cstring>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+#include <cstring>
+#include <iostream>
 #include <sstream>
+#include <string>
+#include <utility>
 #include <vector>
 
 // Try to use readline if available
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define USE_READLINE 1
 #endif
 
@@ -24,6 +27,7 @@ namespace {
 
 #ifdef USE_READLINE
 // Command list for tab completion
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
 const char* command_list[] = {
   "SEARCH", "COUNT", "GET", "INFO", "SAVE", "LOAD", "CONFIG",
   "REPLICATION", "quit", "exit", "help", nullptr
@@ -35,17 +39,20 @@ const char* command_list[] = {
  * @param state 0 for first call, non-zero for subsequent calls
  * @return Completed command name or nullptr
  */
-char* command_generator(const char* text, int state) {
-  static int list_index, len;
-  const char* name;
+char* CommandGenerator(const char* text, int state) {
+  static int list_index;
+  static int len;
+  const char* name = nullptr;
 
-  if (!state) {
+  if (state == 0) {
     list_index = 0;
-    len = strlen(text);
+    len = static_cast<int>(strlen(text));
   }
 
-  while ((name = command_list[list_index++])) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+  while ((name = command_list[list_index++]) != nullptr) {
     if (strncasecmp(name, text, len) == 0) {
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       return strdup(name);
     }
   }
@@ -57,13 +64,13 @@ char* command_generator(const char* text, int state) {
  * @brief Completion function for readline
  * @param text Text to complete
  * @param start Start position in line buffer
- * @param end End position in line buffer
+ * @param end End position in line buffer (unused)
  * @return Array of possible completions
  */
-char** command_completion(const char* text, int start, int end) {
+char** CommandCompletion(const char* text, int start, int /* end */) {
   // Only complete first word (command name)
   if (start == 0) {
-    return rl_completion_matches(text, command_generator);
+    return rl_completion_matches(text, CommandGenerator);
   }
   return nullptr;
 }
@@ -75,9 +82,10 @@ struct Config {
   bool interactive = true;
 };
 
+// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class MygramClient {
  public:
-  MygramClient(const Config& config) : config_(config), sock_(-1) {}
+  MygramClient(Config config) : config_(std::move(config)) {}
 
   ~MygramClient() {
     Disconnect();
@@ -86,23 +94,23 @@ class MygramClient {
   bool Connect() {
     sock_ = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_ < 0) {
-      std::cerr << "Failed to create socket: " << strerror(errno) << std::endl;
+      std::cerr << "Failed to create socket: " << strerror(errno) << '\n';
       return false;
     }
 
-    struct sockaddr_in server_addr;
+    struct sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(config_.port);
 
     if (inet_pton(AF_INET, config_.host.c_str(), &server_addr.sin_addr) <= 0) {
-      std::cerr << "Invalid address: " << config_.host << std::endl;
+      std::cerr << "Invalid address: " << config_.host << '\n';
       close(sock_);
       sock_ = -1;
       return false;
     }
 
-    if (connect(sock_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-      std::cerr << "Connection failed: " << strerror(errno) << std::endl;
+    if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
+      std::cerr << "Connection failed: " << strerror(errno) << '\n';
       close(sock_);
       sock_ = -1;
       return false;
@@ -118,11 +126,9 @@ class MygramClient {
     }
   }
 
-  bool IsConnected() const {
-    return sock_ >= 0;
-  }
+  [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
 
-  std::string SendCommand(const std::string& command) {
+  [[nodiscard]] std::string SendCommand(const std::string& command) const {
     if (!IsConnected()) {
       return "(error) Not connected";
     }
@@ -135,7 +141,9 @@ class MygramClient {
     }
 
     // Receive response
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
     char buffer[65536];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
     if (received <= 0) {
       if (received == 0) {
@@ -144,6 +152,7 @@ class MygramClient {
       return "(error) Failed to receive response: " + std::string(strerror(errno));
     }
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     buffer[received] = '\0';
     std::string response(buffer);
 
@@ -157,18 +166,18 @@ class MygramClient {
     return response;
   }
 
-  void RunInteractive() {
-    std::cout << "mygram-cli " << config_.host << ":" << config_.port << std::endl;
+  void RunInteractive() const {
+    std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
 #ifdef USE_READLINE
-    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help (tab completion enabled)" << std::endl;
+    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help (tab completion enabled)" << '\n';
 #else
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << std::endl;
 #endif
-    std::cout << std::endl;
+    std::cout << '\n';
 
 #ifdef USE_READLINE
     // Setup readline completion
-    rl_attempted_completion_function = command_completion;
+    rl_attempted_completion_function = CommandCompletion;
 #endif
 
     while (true) {
@@ -182,7 +191,7 @@ class MygramClient {
 
       if (input == nullptr) {
         // EOF (Ctrl-D)
-        std::cout << std::endl;
+        std::cout << '\n';
         break;
       }
 
@@ -218,7 +227,7 @@ class MygramClient {
 
       // Check for exit commands
       if (line == "quit" || line == "exit") {
-        std::cout << "Bye!" << std::endl;
+        std::cout << "Bye!" << '\n';
         break;
       }
 
@@ -234,41 +243,45 @@ class MygramClient {
     }
   }
 
-  void RunSingleCommand(const std::string& command) {
+  void RunSingleCommand(const std::string& command) const {
     std::string response = SendCommand(command);
     PrintResponse(response);
   }
 
  private:
-  void PrintHelp() {
-    std::cout << "Available commands:" << std::endl;
-    std::cout << "  SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]" << std::endl;
-    std::cout << "  COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]" << std::endl;
-    std::cout << "  GET <table> <primary_key>" << std::endl;
-    std::cout << "  INFO - Show server statistics" << std::endl;
-    std::cout << "  CONFIG - Show current configuration" << std::endl;
-    std::cout << "  SAVE [filename] - Save snapshot to disk" << std::endl;
-    std::cout << "  LOAD <filename> - Load snapshot from disk" << std::endl;
-    std::cout << "  REPLICATION STATUS - Show replication status" << std::endl;
-    std::cout << "  REPLICATION STOP - Stop replication" << std::endl;
-    std::cout << "  REPLICATION START - Start replication" << std::endl;
-    std::cout << "  quit/exit - Exit the client" << std::endl;
-    std::cout << "  help - Show this help" << std::endl;
+  static void PrintHelp() {
+    std::cout << "Available commands:" << '\n';
+    std::cout
+        << "  SEARCH <table> <text> [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]"
+        << '\n';
+    std::cout << "  COUNT <table> <text> [NOT <term>...] [FILTER <col=val>...]" << '\n';
+    std::cout << "  GET <table> <primary_key>" << '\n';
+    std::cout << "  INFO - Show server statistics" << '\n';
+    std::cout << "  CONFIG - Show current configuration" << '\n';
+    std::cout << "  SAVE [filename] - Save snapshot to disk" << '\n';
+    std::cout << "  LOAD <filename> - Load snapshot from disk" << '\n';
+    std::cout << "  REPLICATION STATUS - Show replication status" << '\n';
+    std::cout << "  REPLICATION STOP - Stop replication" << '\n';
+    std::cout << "  REPLICATION START - Start replication" << '\n';
+    std::cout << "  quit/exit - Exit the client" << '\n';
+    std::cout << "  help - Show this help" << '\n';
   }
 
-  void PrintResponse(const std::string& response) {
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+  static void PrintResponse(const std::string& response) {
     // Parse response type
     if (response.find("OK RESULTS") == 0) {
       // SEARCH response: OK RESULTS <count> [<id1> <id2> ...]
       std::istringstream iss(response);
-      std::string ok, results;
-      size_t count;
-      iss >> ok >> results >> count;
+      std::string status;
+      std::string results;
+      size_t count = 0;
+      iss >> status >> results >> count;
 
       std::vector<std::string> ids;
-      std::string id;
-      while (iss >> id) {
-        ids.push_back(id);
+      std::string doc_id;
+      while (iss >> doc_id) {
+        ids.push_back(doc_id);
       }
 
       std::cout << "(" << count << " results";
@@ -277,21 +290,22 @@ class MygramClient {
       } else {
         std::cout << ")";
       }
-      std::cout << std::endl;
+      std::cout << '\n';
 
       for (size_t i = 0; i < ids.size(); ++i) {
-        std::cout << (i + 1) << ") " << ids[i] << std::endl;
+        std::cout << (i + 1) << ") " << ids[i] << '\n';
       }
     } else if (response.find("OK COUNT") == 0) {
       // COUNT response: OK COUNT <n>
       std::istringstream iss(response);
-      std::string ok, count_str;
-      uint64_t count;
-      iss >> ok >> count_str >> count;
-      std::cout << "(integer) " << count << std::endl;
+      std::string status;
+      std::string count_str;
+      uint64_t count = 0;
+      iss >> status >> count_str >> count;
+      std::cout << "(integer) " << count << '\n';
     } else if (response.find("OK DOC") == 0) {
       // GET response: OK DOC <primary_key> [<filter=value>...]
-      std::cout << response.substr(3) << std::endl;  // Remove "OK "
+      std::cout << response.substr(3) << '\n';  // Remove "OK "
     } else if (response.find("OK INFO") == 0) {
       // INFO response: OK INFO\r\n<key>: <value>\r\n...\r\nEND
       // Simply print the formatted response (already has nice formatting from server)
@@ -311,26 +325,26 @@ class MygramClient {
         pos += 1;
       }
 
-      std::cout << info << std::endl;
+      std::cout << info << '\n';
     } else if (response.find("OK SAVED") == 0) {
       // SAVE response: OK SAVED <filepath>
       std::string filepath = response.substr(9);  // Remove "OK SAVED "
-      std::cout << "Snapshot saved to: " << filepath << std::endl;
+      std::cout << "Snapshot saved to: " << filepath << '\n';
     } else if (response.find("OK LOADED") == 0) {
       // LOAD response: OK LOADED <filepath>
       std::string filepath = response.substr(10);  // Remove "OK LOADED "
-      std::cout << "Snapshot loaded from: " << filepath << std::endl;
+      std::cout << "Snapshot loaded from: " << filepath << '\n';
     } else if (response.find("OK REPLICATION_STOPPED") == 0) {
-      std::cout << "Replication stopped successfully" << std::endl;
+      std::cout << "Replication stopped successfully" << '\n';
     } else if (response.find("OK REPLICATION_STARTED") == 0) {
-      std::cout << "Replication started successfully" << std::endl;
+      std::cout << "Replication started successfully" << '\n';
     } else if (response.find("OK REPLICATION") == 0) {
       // REPLICATION STATUS response: OK REPLICATION\r\n<key>: <value>\r\n...END
       std::string info = response.substr(15);  // Remove "OK REPLICATION\r\n"
 
       // Replace \\r\\n with actual newlines for display
       size_t pos = 0;
-      while ((pos = info.find("\\\\r\\\\n", pos)) != std::string::npos) {
+      while ((pos = info.find(R"(\\r\\n)", pos)) != std::string::npos) {
         info.replace(pos, 4, "\\n");
         pos += 1;
       }
@@ -342,36 +356,38 @@ class MygramClient {
         pos += 1;
       }
 
-      std::cout << info << std::endl;
+      std::cout << info << '\n';
     } else if (response.find("ERROR") == 0) {
       // Error response
-      std::cout << "(error) " << response.substr(6) << std::endl;  // Remove "ERROR "
+      std::cout << "(error) " << response.substr(6) << '\n';  // Remove "ERROR "
     } else {
       // Unknown response
-      std::cout << response << std::endl;
+      std::cout << response << '\n';
     }
   }
 
   Config config_;
-  int sock_;
+  int sock_{-1};
 };
 
 void PrintUsage(const char* program_name) {
-  std::cout << "Usage: " << program_name << " [OPTIONS] [COMMAND]" << std::endl;
-  std::cout << std::endl;
-  std::cout << "Options:" << std::endl;
-  std::cout << "  -h HOST    Server hostname (default: 127.0.0.1)" << std::endl;
-  std::cout << "  -p PORT    Server port (default: 11211)" << std::endl;
-  std::cout << "  --help     Show this help" << std::endl;
-  std::cout << std::endl;
-  std::cout << "Examples:" << std::endl;
-  std::cout << "  " << program_name << "                          # Interactive mode" << std::endl;
-  std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server" << std::endl;
-  std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << std::endl;
+  std::cout << "Usage: " << program_name << " [OPTIONS] [COMMAND]" << '\n';
+  std::cout << '\n';
+  std::cout << "Options:" << '\n';
+  std::cout << "  -h HOST    Server hostname (default: 127.0.0.1)" << '\n';
+  std::cout << "  -p PORT    Server port (default: 11211)" << '\n';
+  std::cout << "  --help     Show this help" << '\n';
+  std::cout << '\n';
+  std::cout << "Examples:" << '\n';
+  std::cout << "  " << program_name << "                          # Interactive mode" << '\n';
+  std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server"
+            << '\n';
+  std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';
 }
 
 }  // namespace
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
   Config config;
   std::vector<std::string> command_args;
@@ -383,24 +399,25 @@ int main(int argc, char* argv[]) {
     if (arg == "--help") {
       PrintUsage(argv[0]);
       return 0;
-    } else if (arg == "-h") {
+    }
+    if (arg == "-h") {
       if (i + 1 < argc) {
         config.host = argv[++i];
       } else {
-        std::cerr << "Error: -h requires an argument" << std::endl;
+        std::cerr << "Error: -h requires an argument" << '\n';
         return 1;
       }
     } else if (arg == "-p") {
       if (i + 1 < argc) {
         config.port = static_cast<uint16_t>(std::stoi(argv[++i]));
       } else {
-        std::cerr << "Error: -p requires an argument" << std::endl;
+        std::cerr << "Error: -p requires an argument" << '\n';
         return 1;
       }
     } else {
       // Assume remaining args are a command
       for (int j = i; j < argc; ++j) {
-        command_args.push_back(argv[j]);
+        command_args.emplace_back(argv[j]);
       }
       config.interactive = false;
       break;
@@ -420,7 +437,9 @@ int main(int argc, char* argv[]) {
     // Build command from args
     std::ostringstream command;
     for (size_t i = 0; i < command_args.size(); ++i) {
-      if (i > 0) command << " ";
+      if (i > 0) {
+        command << " ";
+      }
       command << command_args[i];
     }
     client.RunSingleCommand(command.str());

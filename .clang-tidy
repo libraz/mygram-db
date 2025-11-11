@@ -10,9 +10,10 @@ Checks: >
   -readability-magic-numbers,
   -modernize-use-trailing-return-type,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
-  -cppcoreguidelines-pro-type-reinterpret-cast
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -modernize-concat-nested-namespaces
 WarningsAsErrors: ''
-HeaderFilterRegex: '.*'
+HeaderFilterRegex: '^(?!.*(_deps|third_party|build)).*$'
 FormatStyle: file
 CheckOptions:
   - key: readability-identifier-naming.ClassCase
@@ -22,8 +23,16 @@ CheckOptions:
   - key: readability-identifier-naming.VariableCase
     value: lower_case
   - key: readability-identifier-naming.ConstantCase
-    value: kCamelCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstantPrefix
+    value: 'k'
   - key: readability-identifier-naming.MemberCase
     value: lower_case
   - key: readability-identifier-naming.MemberSuffix
     value: '_'
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.PublicMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.PublicMemberSuffix
+    value: ''

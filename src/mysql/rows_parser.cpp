@@ -24,6 +24,8 @@
 #include "mysql/binlog_util.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 #ifdef USE_MYSQL
 
@@ -39,6 +41,7 @@ namespace mysql {
  * @param is_null Whether the field is NULL
  * @return String representation of the value
  */
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
                                      uint16_t metadata, bool is_null) {
   if (is_null) {
@@ -48,25 +51,25 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
   switch (col_type) {
     // Integer types
     case 1: {  // MYSQL_TYPE_TINY
-      int8_t val = static_cast<int8_t>(*data);
+      auto val = static_cast<int8_t>(*data);
       return std::to_string(val);
     }
     case 2: {  // MYSQL_TYPE_SHORT
-      int16_t val = static_cast<int16_t>(binlog_util::uint2korr(data));
+      auto val = static_cast<int16_t>(binlog_util::uint2korr(data));
       return std::to_string(val);
     }
     case 3: {  // MYSQL_TYPE_LONG
-      int32_t val = static_cast<int32_t>(binlog_util::uint4korr(data));
+      auto val = static_cast<int32_t>(binlog_util::uint4korr(data));
       return std::to_string(val);
     }
     case 8: {  // MYSQL_TYPE_LONGLONG
-      int64_t val = static_cast<int64_t>(binlog_util::uint8korr(data));
+      auto val = static_cast<int64_t>(binlog_util::uint8korr(data));
       return std::to_string(val);
     }
     case 9: {  // MYSQL_TYPE_INT24
       // 3-byte signed integer
       uint32_t val = binlog_util::uint3korr(data);
-      if (val & 0x800000) {
+      if ((val & 0x800000) != 0U) {
         val |= 0xFF000000;  // Sign extend
       }
       return std::to_string(static_cast<int32_t>(val));
@@ -83,7 +86,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
         str_len = *data;
         str_data = data + 1;
       }
-      return std::string(reinterpret_cast<const char*>(str_data), str_len);
+      return {reinterpret_cast<const char*>(str_data), str_len};
     }
 
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT, MEDIUMTEXT, LONGTEXT)
@@ -107,7 +110,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           blob_data = data + 4;
           break;
       }
-      return std::string(reinterpret_cast<const char*>(blob_data), blob_len);
+      return {reinterpret_cast<const char*>(blob_data), blob_len};
     }
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
@@ -115,19 +118,18 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
         // For now, return the numeric value
         return std::to_string(*data);
-      } else {
-        uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
-        uint32_t str_len = 0;
-        const unsigned char* str_data = nullptr;
-        if (max_len > 255) {
-          str_len = binlog_util::uint2korr(data);
-          str_data = data + 2;
-        } else {
-          str_len = *data;
-          str_data = data + 1;
-        }
-        return std::string(reinterpret_cast<const char*>(str_data), str_len);
       }
+      uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
+      uint32_t str_len = 0;
+      const unsigned char* str_data = nullptr;
+      if (max_len > 255) {
+        str_len = binlog_util::uint2korr(data);
+        str_data = data + 2;
+      } else {
+        str_len = *data;
+        str_data = data + 1;
+      }
+      return {reinterpret_cast<const char*>(str_data), str_len};
     }
 
     // JSON type
@@ -154,7 +156,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           json_data = data + 4;
           break;
       }
-      return std::string(reinterpret_cast<const char*>(json_data), json_len);
+      return {reinterpret_cast<const char*>(json_data), json_len};
     }
 
     // Date/Time types (simple representation as strings)
@@ -165,9 +167,10 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       unsigned int day = val & 0x1F;
       unsigned int month = (val >> 5) & 0x0F;
       unsigned int year = (val >> 9);
-      char date_str[16];
-      snprintf(date_str, sizeof(date_str), "%04u-%02u-%02u", year, month, day);
-      return std::string(date_str);
+      std::ostringstream oss;
+      oss << std::setfill('0') << std::setw(4) << year << '-'
+          << std::setw(2) << month << '-' << std::setw(2) << day;
+      return oss.str();
     }
 
     case 7:  // MYSQL_TYPE_TIMESTAMP (4 bytes)
@@ -206,7 +209,10 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       unsigned int minute = (hms >> 6) & 0x3F;
       unsigned int second = hms & 0x3F;
 
-      char datetime_str[32];
+      std::ostringstream oss;
+      oss << std::setfill('0')
+          << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
+          << ' ' << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2) << second;
 
       // Process fractional seconds if present
       if (metadata > 0) {
@@ -227,16 +233,10 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           case 6: usec = frac; break;
         }
 
-        snprintf(datetime_str, sizeof(datetime_str),
-                "%04u-%02u-%02u %02u:%02u:%02u.%06u",
-                year, month, day, hour, minute, second, usec);
-      } else {
-        snprintf(datetime_str, sizeof(datetime_str),
-                "%04u-%02u-%02u %02u:%02u:%02u",
-                year, month, day, hour, minute, second);
+        oss << '.' << std::setw(6) << usec;
       }
 
-      return std::string(datetime_str);
+      return oss.str();
     }
 
     case 246: { // MYSQL_TYPE_NEWDECIMAL
@@ -251,13 +251,14 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::optional<std::vector<RowData>> ParseWriteRowsEvent(
     const unsigned char* buffer,
     unsigned long length,
     const TableMetadata* table_metadata,
     const std::string& pk_column_name,
     const std::string& text_column_name) {
-  if (!buffer || !table_metadata) {
+  if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
 
@@ -308,7 +309,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(
     }
 
     // Pre-calculate bitmap sizes for better cache locality
-    const size_t null_bitmap_size = binlog_util::bitmap_bytes(column_count);
+    const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);
 
     // Find PK and text column indices (one-time lookup)
     int pk_col_idx = -1;
@@ -334,11 +335,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(
       RowData row;
 
       // NULL bitmap for this row
-      if (ptr + null_bitmap_size > end) {
+      if (ptr + kNullBitmapSize > end) {
         break;  // End of rows
       }
       const unsigned char* null_bitmap = ptr;
-      ptr += null_bitmap_size;
+      ptr += kNullBitmapSize;
 
       // Parse each column value
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
@@ -397,13 +398,14 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
     const unsigned char* buffer,
     unsigned long length,
     const TableMetadata* table_metadata,
     const std::string& pk_column_name,
     const std::string& text_column_name) {
-  if (!buffer || !table_metadata) {
+  if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
 
@@ -458,7 +460,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
     }
 
     // Pre-calculate bitmap size
-    const size_t null_bitmap_size = binlog_util::bitmap_bytes(column_count);
+    const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);
 
     // Find PK and text column indices (one-time lookup)
     int pk_col_idx = -1;
@@ -485,11 +487,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
       RowData after_row;
 
       // Parse before image
-      if (ptr + null_bitmap_size > end) {
+      if (ptr + kNullBitmapSize > end) {
         break;
       }
       const unsigned char* null_bitmap_before = ptr;
-      ptr += null_bitmap_size;
+      ptr += kNullBitmapSize;
 
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_before, col_idx)) {
@@ -530,11 +532,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
       }
 
       // Parse after image
-      if (ptr + null_bitmap_size > end) {
+      if (ptr + kNullBitmapSize > end) {
         break;
       }
       const unsigned char* null_bitmap_after = ptr;
-      ptr += null_bitmap_size;
+      ptr += kNullBitmapSize;
 
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_after, col_idx)) {
@@ -574,7 +576,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         }
       }
 
-      row_pairs.push_back({std::move(before_row), std::move(after_row)});
+      row_pairs.emplace_back(std::move(before_row), std::move(after_row));
     }
 
     spdlog::debug("Parsed {} row pairs from UPDATE_ROWS event for table {}.{}",
@@ -588,13 +590,14 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::optional<std::vector<RowData>> ParseDeleteRowsEvent(
     const unsigned char* buffer,
     unsigned long length,
     const TableMetadata* table_metadata,
     const std::string& pk_column_name,
     const std::string& text_column_name) {
-  if (!buffer || !table_metadata) {
+  if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
 
@@ -641,7 +644,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(
     }
 
     // Pre-calculate bitmap size
-    const size_t null_bitmap_size = binlog_util::bitmap_bytes(column_count);
+    const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);
 
     // Find PK and text column indices (one-time lookup)
     int pk_col_idx = -1;
@@ -667,11 +670,11 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(
       RowData row;
 
       // NULL bitmap for this row
-      if (ptr + null_bitmap_size > end) {
+      if (ptr + kNullBitmapSize > end) {
         break;
       }
       const unsigned char* null_bitmap = ptr;
-      ptr += null_bitmap_size;
+      ptr += kNullBitmapSize;
 
       // Parse each column value
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
@@ -733,13 +736,13 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
 
   for (const auto& filter_config : filter_configs) {
     // Check if column exists in row data
-    auto it = row_data.columns.find(filter_config.name);
-    if (it == row_data.columns.end()) {
+    auto iterator = row_data.columns.find(filter_config.name);
+    if (iterator == row_data.columns.end()) {
       spdlog::warn("Filter column '{}' not found in row data", filter_config.name);
       continue;
     }
 
-    const std::string& value_str = it->second;
+    const std::string& value_str = iterator->second;
 
     // Skip empty values (NULL)
     if (value_str.empty()) {

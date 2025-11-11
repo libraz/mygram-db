@@ -1,0 +1,483 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mygramdb.dev/schemas/config.json",
+  "title": "MygramDB Configuration Schema",
+  "description": "JSON Schema for MygramDB configuration validation",
+  "type": "object",
+  "required": ["mysql", "tables"],
+  "additionalProperties": false,
+  "properties": {
+    "mysql": {
+      "type": "object",
+      "description": "MySQL connection settings",
+      "required": ["user", "database"],
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "MySQL server hostname or IP",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "description": "MySQL server port",
+          "default": 3306,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "type": "string",
+          "description": "MySQL username for replication",
+          "minLength": 1
+        },
+        "password": {
+          "type": "string",
+          "description": "MySQL user password"
+        },
+        "database": {
+          "type": "string",
+          "description": "Database name",
+          "minLength": 1
+        },
+        "use_gtid": {
+          "type": "boolean",
+          "description": "Enable GTID-based replication",
+          "default": true
+        },
+        "binlog_format": {
+          "type": "string",
+          "description": "Binary log format",
+          "default": "ROW",
+          "enum": ["ROW", "STATEMENT", "MIXED"]
+        },
+        "binlog_row_image": {
+          "type": "string",
+          "description": "Row image format",
+          "default": "FULL",
+          "enum": ["FULL", "MINIMAL", "NOBLOB"]
+        },
+        "connect_timeout_ms": {
+          "type": "integer",
+          "description": "Connection timeout in milliseconds",
+          "default": 3000,
+          "minimum": 100,
+          "maximum": 60000
+        }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "description": "Table configuration (supports one table per instance)",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Table name in MySQL database",
+            "minLength": 1
+          },
+          "primary_key": {
+            "type": "string",
+            "description": "Primary key column name",
+            "default": "id"
+          },
+          "text_source": {
+            "type": "object",
+            "description": "Text source configuration",
+            "additionalProperties": false,
+            "properties": {
+              "column": {
+                "type": "string",
+                "description": "Single column to index for full-text search"
+              },
+              "concat": {
+                "type": "array",
+                "description": "Multiple columns to concatenate",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 2
+              },
+              "delimiter": {
+                "type": "string",
+                "description": "Delimiter for concatenation",
+                "default": " "
+              }
+            },
+            "oneOf": [
+              {
+                "required": ["column"]
+              },
+              {
+                "required": ["concat"]
+              }
+            ]
+          },
+          "filters": {
+            "type": "array",
+            "description": "Filter columns configuration",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filter column name"
+                },
+                "type": {
+                  "type": "string",
+                  "description": "Column type",
+                  "enum": [
+                    "tinyint", "tinyint_unsigned",
+                    "smallint", "smallint_unsigned",
+                    "int", "int_unsigned",
+                    "bigint",
+                    "float", "double",
+                    "string", "varchar", "text",
+                    "datetime", "date", "timestamp"
+                  ]
+                },
+                "dict_compress": {
+                  "type": "boolean",
+                  "description": "Enable dictionary compression",
+                  "default": false
+                },
+                "bitmap_index": {
+                  "type": "boolean",
+                  "description": "Enable bitmap indexing",
+                  "default": false
+                },
+                "bucket": {
+                  "type": "string",
+                  "description": "Bucket datetime values",
+                  "enum": ["minute", "hour", "day"]
+                }
+              }
+            }
+          },
+          "ngram_size": {
+            "type": "integer",
+            "description": "N-gram size (1=unigram, 2=bigram, etc.)",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 10
+          },
+          "posting": {
+            "type": "object",
+            "description": "Posting list configuration",
+            "additionalProperties": false,
+            "properties": {
+              "block_size": {
+                "type": "integer",
+                "description": "Block size for delta encoding",
+                "default": 128,
+                "minimum": 8,
+                "maximum": 1024
+              },
+              "freq_bits": {
+                "type": "integer",
+                "description": "Term frequency bits: 0=boolean, 4, or 8",
+                "default": 0,
+                "enum": [0, 4, 8]
+              },
+              "use_roaring": {
+                "type": "string",
+                "description": "Roaring bitmap usage",
+                "default": "auto",
+                "enum": ["auto", "always", "never"]
+              }
+            }
+          },
+          "where_clause": {
+            "type": "string",
+            "description": "Optional WHERE clause for snapshot build"
+          }
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "Index build configuration",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Build mode",
+          "default": "select_snapshot",
+          "enum": ["select_snapshot"]
+        },
+        "batch_size": {
+          "type": "integer",
+          "description": "Rows per batch during snapshot",
+          "default": 5000,
+          "minimum": 100,
+          "maximum": 100000
+        },
+        "parallelism": {
+          "type": "integer",
+          "description": "Number of parallel build threads",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 64
+        },
+        "throttle_ms": {
+          "type": "integer",
+          "description": "Throttle delay between batches in milliseconds",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "replication": {
+      "type": "object",
+      "description": "Replication configuration",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Enable binlog replication",
+          "default": true
+        },
+        "server_id": {
+          "type": "integer",
+          "description": "MySQL server ID (REQUIRED, must be non-zero and unique)",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "start_from": {
+          "type": "string",
+          "description": "Replication start position",
+          "default": "snapshot"
+        },
+        "state_file": {
+          "type": "string",
+          "description": "GTID state persistence file",
+          "default": "./mygramdb_replication.state"
+        },
+        "queue_size": {
+          "type": "integer",
+          "description": "Binlog event queue size",
+          "default": 10000,
+          "minimum": 100,
+          "maximum": 1000000
+        },
+        "reconnect_backoff_min_ms": {
+          "type": "integer",
+          "description": "Minimum reconnect backoff delay",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 60000
+        },
+        "reconnect_backoff_max_ms": {
+          "type": "integer",
+          "description": "Maximum reconnect backoff delay",
+          "default": 10000,
+          "minimum": 1000,
+          "maximum": 600000
+        }
+      },
+      "if": {
+        "properties": {
+          "enable": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": ["server_id"]
+      }
+    },
+    "memory": {
+      "type": "object",
+      "description": "Memory management configuration",
+      "additionalProperties": false,
+      "properties": {
+        "hard_limit_mb": {
+          "type": "integer",
+          "description": "Hard memory limit in MB",
+          "default": 8192,
+          "minimum": 256
+        },
+        "soft_target_mb": {
+          "type": "integer",
+          "description": "Soft memory target in MB",
+          "default": 4096,
+          "minimum": 128
+        },
+        "arena_chunk_mb": {
+          "type": "integer",
+          "description": "Arena chunk size in MB",
+          "default": 64,
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "roaring_threshold": {
+          "type": "number",
+          "description": "Roaring bitmap threshold",
+          "default": 0.18,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "minute_epoch": {
+          "type": "boolean",
+          "description": "Use minute-precision epoch",
+          "default": true
+        },
+        "normalize": {
+          "type": "object",
+          "description": "Text normalization settings",
+          "additionalProperties": false,
+          "properties": {
+            "nfkc": {
+              "type": "boolean",
+              "description": "NFKC normalization",
+              "default": true
+            },
+            "width": {
+              "type": "string",
+              "description": "Width conversion",
+              "default": "narrow",
+              "enum": ["keep", "narrow", "wide"]
+            },
+            "lower": {
+              "type": "boolean",
+              "description": "Lowercase conversion",
+              "default": false
+            }
+          }
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "description": "Snapshot persistence configuration",
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Snapshot directory path",
+          "default": "/var/lib/mygramdb/snapshots"
+        },
+        "interval_sec": {
+          "type": "integer",
+          "description": "Snapshot interval in seconds",
+          "default": 600,
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "retain": {
+          "type": "integer",
+          "description": "Number of snapshots to retain",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "description": "API server configuration",
+      "additionalProperties": false,
+      "properties": {
+        "tcp": {
+          "type": "object",
+          "description": "TCP server configuration",
+          "additionalProperties": false,
+          "properties": {
+            "bind": {
+              "type": "string",
+              "description": "TCP bind address",
+              "default": "0.0.0.0"
+            },
+            "port": {
+              "type": "integer",
+              "description": "TCP port",
+              "default": 11311,
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "http": {
+          "type": "object",
+          "description": "HTTP server configuration",
+          "additionalProperties": false,
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Enable HTTP server",
+              "default": true
+            },
+            "bind": {
+              "type": "string",
+              "description": "HTTP bind address",
+              "default": "127.0.0.1"
+            },
+            "port": {
+              "type": "integer",
+              "description": "HTTP port",
+              "default": 8080,
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "description": "Legacy server configuration (deprecated, use api.tcp instead)",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Server bind address (deprecated, use api.tcp.bind)"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Server port (deprecated, use api.tcp.port)",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "description": "Network security configuration",
+      "additionalProperties": false,
+      "properties": {
+        "allow_cidrs": {
+          "type": "array",
+          "description": "Allow CIDR list (empty = allow all)",
+          "items": {
+            "type": "string",
+            "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+          }
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "description": "Logging configuration",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "Log level",
+          "default": "info",
+          "enum": ["debug", "info", "warn", "error"]
+        },
+        "json": {
+          "type": "boolean",
+          "description": "JSON format output",
+          "default": true
+        }
+      }
+    }
+  }
+}

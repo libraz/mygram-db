@@ -15,7 +15,7 @@ namespace query {
 namespace {
 
 // Maximum LIMIT value (1000)
-constexpr uint32_t MAX_LIMIT = 1000;
+constexpr uint32_t kMaxLimit = 1000;
 
 /**
  * @brief Convert string to uppercase
@@ -23,7 +23,7 @@ constexpr uint32_t MAX_LIMIT = 1000;
 std::string ToUpper(const std::string& str) {
   std::string result = str;
   std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char c) { return std::toupper(c); });
+                 [](unsigned char character) { return std::toupper(character); });
   return result;
 }
 
@@ -57,7 +57,7 @@ bool Query::IsValid() const {
   }
 
   if (type == QueryType::SEARCH) {
-    if (limit == 0 || limit > MAX_LIMIT) {
+    if (limit == 0 || limit > kMaxLimit) {
       return false;
     }
   }
@@ -81,34 +81,40 @@ Query QueryParser::Parse(const std::string& query_str) {
 
   if (command == "SEARCH") {
     return ParseSearch(tokens);
-  } else if (command == "COUNT") {
+  }
+  if (command == "COUNT") {
     return ParseCount(tokens);
-  } else if (command == "GET") {
+  }
+  if (command == "GET") {
     return ParseGet(tokens);
-  } else if (command == "INFO") {
+  }
+  if (command == "INFO") {
     Query query;
     query.type = QueryType::INFO;
-    query.table = ""; // INFO doesn't need a table
+    query.table = "";  // INFO doesn't need a table
     return query;
-  } else if (command == "SAVE") {
+  }
+  if (command == "SAVE") {
     Query query;
     query.type = QueryType::SAVE;
-    query.table = ""; // SAVE doesn't need a table
+    query.table = "";  // SAVE doesn't need a table
     // Optional filepath argument
     if (tokens.size() > 1) {
       query.filepath = tokens[1];
     }
     return query;
-  } else if (command == "LOAD") {
+  }
+  if (command == "LOAD") {
     Query query;
     query.type = QueryType::LOAD;
-    query.table = ""; // LOAD doesn't need a table
+    query.table = "";  // LOAD doesn't need a table
     // Optional filepath argument
     if (tokens.size() > 1) {
       query.filepath = tokens[1];
     }
     return query;
-  } else if (command == "REPLICATION") {
+  }
+  if (command == "REPLICATION") {
     // REPLICATION STATUS | STOP | START
     if (tokens.size() < 2) {
       SetError("REPLICATION requires a subcommand (STATUS, STOP, START)");
@@ -117,7 +123,7 @@ Query QueryParser::Parse(const std::string& query_str) {
 
     std::string subcommand = ToUpper(tokens[1]);
     Query query;
-    query.table = ""; // REPLICATION doesn't need a table
+    query.table = "";  // REPLICATION doesn't need a table
 
     if (subcommand == "STATUS") {
       query.type = QueryType::REPLICATION_STATUS;
@@ -131,16 +137,17 @@ Query QueryParser::Parse(const std::string& query_str) {
     }
 
     return query;
-  } else if (command == "CONFIG") {
+  }
+  if (command == "CONFIG") {
     // CONFIG - show current configuration
     Query query;
     query.type = QueryType::CONFIG;
-    query.table = ""; // CONFIG doesn't need a table
+    query.table = "";  // CONFIG doesn't need a table
     return query;
-  } else {
-    SetError("Unknown command: " + command);
-    return Query{};
   }
+
+  SetError("Unknown command: " + command);
+  return Query{};
 }
 
 Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
@@ -194,8 +201,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   }
 
   // Validate limit
-  if (query.limit > MAX_LIMIT) {
-    SetError("LIMIT exceeds maximum of " + std::to_string(MAX_LIMIT));
+  if (query.limit > kMaxLimit) {
+    SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
     query.type = QueryType::UNKNOWN;
     return query;
   }
@@ -303,12 +310,12 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens,
   FilterCondition filter;
   filter.column = tokens[pos++];
 
-  auto op = ParseFilterOp(tokens[pos++]);
-  if (!op.has_value()) {
+  auto filter_op = ParseFilterOp(tokens[pos++]);
+  if (!filter_op.has_value()) {
     SetError("Invalid filter operator: " + tokens[pos - 1]);
     return false;
   }
-  filter.op = op.value();
+  filter.op = filter_op.value();
 
   filter.value = tokens[pos++];
 
@@ -366,6 +373,7 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens,
   return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   std::vector<std::string> tokens;
   std::string token;
@@ -373,52 +381,52 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   bool escape_next = false;
 
   for (size_t i = 0; i < str.length(); ++i) {
-    char c = str[i];
+    char character = str[i];
 
     if (escape_next) {
       // Handle escape sequences
-      switch (c) {
+      switch (character) {
         case 'n':  token += '\n'; break;
         case 't':  token += '\t'; break;
         case 'r':  token += '\r'; break;
         case '\\': token += '\\'; break;
         case '"':  token += '"';  break;
         case '\'': token += '\''; break;
-        default:   token += c;    break;  // Unknown escape, keep as-is
+        default:   token += character;    break;  // Unknown escape, keep as-is
       }
       escape_next = false;
       continue;
     }
 
-    if (c == '\\') {
+    if (character == '\\') {
       escape_next = true;
       continue;
     }
 
     if (quote_char == '\0') {
       // Not currently in quotes
-      if (c == '"' || c == '\'') {
+      if (character == '"' || character == '\'') {
         // Start of quoted string - save any pending token first
         if (!token.empty()) {
           tokens.push_back(token);
           token.clear();
         }
-        quote_char = c;
+        quote_char = character;
         continue;
       }
 
       // Outside quotes, split on whitespace
-      if (std::isspace(c)) {
+      if (std::isspace(character) != 0) {
         if (!token.empty()) {
           tokens.push_back(token);
           token.clear();
         }
       } else {
-        token += c;
+        token += character;
       }
     } else {
       // Inside quotes
-      if (c == quote_char) {
+      if (character == quote_char) {
         // End of quoted string
         if (!token.empty()) {
           tokens.push_back(token);
@@ -429,7 +437,7 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
       }
 
       // Inside quotes, add everything including spaces
-      token += c;
+      token += character;
     }
   }
 
@@ -448,14 +456,26 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
 }
 
 std::optional<FilterOp> QueryParser::ParseFilterOp(const std::string& op_str) {
-  std::string op = ToUpper(op_str);
+  std::string normalized_op = ToUpper(op_str);
 
-  if (op == "=" || op == "EQ") return FilterOp::EQ;
-  if (op == "!=" || op == "NE") return FilterOp::NE;
-  if (op == ">" || op == "GT") return FilterOp::GT;
-  if (op == ">=" || op == "GTE") return FilterOp::GTE;
-  if (op == "<" || op == "LT") return FilterOp::LT;
-  if (op == "<=" || op == "LTE") return FilterOp::LTE;
+  if (normalized_op == "=" || normalized_op == "EQ") {
+    return FilterOp::EQ;
+  }
+  if (normalized_op == "!=" || normalized_op == "NE") {
+    return FilterOp::NE;
+  }
+  if (normalized_op == ">" || normalized_op == "GT") {
+    return FilterOp::GT;
+  }
+  if (normalized_op == ">=" || normalized_op == "GTE") {
+    return FilterOp::GTE;
+  }
+  if (normalized_op == "<" || normalized_op == "LT") {
+    return FilterOp::LT;
+  }
+  if (normalized_op == "<=" || normalized_op == "LTE") {
+    return FilterOp::LTE;
+  }
 
   return std::nullopt;
 }

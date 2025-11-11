@@ -169,13 +169,46 @@ struct Config {
 };
 
 /**
- * @brief Load configuration from YAML file
+ * @brief Load configuration from YAML or JSON file
+ *
+ * Automatically detects file format based on extension (.yaml, .yml, .json).
+ * Validates configuration against JSON Schema if available.
+ *
+ * @param path Path to configuration file (YAML or JSON)
+ * @param schema_path Optional path to JSON Schema file for validation
+ * @return Configuration object
+ * @throws std::runtime_error if file cannot be read, parsed, or validation fails
+ */
+Config LoadConfig(const std::string& path, const std::string& schema_path = "");
+
+/**
+ * @brief Load configuration from YAML file (legacy compatibility)
  *
  * @param path Path to YAML configuration file
  * @return Configuration object
  * @throws std::runtime_error if file cannot be read or parsed
+ * @deprecated Use LoadConfig() which auto-detects format
  */
-Config LoadConfig(const std::string& path);
+Config LoadConfigYaml(const std::string& path);
+
+/**
+ * @brief Load configuration from JSON file
+ *
+ * @param path Path to JSON configuration file
+ * @param schema_path Optional path to JSON Schema file for validation
+ * @return Configuration object
+ * @throws std::runtime_error if file cannot be read, parsed, or validation fails
+ */
+Config LoadConfigJson(const std::string& path, const std::string& schema_path = "");
+
+/**
+ * @brief Validate JSON configuration against schema
+ *
+ * @param config_json JSON configuration object
+ * @param schema_json JSON Schema object
+ * @throws std::runtime_error if validation fails with detailed error message
+ */
+void ValidateConfigJson(const std::string& config_json_str, const std::string& schema_json_str);
 
 }  // namespace config
 }  // namespace mygramdb

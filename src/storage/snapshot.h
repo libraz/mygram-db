@@ -17,7 +17,7 @@ namespace storage {
  */
 class SnapshotManager {
  public:
-  explicit SnapshotManager(const std::string& snapshot_dir);
+  explicit SnapshotManager(std::string snapshot_dir);
   ~SnapshotManager() = default;
 
   /**

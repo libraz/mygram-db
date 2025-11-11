@@ -1,0 +1,106 @@
+{
+  // ======================================
+  // OPTION 1: Use clangd for real-time linting like ESLint
+  // ======================================
+  // ⚠️ Requires: cmake, clangd, and compile_commands.json
+  // To enable: Install tools (see SETUP.md), build project, then uncomment below
+
+  // Disable clangd extension if installed (prevents errors when compile_commands.json is missing)
+  "clangd.onConfigChanged": "ignore",
+
+  // When ready to use clangd, uncomment these lines:
+  // "C_Cpp.intelliSenseEngine": "disabled",
+  // "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",  // or "/usr/bin/clangd" on Linux
+  // "clangd.arguments": [
+  //   "--compile-commands-dir=${workspaceFolder}/build",
+  //   "--background-index",
+  //   "--clang-tidy",
+  //   "--header-insertion=iwyu",
+  //   "--completion-style=detailed",
+  //   "--pch-storage=memory"
+  // ],
+
+  // ======================================
+  // OPTION 2 (Current): Use C/C++ Extension with optimized settings
+  // ======================================
+
+  // C/C++ Extension Settings
+  "C_Cpp.default.cppStandard": "c++17",
+  "C_Cpp.default.compilerPath": "/usr/bin/clang++",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/src/**",
+    "${workspaceFolder}/build/**"
+  ],
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+
+  // Enable clang-tidy with optimized settings for real-time feedback
+  "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+  "C_Cpp.codeAnalysis.clangTidy.path": "/opt/homebrew/opt/llvm/bin/clang-tidy",
+  "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true,
+  "C_Cpp.codeAnalysis.clangTidy.config": "",
+  "C_Cpp.codeAnalysis.clangTidy.args": [],
+  "C_Cpp.codeAnalysis.runAutomatically": true,
+  "C_Cpp.codeAnalysis.updateDelay": 500,  // Fast response like ESLint
+
+  // Enable clang-format
+  "C_Cpp.formatting": "clangFormat",
+  "C_Cpp.clang_format_path": "/opt/homebrew/opt/llvm/bin/clang-format",
+  "C_Cpp.clang_format_style": "file",
+  "C_Cpp.clang_format_fallbackStyle": "Google",
+
+  // Format on save and other editor actions
+  "[cpp]": {
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "editor.formatOnType": false,
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.rulers": [120],
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit"
+    }
+  },
+  "[c]": {
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "editor.formatOnType": false,
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.rulers": [120],
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit"
+    }
+  },
+
+  // Editor settings
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "editor.trimAutoWhitespace": true,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  // File associations
+  "files.associations": {
+    "*.h": "cpp",
+    "*.cc": "cpp",
+    "*.cpp": "cpp",
+    "*.hpp": "cpp"
+  },
+
+  // CMake settings
+  "cmake.configureOnOpen": false,
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+
+  // Search exclusions
+  "search.exclude": {
+    "**/build": true,
+    "**/.git": true
+  },
+
+  // File watcher exclusions
+  "files.watcherExclude": {
+    "**/build/**": true,
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true
+  }
+}

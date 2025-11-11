@@ -1,0 +1,26 @@
+{
+  "recommendations": [
+    // C/C++ IntelliSense, debugging, and code browsing
+    "ms-vscode.cpptools",
+
+    // OPTION: Use clangd for faster real-time linting (like ESLint for JS)
+    // Install this and enable OPTION 1 in settings.json for better experience
+    "llvm-vs-code-extensions.vscode-clangd",
+
+    // CMake language support and tools
+    "ms-vscode.cmake-tools",
+    "twxs.cmake",
+
+    // Real-time error highlighting in editor (like ESLint inline errors)
+    "usernamehw.errorlens",
+
+    // YAML support for config files
+    "redhat.vscode-yaml",
+
+    // Git integration
+    "eamodio.gitlens",
+
+    // Documentation tools (auto-generate Doxygen comments)
+    "cschlosser.doxdocgen"
+  ]
+}

@@ -1,0 +1,440 @@
+# 設定ガイド
+
+MygramDB は **YAML** と **JSON** の両方の設定フォーマットに対応しており、自動的に **JSON Schema 検証**を行います。このガイドでは、利用可能なすべての設定オプションを説明します。
+
+## 設定ファイルのフォーマット
+
+MygramDB はファイル拡張子に基づいて設定フォーマットを自動検出します：
+
+- `.yaml` または `.yml` → YAML 形式
+- `.json` → JSON 形式
+
+すべての設定は起動時に組み込みの JSON Schema に対して自動的に検証され、不正な設定（タイポ、間違った型、未知のキー）が即座に検出されます。
+
+## 設定ファイルの構造
+
+YAML または JSON 形式で設定ファイルを作成します：
+
+### YAML 形式 (config.yaml)
+
+```yaml
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "repl_user"
+  password: "your_password_here"
+  database: "mydb"
+  use_gtid: true
+  binlog_format: "ROW"
+  binlog_row_image: "FULL"
+  connect_timeout_ms: 3000
+
+tables:
+  - name: "articles"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    filters: []
+    ngram_size: 1
+    posting:
+      block_size: 128
+      freq_bits: 0
+      use_roaring: "auto"
+    where_clause: ""
+
+build:
+  mode: "select_snapshot"
+  batch_size: 5000
+  parallelism: 2
+  throttle_ms: 0
+
+replication:
+  enable: true
+  server_id: 12345
+  start_from: "snapshot"
+  state_file: "./mygramdb_replication.state"
+  queue_size: 10000
+  reconnect_backoff_min_ms: 500
+  reconnect_backoff_max_ms: 10000
+
+memory:
+  hard_limit_mb: 8192
+  soft_target_mb: 4096
+  arena_chunk_mb: 64
+  roaring_threshold: 0.18
+  minute_epoch: true
+  normalize:
+    nfkc: true
+    width: "narrow"
+    lower: false
+
+snapshot:
+  dir: "/var/lib/mygramdb/snapshots"
+  interval_sec: 600
+  retain: 3
+
+api:
+  tcp:
+    bind: "0.0.0.0"
+    port: 11311
+
+network:
+  allow_cidrs: []
+
+logging:
+  level: "info"
+  json: true
+```
+
+### JSON 形式 (config.json)
+
+JSON 形式での同じ設定：
+
+```json
+{
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "repl_user",
+    "password": "your_password_here",
+    "database": "mydb",
+    "use_gtid": true,
+    "binlog_format": "ROW",
+    "binlog_row_image": "FULL",
+    "connect_timeout_ms": 3000
+  },
+  "tables": [
+    {
+      "name": "articles",
+      "primary_key": "id",
+      "text_source": {
+        "column": "content"
+      },
+      "filters": [],
+      "ngram_size": 1,
+      "posting": {
+        "block_size": 128,
+        "freq_bits": 0,
+        "use_roaring": "auto"
+      },
+      "where_clause": ""
+    }
+  ],
+  "build": {
+    "mode": "select_snapshot",
+    "batch_size": 5000,
+    "parallelism": 2,
+    "throttle_ms": 0
+  },
+  "replication": {
+    "enable": true,
+    "server_id": 12345,
+    "start_from": "snapshot",
+    "state_file": "./mygramdb_replication.state",
+    "queue_size": 10000,
+    "reconnect_backoff_min_ms": 500,
+    "reconnect_backoff_max_ms": 10000
+  },
+  "memory": {
+    "hard_limit_mb": 8192,
+    "soft_target_mb": 4096,
+    "arena_chunk_mb": 64,
+    "roaring_threshold": 0.18,
+    "minute_epoch": true,
+    "normalize": {
+      "nfkc": true,
+      "width": "narrow",
+      "lower": false
+    }
+  },
+  "snapshot": {
+    "dir": "/var/lib/mygramdb/snapshots",
+    "interval_sec": 600,
+    "retain": 3
+  },
+  "api": {
+    "tcp": {
+      "bind": "0.0.0.0",
+      "port": 11311
+    }
+  },
+  "network": {
+    "allow_cidrs": []
+  },
+  "logging": {
+    "level": "info",
+    "json": true
+  }
+}
+```
+
+**注意:** このガイドのすべての例は可読性のため YAML 形式を使用していますが、すべての設定は JSON 形式でも使用できます。
+
+## MySQL セクション
+
+MySQL サーバーの接続設定：
+
+- **host**: MySQL サーバーのホスト名または IP アドレス（デフォルト: `127.0.0.1`）
+- **port**: MySQL サーバーのポート（デフォルト: `3306`）
+- **user**: レプリケーション用の MySQL ユーザー名（必須）
+- **password**: MySQL ユーザーのパスワード（必須）
+- **database**: データベース名（必須）
+- **use_gtid**: GTID ベースレプリケーションを有効化（デフォルト: `true`、レプリケーションに必須）
+- **binlog_format**: バイナリログ形式（デフォルト: `ROW`、レプリケーションに必須）
+- **binlog_row_image**: 行イメージ形式（デフォルト: `FULL`、レプリケーションに必須）
+- **connect_timeout_ms**: 接続タイムアウト（ミリ秒、デフォルト: `3000`）
+
+## Tables セクション
+
+テーブル設定（インスタンスごとに1テーブルをサポート）：
+
+### 基本設定
+
+- **name**: MySQL データベースのテーブル名（必須）
+- **primary_key**: プライマリキーのカラム名（デフォルト: `id`、単一カラムである必要があります）
+- **ngram_size**: トークン化の N-gram サイズ（デフォルト: `1`）
+  - 1 = ユニグラム、2 = バイグラム等
+  - 日本語/CJK: 1 または 2 を使用
+  - 英語: 3 以上を使用
+
+### Text Source
+
+全文検索用にインデックス化するカラムを定義：
+
+**単一カラム:**
+
+```yaml
+text_source:
+  column: "content"
+  delimiter: " "                    # デフォルト: " "（concat 指定時に使用）
+```
+
+**複数カラム（連結）:**
+
+```yaml
+text_source:
+  concat: ["title", "body"]
+  delimiter: " "
+```
+
+### Filters
+
+検索絞り込み用のオプションフィルターカラム：
+
+```yaml
+filters:
+  - name: "status"
+    type: "int"
+    dict_compress: false            # デフォルト: false
+    bitmap_index: false             # デフォルト: false
+
+  - name: "category"
+    type: "string"
+    dict_compress: false
+    bitmap_index: false
+
+  - name: "created_at"
+    type: "datetime"
+    bucket: "minute"                # オプション: "minute", "hour", "day"
+```
+
+**フィルター型:**
+
+- 整数型: `tinyint`, `tinyint_unsigned`, `smallint`, `smallint_unsigned`, `int`, `int_unsigned`, `mediumint`, `mediumint_unsigned`, `bigint`
+- 浮動小数点型: `float`, `double`
+- 文字列型: `string`, `varchar`, `text`
+- 日付型: `datetime`, `date`, `timestamp`
+
+**フィルターオプション:**
+
+- **dict_compress**: 辞書圧縮を有効化（低カーディナリティカラム推奨）
+- **bitmap_index**: フィルター高速化のためのビットマップインデックスを有効化
+- **bucket**: 日時のバケット化（`minute`, `hour`, `day`）でカーディナリティを削減
+
+### Posting List 設定
+
+転置インデックスの保存方法を制御：
+
+```yaml
+posting:
+  block_size: 128                   # デフォルト: 128
+  freq_bits: 0                      # 0=ブール値、4 または 8 で語頻度（デフォルト: 0）
+  use_roaring: "auto"               # "auto", "always", "never"（デフォルト: auto）
+```
+
+### WHERE 句
+
+スナップショットビルド用のオプション WHERE 句：
+
+```yaml
+where_clause: "status = 1"          # デフォルト: ""（空）
+```
+
+## Build セクション
+
+インデックスビルド設定：
+
+- **mode**: ビルドモード（デフォルト: `select_snapshot`、現在唯一のオプション）
+- **batch_size**: スナップショット時の1バッチあたりの行数（デフォルト: `5000`）
+- **parallelism**: 並列ビルドスレッド数（デフォルト: `2`）
+- **throttle_ms**: バッチ間の遅延（ミリ秒、デフォルト: `0`）
+
+## Replication セクション
+
+MySQL binlog レプリケーション設定：
+
+- **enable**: binlog レプリケーションを有効化（デフォルト: `true`）
+- **server_id**: MySQL サーバー ID（必須、レプリケーショントポロジー内でゼロ以外の一意の値である必要があります）
+  - ランダムな数値を生成するか、環境に応じた一意の値を使用
+  - 例: `12345`
+- **start_from**: レプリケーション開始位置（デフォルト: `snapshot`）
+  - `snapshot`: スナップショット GTID から開始（推奨）
+  - `latest`: 現在の GTID から開始
+  - `gtid=<UUID:txn>`: 特定の GTID から開始（例: `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1`）
+  - `state_file`: 保存された状態ファイルから再開
+- **state_file**: GTID 状態永続化ファイルのパス（デフォルト: `./mygramdb_replication.state`）
+- **queue_size**: Binlog イベントキューサイズ（デフォルト: `10000`）
+- **reconnect_backoff_min_ms**: 最小再接続バックオフ遅延（デフォルト: `500`）
+- **reconnect_backoff_max_ms**: 最大再接続バックオフ遅延（デフォルト: `10000`）
+
+## Memory セクション
+
+メモリ管理設定：
+
+- **hard_limit_mb**: ハードメモリ制限（MB、デフォルト: `8192`）
+- **soft_target_mb**: ソフトメモリ目標（MB、デフォルト: `4096`）
+- **arena_chunk_mb**: アリーナチャンクサイズ（MB、デフォルト: `64`）
+- **roaring_threshold**: Roaring ビットマップ閾値（デフォルト: `0.18`）
+- **minute_epoch**: 分精度のエポックを使用（デフォルト: `true`）
+
+### テキスト正規化
+
+```yaml
+normalize:
+  nfkc: true                        # デフォルト: true、NFKC 正規化
+  width: "narrow"                   # "keep", "narrow", "wide"（デフォルト: narrow）
+  lower: false                      # 小文字変換（デフォルト: false）
+```
+
+## Snapshot セクション
+
+スナップショット永続化設定：
+
+- **dir**: スナップショットディレクトリのパス（デフォルト: `/var/lib/mygramdb/snapshots`）
+- **interval_sec**: スナップショット間隔（秒、デフォルト: `600`）
+- **retain**: 保持するスナップショット数（デフォルト: `3`）
+
+## API セクション
+
+API サーバー設定：
+
+### TCP API
+
+```yaml
+api:
+  tcp:
+    bind: "0.0.0.0"                 # デフォルト: 0.0.0.0（全インターフェース）
+    port: 11311                     # デフォルト: 11311
+```
+
+## Network セクション（オプション）
+
+ネットワークセキュリティ設定：
+
+- **allow_cidrs**: 許可 CIDR リスト（デフォルト: `[]` = すべて許可）
+  - 空の場合、すべての IP アドレスが許可されます
+  - 指定された場合、これらの IP 範囲からの接続のみが受け入れられます
+  - 標準 CIDR 表記をサポート（例: `192.168.1.0/24`, `10.0.0.0/8`）
+  - 複数の CIDR 範囲を指定可能
+
+```yaml
+network:
+  allow_cidrs:
+    - "192.168.1.0/24"
+    - "10.0.0.0/8"
+    - "172.16.0.0/16"
+```
+
+**一般的な CIDR 範囲:**
+
+- プライベートネットワーク:
+  - `10.0.0.0/8` - クラス A プライベートネットワーク
+  - `172.16.0.0/12` - クラス B プライベートネットワーク
+  - `192.168.0.0/16` - クラス C プライベートネットワーク
+- ローカルホスト: `127.0.0.1/32`
+- 単一 IP: `192.168.1.100/32`
+
+## Logging セクション
+
+ロギング設定：
+
+- **level**: ログレベル（デフォルト: `info`）
+  - オプション: `debug`, `info`, `warn`, `error`
+- **json**: JSON 形式出力（デフォルト: `true`）
+
+```yaml
+logging:
+  level: "info"
+  json: true
+```
+
+## 自動検証
+
+MygramDB は起動時に組み込みの JSON Schema を使用して、すべての設定ファイル（YAML と JSON）を自動的に検証します。この検証により以下が保証されます：
+
+- **構文の正しさ**: 有効な YAML/JSON 形式
+- **型チェック**: すべてのフィールドの正しいデータ型
+- **必須フィールド**: すべての必須設定が存在
+- **値の制約**: 値が有効な範囲と列挙値内にある
+- **未知のキー**: タイポやサポートされていないオプションを検出
+
+検証が失敗した場合、MygramDB は問題の正確な位置を示す詳細なエラーメッセージを表示します。
+
+## 設定のテスト
+
+サーバーを起動する前に、設定ファイルをテストできます:
+
+```bash
+# YAML 設定をテスト
+./build/bin/mygramdb -t config.yaml
+
+# JSON 設定をテスト
+./build/bin/mygramdb -t config.json
+
+# またはロングオプションを使用
+./build/bin/mygramdb --config-test config.yaml
+```
+
+これにより以下が実行されます:
+
+1. 設定ファイルを解析
+2. JSON Schema に対して検証
+3. 有効な場合は設定サマリーを表示
+
+設定が有効な場合、以下を表示します:
+
+- MySQL 接続設定
+- テーブル設定
+- API サーバー設定
+- レプリケーション状態
+- ロギングレベル
+
+### カスタムスキーマ（上級者向け）
+
+設定の拡張やテストのため、カスタムスキーマに対して検証することができます:
+
+```bash
+./build/bin/mygramdb config.yaml --schema custom-schema.json
+```
+
+## 設定例
+
+すべての利用可能なオプションを含む完全な設定例:
+- YAML: `examples/config.yaml`
+- JSON: `examples/config.json`
+
+クイックスタート用の最小限の設定例:
+- YAML: `examples/config-minimal.yaml`
+- JSON: `examples/config-minimal.json`
+
+各サンプルファイルの詳細については `examples/README.md` を参照してください。

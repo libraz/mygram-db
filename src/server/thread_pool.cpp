@@ -57,13 +57,13 @@ bool ThreadPool::Submit(Task task) {
 }
 
 size_t ThreadPool::GetQueueSize() const {
-  std::lock_guard<std::mutex> lock(queue_mutex_);
+  std::scoped_lock lock(queue_mutex_);
   return tasks_.size();
 }
 
 void ThreadPool::Shutdown() {
   {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
+    std::scoped_lock lock(queue_mutex_);
     if (shutdown_) {
       return;  // Already shutting down
     }

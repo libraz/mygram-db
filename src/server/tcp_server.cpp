@@ -4,18 +4,23 @@
  */
 
 #include "server/tcp_server.h"
-#include "utils/string_utils.h"
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <fcntl.h>
+
+#include <algorithm>
 #include <cstring>
 #include <ctime>
-#include <sstream>
-#include <algorithm>
 #include <limits>
+#include <sstream>
+#include <utility>
+
+#include "utils/string_utils.h"
+#include "utils/network_utils.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -24,21 +29,21 @@
 namespace mygramdb {
 namespace server {
 
-TcpServer::TcpServer(const ServerConfig& config,
-                     index::Index& index,
-                     storage::DocumentStore& doc_store,
-                     int ngram_size,
-                     const std::string& snapshot_dir,
-                     const config::Config* full_config,
+TcpServer::TcpServer(ServerConfig config, index::Index& index, storage::DocumentStore& doc_store,
+                     int ngram_size, std::string snapshot_dir, const config::Config* full_config,
 #ifdef USE_MYSQL
                      mysql::BinlogReader* binlog_reader
 #else
                      void* binlog_reader
 #endif
                      )
-    : config_(config), index_(index), doc_store_(doc_store),
-      ngram_size_(ngram_size), snapshot_dir_(snapshot_dir),
-      full_config_(full_config), binlog_reader_(binlog_reader) {
+    : config_(std::move(config)),
+      index_(index),
+      doc_store_(doc_store),
+      ngram_size_(ngram_size),
+      snapshot_dir_(std::move(snapshot_dir)),
+      full_config_(full_config),
+      binlog_reader_(binlog_reader) {
   // Create thread pool
   thread_pool_ = std::make_unique<ThreadPool>(
       config_.worker_threads > 0 ? config_.worker_threads : 0,
@@ -72,13 +77,13 @@ bool TcpServer::Start() {
   }
 
   // Bind
-  struct sockaddr_in address;
+  struct sockaddr_in address{};
   std::memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = INADDR_ANY;
   address.sin_port = htons(config_.port);
 
-  if (bind(server_fd_, (struct sockaddr*)&address, sizeof(address)) < 0) {
+  if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0) {
     last_error_ = "Failed to bind to port " + std::to_string(config_.port) +
                   ": " + std::string(strerror(errno));
     spdlog::error(last_error_);
@@ -90,7 +95,7 @@ bool TcpServer::Start() {
   // Get actual port if port 0 was specified
   if (config_.port == 0) {
     socklen_t addr_len = sizeof(address);
-    if (getsockname(server_fd_, (struct sockaddr*)&address, &addr_len) == 0) {
+    if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&address), &addr_len) == 0) {
       actual_port_ = ntohs(address.sin_port);
     }
   } else {
@@ -147,10 +152,10 @@ void TcpServer::Stop() {
 
   // Close all active connections
   {
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    for (int fd : connection_fds_) {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
+    std::scoped_lock lock(connections_mutex_);
+    for (int file_descriptor : connection_fds_) {
+      shutdown(file_descriptor, SHUT_RDWR);
+      close(file_descriptor);
     }
     connection_fds_.clear();
   }
@@ -165,10 +170,10 @@ void TcpServer::AcceptThreadFunc() {
   spdlog::info("Accept thread started");
 
   while (!should_stop_) {
-    struct sockaddr_in client_addr;
+    struct sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
 
-    int client_fd = accept(server_fd_, (struct sockaddr*)&client_addr,
+    int client_fd = accept(server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr),
                           &client_len);
 
     if (client_fd < 0) {
@@ -177,6 +182,24 @@ void TcpServer::AcceptThreadFunc() {
       }
       spdlog::warn("Accept failed: {}", strerror(errno));
       continue;
+    }
+
+    // Get client IP address
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+    char client_ip_str[INET_ADDRSTRLEN];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, INET_ADDRSTRLEN);
+
+    // Check CIDR allow list
+    // NOLINTNEXTLINE(readability-implicit-bool-conversion)
+    if (full_config_ && !full_config_->network.allow_cidrs.empty()) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+      if (!utils::IsIPAllowed(client_ip_str, full_config_->network.allow_cidrs)) {
+        spdlog::warn("Connection from {} rejected (not in allow_cidrs)", client_ip_str);
+        shutdown(client_fd, SHUT_RDWR);
+        close(client_fd);
+        continue;
+      }
     }
 
     // Check connection limit
@@ -194,7 +217,7 @@ void TcpServer::AcceptThreadFunc() {
 
     // Add to connection set
     {
-      std::lock_guard<std::mutex> lock(connections_mutex_);
+      std::scoped_lock lock(connections_mutex_);
       connection_fds_.insert(client_fd);
     }
 
@@ -226,20 +249,20 @@ void TcpServer::HandleClient(int client_fd) {
   std::string accumulated;
 
   while (!should_stop_) {
-    ssize_t n = recv(client_fd, buffer.data(), buffer.size() - 1, 0);
+    ssize_t bytes_received = recv(client_fd, buffer.data(), buffer.size() - 1, 0);
 
-    if (n <= 0) {
-      if (n < 0) {
+    if (bytes_received <= 0) {
+      if (bytes_received < 0) {
         spdlog::debug("recv error: {}", strerror(errno));
       }
       break;
     }
 
-    buffer[n] = '\0';
+    buffer[bytes_received] = '\0';
     accumulated += buffer.data();
 
     // Process complete requests (ending with \r\n)
-    size_t pos;
+    size_t pos = 0;
     while ((pos = accumulated.find("\r\n")) != std::string::npos) {
       std::string request = accumulated.substr(0, pos);
       accumulated = accumulated.substr(pos + 2);
@@ -270,6 +293,7 @@ void TcpServer::HandleClient(int client_fd) {
   spdlog::debug("Connection closed (active: {})", active_connections_.load());
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::string TcpServer::ProcessRequest(const std::string& request) {
   spdlog::debug("Processing request: {}", request);
 
@@ -310,8 +334,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           // Estimate result size by checking the smallest posting list
           size_t min_size = std::numeric_limits<size_t>::max();
           for (const auto& ngram : ngrams) {
-            auto* posting = index_.GetPostingList(ngram);
-            if (posting) {
+            const auto* posting = index_.GetPostingList(ngram);
+            if (posting != nullptr) {
               min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
             } else {
               min_size = 0;
@@ -324,8 +348,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         // Sort terms by estimated size (smallest first for faster intersection)
         std::sort(term_infos.begin(), term_infos.end(),
-                 [](const TermInfo& a, const TermInfo& b) {
-                   return a.estimated_size < b.estimated_size;
+                 [](const TermInfo& lhs, const TermInfo& rhs) {
+                   return lhs.estimated_size < rhs.estimated_size;
                  });
 
         // If any term has zero results, return empty immediately
@@ -435,8 +459,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           // Estimate result size by checking the smallest posting list
           size_t min_size = std::numeric_limits<size_t>::max();
           for (const auto& ngram : ngrams) {
-            auto* posting = index_.GetPostingList(ngram);
-            if (posting) {
+            const auto* posting = index_.GetPostingList(ngram);
+            if (posting != nullptr) {
               min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
             } else {
               min_size = 0;
@@ -449,8 +473,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         // Sort terms by estimated size (smallest first for faster intersection)
         std::sort(term_infos.begin(), term_infos.end(),
-                 [](const TermInfo& a, const TermInfo& b) {
-                   return a.estimated_size < b.estimated_size;
+                 [](const TermInfo& lhs, const TermInfo& rhs) {
+                   return lhs.estimated_size < rhs.estimated_size;
                  });
 
         // If any term has zero results, return 0 immediately
@@ -557,16 +581,16 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
         } else {
           // Generate default filepath with timestamp
           auto now = std::time(nullptr);
-          char buf[64];
-          std::strftime(buf, sizeof(buf), "snapshot_%Y%m%d_%H%M%S", std::localtime(&now));
-          filepath = snapshot_dir_ + "/" + std::string(buf);
+          std::array<char, 64> buf{};
+          std::strftime(buf.data(), buf.size(), "snapshot_%Y%m%d_%H%M%S", std::localtime(&now));
+          filepath = snapshot_dir_ + "/" + std::string(buf.data());
         }
 
         // Get current GTID before stopping replication
         std::string current_gtid;
 #ifdef USE_MYSQL
         bool replication_was_running = false;
-        if (binlog_reader_ && binlog_reader_->IsRunning()) {
+        if ((binlog_reader_ != nullptr) && binlog_reader_->IsRunning()) {
           current_gtid = binlog_reader_->GetCurrentGTID();
           spdlog::info("Stopping binlog replication for snapshot save at GTID: {}", current_gtid);
           binlog_reader_->Stop();
@@ -589,7 +613,7 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         // Restart binlog replication if it was running
 #ifdef USE_MYSQL
-        if (replication_was_running && binlog_reader_) {
+        if (replication_was_running && (binlog_reader_ != nullptr)) {
           spdlog::info("Restarting binlog replication after snapshot save");
           if (!binlog_reader_->Start()) {
             spdlog::warn("Failed to restart binlog replication: {}",
@@ -600,9 +624,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         if (success) {
           return FormatSaveResponse(filepath);
-        } else {
-          return FormatError("Failed to save snapshot");
         }
+        return FormatError("Failed to save snapshot");
       }
 
       case query::QueryType::LOAD: {
@@ -621,7 +644,7 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
         // Stop binlog replication if running
         bool replication_was_running = false;
 #ifdef USE_MYSQL
-        if (binlog_reader_ && binlog_reader_->IsRunning()) {
+        if ((binlog_reader_ != nullptr) && binlog_reader_->IsRunning()) {
           spdlog::info("Stopping binlog replication for snapshot load");
           binlog_reader_->Stop();
           replication_was_running = true;
@@ -644,13 +667,13 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         // Restore GTID if snapshot had one
 #ifdef USE_MYSQL
-        if (success && !loaded_gtid.empty() && binlog_reader_) {
+        if (success && !loaded_gtid.empty() && (binlog_reader_ != nullptr)) {
           binlog_reader_->SetCurrentGTID(loaded_gtid);
           spdlog::info("Restored replication GTID from snapshot: {}", loaded_gtid);
         }
 
         // Restart binlog replication if it was running
-        if (replication_was_running && binlog_reader_) {
+        if (replication_was_running && (binlog_reader_ != nullptr)) {
           spdlog::info("Restarting binlog replication after snapshot load");
           if (!binlog_reader_->Start()) {
             spdlog::warn("Failed to restart binlog replication: {}",
@@ -661,9 +684,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         if (success) {
           return FormatLoadResponse(filepath);
-        } else {
-          return FormatError("Failed to load snapshot");
         }
+        return FormatError("Failed to load snapshot");
       }
 
       case query::QueryType::REPLICATION_STATUS: {
@@ -672,17 +694,17 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
       case query::QueryType::REPLICATION_STOP: {
 #ifdef USE_MYSQL
-        if (binlog_reader_) {
+        if (binlog_reader_ != nullptr) {
           if (binlog_reader_->IsRunning()) {
             spdlog::info("Stopping binlog replication by user request");
             binlog_reader_->Stop();
             return FormatReplicationStopResponse();
-          } else {
-            return FormatError("Replication is not running");
           }
-        } else {
-          return FormatError("Replication is not configured");
+          return FormatError("Replication is not running");
+
         }
+        return FormatError("Replication is not configured");
+
 #else
         return FormatError("MySQL support not compiled");
 #endif
@@ -690,20 +712,19 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
       case query::QueryType::REPLICATION_START: {
 #ifdef USE_MYSQL
-        if (binlog_reader_) {
+        if (binlog_reader_ != nullptr) {
           if (!binlog_reader_->IsRunning()) {
             spdlog::info("Starting binlog replication by user request");
             if (binlog_reader_->Start()) {
               return FormatReplicationStartResponse();
-            } else {
-              return FormatError("Failed to start replication: " + binlog_reader_->GetLastError());
             }
-          } else {
-            return FormatError("Replication is already running");
+            return FormatError("Failed to start replication: " + binlog_reader_->GetLastError());
+
           }
-        } else {
-          return FormatError("Replication is not configured");
+          return FormatError("Replication is already running");
+
         }
+        return FormatError("Replication is not configured");
 #else
         return FormatError("MySQL support not compiled");
 #endif
@@ -775,7 +796,7 @@ std::string TcpServer::FormatInfoResponse() {
   oss << "version: MygramDB 1.0.0\r\n";
 
   // Uptime
-  uint64_t current_time = static_cast<uint64_t>(std::time(nullptr));
+  auto current_time = static_cast<uint64_t>(std::time(nullptr));
   uint64_t uptime_seconds = current_time - start_time_;
   oss << "uptime_seconds: " << uptime_seconds << "\r\n";
 
@@ -795,7 +816,7 @@ std::string TcpServer::FormatInfoResponse() {
 
   // Replication information
 #ifdef USE_MYSQL
-  if (binlog_reader_) {
+  if (binlog_reader_ != nullptr) {
     oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
     oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
     oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
@@ -819,7 +840,7 @@ std::string TcpServer::FormatReplicationStatusResponse() {
   std::ostringstream oss;
   oss << "OK REPLICATION\r\n";
 
-  if (binlog_reader_) {
+  if (binlog_reader_ != nullptr) {
     bool is_running = binlog_reader_->IsRunning();
     oss << "status: " << (is_running ? "running" : "stopped") << "\r\n";
     oss << "current_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
@@ -851,7 +872,7 @@ std::string TcpServer::FormatConfigResponse() {
   std::ostringstream oss;
   oss << "OK CONFIG\n";
 
-  if (!full_config_) {
+  if (full_config_ == nullptr) {
     oss << "  [Configuration not available]\n";
     return oss.str();
   }
@@ -913,10 +934,10 @@ std::string TcpServer::FormatError(const std::string& message) {
   return "ERROR " + message;
 }
 
-bool TcpServer::SetSocketOptions(int fd) {
+bool TcpServer::SetSocketOptions(int socket_fd) {
   // Reuse address
   int opt = 1;
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
     last_error_ = "Failed to set SO_REUSEADDR: " + std::string(strerror(errno));
     spdlog::error(last_error_);
     return false;
@@ -924,22 +945,22 @@ bool TcpServer::SetSocketOptions(int fd) {
 
   // Set receive buffer size
   int recv_buf = config_.recv_buffer_size;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &recv_buf, sizeof(recv_buf)) < 0) {
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &recv_buf, sizeof(recv_buf)) < 0) {
     spdlog::warn("Failed to set SO_RCVBUF: {}", strerror(errno));
   }
 
   // Set send buffer size
   int send_buf = config_.send_buffer_size;
-  if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buf, sizeof(send_buf)) < 0) {
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &send_buf, sizeof(send_buf)) < 0) {
     spdlog::warn("Failed to set SO_SNDBUF: {}", strerror(errno));
   }
 
   return true;
 }
 
-void TcpServer::RemoveConnection(int fd) {
-  std::lock_guard<std::mutex> lock(connections_mutex_);
-  connection_fds_.erase(fd);
+void TcpServer::RemoveConnection(int socket_fd) {
+  std::scoped_lock lock(connections_mutex_);
+  connection_fds_.erase(socket_fd);
 }
 
 }  // namespace server

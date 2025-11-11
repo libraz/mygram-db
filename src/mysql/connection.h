@@ -66,7 +66,7 @@ class Connection {
   /**
    * @brief Construct connection (not yet connected)
    */
-  explicit Connection(const Config& config);
+  explicit Connection(Config config);
 
   /**
    * @brief Destructor - closes connection if open

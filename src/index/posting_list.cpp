@@ -47,9 +47,9 @@ void PostingList::Add(DocId doc_id) {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Get current docs, add new one, re-encode
     auto docs = DecodeDelta(delta_compressed_);
-    auto it = std::lower_bound(docs.begin(), docs.end(), doc_id);
-    if (it == docs.end() || *it != doc_id) {
-      docs.insert(it, doc_id);
+    auto iterator = std::lower_bound(docs.begin(), docs.end(), doc_id);
+    if (iterator == docs.end() || *iterator != doc_id) {
+      docs.insert(iterator, doc_id);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -58,7 +58,9 @@ void PostingList::Add(DocId doc_id) {
 }
 
 void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
-  if (doc_ids.empty()) return;
+  if (doc_ids.empty()) {
+    return;
+  }
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Merge sorted arrays
@@ -77,9 +79,9 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 void PostingList::Remove(DocId doc_id) {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     auto docs = DecodeDelta(delta_compressed_);
-    auto it = std::find(docs.begin(), docs.end(), doc_id);
-    if (it != docs.end()) {
-      docs.erase(it);
+    auto iterator = std::find(docs.begin(), docs.end(), doc_id);
+    if (iterator != docs.end()) {
+      docs.erase(iterator);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -91,36 +93,32 @@ bool PostingList::Contains(DocId doc_id) const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     auto docs = DecodeDelta(delta_compressed_);
     return std::binary_search(docs.begin(), docs.end(), doc_id);
-  } else {
-    return roaring_bitmap_contains(roaring_bitmap_, doc_id);
   }
+  return roaring_bitmap_contains(roaring_bitmap_, doc_id);
 }
 
 std::vector<DocId> PostingList::GetAll() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return DecodeDelta(delta_compressed_);
-  } else {
-    uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
-    std::vector<DocId> result(size);
-    roaring_bitmap_to_uint32_array(roaring_bitmap_, result.data());
-    return result;
   }
+  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  std::vector<DocId> result(size);
+  roaring_bitmap_to_uint32_array(roaring_bitmap_, result.data());
+  return result;
 }
 
 uint64_t PostingList::Size() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return DecodeDelta(delta_compressed_).size();
-  } else {
-    return roaring_bitmap_get_cardinality(roaring_bitmap_);
   }
+  return roaring_bitmap_get_cardinality(roaring_bitmap_);
 }
 
 size_t PostingList::MemoryUsage() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size() * sizeof(uint32_t);
-  } else {
-    return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
   }
+  return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
@@ -168,9 +166,11 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
 }
 
 void PostingList::Optimize(uint64_t total_docs) {
-  if (total_docs == 0) return;
+  if (total_docs == 0) {
+    return;
+  }
 
-  double density = static_cast<double>(Size()) / total_docs;
+  double density = static_cast<double>(Size()) / static_cast<double>(total_docs);
 
   if (density >= roaring_threshold_ && strategy_ == PostingStrategy::kDeltaCompressed) {
     // Convert to Roaring for high density
@@ -184,7 +184,9 @@ void PostingList::Optimize(uint64_t total_docs) {
 }
 
 void PostingList::ConvertToRoaring() {
-  if (strategy_ == PostingStrategy::kRoaringBitmap) return;
+  if (strategy_ == PostingStrategy::kRoaringBitmap) {
+    return;
+  }
 
   auto docs = DecodeDelta(delta_compressed_);
   roaring_bitmap_ = roaring_bitmap_create();
@@ -199,7 +201,9 @@ void PostingList::ConvertToRoaring() {
 }
 
 void PostingList::ConvertToDelta() {
-  if (strategy_ == PostingStrategy::kDeltaCompressed) return;
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    return;
+  }
 
   auto docs = GetAll();
   delta_compressed_ = EncodeDelta(docs);
@@ -210,7 +214,9 @@ void PostingList::ConvertToDelta() {
 }
 
 std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids) {
-  if (doc_ids.empty()) return {};
+  if (doc_ids.empty()) {
+    return {};
+  }
 
   std::vector<uint32_t> encoded;
   encoded.reserve(doc_ids.size());
@@ -227,7 +233,9 @@ std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids
 }
 
 std::vector<DocId> PostingList::DecodeDelta(const std::vector<uint32_t>& encoded) {
-  if (encoded.empty()) return {};
+  if (encoded.empty()) {
+    return {};
+  }
 
   std::vector<DocId> decoded;
   decoded.reserve(encoded.size());
@@ -252,7 +260,7 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Write size
-    uint32_t size = static_cast<uint32_t>(delta_compressed_.size());
+    auto size = static_cast<uint32_t>(delta_compressed_.size());
     buffer.push_back((size >> 24) & 0xFF);
     buffer.push_back((size >> 16) & 0xFF);
     buffer.push_back((size >> 8) & 0xFF);
@@ -284,12 +292,16 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 }
 
 bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset) {
-  if (offset >= buffer.size()) return false;
+  if (offset >= buffer.size()) {
+    return false;
+  }
 
   // Read strategy
   strategy_ = static_cast<PostingStrategy>(buffer[offset++]);
 
-  if (offset + 4 > buffer.size()) return false;
+  if (offset + 4 > buffer.size()) {
+    return false;
+  }
 
   // Read size
   uint32_t size = (static_cast<uint32_t>(buffer[offset]) << 24) |
@@ -300,7 +312,9 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Read delta-compressed data
-    if (offset + size * 4 > buffer.size()) return false;
+    if (offset + (size * 4) > buffer.size()) {
+      return false;
+    }
 
     delta_compressed_.clear();
     delta_compressed_.reserve(size);
@@ -314,22 +328,26 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       offset += 4;
     }
 
-    if (roaring_bitmap_) {
+    if (roaring_bitmap_ != nullptr) {
       roaring_bitmap_free(roaring_bitmap_);
       roaring_bitmap_ = nullptr;
     }
   } else {
     // Read roaring bitmap
-    if (offset + size > buffer.size()) return false;
+    if (offset + size > buffer.size()) {
+      return false;
+    }
 
-    if (roaring_bitmap_) {
+    if (roaring_bitmap_ != nullptr) {
       roaring_bitmap_free(roaring_bitmap_);
     }
 
     roaring_bitmap_ = roaring_bitmap_portable_deserialize(
         reinterpret_cast<const char*>(buffer.data() + offset));
 
-    if (!roaring_bitmap_) return false;
+    if (roaring_bitmap_ == nullptr) {
+      return false;
+    }
 
     offset += size;
     delta_compressed_.clear();

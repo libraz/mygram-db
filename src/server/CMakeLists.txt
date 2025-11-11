@@ -1,5 +1,6 @@
 add_library(mygramdb_server STATIC
   tcp_server.cpp
+  http_server.cpp
   thread_pool.cpp
 )
 
@@ -13,5 +14,7 @@ target_link_libraries(mygramdb_server PUBLIC
   mygramdb_storage
   mygramdb_utils
   spdlog::spdlog
+  httplib::httplib
+  nlohmann_json::nlohmann_json
   Threads::Threads
 )

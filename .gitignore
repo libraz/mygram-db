@@ -16,17 +16,18 @@ CTestTestfile.cmake
 _deps/
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
 
-# Documentation (gitignored as requested)
-docs/
-CLAUDE.md
+# Claude Code configuration
 .claude/
+CLAUDE.md
+
+# Cache
+.cache/
 
 # Generated files
 *.log
@@ -60,6 +61,3 @@ config.yml
 
 # SQL files (may contain sensitive data)
 *.sql
-
-# Examples directory (may contain sensitive data)
-examples/

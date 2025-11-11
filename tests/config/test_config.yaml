@@ -3,6 +3,7 @@ mysql:
   port: 3306
   user: test_user
   password: test_pass
+  database: test_db
   use_gtid: true
   binlog_format: ROW
   binlog_row_image: FULL

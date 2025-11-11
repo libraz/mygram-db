@@ -66,11 +66,8 @@ class BinlogReader {
   /**
    * @brief Construct binlog reader
    */
-  BinlogReader(Connection& connection,
-               index::Index& index,
-               storage::DocumentStore& doc_store,
-               const config::TableConfig& table_config,
-               const Config& config);
+  BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
+               config::TableConfig table_config, const Config& config);
 
   ~BinlogReader();
 
@@ -190,7 +187,7 @@ class BinlogReader {
   /**
    * @brief Write GTID to state file
    */
-  void WriteGTIDToStateFile(const std::string& gtid);
+  void WriteGTIDToStateFile(const std::string& gtid) const;
 
   /**
    * @brief Parse binlog event buffer and create BinlogEvent
@@ -207,8 +204,7 @@ class BinlogReader {
    * @param length Buffer length
    * @return GTID string if found
    */
-  std::optional<std::string> ExtractGTID(const unsigned char* buffer,
-                                          unsigned long length);
+  static std::optional<std::string> ExtractGTID(const unsigned char* buffer, unsigned long length);
 
   /**
    * @brief Parse TABLE_MAP event
@@ -216,8 +212,8 @@ class BinlogReader {
    * @param length Buffer length
    * @return TableMetadata if successfully parsed
    */
-  std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer,
-                                                    unsigned long length);
+  static std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer,
+                                                         unsigned long length);
 
   /**
    * @brief Extract SQL query string from QUERY_EVENT
@@ -225,8 +221,8 @@ class BinlogReader {
    * @param length Buffer length
    * @return Query string if successfully extracted
    */
-  std::optional<std::string> ExtractQueryString(const unsigned char* buffer,
-                                                  unsigned long length);
+  static std::optional<std::string> ExtractQueryString(const unsigned char* buffer,
+                                                       unsigned long length);
 
   /**
    * @brief Check if DDL affects target table
@@ -234,7 +230,7 @@ class BinlogReader {
    * @param table_name Target table name
    * @return true if DDL affects the table
    */
-  bool IsTableAffectingDDL(const std::string& query, const std::string& table_name);
+  static bool IsTableAffectingDDL(const std::string& query, const std::string& table_name);
 };
 
 }  // namespace mysql

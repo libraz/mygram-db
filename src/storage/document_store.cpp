@@ -4,10 +4,13 @@
  */
 
 #include "storage/document_store.h"
+
+#include <cmath>
 #include <spdlog/spdlog.h>
+
 #include <algorithm>
-#include <fstream>
 #include <cstring>
+#include <fstream>
 
 namespace mygramdb {
 namespace storage {
@@ -16,10 +19,10 @@ DocId DocumentStore::AddDocument(
     const std::string& primary_key,
     const std::unordered_map<std::string, FilterValue>& filters) {
   // Check if primary key already exists
-  auto it = pk_to_doc_id_.find(primary_key);
-  if (it != pk_to_doc_id_.end()) {
-    spdlog::warn("Primary key {} already exists with DocID {}", primary_key, it->second);
-    return it->second;
+  auto iterator = pk_to_doc_id_.find(primary_key);
+  if (iterator != pk_to_doc_id_.end()) {
+    spdlog::warn("Primary key {} already exists with DocID {}", primary_key, iterator->second);
+    return iterator->second;
   }
 
   // Assign new DocID
@@ -43,8 +46,8 @@ DocId DocumentStore::AddDocument(
 bool DocumentStore::UpdateDocument(
     DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
   // Check if document exists
-  auto it = doc_id_to_pk_.find(doc_id);
-  if (it == doc_id_to_pk_.end()) {
+  auto iterator = doc_id_to_pk_.find(doc_id);
+  if (iterator == doc_id_to_pk_.end()) {
     spdlog::warn("Document {} does not exist", doc_id);
     return false;
   }
@@ -98,19 +101,19 @@ std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
 }
 
 std::optional<DocId> DocumentStore::GetDocId(const std::string& primary_key) const {
-  auto it = pk_to_doc_id_.find(primary_key);
-  if (it == pk_to_doc_id_.end()) {
+  auto iterator = pk_to_doc_id_.find(primary_key);
+  if (iterator == pk_to_doc_id_.end()) {
     return std::nullopt;
   }
-  return it->second;
+  return iterator->second;
 }
 
 std::optional<std::string> DocumentStore::GetPrimaryKey(DocId doc_id) const {
-  auto it = doc_id_to_pk_.find(doc_id);
-  if (it == doc_id_to_pk_.end()) {
+  auto iterator = doc_id_to_pk_.find(doc_id);
+  if (iterator == doc_id_to_pk_.end()) {
     return std::nullopt;
   }
-  return it->second;
+  return iterator->second;
 }
 
 std::optional<FilterValue> DocumentStore::GetFilterValue(
@@ -133,8 +136,8 @@ std::vector<DocId> DocumentStore::FilterByValue(const std::string& filter_name,
   std::vector<DocId> results;
 
   for (const auto& [doc_id, filters] : doc_filters_) {
-    auto it = filters.find(filter_name);
-    if (it != filters.end() && it->second == value) {
+    auto iterator = filters.find(filter_name);
+    if (iterator != filters.end() && iterator->second == value) {
       results.push_back(doc_id);
     }
   }
@@ -149,13 +152,13 @@ size_t DocumentStore::MemoryUsage() const {
   size_t total = 0;
 
   // doc_id_to_pk_
-  for (const auto& [doc_id, pk] : doc_id_to_pk_) {
-    total += sizeof(DocId) + pk.size();
+  for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
+    total += sizeof(DocId) + primary_key_str.size();
   }
 
   // pk_to_doc_id_
-  for (const auto& [pk, doc_id] : pk_to_doc_id_) {
-    total += pk.size() + sizeof(DocId);
+  for (const auto& [primary_key_str, doc_id] : pk_to_doc_id_) {
+    total += primary_key_str.size() + sizeof(DocId);
   }
 
   // doc_filters_ (approximate)
@@ -164,10 +167,10 @@ size_t DocumentStore::MemoryUsage() const {
     for (const auto& [name, value] : filters) {
       total += name.size();
       total += std::visit(
-          [](const auto& v) -> size_t {
-            using T = std::decay_t<decltype(v)>;
+          [](const auto& filter_value) -> size_t {
+            using T = std::decay_t<decltype(filter_value)>;
             if constexpr (std::is_same_v<T, std::string>) {
-              return v.size();
+              return filter_value.size();
             } else {
               return sizeof(T);
             }
@@ -209,11 +212,11 @@ bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& r
     ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
     // Write next_doc_id
-    uint32_t next_id = static_cast<uint32_t>(next_doc_id_);
+    auto next_id = static_cast<uint32_t>(next_doc_id_);
     ofs.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
 
     // Write GTID (for replication position)
-    uint32_t gtid_len = static_cast<uint32_t>(replication_gtid.size());
+    auto gtid_len = static_cast<uint32_t>(replication_gtid.size());
     ofs.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
     if (gtid_len > 0) {
       ofs.write(replication_gtid.data(), gtid_len);
@@ -224,15 +227,15 @@ bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& r
     ofs.write(reinterpret_cast<const char*>(&doc_count), sizeof(doc_count));
 
     // Write doc_id -> pk mappings
-    for (const auto& [doc_id, pk] : doc_id_to_pk_) {
+    for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
       // Write doc_id
-      uint32_t id = static_cast<uint32_t>(doc_id);
-      ofs.write(reinterpret_cast<const char*>(&id), sizeof(id));
+      auto doc_id_value = static_cast<uint32_t>(doc_id);
+      ofs.write(reinterpret_cast<const char*>(&doc_id_value), sizeof(doc_id_value));
 
       // Write pk length and pk
-      uint32_t pk_len = static_cast<uint32_t>(pk.size());
+      auto pk_len = static_cast<uint32_t>(primary_key_str.size());
       ofs.write(reinterpret_cast<const char*>(&pk_len), sizeof(pk_len));
-      ofs.write(pk.data(), pk_len);
+      ofs.write(primary_key_str.data(), pk_len);
 
       // Write filters for this document
       auto filter_it = doc_filters_.find(doc_id);
@@ -245,22 +248,22 @@ bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& r
       if (filter_count > 0) {
         for (const auto& [name, value] : filter_it->second) {
           // Write filter name
-          uint32_t name_len = static_cast<uint32_t>(name.size());
+          auto name_len = static_cast<uint32_t>(name.size());
           ofs.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
           ofs.write(name.data(), name_len);
 
           // Write filter type and value
-          uint8_t type_idx = static_cast<uint8_t>(value.index());
+          auto type_idx = static_cast<uint8_t>(value.index());
           ofs.write(reinterpret_cast<const char*>(&type_idx), sizeof(type_idx));
 
-          std::visit([&ofs](const auto& v) {
-            using T = std::decay_t<decltype(v)>;
+          std::visit([&ofs](const auto& filter_value) {
+            using T = std::decay_t<decltype(filter_value)>;
             if constexpr (std::is_same_v<T, std::string>) {
-              uint32_t str_len = static_cast<uint32_t>(v.size());
+              auto str_len = static_cast<uint32_t>(filter_value.size());
               ofs.write(reinterpret_cast<const char*>(&str_len), sizeof(str_len));
-              ofs.write(v.data(), str_len);
+              ofs.write(filter_value.data(), str_len);
             } else {
-              ofs.write(reinterpret_cast<const char*>(&v), sizeof(v));
+              ofs.write(reinterpret_cast<const char*>(&filter_value), sizeof(filter_value));
             }
           }, value);
         }
@@ -286,15 +289,15 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     }
 
     // Read and verify magic number
-    char magic[4];
-    ifs.read(magic, 4);
-    if (std::memcmp(magic, "MGDS", 4) != 0) {
+    std::array<char, 4> magic{};
+    ifs.read(magic.data(), magic.size());
+    if (std::memcmp(magic.data(), "MGDS", 4) != 0) {
       spdlog::error("Invalid document store file format (bad magic number)");
       return false;
     }
 
     // Read version
-    uint32_t version;
+    uint32_t version = 0;
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (version != 1) {
       spdlog::error("Unsupported document store file version: {}", version);
@@ -302,25 +305,25 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     }
 
     // Read next_doc_id
-    uint32_t next_id;
+    uint32_t next_id = 0;
     ifs.read(reinterpret_cast<char*>(&next_id), sizeof(next_id));
     next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
-    uint32_t gtid_len;
+    uint32_t gtid_len = 0;
     ifs.read(reinterpret_cast<char*>(&gtid_len), sizeof(gtid_len));
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
-      ifs.read(&gtid[0], gtid_len);
-      if (replication_gtid) {
+      ifs.read(gtid.data(), gtid_len);
+      if (replication_gtid != nullptr) {
         *replication_gtid = gtid;
       }
-    } else if (replication_gtid) {
+    } else if (replication_gtid != nullptr) {
       replication_gtid->clear();
     }
 
     // Read document count
-    uint64_t doc_count;
+    uint64_t doc_count = 0;
     ifs.read(reinterpret_cast<char*>(&doc_count), sizeof(doc_count));
 
     // Clear existing data
@@ -331,22 +334,22 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     // Read doc_id -> pk mappings and filters
     for (uint64_t i = 0; i < doc_count; ++i) {
       // Read doc_id
-      uint32_t id;
-      ifs.read(reinterpret_cast<char*>(&id), sizeof(id));
-      DocId doc_id = static_cast<DocId>(id);
+      uint32_t doc_id_value = 0;
+      ifs.read(reinterpret_cast<char*>(&doc_id_value), sizeof(doc_id_value));
+      auto doc_id = static_cast<DocId>(doc_id_value);
 
       // Read pk length and pk
-      uint32_t pk_len;
+      uint32_t pk_len = 0;
       ifs.read(reinterpret_cast<char*>(&pk_len), sizeof(pk_len));
 
-      std::string pk(pk_len, '\0');
-      ifs.read(&pk[0], pk_len);
+      std::string primary_key_str(pk_len, '\0');
+      ifs.read(primary_key_str.data(), pk_len);
 
-      doc_id_to_pk_[doc_id] = pk;
-      pk_to_doc_id_[pk] = doc_id;
+      doc_id_to_pk_[doc_id] = primary_key_str;
+      pk_to_doc_id_[primary_key_str] = doc_id;
 
       // Read filters
-      uint32_t filter_count;
+      uint32_t filter_count = 0;
       ifs.read(reinterpret_cast<char*>(&filter_count), sizeof(filter_count));
 
       if (filter_count > 0) {
@@ -354,79 +357,79 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
         for (uint32_t j = 0; j < filter_count; ++j) {
           // Read filter name
-          uint32_t name_len;
+          uint32_t name_len = 0;
           ifs.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
 
           std::string name(name_len, '\0');
-          ifs.read(&name[0], name_len);
+          ifs.read(name.data(), name_len);
 
           // Read filter type
-          uint8_t type_idx;
+          uint8_t type_idx = 0;
           ifs.read(reinterpret_cast<char*>(&type_idx), sizeof(type_idx));
 
           // Read filter value based on type
           FilterValue value;
           switch (type_idx) {
             case 0: { // bool
-              bool v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              bool bool_value = false;
+              ifs.read(reinterpret_cast<char*>(&bool_value), sizeof(bool_value));
+              value = bool_value;
               break;
             }
             case 1: { // int8_t
-              int8_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              int8_t int8_value = 0;
+              ifs.read(reinterpret_cast<char*>(&int8_value), sizeof(int8_value));
+              value = int8_value;
               break;
             }
             case 2: { // uint8_t
-              uint8_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              uint8_t uint8_value = 0;
+              ifs.read(reinterpret_cast<char*>(&uint8_value), sizeof(uint8_value));
+              value = uint8_value;
               break;
             }
             case 3: { // int16_t
-              int16_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              int16_t int16_value = 0;
+              ifs.read(reinterpret_cast<char*>(&int16_value), sizeof(int16_value));
+              value = int16_value;
               break;
             }
             case 4: { // uint16_t
-              uint16_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              uint16_t uint16_value = 0;
+              ifs.read(reinterpret_cast<char*>(&uint16_value), sizeof(uint16_value));
+              value = uint16_value;
               break;
             }
             case 5: { // int32_t
-              int32_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              int32_t int32_value = 0;
+              ifs.read(reinterpret_cast<char*>(&int32_value), sizeof(int32_value));
+              value = int32_value;
               break;
             }
             case 6: { // uint32_t
-              uint32_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              uint32_t uint32_value = 0;
+              ifs.read(reinterpret_cast<char*>(&uint32_value), sizeof(uint32_value));
+              value = uint32_value;
               break;
             }
             case 7: { // int64_t
-              int64_t v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              int64_t int64_value = 0;
+              ifs.read(reinterpret_cast<char*>(&int64_value), sizeof(int64_value));
+              value = int64_value;
               break;
             }
             case 8: { // std::string
-              uint32_t str_len;
+              uint32_t str_len = 0;
               ifs.read(reinterpret_cast<char*>(&str_len), sizeof(str_len));
-              std::string v(str_len, '\0');
-              ifs.read(&v[0], str_len);
-              value = v;
+              std::string string_value(str_len, '\0');
+              ifs.read(string_value.data(), str_len);
+              value = string_value;
               break;
             }
             case 9: { // double
-              double v;
-              ifs.read(reinterpret_cast<char*>(&v), sizeof(v));
-              value = v;
+              double double_value = NAN;
+              ifs.read(reinterpret_cast<char*>(&double_value), sizeof(double_value));
+              value = double_value;
               break;
             }
             default:

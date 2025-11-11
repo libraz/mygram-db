@@ -7,33 +7,33 @@
 
 #ifdef USE_MYSQL
 
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <regex>
+#include <utility>
+
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_util.h"
 #include "mysql/gtid_encoder.h"
 #include "mysql/rows_parser.h"
 #include "storage/gtid_state.h"
 #include "utils/string_utils.h"
-#include <spdlog/spdlog.h>
-#include <chrono>
-#include <cstring>
-#include <regex>
-#include <algorithm>
 
 namespace mygramdb {
 namespace mysql {
 
-BinlogReader::BinlogReader(Connection& connection,
-                           index::Index& index,
-                           storage::DocumentStore& doc_store,
-                           const config::TableConfig& table_config,
+BinlogReader::BinlogReader(Connection& connection, index::Index& index,
+                           storage::DocumentStore& doc_store, config::TableConfig table_config,
                            const Config& config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
-      table_config_(table_config),
-      config_(config) {
-  current_gtid_ = config.start_gtid;
-}
+      table_config_(std::move(table_config)),
+      config_(config),
+      current_gtid_(config.start_gtid) {}
 
 BinlogReader::~BinlogReader() {
   Stop();
@@ -152,18 +152,18 @@ void BinlogReader::Stop() {
 }
 
 std::string BinlogReader::GetCurrentGTID() const {
-  std::lock_guard<std::mutex> lock(gtid_mutex_);
+  std::scoped_lock lock(gtid_mutex_);
   return current_gtid_;
 }
 
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
-  std::lock_guard<std::mutex> lock(gtid_mutex_);
+  std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
   spdlog::info("Set replication GTID to: {}", gtid);
 }
 
 size_t BinlogReader::GetQueueSize() const {
-  std::lock_guard<std::mutex> lock(queue_mutex_);
+  std::scoped_lock lock(queue_mutex_);
   return event_queue_.size();
 }
 
@@ -173,7 +173,7 @@ void BinlogReader::ReaderThreadFunc() {
   // Get starting GTID
   std::string gtid_set;
   {
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
+    std::scoped_lock lock(gtid_mutex_);
     if (!current_gtid_.empty()) {
       gtid_set = current_gtid_;
       spdlog::info("Starting binlog replication from GTID: {}", gtid_set);
@@ -290,11 +290,9 @@ void BinlogReader::ReaderThreadFunc() {
             spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
           }
           break;  // Exit inner loop to retry from outer loop
-        } else {
-          // Non-recoverable error
-          should_stop_ = true;
-          break;
-        }
+        }  // Non-recoverable error
+        should_stop_ = true;
+        break;
       }
 
       // Check if we have data
@@ -527,11 +525,11 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 }
 
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
-  std::lock_guard<std::mutex> lock(gtid_mutex_);
+  std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
 }
 
-void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) {
+void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) const {
   if (gtid.empty()) {
     return;
   }
@@ -548,7 +546,7 @@ void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) {
 
 std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length) {
-  if (!buffer || length < 19) {
+  if ((buffer == nullptr) || length < 19) {
     // Minimum event size is 19 bytes (header)
     return std::nullopt;
   }
@@ -606,7 +604,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
 
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache_.Get(table_id);
-      if (!table_meta) {
+      if (table_meta == nullptr) {
         spdlog::warn("WRITE_ROWS event for unknown table_id {}", table_id);
         return std::nullopt;
       }
@@ -659,7 +657,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
 
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache_.Get(table_id);
-      if (!table_meta) {
+      if (table_meta == nullptr) {
         spdlog::warn("UPDATE_ROWS event for unknown table_id {}", table_id);
         return std::nullopt;
       }
@@ -717,7 +715,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
 
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache_.Get(table_id);
-      if (!table_meta) {
+      if (table_meta == nullptr) {
         spdlog::warn("DELETE_ROWS event for unknown table_id {}", table_id);
         return std::nullopt;
       }
@@ -792,7 +790,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(
 
 std::optional<std::string> BinlogReader::ExtractGTID(
     const unsigned char* buffer, unsigned long length) {
-  if (!buffer || length < 42) {
+  if ((buffer == nullptr) || length < 42) {
     // GTID event minimum size
     return std::nullopt;
   }
@@ -828,7 +826,7 @@ std::optional<std::string> BinlogReader::ExtractGTID(
 
 std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(
     const unsigned char* buffer, unsigned long length) {
-  if (!buffer || length < 8) {
+  if ((buffer == nullptr) || length < 8) {
     // Minimum TABLE_MAP event size (6 bytes table_id + 2 bytes flags)
     return std::nullopt;
   }
@@ -1048,7 +1046,7 @@ void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid
 
 std::optional<std::string> BinlogReader::ExtractQueryString(
     const unsigned char* buffer, unsigned long length) {
-  if (!buffer || length < 19) {
+  if ((buffer == nullptr) || length < 19) {
     // Minimum: 19 bytes header
     return std::nullopt;
   }
@@ -1132,7 +1130,8 @@ bool BinlogReader::IsTableAffectingDDL(const std::string& query,
   }
 
   // Check for DROP TABLE
-  if (std::regex_search(query_upper, std::regex("DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?`?" + table_upper + "`?"))) {
+  if (std::regex_search(query_upper,
+                        std::regex(R"(DROP\s+TABLE\s+(IF\s+EXISTS\s+)?`?)" + table_upper + "`?"))) {
     return true;
   }
 

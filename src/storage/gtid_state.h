@@ -27,7 +27,7 @@ class GTIDStateFile {
    *
    * @param file_path Path to the state file
    */
-  explicit GTIDStateFile(const std::string& file_path);
+  explicit GTIDStateFile(std::string file_path);
 
   /**
    * @brief Read GTID from state file

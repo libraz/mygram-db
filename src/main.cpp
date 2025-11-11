@@ -8,6 +8,7 @@
 #include "storage/document_store.h"
 #include "storage/snapshot_builder.h"
 #include "server/tcp_server.h"
+#include "server/http_server.h"
 #include "version.h"
 
 #ifdef USE_MYSQL
@@ -23,6 +24,7 @@
 #include <spdlog/spdlog.h>
 
 namespace {
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile std::sig_atomic_t g_shutdown_requested = 0;
 
 /**
@@ -43,6 +45,7 @@ void SignalHandler(int signal) {
  * @param argv Argument values
  * @return Exit code
  */
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
   // Setup signal handlers
   std::signal(SIGINT, SignalHandler);
@@ -55,11 +58,20 @@ int main(int argc, char* argv[]) {
   // Parse command line arguments
   bool config_test_mode = false;
   const char* config_path = nullptr;
+  const char* schema_path = nullptr;
 
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " [OPTIONS] <config.yaml>\n";
+    std::cerr << "Usage: " << argv[0] << " [OPTIONS] <config.yaml|config.json>\n";
     std::cerr << "Options:\n";
-    std::cerr << "  -t, --config-test    Test configuration file and exit\n";
+    std::cerr << "  -t, --config-test              Test configuration file and exit\n";
+    std::cerr << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
+    std::cerr << "\n";
+    std::cerr << "Configuration file format (auto-detected):\n";
+    std::cerr << "  - YAML (.yaml, .yml) - validated against built-in schema\n";
+    std::cerr << "  - JSON (.json)       - validated against built-in schema\n";
+    std::cerr << "\n";
+    std::cerr << "Note: All configurations are validated automatically using the built-in\n";
+    std::cerr << "      JSON Schema. Use --schema only to override with a custom schema.\n";
     return 1;
   }
 
@@ -68,6 +80,12 @@ int main(int argc, char* argv[]) {
     std::string arg = argv[i];
     if (arg == "-t" || arg == "--config-test") {
       config_test_mode = true;
+    } else if (arg == "-s" || arg == "--schema") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --schema requires an argument\n";
+        return 1;
+      }
+      schema_path = argv[++i];
     } else if (config_path == nullptr) {
       config_path = argv[i];
     } else {
@@ -86,11 +104,16 @@ int main(int argc, char* argv[]) {
   }
 
   spdlog::info("Loading configuration from: {}", config_path);
+  if (schema_path != nullptr) {
+    spdlog::info("Using custom JSON Schema: {}", schema_path);
+  } else {
+    spdlog::debug("Using built-in JSON Schema for validation");
+  }
 
   // Load configuration
   mygramdb::config::Config config;
   try {
-    config = mygramdb::config::LoadConfig(config_path);
+    config = mygramdb::config::LoadConfig(config_path, schema_path ? schema_path : "");
   } catch (const std::exception& e) {
     spdlog::error("Failed to load configuration: {}", e.what());
     return 1;
@@ -266,10 +289,38 @@ int main(int argc, char* argv[]) {
   }
 
   spdlog::info("TCP server started on {}:{}", server_config.host, server_config.port);
+
+  // Start HTTP server (if enabled)
+  std::unique_ptr<mygramdb::server::HttpServer> http_server;
+  if (config.api.http.enable) {
+    mygramdb::server::HttpServerConfig http_config;
+    http_config.bind = config.api.http.bind;
+    http_config.port = config.api.http.port;
+
+    http_server = std::make_unique<mygramdb::server::HttpServer>(
+        http_config, *index, *doc_store,
+        table_config.ngram_size,
+        &config,
+#ifdef USE_MYSQL
+        binlog_reader.get()
+#else
+        nullptr
+#endif
+    );
+
+    if (!http_server->Start()) {
+      spdlog::error("Failed to start HTTP server: {}", http_server->GetLastError());
+      tcp_server.Stop();
+      return 1;
+    }
+
+    spdlog::info("HTTP server started on {}:{}", http_config.bind, http_config.port);
+  }
+
   spdlog::info("MygramDB is ready to serve requests");
 
   // Wait for shutdown signal
-  while (!g_shutdown_requested) {
+  while (g_shutdown_requested == 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
@@ -281,6 +332,10 @@ int main(int argc, char* argv[]) {
     binlog_reader->Stop();
   }
 #endif
+
+  if (http_server && http_server->IsRunning()) {
+    http_server->Stop();
+  }
 
   tcp_server.Stop();
 

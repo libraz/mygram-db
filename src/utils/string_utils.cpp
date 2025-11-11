@@ -23,10 +23,18 @@ namespace {
  * @brief Get number of bytes in UTF-8 character from first byte
  */
 int Utf8CharLength(unsigned char first_byte) {
-  if ((first_byte & 0x80) == 0) return 1;  // 0xxxxxxx
-  if ((first_byte & 0xE0) == 0xC0) return 2;  // 110xxxxx
-  if ((first_byte & 0xF0) == 0xE0) return 3;  // 1110xxxx
-  if ((first_byte & 0xF8) == 0xF0) return 4;  // 11110xxx
+  if ((first_byte & 0x80) == 0) {
+    return 1;  // 0xxxxxxx
+  }
+  if ((first_byte & 0xE0) == 0xC0) {
+    return 2;  // 110xxxxx
+  }
+  if ((first_byte & 0xF0) == 0xE0) {
+    return 3;  // 1110xxxx
+  }
+  if ((first_byte & 0xF8) == 0xF0) {
+    return 4;  // 11110xxx
+  }
   return 1;  // Invalid, treat as 1 byte
 }
 
@@ -37,7 +45,7 @@ std::vector<uint32_t> Utf8ToCodepoints(const std::string& text) {
   codepoints.reserve(text.size());  // Over-allocate for ASCII
 
   for (size_t i = 0; i < text.size();) {
-    unsigned char first_byte = static_cast<unsigned char>(text[i]);
+    auto first_byte = static_cast<unsigned char>(text[i]);
     int char_len = Utf8CharLength(first_byte);
 
     if (i + char_len > text.size()) {
@@ -75,21 +83,21 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
   std::string result;
   result.reserve(codepoints.size() * 3);  // Estimate
 
-  for (uint32_t cp : codepoints) {
-    if (cp <= 0x7F) {
-      result += static_cast<char>(cp);
-    } else if (cp <= 0x7FF) {
-      result += static_cast<char>(0xC0 | (cp >> 6));
-      result += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp <= 0xFFFF) {
-      result += static_cast<char>(0xE0 | (cp >> 12));
-      result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-      result += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp <= 0x10FFFF) {
-      result += static_cast<char>(0xF0 | (cp >> 18));
-      result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-      result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-      result += static_cast<char>(0x80 | (cp & 0x3F));
+  for (uint32_t codepoint : codepoints) {
+    if (codepoint <= 0x7F) {
+      result += static_cast<char>(codepoint);
+    } else if (codepoint <= 0x7FF) {
+      result += static_cast<char>(0xC0 | (codepoint >> 6));
+      result += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint <= 0xFFFF) {
+      result += static_cast<char>(0xE0 | (codepoint >> 12));
+      result += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      result += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint <= 0x10FFFF) {
+      result += static_cast<char>(0xF0 | (codepoint >> 18));
+      result += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+      result += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+      result += static_cast<char>(0x80 | (codepoint & 0x3F));
     }
   }
 
@@ -107,10 +115,10 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc,
   // NFKC normalization
   if (nfkc) {
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
-    if (U_SUCCESS(status)) {
+    if (U_SUCCESS(status) != 0) {
       icu::UnicodeString normalized;
       normalizer->normalize(ustr, normalized, status);
-      if (U_SUCCESS(status)) {
+      if (U_SUCCESS(status) != 0) {
         ustr = normalized;
       }
     }
@@ -119,19 +127,17 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc,
   // Width conversion
   if (width == "narrow") {
     // Full-width to half-width conversion
-    icu::Transliterator* trans = icu::Transliterator::createInstance(
-        "Fullwidth-Halfwidth", UTRANS_FORWARD, status);
-    if (U_SUCCESS(status) && trans != nullptr) {
+    std::unique_ptr<icu::Transliterator> trans(icu::Transliterator::createInstance(
+        "Fullwidth-Halfwidth", UTRANS_FORWARD, status));
+    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
       trans->transliterate(ustr);
-      delete trans;
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
-    icu::Transliterator* trans = icu::Transliterator::createInstance(
-        "Halfwidth-Fullwidth", UTRANS_FORWARD, status);
-    if (U_SUCCESS(status) && trans != nullptr) {
+    std::unique_ptr<icu::Transliterator> trans(icu::Transliterator::createInstance(
+        "Halfwidth-Fullwidth", UTRANS_FORWARD, status));
+    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
       trans->transliterate(ustr);
-      delete trans;
     }
   }
 
@@ -177,8 +183,8 @@ std::vector<std::string> GenerateNgrams(const std::string& text, int n) {
   // For n=1 (unigrams), just return each character
   if (n == 1) {
     ngrams.reserve(codepoints.size());
-    for (uint32_t cp : codepoints) {
-      ngrams.push_back(CodepointsToUtf8({cp}));
+    for (uint32_t codepoint : codepoints) {
+      ngrams.push_back(CodepointsToUtf8({codepoint}));
     }
     return ngrams;
   }
@@ -190,8 +196,8 @@ std::vector<std::string> GenerateNgrams(const std::string& text, int n) {
 
   ngrams.reserve(codepoints.size() - n + 1);
   for (size_t i = 0; i <= codepoints.size() - n; ++i) {
-    std::vector<uint32_t> ngram_cp(codepoints.begin() + i,
-                                   codepoints.begin() + i + n);
+    std::vector<uint32_t> ngram_cp(codepoints.begin() + static_cast<std::ptrdiff_t>(i),
+                                   codepoints.begin() + static_cast<std::ptrdiff_t>(i + n));
     ngrams.push_back(CodepointsToUtf8(ngram_cp));
   }
 
@@ -235,16 +241,16 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text) {
   ngrams.reserve(codepoints.size());  // Estimate
 
   for (size_t i = 0; i < codepoints.size(); ++i) {
-    uint32_t cp = codepoints[i];
+    uint32_t codepoint = codepoints[i];
 
-    if (IsCJKIdeograph(cp)) {
+    if (IsCJKIdeograph(codepoint)) {
       // Kanji: tokenize as single character (unigram)
-      ngrams.push_back(CodepointsToUtf8({cp}));
+      ngrams.push_back(CodepointsToUtf8({codepoint}));
     } else {
       // Non-Kanji: tokenize as bigram with next character
       if (i + 1 < codepoints.size()) {
-        uint32_t next_cp = codepoints[i + 1];
-        ngrams.push_back(CodepointsToUtf8({cp, next_cp}));
+        uint32_t next_codepoint = codepoints[i + 1];
+        ngrams.push_back(CodepointsToUtf8({codepoint, next_codepoint}));
 
         // If next is also non-Kanji, we'll create overlapping bigrams
         // This ensures "abc" -> ["ab", "bc"] not just ["ab", "c"]

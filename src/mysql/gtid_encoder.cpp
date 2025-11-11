@@ -17,16 +17,18 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
 
   // Parse GTID set string
   std::vector<Sid> sids;
-  std::istringstream ss(gtid_set);
+  std::istringstream input_stream(gtid_set);
   std::string sid_part;
 
   // Split by comma for multiple SIDs (e.g., "uuid1:1-3,uuid2:5-7")
   // Note: MySQL GTID sets can have multiple UUIDs separated by commas
-  while (std::getline(ss, sid_part, ',')) {
+  while (std::getline(input_stream, sid_part, ',')) {
     // Trim whitespace
     size_t start = sid_part.find_first_not_of(" \t");
     size_t end = sid_part.find_last_not_of(" \t");
-    if (start == std::string::npos) continue;
+    if (start == std::string::npos) {
+      continue;
+    }
     sid_part = sid_part.substr(start, end - start + 1);
 
     // Find the colon that separates UUID from intervals
@@ -40,7 +42,7 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
     std::string intervals_str = sid_part.substr(colon_pos + 1);
 
     // Parse UUID
-    ParseUuid(uuid_str, sid.uuid);
+    ParseUuid(uuid_str, sid.uuid.data());
 
     // Parse intervals (e.g., "1-3:5-7:9")
     std::istringstream interval_ss(intervals_str);
@@ -70,7 +72,7 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
   // Store each SID
   for (const auto& sid : sids) {
     // Store UUID (16 bytes)
-    result.insert(result.end(), sid.uuid, sid.uuid + 16);
+    result.insert(result.end(), sid.uuid.begin(), sid.uuid.end());
 
     // Store number of intervals
     StoreInt64(result, sid.intervals.size());
@@ -93,9 +95,9 @@ void GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
   }
 
   std::string hex_str;
-  for (char c : uuid_str) {
-    if (c != '-') {
-      hex_str += c;
+  for (char character : uuid_str) {
+    if (character != '-') {
+      hex_str += character;
     }
   }
 
@@ -106,7 +108,7 @@ void GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
   // Convert hex string to bytes
   for (size_t i = 0; i < 16; ++i) {
     std::string byte_str = hex_str.substr(i * 2, 2);
-    char* end;
+    char* end = nullptr;
     unsigned long byte_val = std::strtoul(byte_str.c_str(), &end, 16);
     if (end != byte_str.c_str() + 2) {
       throw std::invalid_argument("Invalid UUID hex digits: " + uuid_str);
@@ -124,7 +126,7 @@ GtidEncoder::Interval GtidEncoder::ParseInterval(const std::string& interval_str
   }
   std::string trimmed = interval_str.substr(start_pos, end_pos - start_pos + 1);
 
-  Interval interval;
+  Interval interval{};
   size_t dash_pos = trimmed.find('-');
 
   if (dash_pos == std::string::npos) {

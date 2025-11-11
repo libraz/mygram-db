@@ -5,12 +5,13 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <string>
-#include <vector>
-#include <unordered_map>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <variant>
+#include <vector>
 
 namespace mygramdb {
 namespace storage {
@@ -64,6 +65,14 @@ class DocumentStore {
   DocumentStore() = default;
   ~DocumentStore() = default;
 
+  // Copy constructor and assignment
+  DocumentStore(const DocumentStore&) = default;
+  DocumentStore& operator=(const DocumentStore&) = default;
+
+  // Move constructor and assignment
+  DocumentStore(DocumentStore&&) noexcept = default;
+  DocumentStore& operator=(DocumentStore&&) noexcept = default;
+
   /**
    * @brief Add document
    *
@@ -98,7 +107,7 @@ class DocumentStore {
    * @param doc_id Document ID
    * @return Document if exists
    */
-  std::optional<Document> GetDocument(DocId doc_id) const;
+  [[nodiscard]] std::optional<Document> GetDocument(DocId doc_id) const;
 
   /**
    * @brief Get DocID by primary key
@@ -106,7 +115,7 @@ class DocumentStore {
    * @param primary_key Primary key
    * @return DocID if exists
    */
-  std::optional<DocId> GetDocId(const std::string& primary_key) const;
+  [[nodiscard]] std::optional<DocId> GetDocId(const std::string& primary_key) const;
 
   /**
    * @brief Get primary key by DocID
@@ -114,7 +123,7 @@ class DocumentStore {
    * @param doc_id Document ID
    * @return Primary key if exists
    */
-  std::optional<std::string> GetPrimaryKey(DocId doc_id) const;
+  [[nodiscard]] std::optional<std::string> GetPrimaryKey(DocId doc_id) const;
 
   /**
    * @brief Get filter value
@@ -123,8 +132,8 @@ class DocumentStore {
    * @param filter_name Filter column name
    * @return Filter value if exists
    */
-  std::optional<FilterValue> GetFilterValue(DocId doc_id,
-                                            const std::string& filter_name) const;
+  [[nodiscard]] std::optional<FilterValue> GetFilterValue(
+      DocId doc_id, const std::string& filter_name) const;
 
   /**
    * @brief Filter documents by value
@@ -133,18 +142,18 @@ class DocumentStore {
    * @param value Filter value
    * @return Vector of matching DocIDs
    */
-  std::vector<DocId> FilterByValue(const std::string& filter_name,
-                                   const FilterValue& value) const;
+  [[nodiscard]] std::vector<DocId> FilterByValue(const std::string& filter_name,
+                                                  const FilterValue& value) const;
 
   /**
    * @brief Get total document count
    */
-  size_t Size() const { return doc_id_to_pk_.size(); }
+  [[nodiscard]] size_t Size() const { return doc_id_to_pk_.size(); }
 
   /**
    * @brief Get memory usage estimate
    */
-  size_t MemoryUsage() const;
+  [[nodiscard]] size_t MemoryUsage() const;
 
   /**
    * @brief Clear all documents
@@ -157,7 +166,8 @@ class DocumentStore {
    * @param replication_gtid Optional GTID position for replication (empty if not using replication)
    * @return true if successful
    */
-  bool SaveToFile(const std::string& filepath, const std::string& replication_gtid = "") const;
+  [[nodiscard]] bool SaveToFile(const std::string& filepath,
+                                 const std::string& replication_gtid = "") const;
 
   /**
    * @brief Deserialize document store from file
@@ -165,7 +175,8 @@ class DocumentStore {
    * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
    * @return true if successful
    */
-  bool LoadFromFile(const std::string& filepath, std::string* replication_gtid = nullptr);
+  [[nodiscard]] bool LoadFromFile(const std::string& filepath,
+                                   std::string* replication_gtid = nullptr);
 
  private:
   // Next DocID to assign

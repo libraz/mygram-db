@@ -1,0 +1,93 @@
+{
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "repl_user",
+    "password": "your_password_here",
+    "database": "mydb",
+    "use_gtid": true,
+    "binlog_format": "ROW",
+    "binlog_row_image": "FULL",
+    "connect_timeout_ms": 3000
+  },
+  "tables": [
+    {
+      "name": "articles",
+      "primary_key": "id",
+      "text_source": {
+        "column": "content",
+        "delimiter": " "
+      },
+      "filters": [
+        {
+          "name": "status",
+          "type": "int",
+          "dict_compress": false,
+          "bitmap_index": false
+        },
+        {
+          "name": "category",
+          "type": "string",
+          "dict_compress": false,
+          "bitmap_index": false
+        },
+        {
+          "name": "created_at",
+          "type": "datetime"
+        }
+      ],
+      "ngram_size": 1,
+      "posting": {
+        "block_size": 128,
+        "freq_bits": 0,
+        "use_roaring": "auto"
+      },
+      "where_clause": ""
+    }
+  ],
+  "build": {
+    "mode": "select_snapshot",
+    "batch_size": 5000,
+    "parallelism": 2,
+    "throttle_ms": 0
+  },
+  "replication": {
+    "enable": true,
+    "server_id": 12345,
+    "start_from": "snapshot",
+    "state_file": "./mygramdb_replication.state",
+    "queue_size": 10000,
+    "reconnect_backoff_min_ms": 500,
+    "reconnect_backoff_max_ms": 10000
+  },
+  "memory": {
+    "hard_limit_mb": 8192,
+    "soft_target_mb": 4096,
+    "arena_chunk_mb": 64,
+    "roaring_threshold": 0.18,
+    "minute_epoch": true,
+    "normalize": {
+      "nfkc": true,
+      "width": "narrow",
+      "lower": false
+    }
+  },
+  "snapshot": {
+    "dir": "/var/lib/mygramdb/snapshots",
+    "interval_sec": 600,
+    "retain": 3
+  },
+  "api": {
+    "tcp": {
+      "bind": "0.0.0.0",
+      "port": 11311
+    }
+  },
+  "network": {
+    "allow_cidrs": []
+  },
+  "logging": {
+    "level": "info",
+    "json": true
+  }
+}

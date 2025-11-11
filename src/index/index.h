@@ -6,11 +6,13 @@
 #pragma once
 
 #include "index/posting_list.h"
+
+#include <cstddef>
 #include <cstdint>
-#include <string>
-#include <vector>
-#include <unordered_map>
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace mygramdb {
 namespace index {
@@ -30,6 +32,14 @@ class Index {
   explicit Index(int ngram_size = 1, double roaring_threshold = 0.18);
 
   ~Index() = default;
+
+  // Delete copy constructor and assignment (contains unique_ptr)
+  Index(const Index&) = delete;
+  Index& operator=(const Index&) = delete;
+
+  // Move constructor and assignment
+  Index(Index&&) noexcept = default;
+  Index& operator=(Index&&) noexcept = default;
 
   /**
    * @brief Add document to index
@@ -63,7 +73,7 @@ class Index {
    * @param terms Search terms
    * @return Vector of document IDs
    */
-  std::vector<DocId> SearchAnd(const std::vector<std::string>& terms) const;
+  [[nodiscard]] std::vector<DocId> SearchAnd(const std::vector<std::string>& terms) const;
 
   /**
    * @brief Search for documents containing any term (OR)
@@ -71,7 +81,7 @@ class Index {
    * @param terms Search terms
    * @return Vector of document IDs
    */
-  std::vector<DocId> SearchOr(const std::vector<std::string>& terms) const;
+  [[nodiscard]] std::vector<DocId> SearchOr(const std::vector<std::string>& terms) const;
 
   /**
    * @brief Search excluding documents containing any term (NOT)
@@ -80,8 +90,9 @@ class Index {
    * @param terms Terms to exclude
    * @return Vector of document IDs not containing any of the terms
    */
-  std::vector<DocId> SearchNot(const std::vector<DocId>& all_docs,
-                               const std::vector<std::string>& terms) const;
+  [[nodiscard]] std::vector<DocId> SearchNot(
+      const std::vector<DocId>& all_docs,
+      const std::vector<std::string>& terms) const;
 
   /**
    * @brief Count documents containing term
@@ -89,17 +100,17 @@ class Index {
    * @param term Search term
    * @return Document count
    */
-  uint64_t Count(const std::string& term) const;
+  [[nodiscard]] uint64_t Count(const std::string& term) const;
 
   /**
    * @brief Get total number of unique terms
    */
-  size_t TermCount() const { return term_postings_.size(); }
+  [[nodiscard]] size_t TermCount() const { return term_postings_.size(); }
 
   /**
    * @brief Get total memory usage
    */
-  size_t MemoryUsage() const;
+  [[nodiscard]] size_t MemoryUsage() const;
 
   /**
    * @brief Optimize all posting lists
@@ -117,21 +128,21 @@ class Index {
    * @param filepath Output file path
    * @return true if successful
    */
-  bool SaveToFile(const std::string& filepath) const;
+  [[nodiscard]] bool SaveToFile(const std::string& filepath) const;
 
   /**
    * @brief Deserialize index from file
    * @param filepath Input file path
    * @return true if successful
    */
-  bool LoadFromFile(const std::string& filepath);
+  [[nodiscard]] bool LoadFromFile(const std::string& filepath);
 
   /**
    * @brief Get posting list for term (read-only)
    * @param term Search term
    * @return Pointer to posting list, or nullptr if not found
    */
-  const PostingList* GetPostingList(const std::string& term) const;
+  [[nodiscard]] const PostingList* GetPostingList(const std::string& term) const;
 
  private:
   int ngram_size_;

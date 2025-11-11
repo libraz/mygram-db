@@ -24,3 +24,19 @@ target_link_libraries(thread_pool_test
 )
 
 gtest_discover_tests(thread_pool_test)
+
+# HTTP Server tests
+
+add_executable(http_server_test
+  http_server_test.cpp
+)
+
+target_link_libraries(http_server_test
+  mygramdb_server
+  mygramdb_mysql
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+gtest_discover_tests(http_server_test)

@@ -161,7 +161,7 @@ class QueryParser {
   /**
    * @brief Parse filter operator
    */
-  std::optional<FilterOp> ParseFilterOp(const std::string& op_str);
+  static std::optional<FilterOp> ParseFilterOp(const std::string& op_str);
 
   /**
    * @brief Set error message
