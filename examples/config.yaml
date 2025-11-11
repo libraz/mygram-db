@@ -21,7 +21,7 @@ mysql:
   binlog_row_image: "FULL"          # Row image format (default: FULL, required for replication)
   connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
 
-# Table Configuration (supports one table per instance)
+# Table Configuration (supports multiple tables)
 tables:
   - name: "articles"                # Table name in MySQL database
     primary_key: "id"               # Primary key column name (default: id, must be single-column)
@@ -86,6 +86,19 @@ tables:
       block_size: 128               # Block size for delta encoding (default: 128)
       freq_bits: 0                  # Term frequency bits: 0=boolean, 4, or 8 (default: 0)
       use_roaring: "auto"           # Roaring bitmap usage: "auto", "always", "never" (default: auto)
+
+  # Example: Second table (uncomment to enable multi-table mode)
+  # - name: "products"
+  #   primary_key: "product_id"
+  #   text_source:
+  #     concat: ["name", "description"]
+  #     delimiter: " "
+  #   ngram_size: 2
+  #   kanji_ngram_size: 1
+  #   posting:
+  #     block_size: 128
+  #     freq_bits: 0
+  #     use_roaring: "auto"
 
 # Index Build Configuration
 build:

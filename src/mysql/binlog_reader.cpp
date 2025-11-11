@@ -21,19 +21,32 @@
 #include "mysql/binlog_util.h"
 #include "mysql/gtid_encoder.h"
 #include "mysql/rows_parser.h"
+#include "server/tcp_server.h"  // For TableContext definition
 #include "storage/gtid_state.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb {
 namespace mysql {
 
+// Single-table mode constructor (deprecated)
 BinlogReader::BinlogReader(Connection& connection, index::Index& index,
                            storage::DocumentStore& doc_store, config::TableConfig table_config,
                            const Config& config)
     : connection_(connection),
-      index_(index),
-      doc_store_(doc_store),
+      multi_table_mode_(false),
+      index_(&index),
+      doc_store_(&doc_store),
       table_config_(std::move(table_config)),
+      config_(config),
+      current_gtid_(config.start_gtid) {}
+
+// Multi-table mode constructor
+BinlogReader::BinlogReader(Connection& connection,
+                           std::unordered_map<std::string, server::TableContext*> table_contexts,
+                           const Config& config)
+    : connection_(connection),
+      table_contexts_(std::move(table_contexts)),
+      multi_table_mode_(true),
       config_(config),
       current_gtid_(config.start_gtid) {}
 
@@ -425,14 +438,15 @@ bool BinlogReader::PopEvent(BinlogEvent& event) {
 }
 
 bool BinlogReader::EvaluateRequiredFilters(
-    const std::unordered_map<std::string, storage::FilterValue>& filters) const {
+    const std::unordered_map<std::string, storage::FilterValue>& filters,
+    const config::TableConfig& table_config) const {
   // If no required_filters, all data is accepted
-  if (table_config_.required_filters.empty()) {
+  if (table_config.required_filters.empty()) {
     return true;
   }
 
   // Check each required filter condition
-  for (const auto& required_filter : table_config_.required_filters) {
+  for (const auto& required_filter : table_config.required_filters) {
     auto it = filters.find(required_filter.name);
     if (it == filters.end()) {
       spdlog::warn("Required filter column '{}' not found in binlog event",
@@ -549,17 +563,37 @@ bool BinlogReader::CompareFilterValue(
 }
 
 bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
-  // Skip events for other tables
-  if (event.table_name != table_config_.name) {
-    return true;
+  // Determine which index/doc_store/config to use based on mode
+  index::Index* current_index = nullptr;
+  storage::DocumentStore* current_doc_store = nullptr;
+  config::TableConfig* current_config = nullptr;
+
+  if (multi_table_mode_) {
+    // Multi-table mode: lookup table from event
+    auto it = table_contexts_.find(event.table_name);
+    if (it == table_contexts_.end()) {
+      // Event is for a table we're not tracking, skip silently
+      return true;
+    }
+    current_index = it->second->index.get();
+    current_doc_store = it->second->doc_store.get();
+    current_config = &it->second->config;
+  } else {
+    // Single-table mode: skip events for other tables
+    if (event.table_name != table_config_.name) {
+      return true;
+    }
+    current_index = index_;
+    current_doc_store = doc_store_;
+    current_config = &table_config_;
   }
 
   try {
     // Evaluate required_filters to determine if data should exist in index
-    bool matches_required = EvaluateRequiredFilters(event.filters);
+    bool matches_required = EvaluateRequiredFilters(event.filters, *current_config);
 
     // Check if document already exists in index
-    auto doc_id_opt = doc_store_.GetDocId(event.primary_key);
+    auto doc_id_opt = current_doc_store->GetDocId(event.primary_key);
     bool exists = doc_id_opt.has_value();
 
     switch (event.type) {
@@ -567,10 +601,10 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         if (matches_required) {
           // Condition satisfied -> add to index
           storage::DocId doc_id =
-              doc_store_.AddDocument(event.primary_key, event.filters);
+              current_doc_store->AddDocument(event.primary_key, event.filters);
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-          index_.AddDocument(doc_id, normalized);
+          current_index->AddDocument(doc_id, normalized);
 
           spdlog::debug("INSERT: pk={} (added to index)", event.primary_key);
         } else {
@@ -589,10 +623,10 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           // Extract text to remove from index
           if (!event.text.empty()) {
             std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-            index_.RemoveDocument(doc_id, normalized);
+            current_index->RemoveDocument(doc_id, normalized);
           }
 
-          doc_store_.RemoveDocument(doc_id);
+          current_doc_store->RemoveDocument(doc_id);
 
           spdlog::info("UPDATE: pk={} (removed from index, no longer matches required_filters)",
                       event.primary_key);
@@ -600,10 +634,10 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
           storage::DocId doc_id =
-              doc_store_.AddDocument(event.primary_key, event.filters);
+              current_doc_store->AddDocument(event.primary_key, event.filters);
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-          index_.AddDocument(doc_id, normalized);
+          current_index->AddDocument(doc_id, normalized);
 
           spdlog::info("UPDATE: pk={} (added to index, now matches required_filters)",
                       event.primary_key);
@@ -613,7 +647,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           storage::DocId doc_id = doc_id_opt.value();
 
           // Update document store filters
-          doc_store_.UpdateDocument(doc_id, event.filters);
+          current_doc_store->UpdateDocument(doc_id, event.filters);
 
           // For full-text index update, we would need the old text to remove old n-grams
           // The rows_parser provides both before and after images in UPDATE events
@@ -640,11 +674,11 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           // The rows_parser provides the deleted row data including text column
           if (!event.text.empty()) {
             std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-            index_.RemoveDocument(doc_id, normalized);
+            current_index->RemoveDocument(doc_id, normalized);
           }
 
           // Remove from document store
-          doc_store_.RemoveDocument(doc_id);
+          current_doc_store->RemoveDocument(doc_id);
 
           spdlog::debug("DELETE: pk={} (removed from index)", event.primary_key);
         } else {
@@ -663,14 +697,14 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         if (query_upper.find("TRUNCATE") != std::string::npos) {
           // TRUNCATE TABLE - clear all data
           spdlog::warn("TRUNCATE TABLE detected for table {}: {}", event.table_name, query);
-          index_.Clear();
-          doc_store_.Clear();
+          current_index->Clear();
+          current_doc_store->Clear();
           spdlog::info("Cleared index and document store due to TRUNCATE");
         } else if (query_upper.find("DROP") != std::string::npos) {
           // DROP TABLE - clear all data and warn
           spdlog::error("DROP TABLE detected for table {}: {}", event.table_name, query);
-          index_.Clear();
-          doc_store_.Clear();
+          current_index->Clear();
+          current_doc_store->Clear();
           spdlog::error("Table dropped! Index and document store cleared. Please reconfigure or stop MygramDB.");
         } else if (query_upper.find("ALTER") != std::string::npos) {
           // ALTER TABLE - log warning about potential schema mismatch

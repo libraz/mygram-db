@@ -23,15 +23,27 @@ class MygramClientTest : public ::testing::Test {
  protected:
   void SetUp() override {
     // Create server components
-    index_ = std::make_unique<index::Index>(1);
-    doc_store_ = std::make_unique<storage::DocumentStore>();
+    auto index = std::make_unique<index::Index>(1);
+    auto doc_store = std::make_unique<storage::DocumentStore>();
+
+    // Create table context
+    table_context_.name = "test";
+    table_context_.config.ngram_size = 1;
+    table_context_.index = std::move(index);
+    table_context_.doc_store = std::move(doc_store);
+
+    // Keep raw pointers for test access
+    index_ = table_context_.index.get();
+    doc_store_ = table_context_.doc_store.get();
+
+    table_contexts_["test"] = &table_context_;
 
     // Start server on random port
     server::ServerConfig server_config;
     server_config.port = 0;  // Let OS assign port
     server_config.host = "127.0.0.1";
 
-    server_ = std::make_unique<server::TcpServer>(server_config, *index_, *doc_store_);
+    server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_);
     ASSERT_TRUE(server_->Start());
 
     // Wait for server to be ready
@@ -52,8 +64,6 @@ class MygramClientTest : public ::testing::Test {
       server_->Stop();
     }
     server_.reset();
-    doc_store_.reset();
-    index_.reset();
   }
 
   // Helper: Add test documents
@@ -83,8 +93,10 @@ class MygramClientTest : public ::testing::Test {
     index_->AddDocument(3, text3);
   }
 
-  std::unique_ptr<index::Index> index_;
-  std::unique_ptr<storage::DocumentStore> doc_store_;
+  index::Index* index_;  // Raw pointer to table_context_.index
+  storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
+  server::TableContext table_context_;
+  std::unordered_map<std::string, server::TableContext*> table_contexts_;
   std::unique_ptr<server::TcpServer> server_;
   std::unique_ptr<MygramClient> client_;
 };
@@ -124,7 +136,7 @@ TEST_F(MygramClientTest, BasicSearch) {
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  auto result = client_->Search("default", "hello", 100);
+  auto result = client_->Search("test", "hello", 100);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;
@@ -142,7 +154,7 @@ TEST_F(MygramClientTest, SearchWithLimit) {
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  auto result = client_->Search("default", "hello", 1);
+  auto result = client_->Search("test", "hello", 1);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
 
@@ -160,7 +172,7 @@ TEST_F(MygramClientTest, SearchWithAndTerms) {
   ASSERT_FALSE(client_->Connect().has_value());
 
   std::vector<std::string> and_terms = {"world"};
-  auto result = client_->Search("default", "hello", 100, 0, and_terms);
+  auto result = client_->Search("test", "hello", 100, 0, and_terms);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
 
@@ -181,7 +193,7 @@ TEST_F(MygramClientTest, SearchWithNotTerms) {
   // Search for "w" (in "world" and "news"), but NOT "x" (only in "example")
   // This should return doc 3 ("World news today") but not doc 1 ("Hello world example")
   std::vector<std::string> not_terms = {"x"};
-  auto result = client_->Search("default", "w", 100, 0, {}, not_terms);
+  auto result = client_->Search("test", "w", 100, 0, {}, not_terms);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;
@@ -203,7 +215,7 @@ TEST_F(MygramClientTest, SearchWithFilters) {
   ASSERT_FALSE(client_->Connect().has_value());
 
   std::vector<std::pair<std::string, std::string>> filters = {{"status", "active"}};
-  auto result = client_->Search("default", "hello", 100, 0, {}, {}, filters);
+  auto result = client_->Search("test", "hello", 100, 0, {}, {}, filters);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;
@@ -220,7 +232,7 @@ TEST_F(MygramClientTest, Count) {
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  auto result = client_->Count("default", "hello");
+  auto result = client_->Count("test", "hello");
 
   ASSERT_TRUE(std::holds_alternative<CountResponse>(result))
       << "Count error: " << std::get<Error>(result).message;
@@ -238,7 +250,7 @@ TEST_F(MygramClientTest, CountWithFilters) {
   ASSERT_FALSE(client_->Connect().has_value());
 
   std::vector<std::pair<std::string, std::string>> filters = {{"status", "active"}};
-  auto result = client_->Count("default", "world", {}, {}, filters);
+  auto result = client_->Count("test", "world", {}, {}, filters);
 
   ASSERT_TRUE(std::holds_alternative<CountResponse>(result))
       << "Count error: " << std::get<Error>(result).message;
@@ -255,7 +267,7 @@ TEST_F(MygramClientTest, GetDocument) {
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  auto result = client_->Get("default", "1");
+  auto result = client_->Get("test", "1");
 
   ASSERT_TRUE(std::holds_alternative<Document>(result))
       << "Get error: " << std::get<Error>(result).message;
@@ -320,7 +332,7 @@ TEST_F(MygramClientTest, DebugMode) {
   EXPECT_FALSE(err.has_value()) << "Debug enable error: " << err.value_or("");
 
   // Perform search - should include debug info
-  auto result = client_->Search("default", "hello", 100);
+  auto result = client_->Search("test", "hello", 100);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
 
@@ -334,24 +346,21 @@ TEST_F(MygramClientTest, DebugMode) {
 
 /**
  * @brief Test error handling - invalid table
- * Note: Current implementation doesn't validate table names,
- * as it uses a single-table design. The table parameter is ignored.
- * This test verifies the search still works with any table name.
  */
 TEST_F(MygramClientTest, ErrorHandling_InvalidTable) {
   AddTestDocuments();
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  // Search with any table name should work (table name is ignored)
+  // Search with invalid table name should return error
   auto result = client_->Search("nonexistent_table", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
-      << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(std::holds_alternative<Error>(result))
+      << "Expected error for invalid table";
 
-  // Should still find results since table name is ignored
-  auto resp = std::get<SearchResponse>(result);
-  EXPECT_EQ(resp.total_count, 2);
+  auto err = std::get<Error>(result);
+  EXPECT_TRUE(err.message.find("Table not found") != std::string::npos)
+      << "Error message: " << err.message;
 }
 
 /**
@@ -360,7 +369,7 @@ TEST_F(MygramClientTest, ErrorHandling_InvalidTable) {
 TEST_F(MygramClientTest, ErrorHandling_NotConnected) {
   // Don't connect
 
-  auto result = client_->Search("default", "hello", 100);
+  auto result = client_->Search("test", "hello", 100);
 
   ASSERT_TRUE(std::holds_alternative<Error>(result));
   EXPECT_EQ(std::get<Error>(result).message, "Not connected");
@@ -374,7 +383,7 @@ TEST_F(MygramClientTest, SendCommand) {
 
   ASSERT_FALSE(client_->Connect().has_value());
 
-  auto result = client_->SendCommand("COUNT default hello");
+  auto result = client_->SendCommand("COUNT test hello");
 
   ASSERT_TRUE(std::holds_alternative<std::string>(result))
       << "SendCommand error: " << std::get<Error>(result).message;
@@ -418,7 +427,7 @@ TEST_F(MygramClientTest, EmojiInSearch) {
   ASSERT_FALSE(client_->Connect().has_value());
 
   // Search for emoji
-  auto result = client_->Search("default", "😀", 100);
+  auto result = client_->Search("test", "😀", 100);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;
@@ -444,7 +453,7 @@ TEST_F(MygramClientTest, MultipleEmojisInSearch) {
   ASSERT_FALSE(client_->Connect().has_value());
 
   // Search for specific emoji
-  auto result = client_->Search("default", "🎉", 100);
+  auto result = client_->Search("test", "🎉", 100);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;
@@ -474,7 +483,7 @@ TEST_F(MygramClientTest, EmojiWithAndSearch) {
 
   // Search for emoji AND 'A'
   std::vector<std::string> and_terms = {"A"};
-  auto result = client_->Search("default", "😀", 100, 0, and_terms);
+  auto result = client_->Search("test", "😀", 100, 0, and_terms);
 
   ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
       << "Search error: " << std::get<Error>(result).message;

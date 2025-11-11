@@ -19,8 +19,15 @@
 #include <thread>
 #include <atomic>
 #include <memory>
+#include <unordered_map>
 
 namespace mygramdb {
+
+// Forward declaration
+namespace server {
+struct TableContext;
+}
+
 namespace mysql {
 
 /**
@@ -65,10 +72,21 @@ class BinlogReader {
   };
 
   /**
-   * @brief Construct binlog reader
+   * @brief Construct binlog reader (single-table mode)
+   * @deprecated Use multi-table constructor instead
    */
   BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
                config::TableConfig table_config, const Config& config);
+
+  /**
+   * @brief Construct binlog reader (multi-table mode)
+   * @param connection MySQL connection
+   * @param table_contexts Map of table name to TableContext pointer
+   * @param config Binlog reader configuration
+   */
+  BinlogReader(Connection& connection,
+               std::unordered_map<std::string, server::TableContext*> table_contexts,
+               const Config& config);
 
   ~BinlogReader();
 
@@ -117,9 +135,16 @@ class BinlogReader {
  private:
   Connection& connection_;  // Main connection (used for queries, not binlog)
   std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading
-  index::Index& index_;
-  storage::DocumentStore& doc_store_;
+
+  // Multi-table support
+  std::unordered_map<std::string, server::TableContext*> table_contexts_;
+  bool multi_table_mode_ = false;
+
+  // Single-table mode (deprecated)
+  index::Index* index_ = nullptr;
+  storage::DocumentStore* doc_store_ = nullptr;
   config::TableConfig table_config_;
+
   Config config_;
 
   std::atomic<bool> running_{false};
@@ -183,9 +208,11 @@ class BinlogReader {
   /**
    * @brief Evaluate required_filters conditions for a binlog event
    * @param filters Filter values from binlog event
+   * @param table_config Table configuration containing required_filters
    * @return true if all required_filters conditions are satisfied
    */
-  bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters) const;
+  bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
+                                const config::TableConfig& table_config) const;
 
   /**
    * @brief Compare filter value against required filter condition

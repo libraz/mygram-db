@@ -44,6 +44,9 @@ struct HttpServerConfig {
   bool enable_cors = true;
 };
 
+// Forward declaration for TableContext
+struct TableContext;
+
 /**
  * @brief HTTP server for JSON API
  *
@@ -58,21 +61,19 @@ class HttpServer {
   /**
    * @brief Construct HTTP server
    * @param config Server configuration
-   * @param index N-gram index reference
-   * @param doc_store Document store reference
-   * @param ngram_size N-gram size (0 for hybrid mode)
+   * @param table_contexts Map of table name to TableContext pointer
    * @param full_config Full application configuration
-   * @param binlog_reader Optional binlog reader pointer
+   * @param binlog_reader Optional BinlogReader for replication status
    */
-  HttpServer(HttpServerConfig config, index::Index& index, storage::DocumentStore& doc_store,
-             int ngram_size = 1,
+  HttpServer(HttpServerConfig config,
+             std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
              mysql::BinlogReader* binlog_reader = nullptr
 #else
              void* binlog_reader = nullptr
 #endif
-  );
+             );
 
   ~HttpServer();
 
@@ -114,8 +115,7 @@ class HttpServer {
 
  private:
   HttpServerConfig config_;
-  index::Index& index_;
-  storage::DocumentStore& doc_store_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
   query::QueryParser query_parser_;
 
   std::atomic<bool> running_{false};
@@ -127,7 +127,6 @@ class HttpServer {
   std::unique_ptr<std::thread> server_thread_;
 
   std::string last_error_;
-  int ngram_size_;
   const config::Config* full_config_;
 
 #ifdef USE_MYSQL

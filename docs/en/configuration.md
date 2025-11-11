@@ -197,7 +197,7 @@ Connection settings for MySQL server:
 
 ## Tables Section
 
-Table configuration (supports one table per instance):
+Table configuration (supports multiple tables):
 
 ### Basic Settings
 

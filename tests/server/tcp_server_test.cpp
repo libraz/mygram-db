@@ -7,6 +7,7 @@
 #include "config/config.h"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -24,13 +25,26 @@ using namespace mygramdb;
 class TcpServerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    index_ = std::make_unique<index::Index>(1);
-    doc_store_ = std::make_unique<storage::DocumentStore>();
+    // Create index and doc_store as unique_ptrs
+    auto index = std::make_unique<index::Index>(1);
+    auto doc_store = std::make_unique<storage::DocumentStore>();
+
+    // Store raw pointers in table context
+    table_context_.name = "test";
+    table_context_.config.ngram_size = 1;
+    table_context_.index = std::move(index);
+    table_context_.doc_store = std::move(doc_store);
+
+    // Keep raw pointers for test access
+    index_ = table_context_.index.get();
+    doc_store_ = table_context_.doc_store.get();
+
+    table_contexts_["test"] = &table_context_;
 
     config_.port = 0;  // Let OS assign port
     config_.host = "127.0.0.1";
 
-    server_ = std::make_unique<TcpServer>(config_, *index_, *doc_store_);
+    server_ = std::make_unique<TcpServer>(config_, table_contexts_);
   }
 
   void TearDown() override {
@@ -87,8 +101,10 @@ class TcpServerTest : public ::testing::Test {
   }
 
   ServerConfig config_;
-  std::unique_ptr<index::Index> index_;
-  std::unique_ptr<storage::DocumentStore> doc_store_;
+  index::Index* index_;  // Raw pointer to table_context_.index
+  storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
+  TableContext table_context_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<TcpServer> server_;
 };
 
@@ -638,18 +654,24 @@ TEST_F(TcpServerTest, SaveCommand) {
   EXPECT_TRUE(response.find("OK SAVED") == 0);
   EXPECT_TRUE(response.find(test_file) != std::string::npos);
 
-  // Check files exist
-  std::ifstream index_file(test_file + ".index");
+  // Check directory and files exist (new directory format)
+  std::ifstream meta_file(test_file + "/meta.json");
+  EXPECT_TRUE(meta_file.good());
+  meta_file.close();
+
+  std::ifstream index_file(test_file + "/test.index");
   EXPECT_TRUE(index_file.good());
   index_file.close();
 
-  std::ifstream docs_file(test_file + ".docs");
+  std::ifstream docs_file(test_file + "/test.docs");
   EXPECT_TRUE(docs_file.good());
   docs_file.close();
 
   // Cleanup
-  std::remove((test_file + ".index").c_str());
-  std::remove((test_file + ".docs").c_str());
+  std::remove((test_file + "/meta.json").c_str());
+  std::remove((test_file + "/test.index").c_str());
+  std::remove((test_file + "/test.docs").c_str());
+  std::remove(test_file.c_str());  // Remove directory
 
   close(sock);
 }
@@ -664,14 +686,26 @@ TEST_F(TcpServerTest, LoadCommand) {
   doc_store_->AddDocument("1", {});
   doc_store_->AddDocument("2", {});
 
-  std::string test_file = "/tmp/test_snapshot_load_" + std::to_string(std::time(nullptr));
-  ASSERT_TRUE(index_->SaveToFile(test_file + ".index"));
-  ASSERT_TRUE(doc_store_->SaveToFile(test_file + ".docs"));
+  // Create snapshot directory with new format
+  std::string test_dir = "/tmp/test_snapshot_load_" + std::to_string(std::time(nullptr));
+  mkdir(test_dir.c_str(), 0755);
 
-  // Recreate index and doc_store
-  index_.reset(new mygramdb::index::Index(1, 0.18));
-  doc_store_.reset(new mygramdb::storage::DocumentStore());
-  server_.reset(new mygramdb::server::TcpServer(config_, *index_, *doc_store_, 1, "./snapshots", nullptr));
+  ASSERT_TRUE(index_->SaveToFile(test_dir + "/test.index"));
+  ASSERT_TRUE(doc_store_->SaveToFile(test_dir + "/test.docs"));
+
+  // Create meta.json
+  std::ofstream meta_file(test_dir + "/meta.json");
+  meta_file << "{\"version\":\"1.0\",\"tables\":[\"test\"],\"timestamp\":\"2024-01-01T00:00:00Z\"}";
+  meta_file.close();
+
+  // Recreate index, doc_store, and table context
+  table_context_.index.reset(new mygramdb::index::Index(1, 0.18));
+  table_context_.doc_store.reset(new mygramdb::storage::DocumentStore());
+  index_ = table_context_.index.get();
+  doc_store_ = table_context_.doc_store.get();
+  table_context_.config.ngram_size = 1;
+  table_contexts_["test"] = &table_context_;
+  server_.reset(new mygramdb::server::TcpServer(config_, table_contexts_, "./snapshots", nullptr));
 
   ASSERT_TRUE(server_->Start());
   uint16_t port = server_->GetPort();
@@ -682,18 +716,20 @@ TEST_F(TcpServerTest, LoadCommand) {
   ASSERT_GE(sock, 0);
 
   // Send LOAD command
-  std::string response = SendRequest(sock, "LOAD " + test_file);
+  std::string response = SendRequest(sock, "LOAD " + test_dir);
 
   // Should return OK LOADED
   EXPECT_TRUE(response.find("OK LOADED") == 0);
-  EXPECT_TRUE(response.find(test_file) != std::string::npos);
+  EXPECT_TRUE(response.find(test_dir) != std::string::npos);
 
   // Verify data was loaded - check document count
   EXPECT_EQ(doc_store_->Size(), 2);
 
   // Cleanup
-  std::remove((test_file + ".index").c_str());
-  std::remove((test_file + ".docs").c_str());
+  std::remove((test_dir + "/meta.json").c_str());
+  std::remove((test_dir + "/test.index").c_str());
+  std::remove((test_dir + "/test.docs").c_str());
+  std::remove(test_dir.c_str());
 
   close(sock);
 }
@@ -808,7 +844,7 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
   EXPECT_EQ(debug_on, "OK DEBUG_ON");
 
   // Search with debug mode enabled
-  std::string response = SendRequest(sock, "SEARCH test_table hello LIMIT 10");
+  std::string response = SendRequest(sock, "SEARCH test hello LIMIT 10");
 
   // Should contain results
   EXPECT_TRUE(response.find("OK RESULTS") == 0);
@@ -827,7 +863,7 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
   EXPECT_EQ(debug_off, "OK DEBUG_OFF");
 
   // Search without debug mode
-  std::string response2 = SendRequest(sock, "SEARCH test_table hello LIMIT 10");
+  std::string response2 = SendRequest(sock, "SEARCH test hello LIMIT 10");
 
   // Should contain results but NO debug info
   EXPECT_TRUE(response2.find("OK RESULTS") == 0);
@@ -858,11 +894,11 @@ TEST_F(TcpServerTest, DebugModePerConnection) {
   ASSERT_GE(sock2, 0);
 
   // Search from connection 1 (debug enabled)
-  std::string response1 = SendRequest(sock1, "SEARCH test_table hello LIMIT 10");
+  std::string response1 = SendRequest(sock1, "SEARCH test hello LIMIT 10");
   EXPECT_TRUE(response1.find("DEBUG") != std::string::npos);
 
   // Search from connection 2 (debug disabled)
-  std::string response2 = SendRequest(sock2, "SEARCH test_table hello LIMIT 10");
+  std::string response2 = SendRequest(sock2, "SEARCH test hello LIMIT 10");
   EXPECT_TRUE(response2.find("DEBUG") == std::string::npos);
 
   close(sock1);
@@ -873,10 +909,33 @@ TEST_F(TcpServerTest, DebugModePerConnection) {
  * @brief Test INFO command with table names
  */
 TEST_F(TcpServerTest, InfoCommandWithTables) {
+  // Create additional table contexts
+  auto index2 = std::make_unique<index::Index>(1);
+  auto doc_store2 = std::make_unique<storage::DocumentStore>();
+  TableContext table_context2;
+  table_context2.name = "users";
+  table_context2.config.ngram_size = 1;
+  table_context2.index = std::move(index2);
+  table_context2.doc_store = std::move(doc_store2);
+
+  auto index3 = std::make_unique<index::Index>(1);
+  auto doc_store3 = std::make_unique<storage::DocumentStore>();
+  TableContext table_context3;
+  table_context3.name = "comments";
+  table_context3.config.ngram_size = 1;
+  table_context3.index = std::move(index3);
+  table_context3.doc_store = std::move(doc_store3);
+
+  // Add to table contexts
+  std::unordered_map<std::string, TableContext*> multi_table_contexts;
+  multi_table_contexts["test"] = &table_context_;
+  multi_table_contexts["users"] = &table_context2;
+  multi_table_contexts["comments"] = &table_context3;
+
   // Create a config with table information
   config::Config full_config;
   config::TableConfig table1;
-  table1.name = "articles";
+  table1.name = "test";
   config::TableConfig table2;
   table2.name = "users";
   config::TableConfig table3;
@@ -887,7 +946,7 @@ TEST_F(TcpServerTest, InfoCommandWithTables) {
 
   // Create server with config
   auto server_with_config = std::make_unique<TcpServer>(
-      config_, *index_, *doc_store_, 2, "./snapshots", &full_config);
+      config_, multi_table_contexts, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -906,8 +965,11 @@ TEST_F(TcpServerTest, InfoCommandWithTables) {
   // Should contain Tables section
   EXPECT_TRUE(response.find("# Tables") != std::string::npos);
 
-  // Should contain table names as comma-separated list
-  EXPECT_TRUE(response.find("tables: articles,users,comments") != std::string::npos);
+  // Should contain all table names (order not guaranteed with unordered_map)
+  EXPECT_TRUE(response.find("tables: ") != std::string::npos);
+  EXPECT_TRUE(response.find("test") != std::string::npos);
+  EXPECT_TRUE(response.find("users") != std::string::npos);
+  EXPECT_TRUE(response.find("comments") != std::string::npos);
 
   close(sock);
   server_with_config->Stop();
@@ -953,7 +1015,7 @@ TEST_F(TcpServerTest, InfoCommandWithSingleTable) {
 
   // Create server with config
   auto server_with_config = std::make_unique<TcpServer>(
-      config_, *index_, *doc_store_, 2, "./snapshots", &full_config);
+      config_, table_contexts_, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -969,8 +1031,9 @@ TEST_F(TcpServerTest, InfoCommandWithSingleTable) {
   // Should return OK INFO
   EXPECT_TRUE(response.find("OK INFO") == 0);
 
-  // Should contain table name without commas
-  EXPECT_TRUE(response.find("tables: products") != std::string::npos);
+  // Should contain table name from table_contexts (actual loaded tables)
+  EXPECT_TRUE(response.find("tables: ") != std::string::npos);
+  EXPECT_TRUE(response.find("test") != std::string::npos);
 
   close(sock);
   server_with_config->Stop();
@@ -987,9 +1050,17 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
                        "test document " + std::to_string(i));
   }
 
+  // Create snapshot directory with new format
   std::string test_file = "/tmp/test_blocking_" + std::to_string(std::time(nullptr));
-  ASSERT_TRUE(index_->SaveToFile(test_file + ".index"));
-  ASSERT_TRUE(doc_store_->SaveToFile(test_file + ".docs"));
+  mkdir(test_file.c_str(), 0755);
+
+  ASSERT_TRUE(index_->SaveToFile(test_file + "/test.index"));
+  ASSERT_TRUE(doc_store_->SaveToFile(test_file + "/test.docs"));
+
+  // Create meta.json
+  std::ofstream meta_file(test_file + "/meta.json");
+  meta_file << "{\"version\":\"1.0\",\"tables\":[\"test\"],\"timestamp\":\"2024-01-01T00:00:00Z\"}";
+  meta_file.close();
 
   ASSERT_TRUE(server_->Start());
   uint16_t port = server_->GetPort();
@@ -1072,6 +1143,8 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
   }
 
   // Cleanup
-  std::remove((test_file + ".index").c_str());
-  std::remove((test_file + ".docs").c_str());
+  std::remove((test_file + "/meta.json").c_str());
+  std::remove((test_file + "/test.index").c_str());
+  std::remove((test_file + "/test.docs").c_str());
+  std::remove(test_file.c_str());
 }

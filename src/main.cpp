@@ -21,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <unordered_map>
 #include <spdlog/spdlog.h>
 
 namespace {
@@ -38,6 +39,9 @@ void SignalHandler(int signal) {
 }
 
 }  // namespace
+
+// Use TableContext from tcp_server.h
+using TableContext = mygramdb::server::TableContext;
 
 /**
  * @brief Main entry point
@@ -154,14 +158,9 @@ int main(int argc, char* argv[]) {
     return 0;
   }
 
-  // For now, only support one table
-  const auto& table_config = config.tables[0];
-  spdlog::info("Configured table: {}", table_config.name);
-
-  // Create index and document store
-  auto index = std::make_unique<mygramdb::index::Index>(
-      table_config.ngram_size, table_config.kanji_ngram_size);
-  auto doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
+  // Initialize table contexts for all configured tables
+  spdlog::info("Initializing {} table(s)...", config.tables.size());
+  std::unordered_map<std::string, std::unique_ptr<TableContext>> table_contexts;
 
 #ifdef USE_MYSQL
   // Initialize MySQL connection
@@ -181,37 +180,75 @@ int main(int argc, char* argv[]) {
 
   spdlog::info("Connected to MySQL {}:{}/{}", config.mysql.host, config.mysql.port,
                config.mysql.database);
+#else
+  spdlog::warn("MySQL support not compiled, running without replication");
+#endif
 
-  // Build snapshot
-  spdlog::info("Building snapshot from table '{}'...", table_config.name);
-  mygramdb::storage::SnapshotBuilder snapshot_builder(
-      *mysql_conn, *index, *doc_store, table_config, config.build);
+  // Build snapshots for all tables and collect GTID
+  std::string snapshot_gtid;  // Single GTID for all tables
 
-  bool snapshot_success = snapshot_builder.Build([](const auto& progress) {
-    if (progress.processed_rows % 10000 == 0) {
-      spdlog::info("Processed {} rows ({:.0f} rows/s)",
-                   progress.processed_rows, progress.rows_per_second);
+  // Process each configured table
+  for (const auto& table_config : config.tables) {
+    spdlog::info("Initializing table: '{}'", table_config.name);
+
+    auto ctx = std::make_unique<TableContext>();
+    ctx->name = table_config.name;
+    ctx->config = table_config;
+
+    // Create index and document store for this table
+    ctx->index = std::make_unique<mygramdb::index::Index>(
+        table_config.ngram_size, table_config.kanji_ngram_size);
+    ctx->doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
+
+#ifdef USE_MYSQL
+    // Build snapshot for this table
+    spdlog::info("Building snapshot from table '{}'...", table_config.name);
+    mygramdb::storage::SnapshotBuilder snapshot_builder(
+        *mysql_conn, *ctx->index, *ctx->doc_store, table_config, config.build);
+
+    bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
+      if (progress.processed_rows % 10000 == 0) {
+        spdlog::info("[{}] Processed {} rows ({:.0f} rows/s)",
+                     table_config.name, progress.processed_rows, progress.rows_per_second);
+      }
+    });
+
+    if (!snapshot_success) {
+      spdlog::error("Failed to build snapshot for table '{}': {}",
+                    table_config.name, snapshot_builder.GetLastError());
+      return 1;
     }
-  });
 
-  if (!snapshot_success) {
-    spdlog::error("Failed to build snapshot: {}", snapshot_builder.GetLastError());
-    return 1;
+    spdlog::info("Snapshot build completed for table '{}': {} documents indexed",
+                 table_config.name, snapshot_builder.GetProcessedRows());
+
+    // Capture GTID from first table's snapshot
+    if (snapshot_gtid.empty() && config.replication.enable) {
+      snapshot_gtid = snapshot_builder.GetSnapshotGTID();
+      if (!snapshot_gtid.empty()) {
+        spdlog::info("Captured snapshot GTID for replication: {}", snapshot_gtid);
+      }
+    }
+#endif
+
+    // Store table context
+    table_contexts[table_config.name] = std::move(ctx);
+    spdlog::info("Table '{}' initialized successfully", table_config.name);
   }
 
-  spdlog::info("Snapshot build completed: {} documents indexed",
-               snapshot_builder.GetProcessedRows());
+  spdlog::info("All {} table(s) initialized", table_contexts.size());
 
-  // Determine starting GTID based on replication.start_from configuration
+#ifdef USE_MYSQL
+  // Create single shared BinlogReader for all tables
   std::unique_ptr<mygramdb::mysql::BinlogReader> binlog_reader;
-  std::string start_gtid;
 
-  if (config.replication.enable) {
+  if (config.replication.enable && !table_contexts.empty()) {
+    std::string start_gtid;
     const std::string& start_from = config.replication.start_from;
 
     if (start_from == "snapshot") {
       // Use GTID captured during snapshot build
-      start_gtid = snapshot_builder.GetSnapshotGTID();
+      start_gtid = snapshot_gtid;
       if (start_gtid.empty()) {
         spdlog::warn("Snapshot GTID not available, replication may miss changes");
       } else {
@@ -232,8 +269,8 @@ int main(int argc, char* argv[]) {
       start_gtid = start_from.substr(5);
       spdlog::info("Replication will start from specified GTID: {}", start_gtid);
     } else if (start_from == "state_file") {
-      // Read GTID from state file
-      mygramdb::storage::GTIDStateFile gtid_state("./gtid_state.txt");
+      // Read GTID from state file (single file for all tables)
+      mygramdb::storage::GTIDStateFile gtid_state(config.replication.state_file);
       auto saved_gtid = gtid_state.Read();
       if (saved_gtid) {
         start_gtid = saved_gtid.value();
@@ -244,15 +281,22 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // Create binlog reader
+    // Prepare table_contexts map for BinlogReader
+    std::unordered_map<std::string, TableContext*> table_contexts_ptrs;
+    for (auto& [name, ctx] : table_contexts) {
+      table_contexts_ptrs[name] = ctx.get();
+    }
+
+    // Create single binlog reader for all tables
     mygramdb::mysql::BinlogReader::Config binlog_config;
     binlog_config.start_gtid = start_gtid;
     binlog_config.queue_size = config.replication.queue_size;
+    binlog_config.state_file_path = config.replication.state_file;
 
     binlog_reader = std::make_unique<mygramdb::mysql::BinlogReader>(
-        *mysql_conn, *index, *doc_store, table_config, binlog_config);
+        *mysql_conn, table_contexts_ptrs, binlog_config);
 
-    // Only start if we have a GTID (not for snapshot mode during initial build)
+    // Only start if we have a GTID
     if (!start_gtid.empty()) {
       if (!binlog_reader->Start()) {
         spdlog::error("Failed to start binlog reader");
@@ -260,12 +304,17 @@ int main(int argc, char* argv[]) {
       }
       spdlog::info("Binlog replication started from GTID: {}", start_gtid);
     } else {
-      spdlog::info("Binlog replication initialized but not started (waiting for snapshot GTID)");
+      spdlog::info("Binlog replication initialized but not started (waiting for GTID)");
     }
   }
-#else
-  spdlog::warn("MySQL support not compiled, running without replication");
 #endif
+
+  // Prepare table_contexts map for servers (already prepared above for BinlogReader)
+  // Reuse the same map for TCP server
+  std::unordered_map<std::string, TableContext*> table_contexts_ptrs;
+  for (auto& [name, ctx] : table_contexts) {
+    table_contexts_ptrs[name] = ctx.get();
+  }
 
   // Start TCP server
   mygramdb::server::ServerConfig server_config;
@@ -273,16 +322,19 @@ int main(int argc, char* argv[]) {
   server_config.port = config.api.tcp.port;
   server_config.max_connections = 1000;  // Default value
 
-  mygramdb::server::TcpServer tcp_server(server_config, *index, *doc_store,
-                                         table_config.ngram_size,
-                                         config.snapshot.dir,
-                                         &config,  // Pass full configuration
 #ifdef USE_MYSQL
-                                         binlog_reader.get()
+  mygramdb::server::TcpServer tcp_server(server_config,
+                                         table_contexts_ptrs,
+                                         config.snapshot.dir,
+                                         &config,
+                                         binlog_reader.get());
 #else
-                                         nullptr
+  mygramdb::server::TcpServer tcp_server(server_config,
+                                         table_contexts_ptrs,
+                                         config.snapshot.dir,
+                                         &config,
+                                         nullptr);
 #endif
-                                         );
 
   if (!tcp_server.Start()) {
     spdlog::error("Failed to start TCP server: {}", tcp_server.GetLastError());
@@ -298,16 +350,13 @@ int main(int argc, char* argv[]) {
     http_config.bind = config.api.http.bind;
     http_config.port = config.api.http.port;
 
-    http_server = std::make_unique<mygramdb::server::HttpServer>(
-        http_config, *index, *doc_store,
-        table_config.ngram_size,
-        &config,
 #ifdef USE_MYSQL
-        binlog_reader.get()
+    http_server = std::make_unique<mygramdb::server::HttpServer>(
+        http_config, table_contexts_ptrs, &config, binlog_reader.get());
 #else
-        nullptr
+    http_server = std::make_unique<mygramdb::server::HttpServer>(
+        http_config, table_contexts_ptrs, &config, nullptr);
 #endif
-    );
 
     if (!http_server->Start()) {
       spdlog::error("Failed to start HTTP server: {}", http_server->GetLastError());
@@ -329,7 +378,9 @@ int main(int argc, char* argv[]) {
 
   // Cleanup
 #ifdef USE_MYSQL
+  // Stop shared binlog reader
   if (binlog_reader && binlog_reader->IsRunning()) {
+    spdlog::info("Stopping binlog reader");
     binlog_reader->Stop();
   }
 #endif

@@ -67,7 +67,7 @@
     },
     "tables": {
       "type": "array",
-      "description": "Table configuration (supports one table per instance)",
+      "description": "Table configuration (supports multiple tables)",
       "minItems": 1,
       "items": {
         "type": "object",
