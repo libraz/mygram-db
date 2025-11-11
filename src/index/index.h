@@ -193,6 +193,11 @@ class Index {
    * @brief Get or create posting list for term
    */
   PostingList* GetOrCreatePostingList(const std::string& term);
+
+  /**
+   * @brief Internal search methods (no locking, assumes caller holds lock)
+   */
+  [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
 };
 
 }  // namespace index

@@ -11,6 +11,30 @@ target_link_libraries(document_store_test
 
 gtest_discover_tests(document_store_test)
 
+# DocumentStore concurrent tests
+add_executable(document_store_concurrent_test
+  document_store_concurrent_test.cpp
+)
+
+target_link_libraries(document_store_concurrent_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(document_store_concurrent_test)
+
+# DocumentStore serialization tests
+add_executable(document_store_serialization_test
+  document_store_serialization_test.cpp
+)
+
+target_link_libraries(document_store_serialization_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(document_store_serialization_test)
+
 # GTID state tests (MySQL only)
 if(USE_MYSQL AND MYSQL_FOUND)
   add_executable(gtid_state_test

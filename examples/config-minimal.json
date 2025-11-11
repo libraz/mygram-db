@@ -1,18 +1,31 @@
 {
   "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
     "user": "repl_user",
-    "password": "your_password_here",
-    "database": "mydb"
+    "password": "your_password",
+    "database": "mydb",
+    "use_gtid": true
   },
   "tables": [
     {
       "name": "articles",
+      "primary_key": "id",
       "text_source": {
         "column": "content"
-      }
+      },
+      "ngram_size": 1
     }
   ],
+  "api": {
+    "tcp": {
+      "bind": "0.0.0.0",
+      "port": 11311
+    }
+  },
   "replication": {
-    "server_id": 12345
+    "enable": true,
+    "server_id": 12345,
+    "start_from": "snapshot"
   }
 }

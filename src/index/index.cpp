@@ -98,6 +98,8 @@ void Index::RemoveDocument(DocId doc_id, const std::string& text) {
 }
 
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const {
+  std::scoped_lock lock(postings_mutex_);
+
   if (terms.empty()) {
     return {};
   }
@@ -133,7 +135,8 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const
   return result;
 }
 
-std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {
+std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms) const {
+  // Internal implementation (assumes postings_mutex_ is already locked)
   std::vector<DocId> result;
 
   for (const auto& term : terms) {
@@ -151,14 +154,21 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
   return result;
 }
 
+std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {
+  std::scoped_lock lock(postings_mutex_);
+  return SearchOrInternal(terms);
+}
+
 std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
                                     const std::vector<std::string>& terms) const {
   if (terms.empty()) {
     return all_docs;
   }
 
+  std::scoped_lock lock(postings_mutex_);
+
   // Get union of all documents containing any of the NOT terms
-  std::vector<DocId> excluded_docs = SearchOr(terms);
+  std::vector<DocId> excluded_docs = SearchOrInternal(terms);
 
   // Return set difference: all_docs - excluded_docs
   std::vector<DocId> result;
@@ -170,11 +180,13 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
 }
 
 uint64_t Index::Count(const std::string& term) const {
+  std::scoped_lock lock(postings_mutex_);
   const auto* posting = GetPostingList(term);
   return (posting != nullptr) ? posting->Size() : 0;
 }
 
 size_t Index::MemoryUsage() const {
+  std::scoped_lock lock(postings_mutex_);
   size_t total = 0;
   for (const auto& [term, posting] : term_postings_) {
     total += term.size();  // Term string
@@ -184,6 +196,7 @@ size_t Index::MemoryUsage() const {
 }
 
 Index::IndexStatistics Index::GetStatistics() const {
+  std::scoped_lock lock(postings_mutex_);
   IndexStatistics stats;
   stats.total_terms = term_postings_.size();
   stats.total_postings = 0;
@@ -316,6 +329,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 }
 
 void Index::Clear() {
+  std::scoped_lock lock(postings_mutex_);
   term_postings_.clear();
   spdlog::info("Cleared index");
 }
@@ -334,6 +348,7 @@ PostingList* Index::GetOrCreatePostingList(const std::string& term) {
 }
 
 const PostingList* Index::GetPostingList(const std::string& term) const {
+  // NOTE: This method assumes postings_mutex_ is already locked by the caller
   auto iterator = term_postings_.find(term);
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }
@@ -361,26 +376,32 @@ bool Index::SaveToFile(const std::string& filepath) const {
     auto ngram = static_cast<uint32_t>(ngram_size_);
     ofs.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
 
-    // Write term count
-    uint64_t term_count = term_postings_.size();
-    ofs.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+    uint64_t term_count = 0;
+    // Lock scope: iterate and serialize posting lists
+    {
+      std::scoped_lock lock(postings_mutex_);
 
-    // Write each term and its posting list
-    for (const auto& [term, posting] : term_postings_) {
-      // Write term length and term
-      auto term_len = static_cast<uint32_t>(term.size());
-      ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
-      ofs.write(term.data(), static_cast<std::streamsize>(term_len));
+      // Write term count
+      term_count = term_postings_.size();
+      ofs.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
 
-      // Serialize posting list to buffer
-      std::vector<uint8_t> posting_data;
-      posting->Serialize(posting_data);
+      // Write each term and its posting list
+      for (const auto& [term, posting] : term_postings_) {
+        // Write term length and term
+        auto term_len = static_cast<uint32_t>(term.size());
+        ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+        ofs.write(term.data(), static_cast<std::streamsize>(term_len));
 
-      // Write posting list size and data
-      uint64_t posting_size = posting_data.size();
-      ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-      ofs.write(reinterpret_cast<const char*>(posting_data.data()),
-                static_cast<std::streamsize>(posting_size));
+        // Serialize posting list to buffer
+        std::vector<uint8_t> posting_data;
+        posting->Serialize(posting_data);
+
+        // Write posting list size and data
+        uint64_t posting_size = posting_data.size();
+        ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
+        ofs.write(reinterpret_cast<const char*>(posting_data.data()),
+                  static_cast<std::streamsize>(posting_size));
+      }
     }
 
     ofs.close();
@@ -429,8 +450,8 @@ bool Index::LoadFromFile(const std::string& filepath) {
     uint64_t term_count = 0;
     ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
-    // Clear existing data
-    term_postings_.clear();
+    // Load into a new map to minimize lock time
+    std::unordered_map<std::string, std::unique_ptr<PostingList>> new_postings;
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
@@ -457,10 +478,17 @@ bool Index::LoadFromFile(const std::string& filepath) {
         return false;
       }
 
-      term_postings_[term] = std::move(posting);
+      new_postings[term] = std::move(posting);
     }
 
     ifs.close();
+
+    // Swap the loaded data in with minimal lock time
+    {
+      std::scoped_lock lock(postings_mutex_);
+      term_postings_ = std::move(new_postings);
+    }
+
     spdlog::info("Loaded index from {}: {} terms, {} MB",
                  filepath, term_count, MemoryUsage() / (1024 * 1024));
     return true;

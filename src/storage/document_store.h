@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -69,13 +70,11 @@ class DocumentStore {
   DocumentStore() = default;
   ~DocumentStore() = default;
 
-  // Copy constructor and assignment
-  DocumentStore(const DocumentStore&) = default;
-  DocumentStore& operator=(const DocumentStore&) = default;
-
-  // Move constructor and assignment
-  DocumentStore(DocumentStore&&) noexcept = default;
-  DocumentStore& operator=(DocumentStore&&) noexcept = default;
+  // Non-copyable and non-movable (due to std::shared_mutex)
+  DocumentStore(const DocumentStore&) = delete;
+  DocumentStore& operator=(const DocumentStore&) = delete;
+  DocumentStore(DocumentStore&&) = delete;
+  DocumentStore& operator=(DocumentStore&&) = delete;
 
   /**
    * @brief Add document
@@ -194,6 +193,9 @@ class DocumentStore {
 
   // DocID -> Filter values
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
+
+  // Mutex for thread-safe access (shared for reads, exclusive for writes)
+  mutable std::shared_mutex mutex_;
 };
 
 }  // namespace storage
