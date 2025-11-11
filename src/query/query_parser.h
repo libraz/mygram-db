@@ -29,6 +29,8 @@ enum class QueryType {
   REPLICATION_START,   // Start replication
   CONFIG,              // Get current configuration
   OPTIMIZE,            // Optimize index (convert to Roaring bitmaps)
+  DEBUG_ON,            // Enable debug mode for this connection
+  DEBUG_OFF,           // Disable debug mode for this connection
   UNKNOWN
 };
 
@@ -51,6 +53,25 @@ struct FilterCondition {
   std::string column;
   FilterOp op;
   std::string value;
+};
+
+/**
+ * @brief Debug information for query execution
+ */
+struct DebugInfo {
+  double query_time_ms = 0.0;                    // Total query execution time
+  double parse_time_ms = 0.0;                    // Query parsing time
+  double index_time_ms = 0.0;                    // Index search time
+  double filter_time_ms = 0.0;                   // Filter application time
+  std::vector<std::string> search_terms;         // Search terms used
+  std::vector<std::string> ngrams_used;          // N-grams generated
+  std::vector<size_t> posting_list_sizes;        // Size of each posting list
+  size_t total_candidates = 0;                   // Total candidates before filtering
+  size_t after_intersection = 0;                 // Results after term intersection
+  size_t after_not = 0;                          // Results after NOT filtering
+  size_t after_filters = 0;                      // Results after filter conditions
+  size_t final_results = 0;                      // Final result count
+  std::string optimization_used;                 // Optimization strategy used
 };
 
 /**

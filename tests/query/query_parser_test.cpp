@@ -702,3 +702,49 @@ TEST(QueryParserTest, ComplexQueryWithQuotesAndNot) {
   EXPECT_EQ(query.offset, 100);
   EXPECT_TRUE(query.IsValid());
 }
+
+// DEBUG Command Tests
+TEST(QueryParserTest, DebugOn) {
+  QueryParser parser;
+  auto query = parser.Parse("DEBUG ON");
+
+  EXPECT_EQ(query.type, QueryType::DEBUG_ON);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, DebugOff) {
+  QueryParser parser;
+  auto query = parser.Parse("DEBUG OFF");
+
+  EXPECT_EQ(query.type, QueryType::DEBUG_OFF);
+  EXPECT_TRUE(query.IsValid());
+}
+
+TEST(QueryParserTest, DebugCaseInsensitive) {
+  QueryParser parser;
+  auto query1 = parser.Parse("debug on");
+  auto query2 = parser.Parse("DeBuG oFf");
+
+  EXPECT_EQ(query1.type, QueryType::DEBUG_ON);
+  EXPECT_EQ(query2.type, QueryType::DEBUG_OFF);
+  EXPECT_TRUE(query1.IsValid());
+  EXPECT_TRUE(query2.IsValid());
+}
+
+TEST(QueryParserTest, DebugMissingMode) {
+  QueryParser parser;
+  auto query = parser.Parse("DEBUG");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_FALSE(parser.GetError().empty());
+}
+
+TEST(QueryParserTest, DebugInvalidMode) {
+  QueryParser parser;
+  auto query = parser.Parse("DEBUG INVALID");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_FALSE(parser.GetError().empty());
+}

@@ -43,6 +43,13 @@ void ServerStats::IncrementCommand(query::QueryType type) {
     case query::QueryType::CONFIG:
       cmd_config_++;
       break;
+    case query::QueryType::OPTIMIZE:
+      // Optimize doesn't need a counter
+      break;
+    case query::QueryType::DEBUG_ON:
+    case query::QueryType::DEBUG_OFF:
+      // Debug commands don't need counters
+      break;
     case query::QueryType::UNKNOWN:
       cmd_unknown_++;
       break;
@@ -147,6 +154,10 @@ uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
       return cmd_replication_start_.load();
     case query::QueryType::CONFIG:
       return cmd_config_.load();
+    case query::QueryType::OPTIMIZE:
+    case query::QueryType::DEBUG_ON:
+    case query::QueryType::DEBUG_OFF:
+      return 0;  // These commands don't have counters
     case query::QueryType::UNKNOWN:
       return cmd_unknown_.load();
   }

@@ -30,7 +30,7 @@ namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
 const char* command_list[] = {
   "SEARCH", "COUNT", "GET", "INFO", "SAVE", "LOAD", "CONFIG",
-  "REPLICATION", "quit", "exit", "help", nullptr
+  "REPLICATION", "DEBUG", "quit", "exit", "help", nullptr
 };
 
 /**
@@ -61,6 +61,57 @@ char* CommandGenerator(const char* text, int state) {
 }
 
 /**
+ * @brief Parse the input line and extract tokens
+ * @param line Input line to parse
+ * @return Vector of tokens
+ */
+std::vector<std::string> ParseTokens(const std::string& line) {
+  std::vector<std::string> tokens;
+  std::istringstream iss(line);
+  std::string token;
+  while (iss >> token) {
+    tokens.push_back(token);
+  }
+  return tokens;
+}
+
+/**
+ * @brief Generator for keyword completions
+ * @param keywords List of keywords to complete from
+ * @param text Partial text to complete
+ * @param state 0 for first call, non-zero for subsequent calls
+ * @return Completed keyword or nullptr
+ */
+char* KeywordGenerator(const std::vector<std::string>& keywords, const char* text, int state) {
+  static size_t list_index;
+  static int len;
+
+  if (state == 0) {
+    list_index = 0;
+    len = static_cast<int>(strlen(text));
+  }
+
+  while (list_index < keywords.size()) {
+    const std::string& name = keywords[list_index++];
+    if (len == 0 || strncasecmp(name.c_str(), text, len) == 0) {
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
+      return strdup(name.c_str());
+    }
+  }
+
+  return nullptr;
+}
+
+/**
+ * @brief Wrapper for keyword generator with static storage
+ */
+static std::vector<std::string> current_keywords;
+
+char* KeywordGeneratorWrapper(const char* text, int state) {
+  return KeywordGenerator(current_keywords, text, state);
+}
+
+/**
  * @brief Completion function for readline
  * @param text Text to complete
  * @param start Start position in line buffer
@@ -68,10 +119,113 @@ char* CommandGenerator(const char* text, int state) {
  * @return Array of possible completions
  */
 char** CommandCompletion(const char* text, int start, int /* end */) {
-  // Only complete first word (command name)
-  if (start == 0) {
+  // Disable default filename completion
+  rl_attempted_completion_over = 1;
+
+  // Get the full line buffer up to the cursor
+  std::string line(rl_line_buffer, start);
+  std::vector<std::string> tokens = ParseTokens(line);
+
+  // First word: complete command name
+  if (tokens.empty()) {
     return rl_completion_matches(text, CommandGenerator);
   }
+
+  std::string command = tokens[0];
+  // Convert to uppercase for comparison
+  for (char& c : command) {
+    c = static_cast<char>(toupper(c));
+  }
+
+  size_t token_count = tokens.size();
+
+  // SEARCH <table> <text> [NOT <term>] [FILTER <col=val>] [LIMIT <n>] [OFFSET <n>]
+  if (command == "SEARCH") {
+    if (token_count == 1) {
+      // After SEARCH: suggest table name hint
+      current_keywords = {"<table_name>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (token_count == 2) {
+      // After table name: suggest search text hint
+      current_keywords = {"<search_text>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    // After search text: suggest optional keywords
+    current_keywords = {"NOT", "FILTER", "LIMIT", "OFFSET"};
+    return rl_completion_matches(text, KeywordGeneratorWrapper);
+  }
+
+  // COUNT <table> <text> [NOT <term>] [FILTER <col=val>]
+  if (command == "COUNT") {
+    if (token_count == 1) {
+      current_keywords = {"<table_name>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (token_count == 2) {
+      current_keywords = {"<search_text>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    current_keywords = {"NOT", "FILTER"};
+    return rl_completion_matches(text, KeywordGeneratorWrapper);
+  }
+
+  // GET <table> <primary_key>
+  if (command == "GET") {
+    if (token_count == 1) {
+      current_keywords = {"<table_name>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (token_count == 2) {
+      current_keywords = {"<primary_key>"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    return nullptr;
+  }
+
+  // SAVE [filename]
+  if (command == "SAVE") {
+    if (token_count == 1) {
+      // Enable filename completion for SAVE
+      rl_attempted_completion_over = 0;
+      return nullptr;
+    }
+    return nullptr;
+  }
+
+  // LOAD <filename>
+  if (command == "LOAD") {
+    if (token_count == 1) {
+      // Enable filename completion for LOAD
+      rl_attempted_completion_over = 0;
+      return nullptr;
+    }
+    return nullptr;
+  }
+
+  // REPLICATION STATUS|STOP|START
+  if (command == "REPLICATION") {
+    if (token_count == 1) {
+      current_keywords = {"STATUS", "STOP", "START"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    return nullptr;
+  }
+
+  // DEBUG ON|OFF
+  if (command == "DEBUG") {
+    if (token_count == 1) {
+      current_keywords = {"ON", "OFF"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    return nullptr;
+  }
+
+  // INFO, CONFIG: no arguments
+  if (command == "INFO" || command == "CONFIG") {
+    return nullptr;
+  }
+
   return nullptr;
 }
 #endif
@@ -80,6 +234,8 @@ struct Config {
   std::string host = "127.0.0.1";
   uint16_t port = 11211;
   bool interactive = true;
+  int retry_count = 0;       // Number of retries (0 = no retry)
+  int retry_interval = 3;    // Seconds between retries
 };
 
 class MygramClient {
@@ -99,31 +255,75 @@ class MygramClient {
   }
 
   bool Connect() {
-    sock_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_ < 0) {
-      std::cerr << "Failed to create socket: " << strerror(errno) << '\n';
-      return false;
+    int attempts = 0;
+    int max_attempts = 1 + config_.retry_count;
+
+    while (attempts < max_attempts) {
+      if (attempts > 0) {
+        std::cerr << "\nRetrying in " << config_.retry_interval << " seconds... (attempt "
+                  << (attempts + 1) << "/" << max_attempts << ")\n";
+        sleep(config_.retry_interval);
+      }
+
+      sock_ = socket(AF_INET, SOCK_STREAM, 0);
+      if (sock_ < 0) {
+        std::cerr << "Failed to create socket: " << strerror(errno) << '\n';
+        attempts++;
+        continue;
+      }
+
+      struct sockaddr_in server_addr{};
+      server_addr.sin_family = AF_INET;
+      server_addr.sin_port = htons(config_.port);
+
+      if (inet_pton(AF_INET, config_.host.c_str(), &server_addr.sin_addr) <= 0) {
+        std::cerr << "Invalid address: " << config_.host << '\n';
+        close(sock_);
+        sock_ = -1;
+        return false;  // Don't retry invalid address
+      }
+
+      if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
+        int saved_errno = errno;
+        std::cerr << "Connection failed: " << strerror(saved_errno) << '\n';
+
+        // Provide helpful hints based on error type
+        if (saved_errno == ECONNREFUSED) {
+          std::cerr << "\nPossible reasons:\n";
+          std::cerr << "  1. MygramDB server is not running\n";
+          std::cerr << "  2. Server is still initializing (building initial index from MySQL)\n";
+          std::cerr << "  3. Wrong port (check config.yaml - default is 11211)\n";
+          std::cerr << "\nTo check server status:\n";
+          std::cerr << "  ps aux | grep mygramdb\n";
+          std::cerr << "  lsof -i -P | grep LISTEN | grep " << config_.port << "\n";
+          std::cerr << "\nFor large datasets, initial index build may take 10-30 minutes.\n";
+          std::cerr << "Server will start accepting connections after initialization completes.\n";
+        } else if (saved_errno == ETIMEDOUT) {
+          std::cerr << "\nServer is not responding. Check if the server is running and network is accessible.\n";
+        } else if (saved_errno == ENETUNREACH || saved_errno == EHOSTUNREACH) {
+          std::cerr << "\nNetwork is unreachable. Check hostname and network connectivity.\n";
+        }
+
+        close(sock_);
+        sock_ = -1;
+
+        // Only retry on ECONNREFUSED (server not ready yet)
+        if (saved_errno != ECONNREFUSED) {
+          return false;
+        }
+
+        attempts++;
+        continue;
+      }
+
+      // Connected successfully
+      if (attempts > 0) {
+        std::cerr << "\nConnected successfully after " << attempts << " retry(ies)!\n\n";
+      }
+      return true;
     }
 
-    struct sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(config_.port);
-
-    if (inet_pton(AF_INET, config_.host.c_str(), &server_addr.sin_addr) <= 0) {
-      std::cerr << "Invalid address: " << config_.host << '\n';
-      close(sock_);
-      sock_ = -1;
-      return false;
-    }
-
-    if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
-      std::cerr << "Connection failed: " << strerror(errno) << '\n';
-      close(sock_);
-      sock_ = -1;
-      return false;
-    }
-
-    return true;
+    return false;
   }
 
   void Disconnect() {
@@ -177,7 +377,8 @@ class MygramClient {
   void RunInteractive() const {
     std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
 #ifdef USE_READLINE
-    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help (tab completion enabled)" << '\n';
+    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';
+    std::cout << "Use TAB for context-aware command completion" << '\n';
 #else
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << std::endl;
 #endif
@@ -272,6 +473,8 @@ class MygramClient {
     std::cout << "  REPLICATION STATUS - Show replication status" << '\n';
     std::cout << "  REPLICATION STOP - Stop replication" << '\n';
     std::cout << "  REPLICATION START - Start replication" << '\n';
+    std::cout << "  DEBUG ON - Enable debug mode (shows query execution details)" << '\n';
+    std::cout << "  DEBUG OFF - Disable debug mode" << '\n';
     std::cout << "  quit/exit - Exit the client" << '\n';
     std::cout << "  help - Show this help" << '\n';
   }
@@ -280,7 +483,7 @@ class MygramClient {
   static void PrintResponse(const std::string& response) {
     // Parse response type
     if (response.find("OK RESULTS") == 0) {
-      // SEARCH response: OK RESULTS <count> [<id1> <id2> ...]
+      // SEARCH response: OK RESULTS <count> [<id1> <id2> ...] [DEBUG ...]
       std::istringstream iss(response);
       std::string status;
       std::string results;
@@ -288,9 +491,18 @@ class MygramClient {
       iss >> status >> results >> count;
 
       std::vector<std::string> ids;
-      std::string doc_id;
-      while (iss >> doc_id) {
-        ids.push_back(doc_id);
+      std::string token;
+      std::string debug_info;
+
+      while (iss >> token) {
+        if (token == "DEBUG") {
+          // Read rest of stream as debug info
+          std::string rest;
+          std::getline(iss, rest);
+          debug_info = rest;
+          break;
+        }
+        ids.push_back(token);
       }
 
       std::cout << "(" << count << " results";
@@ -304,14 +516,32 @@ class MygramClient {
       for (size_t i = 0; i < ids.size(); ++i) {
         std::cout << (i + 1) << ") " << ids[i] << '\n';
       }
+
+      // Print debug info if present
+      if (!debug_info.empty()) {
+        std::cout << "\n[DEBUG INFO]" << debug_info << '\n';
+      }
     } else if (response.find("OK COUNT") == 0) {
-      // COUNT response: OK COUNT <n>
+      // COUNT response: OK COUNT <n> [DEBUG ...]
       std::istringstream iss(response);
       std::string status;
       std::string count_str;
       uint64_t count = 0;
       iss >> status >> count_str >> count;
+
       std::cout << "(integer) " << count << '\n';
+
+      // Check for debug info
+      std::string token;
+      if (iss >> token && token == "DEBUG") {
+        std::string rest;
+        std::getline(iss, rest);
+        std::cout << "\n[DEBUG INFO]" << rest << '\n';
+      }
+    } else if (response.find("OK DEBUG_ON") == 0) {
+      std::cout << "Debug mode enabled" << '\n';
+    } else if (response.find("OK DEBUG_OFF") == 0) {
+      std::cout << "Debug mode disabled" << '\n';
     } else if (response.find("OK DOC") == 0) {
       // GET response: OK DOC <primary_key> [<filter=value>...]
       std::cout << response.substr(3) << '\n';  // Remove "OK "
@@ -383,14 +613,18 @@ void PrintUsage(const char* program_name) {
   std::cout << "Usage: " << program_name << " [OPTIONS] [COMMAND]" << '\n';
   std::cout << '\n';
   std::cout << "Options:" << '\n';
-  std::cout << "  -h HOST    Server hostname (default: 127.0.0.1)" << '\n';
-  std::cout << "  -p PORT    Server port (default: 11211)" << '\n';
-  std::cout << "  --help     Show this help" << '\n';
+  std::cout << "  -h HOST         Server hostname (default: 127.0.0.1)" << '\n';
+  std::cout << "  -p PORT         Server port (default: 11211)" << '\n';
+  std::cout << "  --retry N       Retry connection N times if refused (default: 0)" << '\n';
+  std::cout << "  --wait-ready    Keep retrying until server is ready (max 100 attempts)" << '\n';
+  std::cout << "  --help          Show this help" << '\n';
   std::cout << '\n';
   std::cout << "Examples:" << '\n';
   std::cout << "  " << program_name << "                          # Interactive mode" << '\n';
   std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server"
             << '\n';
+  std::cout << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
+  std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready" << '\n';
   std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';
 }
 
@@ -423,6 +657,19 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: -p requires an argument" << '\n';
         return 1;
       }
+    } else if (arg == "--retry") {
+      if (i + 1 < argc) {
+        config.retry_count = std::stoi(argv[++i]);
+        if (config.retry_count < 0) {
+          std::cerr << "Error: --retry value must be non-negative" << '\n';
+          return 1;
+        }
+      } else {
+        std::cerr << "Error: --retry requires an argument" << '\n';
+        return 1;
+      }
+    } else if (arg == "--wait-ready") {
+      config.retry_count = 100;  // Max 100 retries = ~5 minutes
     } else {
       // Assume remaining args are a command
       for (int j = i; j < argc; ++j) {

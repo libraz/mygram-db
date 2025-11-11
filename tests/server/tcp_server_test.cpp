@@ -750,3 +750,120 @@ TEST_F(TcpServerTest, SaveLoadRoundTrip) {
 
   close(sock);
 }
+
+/**
+ * @brief Test DEBUG ON command
+ */
+TEST_F(TcpServerTest, DebugOn) {
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send DEBUG ON command
+  std::string response = SendRequest(sock, "DEBUG ON");
+
+  // Should return OK DEBUG_ON
+  EXPECT_EQ(response, "OK DEBUG_ON");
+
+  close(sock);
+}
+
+/**
+ * @brief Test DEBUG OFF command
+ */
+TEST_F(TcpServerTest, DebugOff) {
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send DEBUG OFF command
+  std::string response = SendRequest(sock, "DEBUG OFF");
+
+  // Should return OK DEBUG_OFF
+  EXPECT_EQ(response, "OK DEBUG_OFF");
+
+  close(sock);
+}
+
+/**
+ * @brief Test DEBUG mode with SEARCH command
+ */
+TEST_F(TcpServerTest, DebugModeWithSearch) {
+  // Add test documents
+  auto doc_id1 = doc_store_->AddDocument("100", {});
+  auto doc_id2 = doc_store_->AddDocument("200", {});
+  index_->AddDocument(doc_id1, "hello world");
+  index_->AddDocument(doc_id2, "test data");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Enable debug mode
+  std::string debug_on = SendRequest(sock, "DEBUG ON");
+  EXPECT_EQ(debug_on, "OK DEBUG_ON");
+
+  // Search with debug mode enabled
+  std::string response = SendRequest(sock, "SEARCH test_table hello LIMIT 10");
+
+  // Should contain results
+  EXPECT_TRUE(response.find("OK RESULTS") == 0);
+
+  // Should contain debug information
+  EXPECT_TRUE(response.find("DEBUG") != std::string::npos);
+  EXPECT_TRUE(response.find("query_time=") != std::string::npos);
+  EXPECT_TRUE(response.find("index_time=") != std::string::npos);
+  EXPECT_TRUE(response.find("terms=") != std::string::npos);
+  EXPECT_TRUE(response.find("ngrams=") != std::string::npos);
+  EXPECT_TRUE(response.find("candidates=") != std::string::npos);
+  EXPECT_TRUE(response.find("final=") != std::string::npos);
+
+  // Disable debug mode
+  std::string debug_off = SendRequest(sock, "DEBUG OFF");
+  EXPECT_EQ(debug_off, "OK DEBUG_OFF");
+
+  // Search without debug mode
+  std::string response2 = SendRequest(sock, "SEARCH test_table hello LIMIT 10");
+
+  // Should contain results but NO debug info
+  EXPECT_TRUE(response2.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response2.find("DEBUG") == std::string::npos);
+
+  close(sock);
+}
+
+/**
+ * @brief Test DEBUG mode is per-connection
+ */
+TEST_F(TcpServerTest, DebugModePerConnection) {
+  // Add test document
+  auto doc_id = doc_store_->AddDocument("100", {});
+  index_->AddDocument(doc_id, "hello world");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  // Connection 1: Enable debug
+  int sock1 = CreateClientSocket(port);
+  ASSERT_GE(sock1, 0);
+  std::string debug_on = SendRequest(sock1, "DEBUG ON");
+  EXPECT_EQ(debug_on, "OK DEBUG_ON");
+
+  // Connection 2: Debug should be off by default
+  int sock2 = CreateClientSocket(port);
+  ASSERT_GE(sock2, 0);
+
+  // Search from connection 1 (debug enabled)
+  std::string response1 = SendRequest(sock1, "SEARCH test_table hello LIMIT 10");
+  EXPECT_TRUE(response1.find("DEBUG") != std::string::npos);
+
+  // Search from connection 2 (debug disabled)
+  std::string response2 = SendRequest(sock2, "SEARCH test_table hello LIMIT 10");
+  EXPECT_TRUE(response2.find("DEBUG") == std::string::npos);
+
+  close(sock1);
+  close(sock2);
+}

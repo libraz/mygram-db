@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -246,6 +247,15 @@ void TcpServer::HandleClient(int client_fd) {
   std::vector<char> buffer(config_.recv_buffer_size);
   std::string accumulated;
 
+  // Initialize connection context
+  ConnectionContext ctx;
+  ctx.client_fd = client_fd;
+  ctx.debug_mode = false;
+  {
+    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    connection_contexts_[client_fd] = ctx;
+  }
+
   while (!should_stop_) {
     ssize_t bytes_received = recv(client_fd, buffer.data(), buffer.size() - 1, 0);
 
@@ -269,9 +279,21 @@ void TcpServer::HandleClient(int client_fd) {
         continue;
       }
 
+      // Get connection context
+      {
+        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        ctx = connection_contexts_[client_fd];
+      }
+
       // Process request
-      std::string response = ProcessRequest(request);
+      std::string response = ProcessRequest(request, ctx);
       stats_.IncrementRequests();
+
+      // Update connection context (in case debug mode changed)
+      {
+        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        connection_contexts_[client_fd] = ctx;
+      }
 
       // Send response
       response += "\r\n";
@@ -285,6 +307,10 @@ void TcpServer::HandleClient(int client_fd) {
 
   // Clean up connection
   RemoveConnection(client_fd);
+  {
+    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    connection_contexts_.erase(client_fd);
+  }
   close(client_fd);
   stats_.DecrementConnections();
 
@@ -292,8 +318,12 @@ void TcpServer::HandleClient(int client_fd) {
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::string TcpServer::ProcessRequest(const std::string& request) {
+std::string TcpServer::ProcessRequest(const std::string& request, ConnectionContext& ctx) {
   spdlog::debug("Processing request: {}", request);
+
+  // Start timing for debug mode
+  auto start_time = std::chrono::high_resolution_clock::now();
+  query::DebugInfo debug_info;
 
   // Parse query
   auto query = query_parser_.Parse(request);
@@ -308,12 +338,20 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
   try {
     switch (query.type) {
       case query::QueryType::SEARCH: {
+        // Start index search timing
+        auto index_start = std::chrono::high_resolution_clock::now();
+
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
         all_search_terms.insert(all_search_terms.end(),
                                query.and_terms.begin(),
                                query.and_terms.end());
+
+        // Collect debug info for search terms
+        if (ctx.debug_mode) {
+          debug_info.search_terms = all_search_terms;
+        }
 
         // Generate n-grams for each term and estimate result sizes
         struct TermInfo {
@@ -344,6 +382,14 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
             }
           }
 
+          // Collect debug info for n-grams and posting list sizes
+          if (ctx.debug_mode) {
+            for (const auto& ngram : ngrams) {
+              debug_info.ngrams_used.push_back(ngram);
+            }
+            debug_info.posting_list_sizes.push_back(min_size);
+          }
+
           term_infos.push_back({std::move(ngrams), min_size});
         }
 
@@ -355,11 +401,24 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
         // If any term has zero results, return empty immediately
         if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
+          if (ctx.debug_mode) {
+            debug_info.optimization_used = "early-exit (empty posting list)";
+            debug_info.final_results = 0;
+            auto end_time = std::chrono::high_resolution_clock::now();
+            debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+            return FormatSearchResponse({}, query.limit, query.offset, &debug_info);
+          }
           return FormatSearchResponse({}, query.limit, query.offset);
         }
 
         // Process most selective term first
         auto results = index_.SearchAnd(term_infos[0].ngrams);
+        if (ctx.debug_mode) {
+          debug_info.total_candidates = results.size();
+          debug_info.after_intersection = results.size();
+          debug_info.optimization_used = "size-based term ordering";
+        }
 
         // Intersect with remaining terms
         for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
@@ -388,9 +447,15 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           }
 
           results = index_.SearchNot(results, not_ngrams);
+          if (ctx.debug_mode) {
+            debug_info.after_not = results.size();
+          }
+        } else if (ctx.debug_mode) {
+          debug_info.after_not = results.size();
         }
 
         // Apply filter conditions
+        auto filter_start = std::chrono::high_resolution_clock::now();
         if (!query.filters.empty()) {
           std::vector<storage::DocId> filtered_results;
           filtered_results.reserve(results.size());
@@ -430,6 +495,24 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
           }
 
           results = filtered_results;
+          if (ctx.debug_mode) {
+            auto filter_end = std::chrono::high_resolution_clock::now();
+            debug_info.filter_time_ms = std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
+            debug_info.after_filters = results.size();
+          }
+        } else if (ctx.debug_mode) {
+          debug_info.after_filters = results.size();
+        }
+
+        // Calculate final debug info
+        if (ctx.debug_mode) {
+          auto end_time = std::chrono::high_resolution_clock::now();
+          auto index_end = std::chrono::high_resolution_clock::now();
+          debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+          debug_info.index_time_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
+          debug_info.final_results = std::min(static_cast<size_t>(query.limit),
+                                              results.size() > query.offset ? results.size() - query.offset : 0);
+          return FormatSearchResponse(results, query.limit, query.offset, &debug_info);
         }
 
         return FormatSearchResponse(results, query.limit, query.offset);
@@ -764,6 +847,18 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
         return FormatError("Failed to start optimization");
       }
 
+      case query::QueryType::DEBUG_ON: {
+        ctx.debug_mode = true;
+        spdlog::debug("Debug mode enabled for connection {}", ctx.client_fd);
+        return "OK DEBUG_ON";
+      }
+
+      case query::QueryType::DEBUG_OFF: {
+        ctx.debug_mode = false;
+        spdlog::debug("Debug mode disabled for connection {}", ctx.client_fd);
+        return "OK DEBUG_OFF";
+      }
+
       default:
         return FormatError("Unknown query type");
     }
@@ -774,7 +869,8 @@ std::string TcpServer::ProcessRequest(const std::string& request) {
 
 std::string TcpServer::FormatSearchResponse(
     const std::vector<index::DocId>& results,
-    uint32_t limit, uint32_t offset) {
+    uint32_t limit, uint32_t offset,
+    const query::DebugInfo* debug_info) {
   std::ostringstream oss;
   oss << "OK RESULTS " << results.size();
 
@@ -789,11 +885,48 @@ std::string TcpServer::FormatSearchResponse(
     }
   }
 
+  // Add debug information if provided
+  if (debug_info != nullptr) {
+    oss << " DEBUG";
+    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
+    oss << " index_time=" << debug_info->index_time_ms << "ms";
+    if (debug_info->filter_time_ms > 0.0) {
+      oss << " filter_time=" << debug_info->filter_time_ms << "ms";
+    }
+    oss << " terms=" << debug_info->search_terms.size();
+    oss << " ngrams=" << debug_info->ngrams_used.size();
+    oss << " candidates=" << debug_info->total_candidates;
+    oss << " after_intersection=" << debug_info->after_intersection;
+    if (debug_info->after_not > 0) {
+      oss << " after_not=" << debug_info->after_not;
+    }
+    if (debug_info->after_filters > 0) {
+      oss << " after_filters=" << debug_info->after_filters;
+    }
+    oss << " final=" << debug_info->final_results;
+    if (!debug_info->optimization_used.empty()) {
+      oss << " optimization=\"" << debug_info->optimization_used << "\"";
+    }
+  }
+
   return oss.str();
 }
 
-std::string TcpServer::FormatCountResponse(uint64_t count) {
-  return "OK COUNT " + std::to_string(count);
+std::string TcpServer::FormatCountResponse(uint64_t count,
+                                          const query::DebugInfo* debug_info) {
+  std::ostringstream oss;
+  oss << "OK COUNT " << count;
+
+  // Add debug information if provided
+  if (debug_info != nullptr) {
+    oss << " DEBUG";
+    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
+    oss << " index_time=" << debug_info->index_time_ms << "ms";
+    oss << " terms=" << debug_info->search_terms.size();
+    oss << " ngrams=" << debug_info->ngrams_used.size();
+  }
+
+  return oss.str();
 }
 
 std::string TcpServer::FormatGetResponse(

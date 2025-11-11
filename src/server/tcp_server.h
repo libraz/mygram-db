@@ -43,6 +43,14 @@ struct ServerConfig {
 };
 
 /**
+ * @brief Per-connection context
+ */
+struct ConnectionContext {
+  int client_fd = -1;
+  bool debug_mode = false;  // Debug mode flag
+};
+
+/**
  * @brief Simple TCP server for text protocol
  *
  * Text protocol format:
@@ -137,6 +145,8 @@ class TcpServer {
   std::unique_ptr<ThreadPool> thread_pool_;
   std::set<int> connection_fds_;  // Active connection file descriptors
   mutable std::mutex connections_mutex_;
+  std::unordered_map<int, ConnectionContext> connection_contexts_;  // Connection contexts
+  mutable std::mutex contexts_mutex_;
 
   std::string last_error_;
   int ngram_size_;  // N-gram size (0 for hybrid mode)
@@ -162,19 +172,32 @@ class TcpServer {
 
   /**
    * @brief Process single request
+   * @param request Request string
+   * @param ctx Connection context (for debug mode, etc.)
+   * @return Response string
    */
-  std::string ProcessRequest(const std::string& request);
+  std::string ProcessRequest(const std::string& request, ConnectionContext& ctx);
 
   /**
    * @brief Format SEARCH response
+   * @param results Search results
+   * @param limit Result limit
+   * @param offset Result offset
+   * @param debug_info Optional debug information
+   * @return Formatted response
    */
   std::string FormatSearchResponse(const std::vector<index::DocId>& results,
-                                   uint32_t limit, uint32_t offset);
+                                   uint32_t limit, uint32_t offset,
+                                   const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format COUNT response
+   * @param count Result count
+   * @param debug_info Optional debug information
+   * @return Formatted response
    */
-  static std::string FormatCountResponse(uint64_t count);
+  static std::string FormatCountResponse(uint64_t count,
+                                        const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response

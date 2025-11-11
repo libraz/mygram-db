@@ -34,7 +34,7 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE commands don't require a table
+  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_* commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE &&
       type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS &&
@@ -42,6 +42,8 @@ bool Query::IsValid() const {
       type != QueryType::REPLICATION_START &&
       type != QueryType::CONFIG &&
       type != QueryType::OPTIMIZE &&
+      type != QueryType::DEBUG_ON &&
+      type != QueryType::DEBUG_OFF &&
       table.empty()) {
     return false;
   }
@@ -152,6 +154,28 @@ Query QueryParser::Parse(const std::string& query_str) {
     Query query;
     query.type = QueryType::OPTIMIZE;
     query.table = "";  // OPTIMIZE doesn't need a table
+    return query;
+  }
+  if (command == "DEBUG") {
+    // DEBUG ON | OFF
+    if (tokens.size() < 2) {
+      SetError("DEBUG requires ON or OFF");
+      return Query{};
+    }
+
+    std::string mode = ToUpper(tokens[1]);
+    Query query;
+    query.table = "";  // DEBUG doesn't need a table
+
+    if (mode == "ON") {
+      query.type = QueryType::DEBUG_ON;
+    } else if (mode == "OFF") {
+      query.type = QueryType::DEBUG_OFF;
+    } else {
+      SetError("DEBUG requires ON or OFF, got: " + mode);
+      return Query{};
+    }
+
     return query;
   }
 
