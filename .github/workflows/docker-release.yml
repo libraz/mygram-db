@@ -16,7 +16,7 @@ jobs:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write  # Required for creating GitHub releases
       packages: write  # Required for pushing to ghcr.io
 
     steps:
