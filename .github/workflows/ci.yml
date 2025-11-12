@@ -7,8 +7,43 @@ on:
     branches: [ main, develop ]
 
 jobs:
+  # Detect which files have changed to skip unnecessary jobs
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+      tests: ${{ steps.filter.outputs.tests }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            src:
+              - 'src/**'
+              - 'CMakeLists.txt'
+              - 'third_party/**'
+              - 'Makefile'
+            tests:
+              - 'tests/**'
+            docker:
+              - 'src/**'
+              - 'CMakeLists.txt'
+              - 'third_party/**'
+              - 'Makefile'
+              - 'Dockerfile'
+              - 'docker/**'
+              - 'examples/**'
+              - '.dockerignore'
+
   build-and-test:
     name: Build and Test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -93,6 +128,8 @@ jobs:
 
   code-quality:
     name: Code Quality Checks
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -130,6 +167,8 @@ jobs:
 
   docker-build:
     name: Docker Build Test
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -163,6 +202,8 @@ jobs:
 
   coverage:
     name: Code Coverage
+    needs: changes
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
 
     steps:
