@@ -526,7 +526,22 @@ OK DEBUG_OFF
 
 ```
 OK RESULTS <count> <id1> <id2> ...
-query_time=<ms> index_time=<ms> filter_time=<ms> terms=<n> ngrams=<n> candidates=<n> after_intersection=<n> after_not=<n> after_filters=<n> final=<n> optimization=<strategy>
+
+# DEBUG
+query_time: <ms>
+index_time: <ms>
+filter_time: <ms>
+terms: <n>
+ngrams: <n>
+candidates: <n>
+after_intersection: <n>
+after_not: <n>
+after_filters: <n>
+final: <n>
+optimization: <strategy>
+order_by: <column> <direction>
+limit: <value> [(default)]
+offset: <value> [(default)]
 ```
 
 例:
@@ -535,25 +550,41 @@ query_time=<ms> index_time=<ms> filter_time=<ms> terms=<n> ngrams=<n> candidates
 OK DEBUG_ON
 
 > SEARCH articles 技術 AND AI FILTER status=1 LIMIT 10
-OK RESULTS 10 101 205 387 ...
+OK RESULTS 1200 101 205 387 450 512 608 721 835 904 1015
 
-[DEBUG INFO]
-query_time=2.45ms index_time=1.20ms filter_time=0.85ms terms=2 ngrams=8 candidates=15000 after_intersection=5000 after_not=5000 after_filters=1200 final=10 optimization=early_exit
+# DEBUG
+query_time: 2.450ms
+index_time: 1.200ms
+filter_time: 0.850ms
+terms: 2
+ngrams: 8
+candidates: 15000
+after_intersection: 5000
+after_not: 5000
+after_filters: 1200
+final: 1200
+optimization: merge_join
+order_by: id ASC
+limit: 10
+offset: 0 (default)
 ```
 
 ### デバッグメトリクスの説明
 
 - **query_time**: クエリ実行の合計時間（ミリ秒）
 - **index_time**: インデックス検索に費やした時間
-- **filter_time**: フィルターと条件の適用に費やした時間
+- **filter_time**: フィルター適用に費やした時間（フィルターがある場合）
 - **terms**: 検索項の数
 - **ngrams**: 検索項から生成されたn-gramの総数
 - **candidates**: インデックスからの初期候補ドキュメント数
 - **after_intersection**: AND項の交差後の結果数
-- **after_not**: NOT項のフィルタリング後の結果数
-- **after_filters**: FILTER条件適用後の結果数
-- **final**: 返された最終結果数
-- **optimization**: 使用された戦略（例: `early_exit`, `none`）
+- **after_not**: NOT項のフィルタリング後の結果数（NOTが使用された場合）
+- **after_filters**: FILTER条件適用後の結果数（フィルターが使用された場合）
+- **final**: 一致するドキュメントの総数（LIMIT/OFFSETの前）
+- **optimization**: 使用された戦略（例: `merge_join`, `early_exit`, `none`）
+- **order_by**: 適用されたソート（カラムと方向）
+- **limit**: 返される結果の最大数（明示的に指定されていない場合は「(default)」と表示）
+- **offset**: ページネーションの結果オフセット（明示的に指定されていない場合は「(default)」と表示）
 
 ## エラーレスポンス
 

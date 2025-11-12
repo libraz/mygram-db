@@ -138,7 +138,7 @@ docker run -d --name mygramdb \
 
 ```bash
 # GitHub Container Registry から最新イメージを取得
-docker pull ghcr.io/your-username/mygram-db:latest
+docker pull ghcr.io/libraz/mygram-db:latest
 
 # 本番用 docker-compose ファイルを使用
 docker-compose -f docker-compose.prod.yml up -d

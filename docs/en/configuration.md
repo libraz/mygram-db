@@ -394,20 +394,6 @@ api:
 Network security configuration:
 
 - **allow_cidrs**: Allow CIDR list (default: `[]` = allow all)
-  - Example: `["192.168.1.0/24", "10.0.0.0/8"]`
-
-```yaml
-network:
-  allow_cidrs:
-    - "192.168.1.0/24"
-    - "10.0.0.0/8"
-```
-
-## Network Section (Optional)
-
-Network security configuration:
-
-- **allow_cidrs**: Allow CIDR list (default: `[]` = allow all)
   - When empty, all IP addresses are allowed
   - When specified, only connections from these IP ranges are accepted
   - Supports standard CIDR notation (e.g., `192.168.1.0/24`, `10.0.0.0/8`)

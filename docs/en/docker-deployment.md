@@ -138,7 +138,7 @@ docker run -d --name mygramdb \
 
 ```bash
 # Pull the latest image from GitHub Container Registry
-docker pull ghcr.io/your-username/mygram-db:latest
+docker pull ghcr.io/libraz/mygram-db:latest
 
 # Use production docker-compose file
 docker-compose -f docker-compose.prod.yml up -d

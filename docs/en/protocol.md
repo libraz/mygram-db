@@ -442,7 +442,22 @@ When debug mode is enabled, SEARCH and COUNT commands return additional debug in
 
 ```
 OK RESULTS <count> <id1> <id2> ...
-query_time=<ms> index_time=<ms> filter_time=<ms> terms=<n> ngrams=<n> candidates=<n> after_intersection=<n> after_not=<n> after_filters=<n> final=<n> optimization=<strategy>
+
+# DEBUG
+query_time: <ms>
+index_time: <ms>
+filter_time: <ms>
+terms: <n>
+ngrams: <n>
+candidates: <n>
+after_intersection: <n>
+after_not: <n>
+after_filters: <n>
+final: <n>
+optimization: <strategy>
+order_by: <column> <direction>
+limit: <value> [(default)]
+offset: <value> [(default)]
 ```
 
 Example:
@@ -451,25 +466,41 @@ Example:
 OK DEBUG_ON
 
 > SEARCH articles tech AND AI FILTER status=1 LIMIT 10
-OK RESULTS 10 101 205 387 ...
+OK RESULTS 1200 101 205 387 450 512 608 721 835 904 1015
 
-[DEBUG INFO]
-query_time=2.45ms index_time=1.20ms filter_time=0.85ms terms=2 ngrams=8 candidates=15000 after_intersection=5000 after_not=5000 after_filters=1200 final=10 optimization=early_exit
+# DEBUG
+query_time: 2.450ms
+index_time: 1.200ms
+filter_time: 0.850ms
+terms: 2
+ngrams: 8
+candidates: 15000
+after_intersection: 5000
+after_not: 5000
+after_filters: 1200
+final: 1200
+optimization: merge_join
+order_by: id ASC
+limit: 10
+offset: 0 (default)
 ```
 
 ### Debug Metrics Explained
 
 - **query_time**: Total query execution time in milliseconds
 - **index_time**: Time spent searching the index
-- **filter_time**: Time spent applying filters and conditions
+- **filter_time**: Time spent applying filters (if any)
 - **terms**: Number of search terms
 - **ngrams**: Total n-grams generated from search terms
 - **candidates**: Initial candidate documents from index
 - **after_intersection**: Results after AND term intersection
-- **after_not**: Results after NOT term filtering
-- **after_filters**: Results after FILTER conditions
-- **final**: Final result count returned
-- **optimization**: Strategy used (e.g., `early_exit`, `none`)
+- **after_not**: Results after NOT term filtering (if NOT used)
+- **after_filters**: Results after FILTER conditions (if filters used)
+- **final**: Total matching documents (before LIMIT/OFFSET)
+- **optimization**: Strategy used (e.g., `merge_join`, `early_exit`, `none`)
+- **order_by**: Applied sorting (column and direction)
+- **limit**: Maximum results returned (shows "(default)" if not explicitly specified)
+- **offset**: Result offset for pagination (shows "(default)" if not explicitly specified)
 
 ## Error Response
 
