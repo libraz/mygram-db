@@ -117,6 +117,19 @@ Statistics ServerStats::GetStatistics() const {
   // Uptime
   stats.uptime_seconds = GetUptimeSeconds();
 
+  // Replication event statistics
+  stats.repl_inserts_applied = repl_inserts_applied_.load();
+  stats.repl_inserts_skipped = repl_inserts_skipped_.load();
+  stats.repl_updates_applied = repl_updates_applied_.load();
+  stats.repl_updates_added = repl_updates_added_.load();
+  stats.repl_updates_removed = repl_updates_removed_.load();
+  stats.repl_updates_modified = repl_updates_modified_.load();
+  stats.repl_updates_skipped = repl_updates_skipped_.load();
+  stats.repl_deletes_applied = repl_deletes_applied_.load();
+  stats.repl_deletes_skipped = repl_deletes_skipped_.load();
+  stats.repl_ddl_executed = repl_ddl_executed_.load();
+  stats.repl_events_skipped_other_tables = repl_events_skipped_other_tables_.load();
+
   return stats;
 }
 
@@ -185,6 +198,19 @@ void ServerStats::Reset() {
   active_connections_.store(0);
   total_connections_.store(0);
   total_requests_.store(0);
+
+  // Reset replication event counters
+  repl_inserts_applied_.store(0);
+  repl_inserts_skipped_.store(0);
+  repl_updates_applied_.store(0);
+  repl_updates_added_.store(0);
+  repl_updates_removed_.store(0);
+  repl_updates_modified_.store(0);
+  repl_updates_skipped_.store(0);
+  repl_deletes_applied_.store(0);
+  repl_deletes_skipped_.store(0);
+  repl_ddl_executed_.store(0);
+  repl_events_skipped_other_tables_.store(0);
 
   // Note: start_time_ is NOT reset
 }

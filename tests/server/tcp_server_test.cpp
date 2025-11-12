@@ -214,7 +214,8 @@ TEST_F(TcpServerTest, SearchWithDocuments) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test hello");
-  EXPECT_EQ(response, "OK RESULTS 2 1 2");
+  // Default ORDER BY: PRIMARY KEY DESC (descending order: 2, 1)
+  EXPECT_EQ(response, "OK RESULTS 2 2 1");
 
   close(sock);
 }
@@ -288,7 +289,8 @@ TEST_F(TcpServerTest, SearchWithLimit) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test test LIMIT 3");
-  EXPECT_EQ(response, "OK RESULTS 5 1 2 3");
+  // Default ORDER BY: PRIMARY KEY DESC (descending order: 5, 4, 3)
+  EXPECT_EQ(response, "OK RESULTS 5 5 4 3");
 
   close(sock);
 }
@@ -312,7 +314,9 @@ TEST_F(TcpServerTest, SearchWithOffset) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test test OFFSET 2");
-  EXPECT_EQ(response, "OK RESULTS 5 3 4 5");
+  // Default ORDER BY: PRIMARY KEY DESC (descending order: 5, 4, 3, 2, 1)
+  // OFFSET 2 skips first 2 results (5, 4), returns: 3, 2, 1
+  EXPECT_EQ(response, "OK RESULTS 5 3 2 1");
 
   close(sock);
 }
@@ -1290,4 +1294,87 @@ TEST_F(TcpServerTest, HybridNgramSearchWithKanjiNgramSize) {
   EXPECT_TRUE(std::find(ids4.begin(), ids4.end(), 4) == ids4.end()) << "Doc 4 should not match";
 
   close(sock4);
+}
+
+/**
+ * @brief Test INFO command includes replication statistics
+ */
+TEST_F(TcpServerTest, InfoCommandReplicationStatistics) {
+  ASSERT_TRUE(server_->Start());
+
+  // Get server statistics and increment some replication counters
+  ServerStats* stats = server_->GetMutableStats();
+  ASSERT_NE(stats, nullptr);
+
+  stats->IncrementReplInsertApplied();
+  stats->IncrementReplInsertApplied();
+  stats->IncrementReplInsertSkipped();
+
+  stats->IncrementReplUpdateAdded();
+  stats->IncrementReplUpdateRemoved();
+  stats->IncrementReplUpdateModified();
+  stats->IncrementReplUpdateSkipped();
+
+  stats->IncrementReplDeleteApplied();
+  stats->IncrementReplDeleteSkipped();
+
+  stats->IncrementReplDdlExecuted();
+  stats->IncrementReplEventsSkippedOtherTables();
+
+  int port = server_->GetPort();
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send INFO command
+  std::string response = SendRequest(sock, "INFO");
+
+  // Should return OK INFO
+  EXPECT_TRUE(response.find("OK INFO") == 0);
+
+  // Check if replication statistics are included
+  EXPECT_TRUE(response.find("replication_inserts_applied: 2") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_inserts_skipped: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_applied: 3") != std::string::npos);  // Added + Removed + Modified
+  EXPECT_TRUE(response.find("replication_updates_added: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_removed: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_modified: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_skipped: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_deletes_applied: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_deletes_skipped: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_ddl_executed: 1") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_events_skipped_other_tables: 1") != std::string::npos);
+
+  close(sock);
+}
+
+/**
+ * @brief Test INFO command replication statistics initially zero
+ */
+TEST_F(TcpServerTest, InfoCommandReplicationStatisticsInitiallyZero) {
+  ASSERT_TRUE(server_->Start());
+
+  int port = server_->GetPort();
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Send INFO command
+  std::string response = SendRequest(sock, "INFO");
+
+  // Should return OK INFO
+  EXPECT_TRUE(response.find("OK INFO") == 0);
+
+  // All replication statistics should be 0 initially
+  EXPECT_TRUE(response.find("replication_inserts_applied: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_inserts_skipped: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_applied: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_added: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_removed: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_modified: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_updates_skipped: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_deletes_applied: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_deletes_skipped: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_ddl_executed: 0") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_events_skipped_other_tables: 0") != std::string::npos);
+
+  close(sock);
 }

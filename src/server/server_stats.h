@@ -53,6 +53,19 @@ struct Statistics {
   size_t total_postings = 0;
   size_t delta_encoded_lists = 0;
   size_t roaring_bitmap_lists = 0;
+
+  // Replication event statistics
+  uint64_t repl_inserts_applied = 0;
+  uint64_t repl_inserts_skipped = 0;
+  uint64_t repl_updates_applied = 0;
+  uint64_t repl_updates_added = 0;
+  uint64_t repl_updates_removed = 0;
+  uint64_t repl_updates_modified = 0;
+  uint64_t repl_updates_skipped = 0;
+  uint64_t repl_deletes_applied = 0;
+  uint64_t repl_deletes_skipped = 0;
+  uint64_t repl_ddl_executed = 0;
+  uint64_t repl_events_skipped_other_tables = 0;
 };
 
 /**
@@ -156,6 +169,44 @@ class ServerStats {
   uint64_t GetTotalRequests() const { return total_requests_.load(); }
 
   /**
+   * @brief Increment replication event counters
+   */
+  void IncrementReplInsertApplied() { repl_inserts_applied_++; }
+  void IncrementReplInsertSkipped() { repl_inserts_skipped_++; }
+  void IncrementReplUpdateAdded() {
+    repl_updates_applied_++;
+    repl_updates_added_++;
+  }
+  void IncrementReplUpdateRemoved() {
+    repl_updates_applied_++;
+    repl_updates_removed_++;
+  }
+  void IncrementReplUpdateModified() {
+    repl_updates_applied_++;
+    repl_updates_modified_++;
+  }
+  void IncrementReplUpdateSkipped() { repl_updates_skipped_++; }
+  void IncrementReplDeleteApplied() { repl_deletes_applied_++; }
+  void IncrementReplDeleteSkipped() { repl_deletes_skipped_++; }
+  void IncrementReplDdlExecuted() { repl_ddl_executed_++; }
+  void IncrementReplEventsSkippedOtherTables() { repl_events_skipped_other_tables_++; }
+
+  /**
+   * @brief Get replication event counters
+   */
+  uint64_t GetReplInsertsApplied() const { return repl_inserts_applied_.load(); }
+  uint64_t GetReplInsertsSkipped() const { return repl_inserts_skipped_.load(); }
+  uint64_t GetReplUpdatesApplied() const { return repl_updates_applied_.load(); }
+  uint64_t GetReplUpdatesAdded() const { return repl_updates_added_.load(); }
+  uint64_t GetReplUpdatesRemoved() const { return repl_updates_removed_.load(); }
+  uint64_t GetReplUpdatesModified() const { return repl_updates_modified_.load(); }
+  uint64_t GetReplUpdatesSkipped() const { return repl_updates_skipped_.load(); }
+  uint64_t GetReplDeletesApplied() const { return repl_deletes_applied_.load(); }
+  uint64_t GetReplDeletesSkipped() const { return repl_deletes_skipped_.load(); }
+  uint64_t GetReplDdlExecuted() const { return repl_ddl_executed_.load(); }
+  uint64_t GetReplEventsSkippedOtherTables() const { return repl_events_skipped_other_tables_.load(); }
+
+  /**
    * @brief Reset all statistics (except start_time)
    */
   void Reset();
@@ -185,6 +236,19 @@ class ServerStats {
   std::atomic<size_t> active_connections_{0};
   std::atomic<uint64_t> total_connections_{0};
   std::atomic<uint64_t> total_requests_{0};
+
+  // Replication event counters
+  std::atomic<uint64_t> repl_inserts_applied_{0};
+  std::atomic<uint64_t> repl_inserts_skipped_{0};
+  std::atomic<uint64_t> repl_updates_applied_{0};
+  std::atomic<uint64_t> repl_updates_added_{0};
+  std::atomic<uint64_t> repl_updates_removed_{0};
+  std::atomic<uint64_t> repl_updates_modified_{0};
+  std::atomic<uint64_t> repl_updates_skipped_{0};
+  std::atomic<uint64_t> repl_deletes_applied_{0};
+  std::atomic<uint64_t> repl_deletes_skipped_{0};
+  std::atomic<uint64_t> repl_ddl_executed_{0};
+  std::atomic<uint64_t> repl_events_skipped_other_tables_{0};
 };
 
 }  // namespace mygramdb::server

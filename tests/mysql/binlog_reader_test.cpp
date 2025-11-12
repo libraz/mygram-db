@@ -9,6 +9,9 @@
 
 #ifdef USE_MYSQL
 
+#include "server/server_stats.h"
+#include "server/tcp_server.h"
+
 using namespace mygramdb::mysql;
 using namespace mygramdb;
 
@@ -287,6 +290,112 @@ TEST(BinlogReaderTest, DDLvsDMLEvents) {
   // DDL events store SQL query in text field
   EXPECT_EQ(dml_insert.type, BinlogEventType::INSERT);
   EXPECT_EQ(ddl_truncate.type, BinlogEventType::DDL);
+}
+
+/**
+ * @brief Test BinlogReader with ServerStats integration
+ */
+TEST(BinlogReaderTest, ServerStatsIntegration) {
+  Connection::Config conn_config;
+  conn_config.host = "localhost";
+  conn_config.user = "test";
+  conn_config.password = "test";
+
+  Connection conn(conn_config);
+
+  index::Index idx(1);
+  storage::DocumentStore doc_store;
+
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+  table_config.primary_key = "id";
+
+  BinlogReader::Config reader_config;
+  reader_config.start_gtid = "uuid:1";
+
+  server::ServerStats stats;
+
+  // Create BinlogReader with ServerStats
+  BinlogReader reader(conn, idx, doc_store, table_config, reader_config, &stats);
+
+  // Verify initial statistics are zero
+  EXPECT_EQ(stats.GetReplInsertsApplied(), 0);
+  EXPECT_EQ(stats.GetReplInsertsSkipped(), 0);
+  EXPECT_EQ(stats.GetReplUpdatesApplied(), 0);
+  EXPECT_EQ(stats.GetReplDeletesApplied(), 0);
+
+  // Verify BinlogReader is not running
+  EXPECT_FALSE(reader.IsRunning());
+}
+
+/**
+ * @brief Test BinlogReader SetServerStats method
+ */
+TEST(BinlogReaderTest, SetServerStats) {
+  Connection::Config conn_config;
+  Connection conn(conn_config);
+
+  index::Index idx(1);
+  storage::DocumentStore doc_store;
+
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+
+  BinlogReader::Config reader_config;
+
+  // Create BinlogReader without ServerStats
+  BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+
+  // Create ServerStats and set it
+  server::ServerStats stats;
+  reader.SetServerStats(&stats);
+
+  // Verify initial statistics are zero
+  EXPECT_EQ(stats.GetReplInsertsApplied(), 0);
+  EXPECT_EQ(stats.GetReplUpdatesApplied(), 0);
+  EXPECT_EQ(stats.GetReplDeletesApplied(), 0);
+}
+
+/**
+ * @brief Test BinlogReader multi-table mode with ServerStats
+ */
+TEST(BinlogReaderTest, MultiTableModeWithServerStats) {
+  Connection::Config conn_config;
+  Connection conn(conn_config);
+
+  // Create table contexts
+  server::TableContext table_ctx1;
+  table_ctx1.name = "table1";
+  table_ctx1.config.name = "table1";
+  table_ctx1.config.primary_key = "id";
+  table_ctx1.index = std::make_unique<index::Index>(1);
+  table_ctx1.doc_store = std::make_unique<storage::DocumentStore>();
+
+  server::TableContext table_ctx2;
+  table_ctx2.name = "table2";
+  table_ctx2.config.name = "table2";
+  table_ctx2.config.primary_key = "id";
+  table_ctx2.index = std::make_unique<index::Index>(1);
+  table_ctx2.doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts["table1"] = &table_ctx1;
+  table_contexts["table2"] = &table_ctx2;
+
+  BinlogReader::Config reader_config;
+  server::ServerStats stats;
+
+  // Create BinlogReader in multi-table mode with ServerStats
+  BinlogReader reader(conn, table_contexts, reader_config, &stats);
+
+  // Verify initial statistics are zero
+  EXPECT_EQ(stats.GetReplInsertsApplied(), 0);
+  EXPECT_EQ(stats.GetReplUpdatesApplied(), 0);
+  EXPECT_EQ(stats.GetReplDeletesApplied(), 0);
+  EXPECT_EQ(stats.GetReplEventsSkippedOtherTables(), 0);
+
+  // Verify BinlogReader is not running
+  EXPECT_FALSE(reader.IsRunning());
 }
 
 #endif  // USE_MYSQL

@@ -96,6 +96,12 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   if (json_obj.contains("connect_timeout_ms")) {
     config.connect_timeout_ms = json_obj["connect_timeout_ms"].get<int>();
   }
+  if (json_obj.contains("read_timeout_ms")) {
+    config.read_timeout_ms = json_obj["read_timeout_ms"].get<int>();
+  }
+  if (json_obj.contains("write_timeout_ms")) {
+    config.write_timeout_ms = json_obj["write_timeout_ms"].get<int>();
+  }
 
   return config;
 }

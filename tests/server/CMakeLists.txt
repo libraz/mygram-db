@@ -1,3 +1,16 @@
+# ServerStats tests
+
+add_executable(server_stats_test
+  server_stats_test.cpp
+)
+
+target_link_libraries(server_stats_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(server_stats_test)
+
 # TCP Server tests
 
 add_executable(tcp_server_test

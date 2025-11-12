@@ -8,6 +8,8 @@ mysql:
   binlog_format: ROW
   binlog_row_image: FULL
   connect_timeout_ms: 5000
+  read_timeout_ms: 7200000
+  write_timeout_ms: 7200000
 
 tables:
   - name: test_table

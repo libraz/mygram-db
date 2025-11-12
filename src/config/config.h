@@ -17,6 +17,8 @@ namespace defaults {
 // MySQL connection defaults
 constexpr int kMysqlPort = 3306;
 constexpr int kMysqlConnectTimeoutMs = 3000;
+constexpr int kMysqlReadTimeoutMs = 3600000;   // 1 hour (for long-running binlog connections)
+constexpr int kMysqlWriteTimeoutMs = 3600000;  // 1 hour
 
 // Posting list defaults
 constexpr int kPostingBlockSize = 128;
@@ -57,6 +59,8 @@ struct MysqlConfig {
   std::string binlog_format = "ROW";
   std::string binlog_row_image = "FULL";
   int connect_timeout_ms = defaults::kMysqlConnectTimeoutMs;
+  int read_timeout_ms = defaults::kMysqlReadTimeoutMs;
+  int write_timeout_ms = defaults::kMysqlWriteTimeoutMs;
 };
 
 /**

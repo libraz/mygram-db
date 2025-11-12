@@ -25,7 +25,8 @@
 // Forward declaration
 namespace mygramdb::server {
 struct TableContext;
-}
+class ServerStats;
+}  // namespace mygramdb::server
 
 namespace mygramdb::mysql {
 
@@ -78,16 +79,17 @@ class BinlogReader {
    * @deprecated Use multi-table constructor instead
    */
   BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
-               config::TableConfig table_config, const Config& config);
+               config::TableConfig table_config, const Config& config, server::ServerStats* stats = nullptr);
 
   /**
    * @brief Construct binlog reader (multi-table mode)
    * @param connection MySQL connection
    * @param table_contexts Map of table name to TableContext pointer
    * @param config Binlog reader configuration
+   * @param stats Server statistics tracker (optional)
    */
   BinlogReader(Connection& connection, std::unordered_map<std::string, server::TableContext*> table_contexts,
-               const Config& config);
+               const Config& config, server::ServerStats* stats = nullptr);
 
   ~BinlogReader();
 
@@ -139,6 +141,12 @@ class BinlogReader {
    */
   const std::string& GetLastError() const { return last_error_; }
 
+  /**
+   * @brief Set server statistics tracker
+   * @param stats Server statistics tracker pointer
+   */
+  void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
+
  private:
   Connection& connection_;                         // Main connection (used for queries, not binlog)
   std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading
@@ -171,6 +179,7 @@ class BinlogReader {
   std::atomic<uint64_t> processed_events_{0};
   std::string current_gtid_;
   mutable std::mutex gtid_mutex_;
+  server::ServerStats* server_stats_ = nullptr;  // Optional server statistics tracker
 
   std::string last_error_;
 

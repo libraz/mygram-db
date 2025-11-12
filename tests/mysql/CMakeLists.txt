@@ -19,6 +19,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   target_link_libraries(mysql_binlog_reader_test
     mygramdb_mysql
+    mygramdb_server
     GTest::gtest_main
   )
 

@@ -90,9 +90,8 @@ bool Connection::Connect() {
   mysql_options(mysql_, MYSQL_OPT_READ_TIMEOUT, &config_.read_timeout);
   mysql_options(mysql_, MYSQL_OPT_WRITE_TIMEOUT, &config_.write_timeout);
 
-  // Enable auto-reconnect
-  bool reconnect = true;
-  mysql_options(mysql_, MYSQL_OPT_RECONNECT, &reconnect);
+  // Note: MYSQL_OPT_RECONNECT is deprecated and removed
+  // Manual reconnection is handled via Reconnect() method when needed
 
   // Connect to MySQL
   if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(), config_.password.c_str(),

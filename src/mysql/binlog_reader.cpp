@@ -34,23 +34,26 @@ namespace mygramdb::mysql {
 
 // Single-table mode constructor (deprecated)
 BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
-                           config::TableConfig table_config, const Config& config)
+                           config::TableConfig table_config, const Config& config, server::ServerStats* stats)
     : connection_(connection),
 
       index_(&index),
       doc_store_(&doc_store),
       table_config_(std::move(table_config)),
       config_(config),
-      current_gtid_(config.start_gtid) {}
+      current_gtid_(config.start_gtid),
+      server_stats_(stats) {}
 
 // Multi-table mode constructor
 BinlogReader::BinlogReader(Connection& connection,
-                           std::unordered_map<std::string, server::TableContext*> table_contexts, const Config& config)
+                           std::unordered_map<std::string, server::TableContext*> table_contexts, const Config& config,
+                           server::ServerStats* stats)
     : connection_(connection),
       table_contexts_(std::move(table_contexts)),
       multi_table_mode_(true),
       config_(config),
-      current_gtid_(config.start_gtid) {}
+      current_gtid_(config.start_gtid),
+      server_stats_(stats) {}
 
 BinlogReader::~BinlogReader() {
   Stop();
@@ -148,18 +151,20 @@ void BinlogReader::Stop() {
   queue_cv_.notify_all();
   queue_full_cv_.notify_all();
 
+  // Close binlog connection BEFORE joining threads to unblock mysql_binlog_fetch()
+  // This forces the reader thread to exit from its blocking call
+  if (binlog_connection_) {
+    spdlog::debug("Closing binlog connection to unblock reader thread");
+    binlog_connection_->Close();
+    binlog_connection_.reset();
+  }
+
   if (reader_thread_ && reader_thread_->joinable()) {
     reader_thread_->join();
   }
 
   if (worker_thread_ && worker_thread_->joinable()) {
     worker_thread_->join();
-  }
-
-  // Close binlog connection
-  if (binlog_connection_) {
-    binlog_connection_->Close();
-    binlog_connection_.reset();
   }
 
   running_ = false;
@@ -282,12 +287,11 @@ void BinlogReader::ReaderThreadFunc() {
         const char* err_str = mysql_error(binlog_connection_->GetHandle());
         last_error_ =
             "Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
-        spdlog::error("{}", last_error_);
-        spdlog::error("mysql_binlog_fetch returned: {}", result);
 
-        // Check if this is a recoverable error
+        // Check if this is a recoverable error (connection timeout/lost)
         if (err_no == 2013 || err_no == 2006) {  // Connection lost or gone away
-          spdlog::warn("Connection lost, will attempt to reconnect...");
+          spdlog::info("{} (will attempt to reconnect)", last_error_);
+          spdlog::debug("mysql_binlog_fetch returned: {}", result);
           connection_lost = true;
 
           // Close current binlog stream
@@ -304,7 +308,10 @@ void BinlogReader::ReaderThreadFunc() {
             spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
           }
           break;  // Exit inner loop to retry from outer loop
-        }  // Non-recoverable error
+        }
+        // Non-recoverable error - log as error and stop
+        spdlog::error("{}", last_error_);
+        spdlog::error("mysql_binlog_fetch returned: {}", result);
         should_stop_ = true;
         break;
       }
@@ -602,6 +609,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
     auto table_iter = table_contexts_.find(event.table_name);
     if (table_iter == table_contexts_.end()) {
       // Event is for a table we're not tracking, skip silently
+      if (server_stats_ != nullptr) {
+        server_stats_->IncrementReplEventsSkippedOtherTables();
+      }
       return true;
     }
     current_index = table_iter->second->index.get();
@@ -610,6 +620,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   } else {
     // Single-table mode: skip events for other tables
     if (event.table_name != table_config_.name) {
+      if (server_stats_ != nullptr) {
+        server_stats_->IncrementReplEventsSkippedOtherTables();
+      }
       return true;
     }
     current_index = index_;
@@ -635,9 +648,15 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           current_index->AddDocument(doc_id, normalized);
 
           spdlog::debug("INSERT: pk={} (added to index)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplInsertApplied();
+          }
         } else {
           // Condition not satisfied -> do not index
           spdlog::debug("INSERT: pk={} (skipped, does not match required_filters)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplInsertSkipped();
+          }
         }
         break;
       }
@@ -656,6 +675,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           current_doc_store->RemoveDocument(doc_id);
 
           spdlog::info("UPDATE: pk={} (removed from index, no longer matches required_filters)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplUpdateRemoved();
+          }
 
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
@@ -665,6 +687,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           current_index->AddDocument(doc_id, normalized);
 
           spdlog::info("UPDATE: pk={} (added to index, now matches required_filters)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplUpdateAdded();
+          }
 
         } else if (exists && matches_required) {
           // Still matches conditions -> UPDATE
@@ -680,10 +705,16 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
 
           spdlog::debug("UPDATE: pk={} (filters updated)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplUpdateModified();
+          }
 
         } else {
           // !exists && !matches_required -> do nothing
           spdlog::debug("UPDATE: pk={} (ignored, not in index and does not match required_filters)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplUpdateSkipped();
+          }
         }
         break;
       }
@@ -704,9 +735,15 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           current_doc_store->RemoveDocument(doc_id);
 
           spdlog::debug("DELETE: pk={} (removed from index)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplDeleteApplied();
+          }
         } else {
           // Not in index, nothing to do
           spdlog::debug("DELETE: pk={} (not in index, ignored)", event.primary_key);
+          if (server_stats_ != nullptr) {
+            server_stats_->IncrementReplDeleteSkipped();
+          }
         }
         break;
       }
@@ -737,6 +774,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           spdlog::warn("Schema change may cause data inconsistency. Consider rebuilding from snapshot.");
           // Note: We cannot automatically detect what changed (column type, name, etc.)
           // Users should manually rebuild if text column type or PK changed
+        }
+        if (server_stats_ != nullptr) {
+          server_stats_->IncrementReplDdlExecuted();
         }
         break;
       }

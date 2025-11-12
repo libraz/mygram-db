@@ -24,6 +24,7 @@
 #include <sstream>
 #include <utility>
 
+#include "query/result_sorter.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
@@ -456,9 +457,9 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             auto end_time = std::chrono::high_resolution_clock::now();
             debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
             debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-            return FormatSearchResponse({}, query.limit, query.offset, current_doc_store, &debug_info);
+            return FormatSearchResponse({}, 0, current_doc_store, &debug_info);
           }
-          return FormatSearchResponse({}, query.limit, query.offset, current_doc_store);
+          return FormatSearchResponse({}, 0, current_doc_store);
         }
 
         // Process most selective term first
@@ -553,18 +554,22 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           debug_info.after_filters = results.size();
         }
 
+        // Sort and paginate results using ResultSorter
+        // This uses in-place sorting with partial_sort optimization for memory efficiency
+        size_t total_results = results.size();
+        auto sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
+
         // Calculate final debug info
         if (ctx.debug_mode) {
           auto end_time = std::chrono::high_resolution_clock::now();
           auto index_end = std::chrono::high_resolution_clock::now();
           debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
           debug_info.index_time_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
-          debug_info.final_results = std::min(static_cast<size_t>(query.limit),
-                                              results.size() > query.offset ? results.size() - query.offset : 0);
-          return FormatSearchResponse(results, query.limit, query.offset, current_doc_store, &debug_info);
+          debug_info.final_results = sorted_results.size();
+          return FormatSearchResponse(sorted_results, total_results, current_doc_store, &debug_info);
         }
 
-        return FormatSearchResponse(results, query.limit, query.offset, current_doc_store);
+        return FormatSearchResponse(sorted_results, total_results, current_doc_store);
       }
 
       case query::QueryType::COUNT: {
@@ -1001,17 +1006,15 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 }
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& results, uint32_t limit, uint32_t offset,
+std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
                                             storage::DocumentStore* doc_store, const query::DebugInfo* debug_info) {
   std::ostringstream oss;
-  oss << "OK RESULTS " << results.size();
+  oss << "OK RESULTS " << total_results;
 
-  // Apply offset and limit
-  size_t start = std::min(static_cast<size_t>(offset), results.size());
-  size_t end = std::min(start + limit, results.size());
-
-  for (size_t i = start; i < end; ++i) {
-    auto pk_opt = doc_store->GetPrimaryKey(static_cast<storage::DocId>(results[i]));
+  // Results are already sorted and paginated by ResultSorter::SortAndPaginate
+  // Just format them directly (no offset/limit needed)
+  for (const auto& doc_id : results) {
+    auto pk_opt = doc_store->GetPrimaryKey(static_cast<storage::DocId>(doc_id));
     if (pk_opt) {
       oss << " " << pk_opt.value();
     }
@@ -1220,13 +1223,28 @@ std::string TcpServer::FormatInfoResponse() {
 
   // Replication information
 #ifdef USE_MYSQL
+  oss << "# Replication\r\n";
   if (binlog_reader_ != nullptr) {
-    oss << "# Replication\r\n";
     oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
     oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
     oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
-    oss << "\r\n";
+  } else {
+    oss << "replication_status: disabled\r\n";
   }
+
+  // Event statistics (always shown, even when binlog_reader is null)
+  oss << "replication_inserts_applied: " << stats_.GetReplInsertsApplied() << "\r\n";
+  oss << "replication_inserts_skipped: " << stats_.GetReplInsertsSkipped() << "\r\n";
+  oss << "replication_updates_applied: " << stats_.GetReplUpdatesApplied() << "\r\n";
+  oss << "replication_updates_added: " << stats_.GetReplUpdatesAdded() << "\r\n";
+  oss << "replication_updates_removed: " << stats_.GetReplUpdatesRemoved() << "\r\n";
+  oss << "replication_updates_modified: " << stats_.GetReplUpdatesModified() << "\r\n";
+  oss << "replication_updates_skipped: " << stats_.GetReplUpdatesSkipped() << "\r\n";
+  oss << "replication_deletes_applied: " << stats_.GetReplDeletesApplied() << "\r\n";
+  oss << "replication_deletes_skipped: " << stats_.GetReplDeletesSkipped() << "\r\n";
+  oss << "replication_ddl_executed: " << stats_.GetReplDdlExecuted() << "\r\n";
+  oss << "replication_events_skipped_other_tables: " << stats_.GetReplEventsSkippedOtherTables() << "\r\n";
+  oss << "\r\n";
 #endif
 
   oss << "END";

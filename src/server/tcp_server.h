@@ -145,6 +145,11 @@ class TcpServer {
    */
   const ServerStats& GetStats() const { return stats_; }
 
+  /**
+   * @brief Get mutable server statistics pointer (for binlog reader)
+   */
+  ServerStats* GetMutableStats() { return &stats_; }
+
  private:
   ServerConfig config_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -197,14 +202,13 @@ class TcpServer {
 
   /**
    * @brief Format SEARCH response
-   * @param results Search results
-   * @param limit Result limit
-   * @param offset Result offset
+   * @param results Search results (already sorted and paginated)
+   * @param total_results Total number of results before pagination
    * @param doc_store Document store for retrieving primary keys
    * @param debug_info Optional debug information
    * @return Formatted response
    */
-  std::string FormatSearchResponse(const std::vector<index::DocId>& results, uint32_t limit, uint32_t offset,
+  std::string FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
                                    storage::DocumentStore* doc_store, const query::DebugInfo* debug_info = nullptr);
 
   /**

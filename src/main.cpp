@@ -33,6 +33,7 @@ constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
 constexpr size_t kGtidPrefixLength = 5;           // "gtid="
 constexpr size_t kDefaultMaxConnections = 1000;   // Default max TCP connections
 constexpr int kShutdownCheckIntervalMs = 100;     // Shutdown check interval (ms)
+constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
 
 /**
  * @brief Signal handler for graceful shutdown
@@ -201,6 +202,9 @@ int main(int argc, char* argv[]) {
   mysql_config.user = config.mysql.user;
   mysql_config.password = config.mysql.password;
   mysql_config.database = config.mysql.database;
+  mysql_config.connect_timeout = config.mysql.connect_timeout_ms / kMillisecondsPerSecond;  // ms to sec
+  mysql_config.read_timeout = config.mysql.read_timeout_ms / kMillisecondsPerSecond;        // ms to sec
+  mysql_config.write_timeout = config.mysql.write_timeout_ms / kMillisecondsPerSecond;      // ms to sec
 
   auto mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mysql_config);
 
@@ -352,6 +356,11 @@ int main(int argc, char* argv[]) {
 #ifdef USE_MYSQL
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir, &config,
                                          binlog_reader.get());
+
+  // Set server statistics for binlog reader
+  if (binlog_reader) {
+    binlog_reader->SetServerStats(tcp_server.GetMutableStats());
+  }
 #else
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir, &config, nullptr);
 #endif

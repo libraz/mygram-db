@@ -28,6 +28,8 @@ TEST(ConfigTest, LoadValidConfig) {
   EXPECT_EQ(config.mysql.binlog_format, "ROW");
   EXPECT_EQ(config.mysql.binlog_row_image, "FULL");
   EXPECT_EQ(config.mysql.connect_timeout_ms, 5000);
+  EXPECT_EQ(config.mysql.read_timeout_ms, 7200000);
+  EXPECT_EQ(config.mysql.write_timeout_ms, 7200000);
 
   // Tables
   ASSERT_EQ(config.tables.size(), 1);
@@ -136,6 +138,9 @@ TEST(ConfigTest, DefaultValues) {
   // Check defaults
   EXPECT_EQ(config.mysql.port, 3306);
   EXPECT_TRUE(config.mysql.use_gtid);
+  EXPECT_EQ(config.mysql.connect_timeout_ms, 3000);   // Default: 3 seconds
+  EXPECT_EQ(config.mysql.read_timeout_ms, 3600000);   // Default: 1 hour
+  EXPECT_EQ(config.mysql.write_timeout_ms, 3600000);  // Default: 1 hour
   EXPECT_EQ(config.build.batch_size, 5000);
   EXPECT_EQ(config.memory.hard_limit_mb, 8192);
   EXPECT_EQ(config.api.tcp.port, 11016);
