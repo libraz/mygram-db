@@ -28,12 +28,19 @@
 namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile std::sig_atomic_t g_shutdown_requested = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile std::sig_atomic_t g_snapshot_building = 0;
 
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
 constexpr size_t kGtidPrefixLength = 5;           // "gtid="
 constexpr size_t kDefaultMaxConnections = 1000;   // Default max TCP connections
 constexpr int kShutdownCheckIntervalMs = 100;     // Shutdown check interval (ms)
 constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
+
+#ifdef USE_MYSQL
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+mygramdb::storage::SnapshotBuilder* g_current_snapshot_builder = nullptr;
+#endif
 
 /**
  * @brief Signal handler for graceful shutdown
@@ -42,6 +49,13 @@ constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds con
 void SignalHandler(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
     g_shutdown_requested = 1;
+
+#ifdef USE_MYSQL
+    // If snapshot is being built, cancel it immediately
+    if (g_snapshot_building != 0 && g_current_snapshot_builder != nullptr) {
+      g_current_snapshot_builder->Cancel();
+    }
+#endif
   }
 }
 
@@ -208,12 +222,10 @@ int main(int argc, char* argv[]) {
 
   auto mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mysql_config);
 
-  if (!mysql_conn->Connect()) {
+  if (!mysql_conn->Connect("snapshot builder")) {
     spdlog::error("Failed to connect to MySQL: {}", mysql_conn->GetLastError());
     return 1;
   }
-
-  spdlog::info("Connected to MySQL {}:{}/{}", config.mysql.host, config.mysql.port, config.mysql.database);
 #else
   spdlog::warn("MySQL support not compiled, running without replication");
 #endif
@@ -223,7 +235,7 @@ int main(int argc, char* argv[]) {
 
   // Process each configured table
   for (const auto& table_config : config.tables) {
-    spdlog::info("Initializing table: '{}'", table_config.name);
+    spdlog::info("Initializing table: {}", table_config.name);
 
     auto ctx = std::make_unique<TableContext>();
     ctx->name = table_config.name;
@@ -235,23 +247,38 @@ int main(int argc, char* argv[]) {
 
 #ifdef USE_MYSQL
     // Build snapshot for this table
-    spdlog::info("Building snapshot from table '{}'...", table_config.name);
+    spdlog::info("Building snapshot from table: {}", table_config.name);
+    spdlog::info("This may take a while for large tables. Please wait...");
     mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store, table_config,
                                                         config.build);
 
+    // Set global pointer for signal handler
+    g_snapshot_building = 1;
+    g_current_snapshot_builder = &snapshot_builder;
+
     bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
       if (progress.processed_rows % kProgressLogInterval == 0) {
-        spdlog::debug("[{}] Processed {} rows ({:.0f} rows/s)", table_config.name, progress.processed_rows,
-                      progress.rows_per_second);
+        spdlog::debug("table: {} - Progress: {} rows processed ({:.0f} rows/s)", table_config.name,
+                      progress.processed_rows, progress.rows_per_second);
       }
     });
 
-    if (!snapshot_success) {
-      spdlog::error("Failed to build snapshot for table '{}': {}", table_config.name, snapshot_builder.GetLastError());
+    // Clear global pointer
+    g_snapshot_building = 0;
+    g_current_snapshot_builder = nullptr;
+
+    // Check if build was cancelled by signal
+    if (g_shutdown_requested != 0) {
+      spdlog::warn("Snapshot build cancelled by shutdown signal for table: {}", table_config.name);
       return 1;
     }
 
-    spdlog::info("Snapshot build completed for table '{}': {} documents indexed", table_config.name,
+    if (!snapshot_success) {
+      spdlog::error("Failed to build snapshot for table: {} - {}", table_config.name, snapshot_builder.GetLastError());
+      return 1;
+    }
+
+    spdlog::info("Snapshot build completed - table: {}, documents: {}", table_config.name,
                  snapshot_builder.GetProcessedRows());
 
     // Capture GTID from first table's snapshot
@@ -265,7 +292,7 @@ int main(int argc, char* argv[]) {
 
     // Store table context
     table_contexts[table_config.name] = std::move(ctx);
-    spdlog::info("Table '{}' initialized successfully", table_config.name);
+    spdlog::info("Table initialized successfully: {}", table_config.name);
   }
 
   spdlog::info("All {} table(s) initialized", table_contexts.size());
@@ -404,20 +431,39 @@ int main(int argc, char* argv[]) {
 
   spdlog::info("Shutdown requested, cleaning up...");
 
-  // Cleanup
-#ifdef USE_MYSQL
-  // Stop shared binlog reader
-  if (binlog_reader && binlog_reader->IsRunning()) {
-    spdlog::info("Stopping binlog reader");
-    binlog_reader->Stop();
-  }
-#endif
-
+  // Cleanup in reverse order of initialization
+  // 1. Stop HTTP server first (depends on table_contexts and binlog_reader)
   if (http_server && http_server->IsRunning()) {
+    spdlog::info("Stopping HTTP server");
     http_server->Stop();
   }
 
+  // 2. Stop TCP server (depends on table_contexts and binlog_reader)
+  spdlog::info("Stopping TCP server");
   tcp_server.Stop();
+
+#ifdef USE_MYSQL
+  // 3. Stop and destroy binlog reader (depends on mysql connection and table_contexts)
+  if (binlog_reader) {
+    if (binlog_reader->IsRunning()) {
+      spdlog::info("Stopping binlog reader");
+      binlog_reader->Stop();
+    }
+    // Explicitly destroy binlog_reader before other resources
+    binlog_reader.reset();
+  }
+
+  // 4. Close MySQL connection
+  if (mysql_conn) {
+    mysql_conn->Close();
+  }
+#endif
+
+  // 5. HTTP server will be automatically destroyed
+  http_server.reset();
+
+  // 6. Table contexts will be automatically destroyed (index, doc_store)
+  // 7. Config will be automatically destroyed
 
   spdlog::info("MygramDB stopped");
   return 0;

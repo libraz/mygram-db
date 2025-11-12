@@ -128,14 +128,175 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
 
   // Optimization: Single term with limit and reverse
   // This is common for "ORDER BY primary_key DESC LIMIT N" queries
-  // For multi-term queries, we cannot optimize here because we don't know
-  // the offset, and intersection size is unpredictable
   if (terms.size() == 1 && limit > 0 && reverse) {
     const auto* posting = GetPostingList(terms[0]);
     if (posting == nullptr) {
       return {};
     }
     return posting->GetTopN(limit, true);
+  }
+
+  // NEW Optimization: Multi-term with limit and reverse (for multi-ngram queries)
+  // Query planning: Use statistics to choose the best execution strategy
+  if (terms.size() > 1 && limit > 0 && reverse) {
+    // Step 1: Gather statistics (cheap: O(N) where N = number of terms)
+    std::vector<std::pair<size_t, const PostingList*>> term_info;
+    term_info.reserve(terms.size());
+
+    for (const auto& term : terms) {
+      const auto* posting = GetPostingList(term);
+      if (posting == nullptr) {
+        return {};  // No documents if any term is missing
+      }
+      term_info.emplace_back(posting->Size(), posting);
+    }
+
+    // Find min and max sizes for selectivity estimation
+    auto min_it = std::min_element(term_info.begin(), term_info.end(),
+                                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+    auto max_it = std::max_element(term_info.begin(), term_info.end(),
+                                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+    size_t min_size = min_it->first;
+    size_t max_size = max_it->first;
+
+    // Step 2: Estimate intersection selectivity
+    // selectivity = min_size / max_size
+    // High selectivity (close to 1.0) means terms are highly correlated (e.g., CJK bigrams)
+    // Low selectivity (close to 0.0) means terms are independent
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    double selectivity = (max_size > 0) ? static_cast<double>(min_size) / static_cast<double>(max_size) : 0.0;
+
+    // Step 3: Query planning - choose execution strategy
+    // Strategy 1: Streaming intersection (when selectivity is high)
+    //   - Pros: Avoids materializing large result sets, early termination
+    //   - Cons: Contains() lookups can be expensive
+    //   - Best for: High selectivity (>50%), need only top-N results
+    //
+    // Strategy 2: Standard intersection (when selectivity is low)
+    //   - Pros: Efficient set intersection, no redundant lookups
+    //   - Cons: Materializes entire intersection result
+    //   - Best for: Low selectivity (<50%), or when result set is small anyway
+
+    constexpr double kSelectivityThreshold = 0.5;  // 50% threshold
+    constexpr size_t kMinSizeThreshold = 10000;    // Don't optimize for tiny lists
+
+    bool use_streaming = (selectivity >= kSelectivityThreshold) && (min_size >= kMinSizeThreshold);
+    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+    if (use_streaming) {
+      // Merge join optimization (DESC order)
+      // Algorithm: Simultaneously walk backwards through all sorted posting lists
+      // This is a classic merge join algorithm adapted for reverse iteration
+      //
+      // Performance: O(M) where M = size of posting lists
+      // Much faster than binary_search approach: O(M + K*N*log(M))
+      //
+      // Example with 2 lists (DESC order):
+      //   list1: [800K, 799K, ..., 3, 2, 1]
+      //   list2: [800K, 799K, ..., 3, 2, 1]
+      //   Walk both from end, when values match -> add to result
+
+      // Get all posting lists (sorted ASC)
+      std::vector<std::vector<DocId>> all_postings;
+      all_postings.reserve(term_info.size());
+      for (const auto& [size, posting] : term_info) {
+        all_postings.push_back(posting->GetAll());
+      }
+
+      std::vector<DocId> result;
+      result.reserve(limit);
+
+      if (term_info.size() == 2) {
+        // Optimized 2-way merge join
+        const auto& list1 = all_postings[0];
+        const auto& list2 = all_postings[1];
+
+        auto it1 = list1.rbegin();
+        auto it2 = list2.rbegin();
+
+        while (result.size() < limit && it1 != list1.rend() && it2 != list2.rend()) {
+          if (*it1 == *it2) {
+            // Match found
+            result.push_back(*it1);
+            ++it1;
+            ++it2;
+          } else if (*it1 > *it2) {
+            // it1 is ahead, advance it
+            ++it1;
+          } else {
+            // it2 is ahead, advance it
+            ++it2;
+          }
+        }
+      } else {
+        // N-way merge join (for 3+ terms)
+        // Use iterators for each list
+        std::vector<std::vector<DocId>::const_reverse_iterator> iters;
+        std::vector<std::vector<DocId>::const_reverse_iterator> ends;
+        iters.reserve(all_postings.size());
+        ends.reserve(all_postings.size());
+
+        for (const auto& list : all_postings) {
+          iters.push_back(list.rbegin());
+          ends.push_back(list.rend());
+        }
+
+        while (result.size() < limit) {
+          // Check if any iterator is exhausted
+          bool any_exhausted = false;
+          for (size_t idx = 0; idx < iters.size(); ++idx) {
+            if (iters[idx] == ends[idx]) {
+              any_exhausted = true;
+              break;
+            }
+          }
+          if (any_exhausted) {
+            break;
+          }
+
+          // Find maximum value among current positions
+          DocId max_val = *iters[0];
+          for (size_t idx = 1; idx < iters.size(); ++idx) {
+            if (*iters[idx] > max_val) {
+              max_val = *iters[idx];
+            }
+          }
+
+          // Check if all iterators point to max_val
+          bool all_match = true;
+          for (const auto& iter : iters) {
+            if (*iter != max_val) {
+              all_match = false;
+              break;
+            }
+          }
+
+          if (all_match) {
+            // All match - add to result
+            result.push_back(max_val);
+            // Advance all iterators
+            for (auto& iter : iters) {
+              ++iter;
+            }
+          } else {
+            // Not all match - advance iterators pointing to max_val
+            for (auto& iter : iters) {
+              if (*iter == max_val) {
+                ++iter;
+              }
+            }
+          }
+        }
+      }
+
+      // Merge join always produces exact results (or all available)
+      spdlog::debug("Merge join: {} terms, selectivity={:.2f}, min={}, max={}, found={}", terms.size(), selectivity,
+                    min_size, max_size, result.size());
+      return result;
+    }
+    spdlog::debug("Using standard intersection: selectivity={:.2f}, min={}, max={}", selectivity, min_size, max_size);
+    // Fall through to standard path
   }
 
   // Standard path: Get all documents from all terms and intersect

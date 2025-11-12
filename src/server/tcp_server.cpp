@@ -462,30 +462,51 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatSearchResponse({}, 0, current_doc_store);
         }
 
-        // Optimization: For single-term, single-ngram queries with LIMIT + PRIMARY KEY order,
+        // Optimization: For queries with LIMIT + PRIMARY KEY order,
         // use Index::SearchAnd() with limit/reverse to avoid materializing all results
-        //  - Condition: single term, single n-gram, no NOT, no filters, limit > 0, order by primary_key
+        //  - Condition: single term (any number of n-grams), no NOT, no filters, limit > 0, order by primary_key
         //  - Benefit: O(limit) instead of O(total_candidates) for large result sets
-        //  - Note: Multi-ngram terms (e.g., "漫画" -> ["漫","画"]) require intersection, cannot optimize
+        //  - Now supports multi-ngram terms (e.g., Japanese/CJK characters) via streaming intersection
         // Determine ORDER BY clause (default: primary key DESC)
         query::OrderByClause order_by;
+        bool order_by_implicit = false;
         if (query.order_by.has_value()) {
           order_by = query.order_by.value();
         } else {
           // Default: primary key DESC
           order_by.column = "";  // Empty = primary key
           order_by.order = query::SortOrder::DESC;
+          order_by_implicit = true;
         }
 
-        // Check optimization conditions (single term AND single n-gram)
-        bool can_optimize = term_infos.size() == 1 && term_infos[0].ngrams.size() == 1 &&
-                            query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
-                            order_by.IsPrimaryKey();
+        // Record applied ORDER BY for debug
+        if (ctx.debug_mode) {
+          std::string order_str = order_by.column.empty() ? "id" : order_by.column;
+          order_str += (order_by.order == query::SortOrder::ASC) ? " ASC" : " DESC";
+          if (order_by_implicit) {
+            order_str += " (default)";
+          }
+          debug_info.order_by_applied = order_str;
+          debug_info.limit_applied = query.limit;
+          debug_info.offset_applied = query.offset;
+          debug_info.limit_explicit = query.limit_explicit;
+          debug_info.offset_explicit = query.offset_explicit;
+        }
+
+        // Check optimization conditions: single search term (multi-ngram OK now!)
+        // The Index::SearchAnd() now supports streaming intersection for multi-ngram queries
+        // IMPORTANT: Skip optimization for deep offsets (>10000) as it becomes inefficient
+        // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        constexpr uint32_t kMaxOffsetForOptimization = 10000;
+        // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() &&
+                            query.limit > 0 && query.offset <= kMaxOffsetForOptimization && order_by.IsPrimaryKey();
 
         // Process most selective term first
         std::vector<storage::DocId> results;
         if (can_optimize) {
           // Use GetTopN optimization: only retrieve top (offset + limit) results
+          // This works for both single-ngram and multi-ngram terms now
           size_t index_limit = query.offset + query.limit;
           bool reverse = (order_by.order == query::SortOrder::DESC);
           results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
@@ -493,7 +514,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             debug_info.total_candidates = results.size();
             debug_info.after_intersection = results.size();
             std::string direction = reverse ? "DESC" : "ASC";
-            debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+            if (term_infos[0].ngrams.size() == 1) {
+              debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+            } else {
+              debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
+            }
           }
         } else {
           // Standard path: retrieve all results
@@ -618,10 +643,18 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatError("Index not available");
         }
 
+        // Start index search timing
+        auto index_start = std::chrono::high_resolution_clock::now();
+
         // Collect all search terms (main + AND terms)
         std::vector<std::string> all_search_terms;
         all_search_terms.push_back(query.search_text);
         all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+
+        // Collect debug info for search terms
+        if (ctx.debug_mode) {
+          debug_info.search_terms = all_search_terms;
+        }
 
         // Generate n-grams for each term and estimate result sizes
         struct TermInfo {
@@ -655,6 +688,14 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             }
           }
 
+          // Collect debug info for n-grams and posting list sizes
+          if (ctx.debug_mode) {
+            for (const auto& ngram : ngrams) {
+              debug_info.ngrams_used.push_back(ngram);
+            }
+            debug_info.posting_list_sizes.push_back(min_size);
+          }
+
           term_infos.push_back({std::move(ngrams), min_size});
         }
 
@@ -664,6 +705,12 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // If any term has zero results, return 0 immediately
         if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
+          if (ctx.debug_mode) {
+            auto end_time = std::chrono::high_resolution_clock::now();
+            debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+            debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+            return FormatCountResponse(0, &debug_info);
+          }
           return FormatCountResponse(0);
         }
 
@@ -740,6 +787,14 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           results = filtered_results;
         }
 
+        // Calculate final debug info
+        if (ctx.debug_mode) {
+          auto end_time = std::chrono::high_resolution_clock::now();
+          debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+          debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+          return FormatCountResponse(results.size(), &debug_info);
+        }
+
         return FormatCountResponse(results.size());
       }
 
@@ -802,6 +857,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         }
 
         // Save each table
+        spdlog::info("Saving snapshot to: {}", filepath);
+        spdlog::info("This may take a while for large datasets. Please wait...");
         success = true;
         for (const auto& [table_name, ctx] : table_contexts_) {
           std::string table_index_path = filepath;
@@ -813,12 +870,13 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           table_doc_path += table_name;
           table_doc_path += ".docs";
 
+          spdlog::info("Saving table: {}", table_name);
           if (!ctx->index->SaveToFile(table_index_path) || !ctx->doc_store->SaveToFile(table_doc_path, "")) {
-            spdlog::error("Failed to save table '{}'", table_name);
+            spdlog::error("Failed to save table: {}", table_name);
             success = false;
             break;
           }
-          spdlog::info("Saved table '{}' to snapshot", table_name);
+          spdlog::info("Saved table to snapshot: {}", table_name);
         }
 
         // Save metadata
@@ -909,6 +967,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         }
 
         // Load each table
+        spdlog::info("Loading snapshot from: {}", filepath);
+        spdlog::info("This may take a while for large snapshots. Please wait...");
         bool success = true;
         for (const auto& [table_name, ctx] : table_contexts_) {
           std::string table_index_path = filepath;
@@ -922,16 +982,17 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
           // Check if snapshot files exist for this table
           if (stat(table_index_path.c_str(), &file_stat) != 0) {
-            spdlog::warn("Snapshot for table '{}' not found, skipping (table may be new)", table_name);
+            spdlog::warn("Snapshot not found for table: {} (table may be new), skipping", table_name);
             continue;
           }
 
+          spdlog::info("Loading table: {}", table_name);
           if (!ctx->index->LoadFromFile(table_index_path) || !ctx->doc_store->LoadFromFile(table_doc_path, nullptr)) {
-            spdlog::error("Failed to load table '{}'", table_name);
+            spdlog::error("Failed to load table: {}", table_name);
             success = false;
             break;
           }
-          spdlog::info("Loaded table '{}' from snapshot", table_name);
+          spdlog::info("Loaded table from snapshot: {}", table_name);
         }
 
         // Clear loading mode
@@ -1057,25 +1118,43 @@ std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& res
 
   // Add debug information if provided
   if (debug_info != nullptr) {
-    oss << " DEBUG";
-    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
-    oss << " index_time=" << debug_info->index_time_ms << "ms";
+    oss << "\r\n\r\n# DEBUG\r\n";
+    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
+    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
     if (debug_info->filter_time_ms > 0.0) {
-      oss << " filter_time=" << debug_info->filter_time_ms << "ms";
+      oss << "filter_time: " << debug_info->filter_time_ms << "ms\r\n";
     }
-    oss << " terms=" << debug_info->search_terms.size();
-    oss << " ngrams=" << debug_info->ngrams_used.size();
-    oss << " candidates=" << debug_info->total_candidates;
-    oss << " after_intersection=" << debug_info->after_intersection;
+    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
+    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
+    oss << "candidates: " << debug_info->total_candidates << "\r\n";
+    oss << "after_intersection: " << debug_info->after_intersection << "\r\n";
     if (debug_info->after_not > 0) {
-      oss << " after_not=" << debug_info->after_not;
+      oss << "after_not: " << debug_info->after_not << "\r\n";
     }
     if (debug_info->after_filters > 0) {
-      oss << " after_filters=" << debug_info->after_filters;
+      oss << "after_filters: " << debug_info->after_filters << "\r\n";
     }
-    oss << " final=" << debug_info->final_results;
+    oss << "final: " << debug_info->final_results << "\r\n";
     if (!debug_info->optimization_used.empty()) {
-      oss << " optimization=\"" << debug_info->optimization_used << "\"";
+      oss << "optimization: " << debug_info->optimization_used << "\r\n";
+    }
+    // Show applied ORDER BY, LIMIT, OFFSET
+    if (!debug_info->order_by_applied.empty()) {
+      oss << "order_by: " << debug_info->order_by_applied << "\r\n";
+    }
+    // Always show LIMIT (it has a default value of 100)
+    oss << "limit: " << debug_info->limit_applied;
+    if (!debug_info->limit_explicit) {
+      oss << " (default)";
+    }
+    oss << "\r\n";
+    // Show OFFSET if non-zero
+    if (debug_info->offset_applied > 0) {
+      oss << "offset: " << debug_info->offset_applied;
+      if (!debug_info->offset_explicit) {
+        oss << " (default)";
+      }
+      oss << "\r\n";
     }
   }
 
@@ -1088,11 +1167,11 @@ std::string TcpServer::FormatCountResponse(uint64_t count, const query::DebugInf
 
   // Add debug information if provided
   if (debug_info != nullptr) {
-    oss << " DEBUG";
-    oss << " query_time=" << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms";
-    oss << " index_time=" << debug_info->index_time_ms << "ms";
-    oss << " terms=" << debug_info->search_terms.size();
-    oss << " ngrams=" << debug_info->ngrams_used.size();
+    oss << "\r\n\r\n# DEBUG\r\n";
+    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
+    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
+    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
+    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
   }
 
   return oss.str();

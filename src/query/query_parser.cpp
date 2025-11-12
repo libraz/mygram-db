@@ -616,6 +616,7 @@ bool QueryParser::ParseLimit(const std::vector<std::string>& tokens, size_t& pos
       return false;
     }
     query.limit = static_cast<uint32_t>(limit);
+    query.limit_explicit = true;  // Mark as explicitly specified
   } catch (const std::exception& e) {
     SetError("Invalid LIMIT value: " + tokens[pos - 1]);
     return false;
@@ -640,6 +641,7 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens, size_t& po
       return false;
     }
     query.offset = static_cast<uint32_t>(offset);
+    query.offset_explicit = true;  // Mark as explicitly specified
   } catch (const std::exception& e) {
     SetError("Invalid OFFSET value: " + tokens[pos - 1]);
     return false;

@@ -79,7 +79,7 @@ Connection& Connection::operator=(Connection&& other) noexcept {
   return *this;
 }
 
-bool Connection::Connect() {
+bool Connection::Connect(const std::string& context) {
   if (mysql_ == nullptr) {
     last_error_ = "MySQL handle not initialized";
     return false;
@@ -98,11 +98,14 @@ bool Connection::Connect() {
                          config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
                          0) == nullptr) {
     SetMySQLError();
-    spdlog::error("MySQL connection failed: {}", last_error_);
+    std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
+    spdlog::error("{}MySQL connection failed: {}", context_prefix, last_error_);
     return false;
   }
 
-  spdlog::info("Connected to MySQL at {}:{}", config_.host, config_.port);
+  std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
+  std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
+  spdlog::info("{}Connected to MySQL {}:{}{}", context_prefix, config_.host, config_.port, db_info);
   return true;
 }
 

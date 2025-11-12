@@ -83,9 +83,10 @@ class Connection {
 
   /**
    * @brief Connect to MySQL server
+   * @param context Optional context label for logging (e.g., "main", "binlog worker")
    * @return true if connection successful
    */
-  bool Connect();
+  bool Connect(const std::string& context = "");
 
   /**
    * @brief Check if connection is alive

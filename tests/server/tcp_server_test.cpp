@@ -855,14 +855,14 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
   // Should contain results
   EXPECT_TRUE(response.find("OK RESULTS") == 0);
 
-  // Should contain debug information
-  EXPECT_TRUE(response.find("DEBUG") != std::string::npos);
-  EXPECT_TRUE(response.find("query_time=") != std::string::npos);
-  EXPECT_TRUE(response.find("index_time=") != std::string::npos);
-  EXPECT_TRUE(response.find("terms=") != std::string::npos);
-  EXPECT_TRUE(response.find("ngrams=") != std::string::npos);
-  EXPECT_TRUE(response.find("candidates=") != std::string::npos);
-  EXPECT_TRUE(response.find("final=") != std::string::npos);
+  // Should contain debug information (multi-line format)
+  EXPECT_TRUE(response.find("# DEBUG") != std::string::npos);
+  EXPECT_TRUE(response.find("query_time:") != std::string::npos);
+  EXPECT_TRUE(response.find("index_time:") != std::string::npos);
+  EXPECT_TRUE(response.find("terms:") != std::string::npos);
+  EXPECT_TRUE(response.find("ngrams:") != std::string::npos);
+  EXPECT_TRUE(response.find("candidates:") != std::string::npos);
+  EXPECT_TRUE(response.find("final:") != std::string::npos);
 
   // Disable debug mode
   std::string debug_off = SendRequest(sock, "DEBUG OFF");
@@ -1375,6 +1375,82 @@ TEST_F(TcpServerTest, InfoCommandReplicationStatisticsInitiallyZero) {
   EXPECT_TRUE(response.find("replication_deletes_skipped: 0") != std::string::npos);
   EXPECT_TRUE(response.find("replication_ddl_executed: 0") != std::string::npos);
   EXPECT_TRUE(response.find("replication_events_skipped_other_tables: 0") != std::string::npos);
+
+  close(sock);
+}
+
+/**
+ * @brief Test debug output shows (default) marker for implicit parameters
+ */
+TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
+  // Add test documents
+  auto doc_id1 = doc_store_->AddDocument("100", {});
+  index_->AddDocument(doc_id1, "hello world");
+  auto doc_id2 = doc_store_->AddDocument("101", {});
+  index_->AddDocument(doc_id2, "hello universe");
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Enable debug mode
+  std::string debug_on = SendRequest(sock, "DEBUG ON");
+  EXPECT_EQ(debug_on, "OK DEBUG_ON");
+
+  // Test 1: Search without explicit LIMIT, OFFSET, or ORDER BY
+  // Should show all as (default)
+  std::string response1 = SendRequest(sock, "SEARCH test hello");
+  EXPECT_TRUE(response1.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response1.find("# DEBUG") != std::string::npos);
+  EXPECT_TRUE(response1.find("order_by: id DESC (default)") != std::string::npos)
+      << "Should show default ORDER BY with (default) marker";
+  EXPECT_TRUE(response1.find("limit: 100 (default)") != std::string::npos)
+      << "Should show default LIMIT with (default) marker";
+  // OFFSET should not be shown when it's 0
+  EXPECT_TRUE(response1.find("offset:") == std::string::npos) << "OFFSET should not be shown when 0";
+
+  // Test 2: Search with explicit LIMIT
+  // LIMIT should NOT have (default), but ORDER BY should
+  std::string response2 = SendRequest(sock, "SEARCH test hello LIMIT 50");
+  EXPECT_TRUE(response2.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response2.find("order_by: id DESC (default)") != std::string::npos)
+      << "ORDER BY should still have (default) marker";
+  EXPECT_TRUE(response2.find("limit: 50\r\n") != std::string::npos)
+      << "Explicit LIMIT should NOT have (default) marker";
+  EXPECT_TRUE(response2.find("limit: 50 (default)") == std::string::npos)
+      << "Explicit LIMIT should NOT have (default) marker";
+
+  // Test 3: Search with explicit ORDER BY
+  // ORDER BY should NOT have (default), but LIMIT should
+  std::string response3 = SendRequest(sock, "SEARCH test hello ORDER BY id ASC");
+  EXPECT_TRUE(response3.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response3.find("order_by: id ASC\r\n") != std::string::npos)
+      << "Explicit ORDER BY should NOT have (default) marker";
+  EXPECT_TRUE(response3.find("order_by: id ASC (default)") == std::string::npos)
+      << "Explicit ORDER BY should NOT have (default) marker";
+  EXPECT_TRUE(response3.find("limit: 100 (default)") != std::string::npos)
+      << "Default LIMIT should have (default) marker";
+
+  // Test 4: Search with explicit OFFSET
+  // OFFSET should NOT have (default) when explicitly set
+  std::string response4 = SendRequest(sock, "SEARCH test hello OFFSET 10");
+  EXPECT_TRUE(response4.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response4.find("offset: 10\r\n") != std::string::npos)
+      << "Explicit OFFSET should NOT have (default) marker";
+  EXPECT_TRUE(response4.find("offset: 10 (default)") == std::string::npos)
+      << "Explicit OFFSET should NOT have (default) marker";
+
+  // Test 5: Search with all explicit parameters
+  // Nothing should have (default)
+  std::string response5 = SendRequest(sock, "SEARCH test hello ORDER BY id DESC LIMIT 25 OFFSET 5");
+  EXPECT_TRUE(response5.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response5.find("order_by: id DESC\r\n") != std::string::npos);
+  EXPECT_TRUE(response5.find("(default)") == std::string::npos)
+      << "No parameters should have (default) when all are explicit";
+  EXPECT_TRUE(response5.find("limit: 25\r\n") != std::string::npos);
+  EXPECT_TRUE(response5.find("offset: 5\r\n") != std::string::npos);
 
   close(sock);
 }

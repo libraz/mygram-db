@@ -629,8 +629,16 @@ class MygramClient {
   static void PrintResponse(const std::string& response) {
     // Parse response type
     if (response.find("OK RESULTS") == 0) {
-      // SEARCH response: OK RESULTS <count> [<id1> <id2> ...] [DEBUG ...]
-      std::istringstream iss(response);
+      // SEARCH response: OK RESULTS <count> [<id1> <id2> ...]\r\n\r\n# DEBUG\r\n...
+      // Split by \r\n\r\n to separate main response from debug info
+      size_t debug_separator = response.find("\r\n\r\n");
+      std::string main_response =
+          (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
+      std::string debug_section = (debug_separator != std::string::npos)
+                                      ? response.substr(debug_separator + 4)  // Skip "\r\n\r\n"
+                                      : "";
+
+      std::istringstream iss(main_response);
       std::string status;
       std::string results;
       size_t count = 0;
@@ -638,16 +646,8 @@ class MygramClient {
 
       std::vector<std::string> ids;
       std::string token;
-      std::string debug_info;
 
       while (iss >> token) {
-        if (token == "DEBUG") {
-          // Read rest of stream as debug info
-          std::string rest;
-          std::getline(iss, rest);
-          debug_info = rest;
-          break;
-        }
         ids.push_back(token);
       }
 
@@ -664,12 +664,30 @@ class MygramClient {
       }
 
       // Print debug info if present
-      if (!debug_info.empty()) {
-        std::cout << "\n[DEBUG INFO]" << debug_info << '\n';
+      if (!debug_section.empty()) {
+        std::cout << '\n';
+        // Replace \r\n with actual newlines for display
+        size_t pos = 0;
+        while ((pos = debug_section.find("\r\n", pos)) != std::string::npos) {
+          debug_section.replace(pos, 2, "\n");
+          pos += 1;
+        }
+        std::cout << debug_section;
+        if (!debug_section.empty() && debug_section.back() != '\n') {
+          std::cout << '\n';
+        }
       }
     } else if (response.find("OK COUNT") == 0) {
-      // COUNT response: OK COUNT <n> [DEBUG ...]
-      std::istringstream iss(response);
+      // COUNT response: OK COUNT <n>\r\n\r\n# DEBUG\r\n...
+      // Split by \r\n\r\n to separate main response from debug info
+      size_t debug_separator = response.find("\r\n\r\n");
+      std::string main_response =
+          (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
+      std::string debug_section = (debug_separator != std::string::npos)
+                                      ? response.substr(debug_separator + 4)  // Skip "\r\n\r\n"
+                                      : "";
+
+      std::istringstream iss(main_response);
       std::string status;
       std::string count_str;
       uint64_t count = 0;
@@ -677,12 +695,19 @@ class MygramClient {
 
       std::cout << "(integer) " << count << '\n';
 
-      // Check for debug info
-      std::string token;
-      if (iss >> token && token == "DEBUG") {
-        std::string rest;
-        std::getline(iss, rest);
-        std::cout << "\n[DEBUG INFO]" << rest << '\n';
+      // Print debug info if present
+      if (!debug_section.empty()) {
+        std::cout << '\n';
+        // Replace \r\n with actual newlines for display
+        size_t pos = 0;
+        while ((pos = debug_section.find("\r\n", pos)) != std::string::npos) {
+          debug_section.replace(pos, 2, "\n");
+          pos += 1;
+        }
+        std::cout << debug_section;
+        if (!debug_section.empty() && debug_section.back() != '\n') {
+          std::cout << '\n';
+        }
       }
     } else if (response.find("OK DEBUG_ON") == 0) {
       std::cout << "Debug mode enabled" << '\n';

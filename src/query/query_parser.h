@@ -92,6 +92,11 @@ struct DebugInfo {
   size_t after_filters = 0;                // Results after filter conditions
   size_t final_results = 0;                // Final result count
   std::string optimization_used;           // Optimization strategy used
+  std::string order_by_applied;            // ORDER BY applied (e.g., "id DESC")
+  uint32_t limit_applied = 0;              // LIMIT value applied
+  uint32_t offset_applied = 0;             // OFFSET value applied
+  bool limit_explicit = false;             // True if LIMIT was explicitly specified
+  bool offset_explicit = false;            // True if OFFSET was explicitly specified
 };
 
 /**
@@ -106,10 +111,12 @@ struct Query {
   std::vector<FilterCondition> filters;
   std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  uint32_t limit = 100;     // Default limit: 100 results per query
-  uint32_t offset = 0;      // Default offset
-  std::string primary_key;  // For GET command
-  std::string filepath;     // For SAVE/LOAD command (optional)
+  uint32_t limit = 100;          // Default limit: 100 results per query
+  uint32_t offset = 0;           // Default offset
+  bool limit_explicit = false;   // True if LIMIT was explicitly specified by user
+  bool offset_explicit = false;  // True if OFFSET was explicitly specified by user
+  std::string primary_key;       // For GET command
+  std::string filepath;          // For SAVE/LOAD command (optional)
 
   /**
    * @brief Check if query is valid

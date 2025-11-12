@@ -96,13 +96,12 @@ bool BinlogReader::Start() {
   binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
 
   binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
-  if (!binlog_connection_->Connect()) {
+  if (!binlog_connection_->Connect("binlog worker")) {
     last_error_ = "Failed to create binlog connection: " + binlog_connection_->GetLastError();
     spdlog::error("Cannot start binlog reader: {}", last_error_);
     binlog_connection_.reset();
     return false;
   }
-  spdlog::info("Dedicated binlog connection established");
 
   should_stop_ = false;
   running_ = true;
@@ -156,15 +155,23 @@ void BinlogReader::Stop() {
   if (binlog_connection_) {
     spdlog::debug("Closing binlog connection to unblock reader thread");
     binlog_connection_->Close();
-    binlog_connection_.reset();
   }
 
+  // Wait for threads to finish BEFORE destroying binlog_connection_
+  // This ensures threads don't access connection during destruction
   if (reader_thread_ && reader_thread_->joinable()) {
     reader_thread_->join();
+    reader_thread_.reset();
   }
 
   if (worker_thread_ && worker_thread_->joinable()) {
     worker_thread_->join();
+    worker_thread_.reset();
+  }
+
+  // Now it's safe to destroy the connection
+  if (binlog_connection_) {
+    binlog_connection_.reset();
   }
 
   running_ = false;
@@ -211,14 +218,15 @@ void BinlogReader::ReaderThreadFunc() {
       spdlog::error("{}", last_error_);
 
       // Retry connection after delay
-      spdlog::info("Will retry connection in {} ms", config_.reconnect_delay_ms);
+      spdlog::info("[binlog worker] Will retry connection in {} ms", config_.reconnect_delay_ms);
       std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
 
       // Reconnect
-      if (!binlog_connection_->Connect()) {
-        spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+      if (!binlog_connection_->Connect("binlog worker")) {
+        spdlog::error("[binlog worker] Failed to reconnect: {}", binlog_connection_->GetLastError());
         continue;
       }
+      spdlog::info("[binlog worker] Reconnected successfully");
       continue;
     }
     spdlog::info("Binlog checksums disabled for replication");
