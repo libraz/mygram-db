@@ -515,6 +515,9 @@ Config ParseConfigFromJson(const json& root) {
         config.api.http.port = http["port"].get<int>();
       }
     }
+    if (api.contains("default_limit")) {
+      config.api.default_limit = api["default_limit"].get<int>();
+    }
   }
 
   // Parse network config

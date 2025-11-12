@@ -484,6 +484,13 @@
               "maximum": 65535
             }
           }
+        },
+        "default_limit": {
+          "type": "integer",
+          "description": "Default LIMIT for SEARCH queries when not explicitly specified",
+          "default": 1000,
+          "minimum": 5,
+          "maximum": 1000
         }
       }
     },

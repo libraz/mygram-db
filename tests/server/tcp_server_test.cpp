@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <thread>
 
 #include "config/config.h"
@@ -1406,7 +1407,7 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
   EXPECT_TRUE(response1.find("# DEBUG") != std::string::npos);
   EXPECT_TRUE(response1.find("order_by: id DESC (default)") != std::string::npos)
       << "Should show default ORDER BY with (default) marker";
-  EXPECT_TRUE(response1.find("limit: 100 (default)") != std::string::npos)
+  EXPECT_TRUE(response1.find("limit: 1000 (default)") != std::string::npos)
       << "Should show default LIMIT with (default) marker";
   // OFFSET should not be shown when it's 0
   EXPECT_TRUE(response1.find("offset:") == std::string::npos) << "OFFSET should not be shown when 0";
@@ -1430,7 +1431,7 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
       << "Explicit ORDER BY should NOT have (default) marker";
   EXPECT_TRUE(response3.find("order_by: id ASC (default)") == std::string::npos)
       << "Explicit ORDER BY should NOT have (default) marker";
-  EXPECT_TRUE(response3.find("limit: 100 (default)") != std::string::npos)
+  EXPECT_TRUE(response3.find("limit: 1000 (default)") != std::string::npos)
       << "Default LIMIT should have (default) marker";
 
   // Test 4: Search with explicit OFFSET
@@ -1451,6 +1452,132 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
       << "No parameters should have (default) when all are explicit";
   EXPECT_TRUE(response5.find("limit: 25\r\n") != std::string::npos);
   EXPECT_TRUE(response5.find("offset: 5\r\n") != std::string::npos);
+
+  close(sock);
+}
+
+/**
+ * @brief Test optimization strategy selection based on result set size and LIMIT
+ *
+ * This test verifies that the server correctly chooses between:
+ * - GetTopN optimization (for large result sets with small LIMIT)
+ * - reuse-fetch optimization (for small result sets or high LIMIT ratio)
+ */
+TEST_F(TcpServerTest, OptimizationStrategySelection) {
+  // Prepare test data: insert documents with varying characteristics
+  // Small result set: 10 documents with "small"
+  // Large result set: 1000 documents with "large"
+
+  for (int i = 1; i <= 10; ++i) {
+    auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
+    index_->AddDocument(static_cast<index::DocId>(doc_id), "small unique text");
+  }
+
+  for (int i = 11; i <= 1010; ++i) {
+    auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
+    index_->AddDocument(static_cast<index::DocId>(doc_id), "large dataset text");
+  }
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Enable debug mode to see optimization strategy
+  std::string debug_response = SendRequest(sock, "DEBUG ON");
+  EXPECT_EQ(debug_response, "OK DEBUG_ON");
+
+  // Test 1: Small result set (10 docs) with small LIMIT (2 docs = 20%)
+  // Expected: GetTopN optimization (ratio 20% < 50%)
+  std::string response1 = SendRequest(sock, "SEARCH test small LIMIT 2");
+  EXPECT_TRUE(response1.find("OK RESULTS 10") == 0)
+      << "Should return total of 10 matching documents";
+  EXPECT_TRUE(response1.find("optimization: Index GetTopN") != std::string::npos ||
+              response1.find("optimization: reuse-fetch") != std::string::npos)
+      << "Should use GetTopN or reuse-fetch optimization";
+
+  // Test 2: Small result set (10 docs) with high LIMIT (9 docs = 90%)
+  // Expected: reuse-fetch optimization (ratio 90% > 50%)
+  std::string response2 = SendRequest(sock, "SEARCH test small LIMIT 9");
+  EXPECT_TRUE(response2.find("OK RESULTS 10") == 0)
+      << "Should return total of 10 matching documents. Response: " << response2;
+  EXPECT_TRUE(response2.find("optimization: reuse-fetch") != std::string::npos)
+      << "Should use reuse-fetch optimization for high LIMIT ratio (90% > 50%). Response: " << response2;
+
+  // Test 3: Large result set (1000 docs) with small LIMIT (10 docs = 1%)
+  // Expected: GetTopN optimization (ratio 1% < 50%)
+  std::string response3 = SendRequest(sock, "SEARCH test large LIMIT 10");
+  EXPECT_TRUE(response3.find("OK RESULTS 1000") == 0)
+      << "Should return total of 1000 matching documents";
+  EXPECT_TRUE(response3.find("optimization: Index GetTopN") != std::string::npos)
+      << "Should use GetTopN optimization for low LIMIT ratio (1% < 50%)";
+
+  // Test 4: Large result set (1000 docs) with high LIMIT (600 docs = 60%)
+  // Expected: reuse-fetch optimization (ratio 60% > 50%)
+  std::string response4 = SendRequest(sock, "SEARCH test large LIMIT 600");
+  EXPECT_TRUE(response4.find("OK RESULTS 1000") == 0)
+      << "Should return total of 1000 matching documents";
+  EXPECT_TRUE(response4.find("optimization: reuse-fetch") != std::string::npos)
+      << "Should use reuse-fetch optimization for high LIMIT ratio (60% > 50%)";
+
+  // Test 5: Verify total_results accuracy with optimization
+  // Even when using GetTopN, total_results should be accurate (not limited)
+  std::string response5 = SendRequest(sock, "SEARCH test large LIMIT 5");
+  EXPECT_TRUE(response5.find("OK RESULTS 1000") == 0)
+      << "Total results should be 1000 (accurate count), not 5 (LIMIT)";
+
+  // Count number of IDs in response (should be 5, not 1000)
+  size_t id_count = 0;
+  size_t pos = response5.find("OK RESULTS 1000");
+  if (pos != std::string::npos) {
+    std::string ids_part = response5.substr(pos + 16);  // Skip "OK RESULTS 1000 "
+    std::istringstream iss(ids_part);
+    std::string id;
+    while (iss >> id && id_count < 100) {  // Limit check to avoid infinite loop
+      if (id.find("\r") != std::string::npos || id.find("#") != std::string::npos) {
+        break;  // Stop at debug section
+      }
+      id_count++;
+    }
+  }
+  EXPECT_EQ(id_count, 5) << "Should return exactly 5 document IDs (LIMIT applied)";
+
+  close(sock);
+}
+
+/**
+ * @brief Test that COUNT and SEARCH return consistent total results
+ */
+TEST_F(TcpServerTest, CountSearchConsistency) {
+  // Insert test documents
+  for (int i = 1; i <= 100; ++i) {
+    auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
+    index_->AddDocument(static_cast<index::DocId>(doc_id), "test document");
+  }
+
+  ASSERT_TRUE(server_->Start());
+  uint16_t port = server_->GetPort();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Get COUNT
+  std::string count_response = SendRequest(sock, "COUNT test test");
+  EXPECT_TRUE(count_response.find("OK COUNT 100") == 0)
+      << "COUNT should return 100";
+
+  // Get SEARCH total (with small LIMIT)
+  std::string search_response = SendRequest(sock, "SEARCH test test LIMIT 10");
+  EXPECT_TRUE(search_response.find("OK RESULTS 100") == 0)
+      << "SEARCH total_results should match COUNT (100)";
+
+  // Get SEARCH total (with large LIMIT)
+  std::string search_response2 = SendRequest(sock, "SEARCH test test LIMIT 90");
+  EXPECT_TRUE(search_response2.find("OK RESULTS 100") == 0)
+      << "SEARCH total_results should be consistent regardless of LIMIT";
 
   close(sock);
 }

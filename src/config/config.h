@@ -44,6 +44,11 @@ constexpr int kSnapshotIntervalSec = 600;
 constexpr int kTcpPort = 11016;
 constexpr int kHttpPort = 8080;
 
+// Query defaults
+constexpr int kDefaultLimit = 1000;
+constexpr int kMinLimit = 5;
+constexpr int kMaxLimit = 1000;
+
 }  // namespace defaults
 
 /**
@@ -194,6 +199,12 @@ struct ApiConfig {
     std::string bind = "127.0.0.1";
     int port = defaults::kHttpPort;
   } http;
+
+  /**
+   * @brief Default LIMIT for SEARCH queries when not explicitly specified
+   * Valid range: 5-1000 (enforced by validation)
+   */
+  int default_limit = defaults::kDefaultLimit;
 };
 
 /**

@@ -379,6 +379,7 @@ int main(int argc, char* argv[]) {
   server_config.host = config.api.tcp.bind;
   server_config.port = config.api.tcp.port;
   server_config.max_connections = kDefaultMaxConnections;
+  server_config.default_limit = config.api.default_limit;
 
 #ifdef USE_MYSQL
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir, &config,

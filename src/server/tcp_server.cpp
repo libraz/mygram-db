@@ -355,6 +355,11 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
     return FormatError(query_parser_.GetError());
   }
 
+  // Apply configured default LIMIT if not explicitly specified
+  if (!query.limit_explicit && (query.type == query::QueryType::SEARCH)) {
+    query.limit = static_cast<uint32_t>(config_.default_limit);
+  }
+
   // Increment command statistics
   stats_.IncrementCommand(query.type);
 
@@ -502,22 +507,47 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() &&
                             query.limit > 0 && query.offset <= kMaxOffsetForOptimization && order_by.IsPrimaryKey();
 
-        // Process most selective term first
+        // Calculate total results count (needed for accurate response)
+        // For optimization path: we need to count all results first, then decide best strategy
+        size_t total_results = 0;
         std::vector<storage::DocId> results;
+
         if (can_optimize) {
-          // Use GetTopN optimization: only retrieve top (offset + limit) results
-          // This works for both single-ngram and multi-ngram terms now
+          // Fetch all matching results once (without limit) for accurate total_results
+          auto all_results = current_index->SearchAnd(term_infos[0].ngrams);
+          total_results = all_results.size();
+
+          // Heuristic: If total results is small enough, reuse the fetched results
+          // instead of doing a second GetTopN fetch. This avoids double index scan.
+          // Threshold: if (offset + limit) is close to total_results, reuse is more efficient
+          // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+          constexpr double kReuseThreshold = 0.5;  // Reuse if fetching >50% of results
+          // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
           size_t index_limit = query.offset + query.limit;
-          bool reverse = (order_by.order == query::SortOrder::DESC);
-          results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
-          if (ctx.debug_mode) {
-            debug_info.total_candidates = results.size();
-            debug_info.after_intersection = results.size();
-            std::string direction = reverse ? "DESC" : "ASC";
-            if (term_infos[0].ngrams.size() == 1) {
-              debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
-            } else {
-              debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
+          bool should_reuse = (static_cast<double>(index_limit) / total_results) > kReuseThreshold;
+
+          if (should_reuse) {
+            // Reuse the already-fetched results (more efficient for small result sets)
+            results = std::move(all_results);
+            can_optimize = false;  // Use standard sort+paginate path
+            if (ctx.debug_mode) {
+              debug_info.total_candidates = results.size();
+              debug_info.after_intersection = results.size();
+              debug_info.optimization_used = "reuse-fetch (small result set)";
+            }
+          } else {
+            // Result set is large: use GetTopN optimization to avoid sorting all results
+            bool reverse = (order_by.order == query::SortOrder::DESC);
+            results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
+            if (ctx.debug_mode) {
+              debug_info.total_candidates = results.size();
+              debug_info.after_intersection = results.size();
+              std::string direction = reverse ? "DESC" : "ASC";
+              if (term_infos[0].ngrams.size() == 1) {
+                debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+              } else {
+                debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
+              }
             }
           }
         } else {
@@ -616,7 +646,10 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
 
         // Sort and paginate results using ResultSorter
         // This uses in-place sorting with partial_sort optimization for memory efficiency
-        size_t total_results = results.size();
+        // Note: total_results is already set for optimized path, otherwise set it here
+        if (!can_optimize) {
+          total_results = results.size();
+        }
         auto sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
 
         // Calculate final debug info
@@ -839,6 +872,8 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           filepath = snapshot_dir_ + "/" + std::string(buf.data());
         }
 
+        spdlog::info("Attempting to save snapshot to: {}", filepath);
+
         // Get current GTID from shared binlog reader
         // TODO: Need access to shared binlog_reader from main
         std::string current_gtid;
@@ -851,15 +886,19 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         bool success = false;
 
         // Create directory
+        spdlog::debug("Creating directory: {}", filepath);
         if (system(("mkdir -p \"" + filepath + "\"").c_str()) != 0) {
           read_only_ = false;
-          return FormatError("Failed to create snapshot directory");
+          std::string error_msg = "Failed to create snapshot directory: " + filepath + " (check permissions and disk space)";
+          spdlog::error("{}", error_msg);
+          return FormatError(error_msg);
         }
 
         // Save each table
         spdlog::info("Saving snapshot to: {}", filepath);
         spdlog::info("This may take a while for large datasets. Please wait...");
         success = true;
+        std::string failed_table;
         for (const auto& [table_name, ctx] : table_contexts_) {
           std::string table_index_path = filepath;
           table_index_path += "/";
@@ -871,8 +910,15 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           table_doc_path += ".docs";
 
           spdlog::info("Saving table: {}", table_name);
-          if (!ctx->index->SaveToFile(table_index_path) || !ctx->doc_store->SaveToFile(table_doc_path, "")) {
-            spdlog::error("Failed to save table: {}", table_name);
+          if (!ctx->index->SaveToFile(table_index_path)) {
+            spdlog::error("Failed to save index for table: {}", table_name);
+            failed_table = table_name;
+            success = false;
+            break;
+          }
+          if (!ctx->doc_store->SaveToFile(table_doc_path, "")) {
+            spdlog::error("Failed to save documents for table: {}", table_name);
+            failed_table = table_name;
             success = false;
             break;
           }
@@ -903,8 +949,10 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
             meta_file.close();
             spdlog::info("Saved snapshot metadata with {} table(s)", table_contexts_.size());
           } else {
-            spdlog::error("Failed to write metadata file");
-            success = false;
+            spdlog::error("Failed to write metadata file: {}", meta_path);
+            std::string error_msg = "Failed to write metadata file: " + meta_path + " (check permissions)";
+            read_only_ = false;
+            return FormatError(error_msg);
           }
         }
 
@@ -912,9 +960,16 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         read_only_ = false;
 
         if (success) {
+          spdlog::info("Successfully saved snapshot to: {}", filepath);
           return FormatSaveResponse(filepath);
         }
-        return FormatError("Failed to save snapshot");
+
+        std::string error_msg = "Failed to save snapshot to: " + filepath;
+        if (!failed_table.empty()) {
+          error_msg += " (failed at table: " + failed_table + ")";
+        }
+        spdlog::error("{}", error_msg);
+        return FormatError(error_msg);
       }
 
       case query::QueryType::LOAD: {
@@ -1142,7 +1197,7 @@ std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& res
     if (!debug_info->order_by_applied.empty()) {
       oss << "order_by: " << debug_info->order_by_applied << "\r\n";
     }
-    // Always show LIMIT (it has a default value of 100)
+    // Always show LIMIT (it has a default value of 1000)
     oss << "limit: " << debug_info->limit_applied;
     if (!debug_info->limit_explicit) {
       oss << " (default)";

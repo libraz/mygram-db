@@ -111,7 +111,7 @@ struct Query {
   std::vector<FilterCondition> filters;
   std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  uint32_t limit = 100;          // Default limit: 100 results per query
+  uint32_t limit = 1000;         // Initial value (overridden by config.api.default_limit if not explicit)
   uint32_t offset = 0;           // Default offset
   bool limit_explicit = false;   // True if LIMIT was explicitly specified by user
   bool offset_explicit = false;  // True if OFFSET was explicitly specified by user

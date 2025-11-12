@@ -44,6 +44,7 @@ struct ServerConfig {
   int worker_threads = 0;  // Number of worker threads (0 = CPU count)
   int recv_buffer_size = kDefaultRecvBufferSize;
   int send_buffer_size = kDefaultSendBufferSize;
+  int default_limit = 1000;  // Default LIMIT for SEARCH queries (range: 5-1000)
 };
 
 /**
