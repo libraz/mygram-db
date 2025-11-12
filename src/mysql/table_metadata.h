@@ -12,8 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace mygramdb {
-namespace mysql {
+namespace mygramdb::mysql {
 
 /**
  * @brief MySQL column types (subset relevant for text search)
@@ -56,18 +55,18 @@ enum class ColumnType : uint8_t {
  * @brief Column metadata
  */
 struct ColumnMetadata {
-  ColumnType type;
-  std::string name;   // May not be available from binlog
-  uint16_t metadata;  // Type-specific metadata
-  bool is_nullable;
-  bool is_unsigned;
+  ColumnType type = ColumnType::LONG;
+  std::string name;       // May not be available from binlog
+  uint16_t metadata = 0;  // Type-specific metadata
+  bool is_nullable = false;
+  bool is_unsigned = false;
 };
 
 /**
  * @brief Table metadata extracted from TABLE_MAP event
  */
 struct TableMetadata {
-  uint64_t table_id;
+  uint64_t table_id = 0;
   std::string database_name;
   std::string table_name;
   std::vector<ColumnMetadata> columns;
@@ -92,7 +91,7 @@ class TableMetadataCache {
   /**
    * @brief Get table metadata by ID
    */
-  const TableMetadata* Get(uint64_t table_id) const;
+  [[nodiscard]] const TableMetadata* Get(uint64_t table_id) const;
 
   /**
    * @brief Remove table metadata
@@ -108,7 +107,6 @@ class TableMetadataCache {
   std::map<uint64_t, TableMetadata> cache_;
 };
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

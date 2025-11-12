@@ -25,7 +25,17 @@
 
 namespace {
 
+// Buffer and string prefix size constants
+constexpr size_t kReceiveBufferSize = 65536;       // Receive buffer size (64KB)
+constexpr size_t kOkInfoPrefixLength = 8;          // "OK INFO\r\n" length (7 chars + newline)
+constexpr size_t kOkSavedPrefixLength = 9;         // "OK SAVED " length
+constexpr size_t kOkLoadedPrefixLength = 10;       // "OK LOADED " length
+constexpr size_t kOkReplicationPrefixLength = 15;  // "OK REPLICATION\r\n" length (14 chars + newline)
+constexpr size_t kErrorPrefixLength = 6;           // "ERROR " length
+constexpr int kMaxWaitReadyRetries = 100;          // Maximum retries for --wait-ready (~5 minutes)
+
 #ifdef USE_READLINE
+constexpr size_t kTablesKeyLength = 8;  // "tables: " length (used in tab completion)
 // Command list for tab completion
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
 const char* command_list[] = {"SEARCH",      "COUNT", "GET",  "INFO", "SAVE", "LOAD", "CONFIG",
@@ -123,7 +133,6 @@ char* KeywordGeneratorWrapper(const char* text, int state) {
  * @param end End position in line buffer (unused)
  * @return Array of possible completions
  */
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 char** CommandCompletion(const char* text, int start, int /* end */) {
   // Disable default filename completion
   rl_attempted_completion_over = 1;
@@ -319,8 +328,8 @@ class MygramClient {
 
     while (attempts < max_attempts) {
       if (attempts > 0) {
-        std::cerr << "\nRetrying in " << config_.retry_interval << " seconds... (attempt "
-                  << (attempts + 1) << "/" << max_attempts << ")\n";
+        std::cerr << "\nRetrying in " << config_.retry_interval << " seconds... (attempt " << (attempts + 1) << "/"
+                  << max_attempts << ")\n";
         sleep(config_.retry_interval);
       }
 
@@ -342,8 +351,11 @@ class MygramClient {
         return false;  // Don't retry invalid address
       }
 
-      if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) <
-          0) {
+      // POSIX socket API requires sockaddr* type conversion from sockaddr_in*
+      if (connect(
+              sock_,
+              reinterpret_cast<struct sockaddr*>(&server_addr),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+              sizeof(server_addr)) < 0) {
         int saved_errno = errno;
         std::cerr << "Connection failed: " << strerror(saved_errno) << '\n';
 
@@ -412,7 +424,7 @@ class MygramClient {
     // Look for line: "tables: table1,table2,table3"
     size_t pos = response.find("tables: ");
     if (pos != std::string::npos) {
-      pos += 8;  // Skip "tables: "
+      pos += kTablesKeyLength;  // Skip "tables: "
       size_t end_pos = response.find("\r\n", pos);
       if (end_pos == std::string::npos) {
         end_pos = response.find('\n', pos);
@@ -451,7 +463,7 @@ class MygramClient {
 
     // Receive response
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-    char buffer[65536];
+    char buffer[kReceiveBufferSize];
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
     if (received <= 0) {
@@ -467,8 +479,7 @@ class MygramClient {
     std::string response(buffer);
 
     // Remove trailing \r\n
-    if (response.size() >= 2 && response[response.size() - 2] == '\r' &&
-        response[response.size() - 1] == '\n') {
+    if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
       response = response.substr(0, response.size() - 2);
     }
 
@@ -481,7 +492,7 @@ class MygramClient {
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';
     std::cout << "Use TAB for context-aware command completion" << '\n';
 #else
-    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << std::endl;
+    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';
 #endif
     std::cout << '\n';
 
@@ -590,7 +601,6 @@ class MygramClient {
     std::cout << "  help - Show this help" << '\n';
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
   static void PrintResponse(const std::string& response) {
     // Parse response type
     if (response.find("OK RESULTS") == 0) {
@@ -659,7 +669,7 @@ class MygramClient {
     } else if (response.find("OK INFO") == 0) {
       // INFO response: OK INFO\r\n<key>: <value>\r\n...\r\nEND
       // Simply print the formatted response (already has nice formatting from server)
-      std::string info = response.substr(8);  // Remove "OK INFO\r\n"
+      std::string info = response.substr(kOkInfoPrefixLength);  // Remove "OK INFO\r\n"
 
       // Replace \r\n with actual newlines for display
       size_t pos = 0;
@@ -678,11 +688,11 @@ class MygramClient {
       std::cout << info << '\n';
     } else if (response.find("OK SAVED") == 0) {
       // SAVE response: OK SAVED <filepath>
-      std::string filepath = response.substr(9);  // Remove "OK SAVED "
+      std::string filepath = response.substr(kOkSavedPrefixLength);  // Remove "OK SAVED "
       std::cout << "Snapshot saved to: " << filepath << '\n';
     } else if (response.find("OK LOADED") == 0) {
       // LOAD response: OK LOADED <filepath>
-      std::string filepath = response.substr(10);  // Remove "OK LOADED "
+      std::string filepath = response.substr(kOkLoadedPrefixLength);  // Remove "OK LOADED "
       std::cout << "Snapshot loaded from: " << filepath << '\n';
     } else if (response.find("OK REPLICATION_STOPPED") == 0) {
       std::cout << "Replication stopped successfully" << '\n';
@@ -690,7 +700,7 @@ class MygramClient {
       std::cout << "Replication started successfully" << '\n';
     } else if (response.find("OK REPLICATION") == 0) {
       // REPLICATION STATUS response: OK REPLICATION\r\n<key>: <value>\r\n...END
-      std::string info = response.substr(15);  // Remove "OK REPLICATION\r\n"
+      std::string info = response.substr(kOkReplicationPrefixLength);  // Remove "OK REPLICATION\r\n"
 
       // Replace \\r\\n with actual newlines for display
       size_t pos = 0;
@@ -709,7 +719,7 @@ class MygramClient {
       std::cout << info << '\n';
     } else if (response.find("ERROR") == 0) {
       // Error response
-      std::cout << "(error) " << response.substr(6) << '\n';  // Remove "ERROR "
+      std::cout << "(error) " << response.substr(kErrorPrefixLength) << '\n';  // Remove "ERROR "
     } else {
       // Unknown response
       std::cout << response << '\n';
@@ -732,47 +742,45 @@ void PrintUsage(const char* program_name) {
   std::cout << '\n';
   std::cout << "Examples:" << '\n';
   std::cout << "  " << program_name << "                          # Interactive mode" << '\n';
-  std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server"
-            << '\n';
-  std::cout << "  " << program_name
-            << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
-  std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready"
-            << '\n';
+  std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server" << '\n';
+  std::cout << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
+  std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready" << '\n';
   std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';
 }
 
 }  // namespace
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
   Config config;
   std::vector<std::string> command_args;
 
   // Parse arguments
   for (int i = 1; i < argc; ++i) {
-    std::string arg(argv[i]);
+    // Standard C main() argv access requires pointer arithmetic
+    std::string arg(argv[i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
     if (arg == "--help") {
-      PrintUsage(argv[0]);
+      PrintUsage(argv[0]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       return 0;
     }
     if (arg == "-h") {
       if (i + 1 < argc) {
-        config.host = argv[++i];
+        config.host = argv[++i];  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       } else {
         std::cerr << "Error: -h requires an argument" << '\n';
         return 1;
       }
     } else if (arg == "-p") {
       if (i + 1 < argc) {
-        config.port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        config.port =
+            static_cast<uint16_t>(std::stoi(argv[++i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       } else {
         std::cerr << "Error: -p requires an argument" << '\n';
         return 1;
       }
     } else if (arg == "--retry") {
       if (i + 1 < argc) {
-        config.retry_count = std::stoi(argv[++i]);
+        config.retry_count = std::stoi(argv[++i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         if (config.retry_count < 0) {
           std::cerr << "Error: --retry value must be non-negative" << '\n';
           return 1;
@@ -782,11 +790,11 @@ int main(int argc, char* argv[]) {
         return 1;
       }
     } else if (arg == "--wait-ready") {
-      config.retry_count = 100;  // Max 100 retries = ~5 minutes
+      config.retry_count = kMaxWaitReadyRetries;  // Max retries for --wait-ready (~5 minutes)
     } else {
       // Assume remaining args are a command
       for (int j = i; j < argc; ++j) {
-        command_args.emplace_back(argv[j]);
+        command_args.emplace_back(argv[j]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       }
       config.interactive = false;
       break;

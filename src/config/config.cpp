@@ -21,13 +21,14 @@
 #include "mysql/connection.h"
 #endif
 
-namespace mygramdb {
-namespace config {
+namespace mygramdb::config {
 
 namespace {
 
 using json = nlohmann::json;
 using nlohmann::json_schema::json_validator;
+
+constexpr size_t kGtidPrefixLength = 5;  // "gtid="
 
 /**
  * @brief Convert YAML node to JSON object recursively
@@ -113,8 +114,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   }
   if (json_obj.contains("op") || json_obj.contains("operator")) {
     // Support both "op" and "operator" as key names
-    config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>()
-                                        : json_obj["operator"].get<std::string>();
+    config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>() : json_obj["operator"].get<std::string>();
   }
   if (json_obj.contains("value")) {
     // value can be string or number, convert to string
@@ -139,8 +139,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
 
   // Validate: IS NULL/IS NOT NULL should not have a value
   if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && !config.value.empty()) {
-    throw std::runtime_error("Required filter with operator '" + config.op +
-                             "' should not have a value");
+    throw std::runtime_error("Required filter with operator '" + config.op + "' should not have a value");
   }
 
   // Validate: Other operators should have a value
@@ -179,7 +178,6 @@ FilterConfig ParseFilterConfig(const json& json_obj) {
 /**
  * @brief Parse table configuration from JSON
  */
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 TableConfig ParseTableConfig(const json& json_obj) {
   TableConfig config;
 
@@ -257,7 +255,6 @@ TableConfig ParseTableConfig(const json& json_obj) {
 /**
  * @brief Parse configuration from JSON object
  */
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Config ParseConfigFromJson(const json& root) {
   Config config;
 
@@ -328,15 +325,13 @@ Config ParseConfigFromJson(const json& root) {
 
     // Validate server_id
     if (config.replication.enable && config.replication.server_id == 0) {
-      throw std::runtime_error(
-          "replication.server_id must be set to a non-zero value when replication is enabled");
+      throw std::runtime_error("replication.server_id must be set to a non-zero value when replication is enabled");
     }
 
     // Validate start_from
     if (config.replication.enable) {
       const auto& start = config.replication.start_from;
-      if (start != "snapshot" && start != "latest" && start != "state_file" &&
-          start.find("gtid=") != 0) {
+      if (start != "snapshot" && start != "latest" && start != "state_file" && start.find("gtid=") != 0) {
         throw std::runtime_error(
             "replication.start_from must be one of: snapshot, latest, state_file, or "
             "gtid=<UUID:txn>");
@@ -344,7 +339,7 @@ Config ParseConfigFromJson(const json& root) {
 
       // If gtid= format, validate the GTID format
       if (start.find("gtid=") == 0) {
-        std::string gtid_str = start.substr(5);  // Remove "gtid=" prefix
+        std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
 #ifdef USE_MYSQL
         auto gtid = mysql::GTID::Parse(gtid_str);
         if (!gtid.has_value()) {
@@ -488,14 +483,18 @@ std::string ReadFileToString(const std::string& path) {
 // NOLINTNEXTLINE(performance-enum-size)
 enum class FileFormat { kYaml, kJson, kUnknown };
 
+constexpr size_t kJsonExtLength = 5;  // ".json"
+constexpr size_t kYamlExtLength = 5;  // ".yaml"
+constexpr size_t kYmlExtLength = 4;   // ".yml"
+
 FileFormat DetectFileFormat(const std::string& path) {
-  if (path.size() >= 5 && path.substr(path.size() - 5) == ".json") {
+  if (path.size() >= kJsonExtLength && path.substr(path.size() - kJsonExtLength) == ".json") {
     return FileFormat::kJson;
   }
-  if (path.size() >= 5 && path.substr(path.size() - 5) == ".yaml") {
+  if (path.size() >= kYamlExtLength && path.substr(path.size() - kYamlExtLength) == ".yaml") {
     return FileFormat::kYaml;
   }
-  if (path.size() >= 4 && path.substr(path.size() - 4) == ".yml") {
+  if (path.size() >= kYmlExtLength && path.substr(path.size() - kYmlExtLength) == ".yml") {
     return FileFormat::kYaml;
   }
   return FileFormat::kUnknown;
@@ -508,8 +507,7 @@ void ValidateConfigJson(const std::string& config_json_str, const std::string& s
     json config_json = json::parse(config_json_str);
 
     // Use embedded schema if no custom schema provided
-    std::string schema_to_use =
-        schema_json_str.empty() ? std::string(kConfigSchemaJson) : schema_json_str;
+    std::string schema_to_use = schema_json_str.empty() ? std::string(kConfigSchemaJson) : schema_json_str;
 
     json schema_json = json::parse(schema_to_use);
 
@@ -544,9 +542,8 @@ Config LoadConfigJson(const std::string& path, const std::string& schema_path) {
 
     spdlog::info("Configuration loaded successfully from {}", path);
     spdlog::info("  Tables: {}", config.tables.size());
-    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user,
-                 std::string(config.mysql.password.length(), '*'), config.mysql.host,
-                 config.mysql.port);
+    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user, std::string(config.mysql.password.length(), '*'),
+                 config.mysql.host, config.mysql.port);
 
     return config;
   } catch (const json::parse_error& e) {
@@ -565,9 +562,8 @@ Config LoadConfigYaml(const std::string& path) {
 
     spdlog::info("Configuration loaded successfully from {}", path);
     spdlog::info("  Tables: {}", config.tables.size());
-    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user,
-                 std::string(config.mysql.password.length(), '*'), config.mysql.host,
-                 config.mysql.port);
+    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user, std::string(config.mysql.password.length(), '*'),
+                 config.mysql.host, config.mysql.port);
 
     return config;
   } catch (const YAML::Exception& e) {
@@ -616,5 +612,4 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
   }
 }
 
-}  // namespace config
-}  // namespace mygramdb
+}  // namespace mygramdb::config

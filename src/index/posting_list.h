@@ -11,8 +11,12 @@
 #include <memory>
 #include <vector>
 
-namespace mygramdb {
-namespace index {
+namespace mygramdb::index {
+
+/**
+ * @brief Default density threshold for Roaring bitmap strategy (18%)
+ */
+constexpr double kDefaultRoaringThreshold = 0.18;
 
 /**
  * @brief Document ID type (32-bit, supports up to 4B documents)
@@ -22,7 +26,7 @@ using DocId = uint32_t;
 /**
  * @brief Posting list storage strategies
  */
-enum class PostingStrategy {
+enum class PostingStrategy : uint8_t {
   kDeltaCompressed,  // Delta-encoded varint array (sparse)
   kRoaringBitmap     // Roaring bitmap (dense)
 };
@@ -40,7 +44,7 @@ class PostingList {
    * @brief Construct empty posting list
    * @param roaring_threshold Density threshold for Roaring bitmap (0.0-1.0)
    */
-  explicit PostingList(double roaring_threshold = 0.18);
+  explicit PostingList(double roaring_threshold = kDefaultRoaringThreshold);
 
   /**
    * @brief Destructor
@@ -52,8 +56,8 @@ class PostingList {
   PostingList& operator=(const PostingList&) = delete;
 
   // Enable move
-  PostingList(PostingList&&) noexcept;
-  PostingList& operator=(PostingList&&) noexcept;
+  PostingList(PostingList&& other) noexcept;
+  PostingList& operator=(PostingList&& other) noexcept;
 
   /**
    * @brief Add document ID to posting list
@@ -78,44 +82,44 @@ class PostingList {
    * @param doc_id Document ID to check
    * @return true if exists
    */
-  bool Contains(DocId doc_id) const;
+  [[nodiscard]] bool Contains(DocId doc_id) const;
 
   /**
    * @brief Get all document IDs
    * @return Vector of document IDs (sorted)
    */
-  std::vector<DocId> GetAll() const;
+  [[nodiscard]] std::vector<DocId> GetAll() const;
 
   /**
    * @brief Get document count
    * @return Number of documents in posting list
    */
-  uint64_t Size() const;
+  [[nodiscard]] uint64_t Size() const;
 
   /**
    * @brief Get memory usage in bytes
    * @return Memory used by this posting list
    */
-  size_t MemoryUsage() const;
+  [[nodiscard]] size_t MemoryUsage() const;
 
   /**
    * @brief Get current strategy
    */
-  PostingStrategy GetStrategy() const { return strategy_; }
+  [[nodiscard]] PostingStrategy GetStrategy() const { return strategy_; }
 
   /**
    * @brief Intersect with another posting list
    * @param other Other posting list
    * @return New posting list with intersection
    */
-  std::unique_ptr<PostingList> Intersect(const PostingList& other) const;
+  [[nodiscard]] std::unique_ptr<PostingList> Intersect(const PostingList& other) const;
 
   /**
    * @brief Union with another posting list
    * @param other Other posting list
    * @return New posting list with union
    */
-  std::unique_ptr<PostingList> Union(const PostingList& other) const;
+  [[nodiscard]] std::unique_ptr<PostingList> Union(const PostingList& other) const;
 
   /**
    * @brief Optimize storage (convert to Roaring if beneficial)
@@ -128,7 +132,7 @@ class PostingList {
    * @param total_docs Total number of documents (for density calculation)
    * @return New posting list with optimized storage
    */
-  std::unique_ptr<PostingList> Clone(uint64_t total_docs) const;
+  [[nodiscard]] std::unique_ptr<PostingList> Clone(uint64_t total_docs) const;
 
   /**
    * @brief Serialize posting list to buffer
@@ -145,14 +149,14 @@ class PostingList {
   bool Deserialize(const std::vector<uint8_t>& buffer, size_t& offset);
 
  private:
-  PostingStrategy strategy_;
+  PostingStrategy strategy_ = PostingStrategy::kDeltaCompressed;
   double roaring_threshold_;
 
   // Delta-compressed storage
   std::vector<uint32_t> delta_compressed_;
 
   // Roaring bitmap storage
-  roaring_bitmap_t* roaring_bitmap_;
+  roaring_bitmap_t* roaring_bitmap_ = nullptr;
 
   /**
    * @brief Convert from delta to Roaring
@@ -175,5 +179,4 @@ class PostingList {
   static std::vector<DocId> DecodeDelta(const std::vector<uint32_t>& encoded);
 };
 
-}  // namespace index
-}  // namespace mygramdb
+}  // namespace mygramdb::index

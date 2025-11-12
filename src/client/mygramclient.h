@@ -16,8 +16,7 @@
 #include <variant>
 #include <vector>
 
-namespace mygramdb {
-namespace client {
+namespace mygramdb::client {
 
 /**
  * @brief Error wrapper to distinguish from success strings in std::variant
@@ -29,7 +28,7 @@ struct Error {
   explicit Error(std::string msg) : message(std::move(msg)) {}
 
   // Convenience conversion to string
-  const std::string& str() const { return message; }
+  [[nodiscard]] const std::string& str() const { return message; }
   operator const std::string&() const { return message; }
 };
 
@@ -40,7 +39,7 @@ struct SearchResult {
   std::string primary_key;  // Document primary key
 
   SearchResult() = default;
-  explicit SearchResult(std::string pk) : primary_key(std::move(pk)) {}
+  explicit SearchResult(std::string primary_key_value) : primary_key(std::move(primary_key_value)) {}
 };
 
 /**
@@ -51,7 +50,7 @@ struct Document {
   std::vector<std::pair<std::string, std::string>> fields;  // Filter fields (key=value)
 
   Document() = default;
-  explicit Document(std::string pk) : primary_key(std::move(pk)) {}
+  explicit Document(std::string primary_key_value) : primary_key(std::move(primary_key_value)) {}
 };
 
 /**
@@ -113,12 +112,15 @@ struct ReplicationStatus {
 /**
  * @brief Client configuration
  */
+// NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default MygramDB
+// client settings
 struct ClientConfig {
   std::string host = "127.0.0.1";     // Server hostname
-  uint16_t port = 11211;              // Server port
-  uint32_t timeout_ms = 5000;         // Connection timeout (milliseconds)
-  uint32_t recv_buffer_size = 65536;  // Receive buffer size
+  uint16_t port = 11211;              // Default port for MygramDB protocol
+  uint32_t timeout_ms = 5000;         // Default timeout in milliseconds
+  uint32_t recv_buffer_size = 65536;  // Default buffer size (64KB)
 };
+// NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
 /**
  * @brief MygramDB client
@@ -183,7 +185,7 @@ class MygramClient {
    * @brief Check if connected to server
    * @return true if connected
    */
-  bool IsConnected() const;
+  [[nodiscard]] bool IsConnected() const;
 
   /**
    * @brief Search for documents
@@ -200,11 +202,13 @@ class MygramClient {
    * @return SearchResponse on success, Error on failure
    */
   std::variant<SearchResponse, Error> Search(
-      const std::string& table, const std::string& query, uint32_t limit = 1000,
+      const std::string& table, const std::string& query,
+      uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+                              // - Default result limit
       uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
-      const std::vector<std::pair<std::string, std::string>>& filters = {},
-      const std::string& order_by = "", bool order_desc = false);
+      const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& order_by = "",
+      bool order_desc = false);
 
   /**
    * @brief Count matching documents
@@ -216,11 +220,10 @@ class MygramClient {
    * @param filters Filter conditions (key=value pairs)
    * @return CountResponse on success, Error on failure
    */
-  std::variant<CountResponse, Error> Count(
-      const std::string& table, const std::string& query,
-      const std::vector<std::string>& and_terms = {},
-      const std::vector<std::string>& not_terms = {},
-      const std::vector<std::pair<std::string, std::string>>& filters = {});
+  std::variant<CountResponse, Error> Count(const std::string& table, const std::string& query,
+                                           const std::vector<std::string>& and_terms = {},
+                                           const std::vector<std::string>& not_terms = {},
+                                           const std::vector<std::pair<std::string, std::string>>& filters = {});
 
   /**
    * @brief Get document by primary key
@@ -302,12 +305,11 @@ class MygramClient {
    * @brief Get last error message
    * @return Last error message (empty if no error)
    */
-  const std::string& GetLastError() const;
+  [[nodiscard]] const std::string& GetLastError() const;
 
  private:
   class Impl;  // Forward declaration for PIMPL
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace client
-}  // namespace mygramdb
+}  // namespace mygramdb::client

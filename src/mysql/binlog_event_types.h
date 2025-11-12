@@ -6,19 +6,26 @@
  * https://github.com/mysql/mysql-server
  *
  * License: GPL v2.0 with Universal FOSS Exception
+ *
+ * Note: This file contains MySQL binlog protocol definitions that must match
+ * the MySQL wire protocol exactly. Some modern C++ style guidelines are
+ * intentionally relaxed for protocol compatibility.
  */
 
 #pragma once
 
-namespace mygramdb {
-namespace mysql {
+#include <cstdint>
+
+// NOLINTBEGIN(performance-enum-size) - MySQL protocol requires uint8_t for binlog event types
+
+namespace mygramdb::mysql {
 
 /**
  * @brief MySQL binlog event types
  *
  * Based on enum Log_event_type from MySQL 8.4.7
  */
-enum class MySQLBinlogEventType {
+enum class MySQLBinlogEventType : uint8_t {
   UNKNOWN_EVENT = 0,
   START_EVENT_V3 = 1,  // Deprecated
   QUERY_EVENT = 2,
@@ -104,5 +111,6 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
   }
 }
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
+
+// NOLINTEND(performance-enum-size)

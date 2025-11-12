@@ -197,8 +197,7 @@ TEST(ConfigTest, InvalidServerId) {
           std::string error_msg(e.what());
           // Schema validation happens first, so check for schema error or server_id error
           bool valid_error =
-              (error_msg.find("replication.server_id must be set to a non-zero value") !=
-               std::string::npos) ||
+              (error_msg.find("replication.server_id must be set to a non-zero value") != std::string::npos) ||
               (error_msg.find("server_id") != std::string::npos) ||
               (error_msg.find("required property") != std::string::npos);
           EXPECT_TRUE(valid_error) << "Actual error: " << error_msg;
@@ -340,10 +339,9 @@ TEST(ConfigTest, LoadValidJSONConfig) {
  */
 TEST(ConfigTest, LoadJSONConfigWithSchemaValidation) {
   // Create valid JSON config
-  json config_json = {
-      {"mysql", {{"user", "test_user"}, {"password", "test_pass"}, {"database", "test_db"}}},
-      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
-      {"replication", {{"server_id", 100}}}};
+  json config_json = {{"mysql", {{"user", "test_user"}, {"password", "test_pass"}, {"database", "test_db"}}},
+                      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
+                      {"replication", {{"server_id", 100}}}};
 
   std::ofstream f("valid_config.json");
   f << config_json.dump(2);
@@ -360,9 +358,8 @@ TEST(ConfigTest, LoadJSONConfigWithSchemaValidation) {
  */
 TEST(ConfigTest, LoadInvalidJSONWithSchemaValidation) {
   // Create invalid JSON config (missing required "user" field)
-  json config_json = {
-      {"mysql", {{"password", "test_pass"}, {"database", "test_db"}}},
-      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}}};
+  json config_json = {{"mysql", {{"password", "test_pass"}, {"database", "test_db"}}},
+                      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}}};
 
   std::ofstream f("invalid_config.json");
   f << config_json.dump(2);
@@ -411,14 +408,13 @@ TEST(ConfigTest, LoadInvalidJSON) {
  */
 TEST(ConfigTest, JSONConfigWithUnknownKeys) {
   // Create JSON config with unknown field
-  json config_json = {
-      {"mysql",
-       {{"user", "test_user"},
-        {"password", "test_pass"},
-        {"database", "test_db"},
-        {"unknown_field", "should_be_rejected"}}},
-      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
-      {"replication", {{"server_id", 100}}}};
+  json config_json = {{"mysql",
+                       {{"user", "test_user"},
+                        {"password", "test_pass"},
+                        {"database", "test_db"},
+                        {"unknown_field", "should_be_rejected"}}},
+                      {"tables", {{{"name", "test_table"}, {"text_source", {{"column", "content"}}}}}},
+                      {"replication", {{"server_id", 100}}}};
 
   std::ofstream f("unknown_keys.json");
   f << config_json.dump(2);
@@ -452,10 +448,9 @@ TEST(ConfigTest, LoadConfigYamlLegacy) {
  * @brief Test LoadConfigJson function
  */
 TEST(ConfigTest, LoadConfigJsonFunction) {
-  json config_json = {
-      {"mysql", {{"user", "json_func_user"}, {"password", "pass"}, {"database", "db"}}},
-      {"tables", {{{"name", "test"}, {"text_source", {{"column", "content"}}}}}},
-      {"replication", {{"server_id", 300}}}};
+  json config_json = {{"mysql", {{"user", "json_func_user"}, {"password", "pass"}, {"database", "db"}}},
+                      {"tables", {{{"name", "test"}, {"text_source", {{"column", "content"}}}}}},
+                      {"replication", {{"server_id", 300}}}};
 
   std::ofstream f("func_test.json");
   f << config_json.dump(2);

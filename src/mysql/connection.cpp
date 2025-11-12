@@ -13,8 +13,9 @@
 #include <sstream>
 #include <utility>
 
-namespace mygramdb {
-namespace mysql {
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
+
+namespace mygramdb::mysql {
 
 // GTID implementation
 
@@ -63,9 +64,7 @@ Connection::~Connection() {
 }
 
 Connection::Connection(Connection&& other) noexcept
-    : config_(std::move(other.config_)),
-      mysql_(other.mysql_),
-      last_error_(std::move(other.last_error_)) {
+    : config_(std::move(other.config_)), mysql_(other.mysql_), last_error_(std::move(other.last_error_)) {
   other.mysql_ = nullptr;
 }
 
@@ -96,10 +95,9 @@ bool Connection::Connect() {
   mysql_options(mysql_, MYSQL_OPT_RECONNECT, &reconnect);
 
   // Connect to MySQL
-  if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(),
-                         config_.password.c_str(),
-                         config_.database.empty() ? nullptr : config_.database.c_str(),
-                         config_.port, nullptr, 0) == nullptr) {
+  if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(), config_.password.c_str(),
+                         config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
+                         0) == nullptr) {
     SetMySQLError();
     spdlog::error("MySQL connection failed: {}", last_error_);
     return false;
@@ -356,7 +354,8 @@ void Connection::SetMySQLError() {
   }
 }
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
+
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 #endif  // USE_MYSQL

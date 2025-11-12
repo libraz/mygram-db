@@ -2,37 +2,17 @@
 Checks: >
   clang-diagnostic-*,
   clang-analyzer-*,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
   cppcoreguidelines-*,
   modernize-*,
   performance-*,
   readability-*,
-  -cppcoreguidelines-avoid-magic-numbers,
-  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
   -modernize-use-trailing-return-type,
-  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
-  -cppcoreguidelines-pro-type-reinterpret-cast,
-  -modernize-concat-nested-namespaces
+  -modernize-use-nodiscard
 WarningsAsErrors: ''
-HeaderFilterRegex: '^(?!.*(_deps|third_party|build)).*$'
+HeaderFilterRegex: '.*/src/.*'
 FormatStyle: file
 CheckOptions:
-  - key: readability-identifier-naming.ClassCase
-    value: CamelCase
-  - key: readability-identifier-naming.FunctionCase
-    value: CamelCase
-  - key: readability-identifier-naming.VariableCase
-    value: lower_case
-  - key: readability-identifier-naming.ConstantCase
-    value: CamelCase
-  - key: readability-identifier-naming.ConstantPrefix
-    value: 'k'
-  - key: readability-identifier-naming.MemberCase
-    value: lower_case
-  - key: readability-identifier-naming.MemberSuffix
-    value: '_'
-  - key: readability-identifier-naming.StructCase
-    value: CamelCase
-  - key: readability-identifier-naming.PublicMemberCase
-    value: lower_case
-  - key: readability-identifier-naming.PublicMemberSuffix
-    value: ''
+  - key: SystemHeaderFilterRegex
+    value: '.*(_deps|build|third_party)/.*'

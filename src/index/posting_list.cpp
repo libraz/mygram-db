@@ -9,13 +9,70 @@
 
 #include <algorithm>
 
-namespace mygramdb {
-namespace index {
+namespace mygramdb::index {
 
-PostingList::PostingList(double roaring_threshold)
-    : strategy_(PostingStrategy::kDeltaCompressed),
-      roaring_threshold_(roaring_threshold),
-      roaring_bitmap_(nullptr) {}
+// Hysteresis factor to prevent oscillation between delta and roaring formats
+constexpr double kHysteresisFactor = 0.5;
+
+// Binary serialization constants
+constexpr uint32_t kBitsPerByte = 8;
+constexpr uint32_t kShift16Bits = 16;
+constexpr uint32_t kShift24Bits = 24;
+constexpr uint32_t kByteMask = 0xFF;
+
+namespace {
+
+/**
+ * @brief Helper to get char* pointer for Roaring Bitmap serialization
+ *
+ * Roaring Bitmap C API requires char* for serialization output.
+ * This helper encapsulates the required type conversion and pointer arithmetic.
+ *
+ * Why reinterpret_cast and pointer arithmetic are necessary:
+ * - roaring_bitmap_portable_serialize() requires char* as output buffer
+ * - We use std::vector<uint8_t> for type-safe memory management
+ * - uint8_t* and char* are binary-compatible but different types
+ * - Pointer arithmetic is needed to write at specific buffer offsets
+ * - This is the standard pattern for C library integration
+ *
+ * @param buffer Vector to write serialized data
+ * @param offset Offset in the buffer where serialization should start
+ * @return char* pointer to the offset position
+ */
+inline char* GetSerializationPointer(std::vector<uint8_t>& buffer, size_t offset) {
+  // Suppressing clang-tidy warnings for Roaring Bitmap C API compatibility
+  // Both casts are required and safe for binary-compatible types
+  return reinterpret_cast<char*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      buffer.data() + offset);     // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+}
+
+/**
+ * @brief Helper to get const char* pointer for Roaring Bitmap deserialization
+ *
+ * Roaring Bitmap C API requires const char* for deserialization input.
+ * This helper encapsulates the required type conversion and pointer arithmetic.
+ *
+ * Why reinterpret_cast and pointer arithmetic are necessary:
+ * - roaring_bitmap_portable_deserialize() requires const char* as input
+ * - We use std::vector<uint8_t> for type-safe memory management
+ * - const uint8_t* and const char* are binary-compatible but different types
+ * - Pointer arithmetic is needed to read from specific buffer offsets
+ * - This is the standard pattern for C library integration
+ *
+ * @param buffer Vector containing serialized data
+ * @param offset Offset in the buffer where deserialization should start
+ * @return const char* pointer to the offset position
+ */
+inline const char* GetDeserializationPointer(const std::vector<uint8_t>& buffer, size_t offset) {
+  // Suppressing clang-tidy warnings for Roaring Bitmap C API compatibility
+  // Both casts are required and safe for binary-compatible types
+  return reinterpret_cast<const char*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      buffer.data() + offset);           // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+}
+
+}  // namespace
+
+PostingList::PostingList(double roaring_threshold) : roaring_threshold_(roaring_threshold) {}
 
 PostingList::~PostingList() {
   if (roaring_bitmap_ != nullptr) {
@@ -69,8 +126,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     auto existing = DecodeDelta(delta_compressed_);
     std::vector<DocId> merged;
     merged.reserve(existing.size() + doc_ids.size());
-    std::set_union(existing.begin(), existing.end(), doc_ids.begin(), doc_ids.end(),
-                   std::back_inserter(merged));
+    std::set_union(existing.begin(), existing.end(), doc_ids.begin(), doc_ids.end(), std::back_inserter(merged));
     delta_compressed_ = EncodeDelta(merged);
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
@@ -125,8 +181,7 @@ size_t PostingList::MemoryUsage() const {
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_ == PostingStrategy::kRoaringBitmap &&
-      other.strategy_ == PostingStrategy::kRoaringBitmap) {
+  if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap AND
     result->strategy_ = PostingStrategy::kRoaringBitmap;
     result->roaring_bitmap_ = roaring_bitmap_and(roaring_bitmap_, other.roaring_bitmap_);
@@ -135,8 +190,7 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     auto docs1 = GetAll();
     auto docs2 = other.GetAll();
     std::vector<DocId> intersection;
-    std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(),
-                          std::back_inserter(intersection));
+    std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
     result->delta_compressed_ = EncodeDelta(intersection);
   }
 
@@ -146,8 +200,7 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_ == PostingStrategy::kRoaringBitmap &&
-      other.strategy_ == PostingStrategy::kRoaringBitmap) {
+  if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap OR
     result->strategy_ = PostingStrategy::kRoaringBitmap;
     result->roaring_bitmap_ = roaring_bitmap_or(roaring_bitmap_, other.roaring_bitmap_);
@@ -156,8 +209,7 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     auto docs1 = GetAll();
     auto docs2 = other.GetAll();
     std::vector<DocId> union_result;
-    std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(),
-                   std::back_inserter(union_result));
+    std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(union_result));
     result->delta_compressed_ = EncodeDelta(union_result);
   }
 
@@ -175,7 +227,7 @@ void PostingList::Optimize(uint64_t total_docs) {
     // Convert to Roaring for high density
     ConvertToRoaring();
     spdlog::debug("Converted posting list to Roaring (density={:.2f})", density);
-  } else if (density < roaring_threshold_ * 0.5 && strategy_ == PostingStrategy::kRoaringBitmap) {
+  } else if (density < roaring_threshold_ * kHysteresisFactor && strategy_ == PostingStrategy::kRoaringBitmap) {
     // Convert back to delta for low density (with hysteresis)
     ConvertToDelta();
     spdlog::debug("Converted posting list to delta (density={:.2f})", density);
@@ -279,33 +331,32 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Write size
     auto size = static_cast<uint32_t>(delta_compressed_.size());
-    buffer.push_back((size >> 24) & 0xFF);
-    buffer.push_back((size >> 16) & 0xFF);
-    buffer.push_back((size >> 8) & 0xFF);
-    buffer.push_back(size & 0xFF);
+    buffer.push_back((size >> kShift24Bits) & kByteMask);
+    buffer.push_back((size >> kShift16Bits) & kByteMask);
+    buffer.push_back((size >> kBitsPerByte) & kByteMask);
+    buffer.push_back(size & kByteMask);
 
     // Write delta-compressed data
     for (uint32_t val : delta_compressed_) {
-      buffer.push_back((val >> 24) & 0xFF);
-      buffer.push_back((val >> 16) & 0xFF);
-      buffer.push_back((val >> 8) & 0xFF);
-      buffer.push_back(val & 0xFF);
+      buffer.push_back((val >> kShift24Bits) & kByteMask);
+      buffer.push_back((val >> kShift16Bits) & kByteMask);
+      buffer.push_back((val >> kBitsPerByte) & kByteMask);
+      buffer.push_back(val & kByteMask);
     }
   } else {
     // Roaring bitmap: serialize using roaring's native format
     size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 
     // Write size
-    buffer.push_back((roaring_size >> 24) & 0xFF);
-    buffer.push_back((roaring_size >> 16) & 0xFF);
-    buffer.push_back((roaring_size >> 8) & 0xFF);
-    buffer.push_back(roaring_size & 0xFF);
+    buffer.push_back((roaring_size >> kShift24Bits) & kByteMask);
+    buffer.push_back((roaring_size >> kShift16Bits) & kByteMask);
+    buffer.push_back((roaring_size >> kBitsPerByte) & kByteMask);
+    buffer.push_back(roaring_size & kByteMask);
 
     // Write roaring bitmap data
     size_t old_size = buffer.size();
     buffer.resize(old_size + roaring_size);
-    roaring_bitmap_portable_serialize(roaring_bitmap_,
-                                      reinterpret_cast<char*>(buffer.data() + old_size));
+    roaring_bitmap_portable_serialize(roaring_bitmap_, GetSerializationPointer(buffer, old_size));
   }
 }
 
@@ -322,9 +373,9 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
   }
 
   // Read size
-  uint32_t size = (static_cast<uint32_t>(buffer[offset]) << 24) |
-                  (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
-                  (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
+  uint32_t size = (static_cast<uint32_t>(buffer[offset]) << kShift24Bits) |
+                  (static_cast<uint32_t>(buffer[offset + 1]) << kShift16Bits) |
+                  (static_cast<uint32_t>(buffer[offset + 2]) << kBitsPerByte) |
                   static_cast<uint32_t>(buffer[offset + 3]);
   offset += 4;
 
@@ -338,9 +389,9 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     delta_compressed_.reserve(size);
 
     for (uint32_t i = 0; i < size; ++i) {
-      uint32_t val = (static_cast<uint32_t>(buffer[offset]) << 24) |
-                     (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
-                     (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
+      uint32_t val = (static_cast<uint32_t>(buffer[offset]) << kShift24Bits) |
+                     (static_cast<uint32_t>(buffer[offset + 1]) << kShift16Bits) |
+                     (static_cast<uint32_t>(buffer[offset + 2]) << kBitsPerByte) |
                      static_cast<uint32_t>(buffer[offset + 3]);
       delta_compressed_.push_back(val);
       offset += 4;
@@ -360,8 +411,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       roaring_bitmap_free(roaring_bitmap_);
     }
 
-    roaring_bitmap_ =
-        roaring_bitmap_portable_deserialize(reinterpret_cast<const char*>(buffer.data() + offset));
+    roaring_bitmap_ = roaring_bitmap_portable_deserialize(GetDeserializationPointer(buffer, offset));
 
     if (roaring_bitmap_ == nullptr) {
       return false;
@@ -374,5 +424,4 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
   return true;
 }
 
-}  // namespace index
-}  // namespace mygramdb
+}  // namespace mygramdb::index

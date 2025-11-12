@@ -81,8 +81,7 @@ class HttpServerTest : public ::testing::Test {
     http_config.bind = "127.0.0.1";
     http_config.port = 18080;
 
-    http_server_ =
-        std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+    http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
   }
 
   void TearDown() override {
@@ -431,8 +430,7 @@ class HttpServerMultiTableTest : public ::testing::Test {
     http_config.bind = "127.0.0.1";
     http_config.port = 18081;
 
-    http_server_ =
-        std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+    http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
   }
 
   void TearDown() override {

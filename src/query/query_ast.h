@@ -27,7 +27,7 @@ namespace query {
 /**
  * @brief AST node type
  */
-enum class NodeType {
+enum class NodeType : uint8_t {
   AND,  // Logical AND (intersection)
   OR,   // Logical OR (union)
   NOT,  // Logical NOT (complement)
@@ -81,7 +81,7 @@ struct QueryNode {
 /**
  * @brief Token type for lexical analysis
  */
-enum class TokenType {
+enum class TokenType : uint8_t {
   AND,     // AND keyword
   OR,      // OR keyword
   NOT,     // NOT keyword
@@ -98,8 +98,7 @@ struct Token {
   TokenType type;
   std::string value;  // For TERM type
 
-  Token(TokenType token_type, std::string token_value = "")
-      : type(token_type), value(std::move(token_value)) {}
+  Token(TokenType token_type, std::string token_value = "") : type(token_type), value(std::move(token_value)) {}
 };
 
 /**

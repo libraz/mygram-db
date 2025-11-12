@@ -1,11 +1,22 @@
 /**
  * @file snapshot_builder.cpp
  * @brief Snapshot builder implementation
+ *
+ * Note on clang-tidy suppressions:
+ * This file extensively uses MySQL C API which requires pointer arithmetic for result set access.
+ * - MYSQL_ROW is defined as char** (array of column values)
+ * - MYSQL_FIELD* is an array of field metadata
+ * - Column access requires pointer arithmetic: row[column_index], fields[column_index]
+ * - This is the standard and only way to access MySQL result columns
+ * - Pointer arithmetic warnings are suppressed for the entire file due to MySQL C API requirements
  */
 
 #include "storage/snapshot_builder.h"
 
 #ifdef USE_MYSQL
+
+// Disable pointer arithmetic warnings for MySQL C API usage throughout this file
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 #include <spdlog/spdlog.h>
 
@@ -14,19 +25,21 @@
 
 #include "utils/string_utils.h"
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
-SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& index,
-                                 DocumentStore& doc_store, config::TableConfig table_config,
-                                 config::BuildConfig build_config)
+namespace {
+// Default batch size for snapshot building
+constexpr size_t kDefaultBatchSize = 1000;
+}  // namespace
+
+SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
+                                 config::TableConfig table_config, config::BuildConfig build_config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
       table_config_(std::move(table_config)),
       build_config_(std::move(build_config)) {}
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   if (!connection_.IsConnected()) {
     last_error_ = "MySQL connection not established";
@@ -93,8 +106,8 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   MYSQL_ROW row = nullptr;
   processed_rows_ = 0;
 
-  // Determine batch size (default to 1000 if not specified)
-  size_t batch_size = build_config_.batch_size > 0 ? build_config_.batch_size : 1000;
+  // Determine batch size (use default if not specified)
+  size_t batch_size = build_config_.batch_size > 0 ? build_config_.batch_size : kDefaultBatchSize;
 
   std::vector<DocumentStore::DocumentItem> doc_batch;
   std::vector<index::Index::DocumentItem> index_batch;
@@ -157,8 +170,7 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
         progress.total_rows = total_rows;
         progress.processed_rows = processed_rows_;
         progress.elapsed_seconds = elapsed;
-        progress.rows_per_second =
-            elapsed > 0 ? static_cast<double>(processed_rows_) / elapsed : 0.0;
+        progress.rows_per_second = elapsed > 0 ? static_cast<double>(processed_rows_) / elapsed : 0.0;
 
         progress_callback(progress);
       }
@@ -197,8 +209,7 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   auto end_time = std::chrono::steady_clock::now();
   double total_elapsed = std::chrono::duration<double>(end_time - start_time).count();
 
-  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_,
-               total_elapsed,
+  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_, total_elapsed,
                total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
 
   return true;
@@ -250,8 +261,8 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
         query << filter.op << " ";
 
         // Quote string values
-        if (filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
-            filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp") {
+        if (filter.type == "string" || filter.type == "varchar" || filter.type == "text" || filter.type == "datetime" ||
+            filter.type == "date" || filter.type == "timestamp") {
           query << "'" << filter.value << "'";
         } else {
           query << filter.value;
@@ -300,13 +311,11 @@ bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned in
 bool SnapshotBuilder::IsTextColumn(enum_field_types type) {
   // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
   return type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING ||
-         type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
-         type == MYSQL_TYPE_LONG_BLOB || type == MYSQL_TYPE_BLOB;
+         type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB || type == MYSQL_TYPE_LONG_BLOB ||
+         type == MYSQL_TYPE_BLOB;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                         unsigned int num_fields) const {
+std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
   if (!table_config_.text_source.column.empty()) {
     // Single column
     int idx = FindFieldIndex(table_config_.text_source.column, fields, num_fields);
@@ -351,8 +360,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields,
   return "";
 }
 
-std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                               unsigned int num_fields) const {
+std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
   int idx = FindFieldIndex(table_config_.primary_key, fields, num_fields);
   if (idx >= 0 && row[idx] != nullptr) {
     return {row[idx]};
@@ -360,8 +368,8 @@ std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* field
   return "";
 }
 
-std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(
-    MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
+std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                             unsigned int num_fields) const {
   std::unordered_map<std::string, FilterValue> filters;
 
   for (const auto& filter_config : table_config_.filters) {
@@ -412,8 +420,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(
   return filters;
 }
 
-int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields,
-                                    unsigned int num_fields) {
+int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields) {
   for (unsigned int i = 0; i < num_fields; ++i) {
     if (field_name == fields[i].name) {
       return static_cast<int>(i);
@@ -422,7 +429,8 @@ int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* 
   return -1;
 }
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage
+
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 #endif  // USE_MYSQL

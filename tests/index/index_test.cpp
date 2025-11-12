@@ -743,10 +743,9 @@ TEST(IndexTest, AddDocumentBatchVsSingleIdenticalStructure) {
   Index index_batch(2);
 
   // Prepare test data with complex overlapping terms
-  std::vector<std::string> texts = {NormalizeText("データベース", true, "keep", false),
-                                    NormalizeText("データ構造", true, "keep", false),
-                                    NormalizeText("構造化データ", true, "keep", false),
-                                    NormalizeText("データベース設計", true, "keep", false)};
+  std::vector<std::string> texts = {
+      NormalizeText("データベース", true, "keep", false), NormalizeText("データ構造", true, "keep", false),
+      NormalizeText("構造化データ", true, "keep", false), NormalizeText("データベース設計", true, "keep", false)};
 
   // Add to single index one by one
   for (DocId i = 0; i < texts.size(); ++i) {
@@ -770,8 +769,7 @@ TEST(IndexTest, AddDocumentBatchVsSingleIdenticalStructure) {
       auto results_single = index_single.SearchAnd({ngram});
       auto results_batch = index_batch.SearchAnd({ngram});
 
-      EXPECT_EQ(results_single.size(), results_batch.size())
-          << "Term '" << ngram << "' has different result count";
+      EXPECT_EQ(results_single.size(), results_batch.size()) << "Term '" << ngram << "' has different result count";
 
       for (size_t i = 0; i < results_single.size(); ++i) {
         EXPECT_EQ(results_single[i], results_batch[i])

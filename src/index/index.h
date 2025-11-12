@@ -16,8 +16,14 @@
 
 #include "index/posting_list.h"
 
-namespace mygramdb {
-namespace index {
+namespace mygramdb::index {
+
+// Default n-gram sizes for different character types
+constexpr int kDefaultNgramSize = 2;       // Bigrams for ASCII/alphanumeric
+constexpr int kDefaultKanjiNgramSize = 1;  // Unigrams for CJK characters
+
+// Default batch size for posting list optimization
+constexpr size_t kDefaultOptimizeBatchSize = 10000;
 
 /**
  * @brief N-gram inverted index
@@ -32,7 +38,8 @@ class Index {
    * @param kanji_ngram_size N-gram size for CJK characters (0 = use ngram_size)
    * @param roaring_threshold Density threshold for Roaring bitmaps
    */
-  explicit Index(int ngram_size = 2, int kanji_ngram_size = 1, double roaring_threshold = 0.18);
+  explicit Index(int ngram_size = kDefaultNgramSize, int kanji_ngram_size = kDefaultKanjiNgramSize,
+                 double roaring_threshold = kDefaultRoaringThreshold);
 
   ~Index() = default;
 
@@ -159,10 +166,10 @@ class Index {
   /**
    * @brief Optimize posting lists in batches (thread-safe, minimal memory overhead)
    * @param total_docs Total document count
-   * @param batch_size Number of terms to optimize per batch (default: 10000)
+   * @param batch_size Number of terms to optimize per batch
    * @return true if optimization started, false if already in progress
    */
-  bool OptimizeInBatches(uint64_t total_docs, size_t batch_size = 10000);
+  bool OptimizeInBatches(uint64_t total_docs, size_t batch_size = kDefaultOptimizeBatchSize);
 
   /**
    * @brief Check if optimization is currently running
@@ -232,5 +239,4 @@ class Index {
   [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
 };
 
-}  // namespace index
-}  // namespace mygramdb
+}  // namespace mygramdb::index

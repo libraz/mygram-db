@@ -14,8 +14,7 @@
 #include <variant>
 #include <vector>
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
 using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::DocId)
 
@@ -54,7 +53,7 @@ using FilterValue = std::variant<std::monostate,  // NULL value
  * @brief Document metadata
  */
 struct Document {
-  DocId doc_id;
+  DocId doc_id = 0;
   std::string primary_key;
   std::unordered_map<std::string, FilterValue> filters;
 };
@@ -90,8 +89,7 @@ class DocumentStore {
    * @param filters Filter column values
    * @return Assigned DocID
    */
-  DocId AddDocument(const std::string& primary_key,
-                    const std::unordered_map<std::string, FilterValue>& filters = {});
+  DocId AddDocument(const std::string& primary_key, const std::unordered_map<std::string, FilterValue>& filters = {});
 
   /**
    * @brief Add multiple documents (batch operation, thread-safe)
@@ -153,8 +151,7 @@ class DocumentStore {
    * @param filter_name Filter column name
    * @return Filter value if exists
    */
-  [[nodiscard]] std::optional<FilterValue> GetFilterValue(DocId doc_id,
-                                                          const std::string& filter_name) const;
+  [[nodiscard]] std::optional<FilterValue> GetFilterValue(DocId doc_id, const std::string& filter_name) const;
 
   /**
    * @brief Filter documents by value
@@ -163,8 +160,7 @@ class DocumentStore {
    * @param value Filter value
    * @return Vector of matching DocIDs
    */
-  [[nodiscard]] std::vector<DocId> FilterByValue(const std::string& filter_name,
-                                                 const FilterValue& value) const;
+  [[nodiscard]] std::vector<DocId> FilterByValue(const std::string& filter_name, const FilterValue& value) const;
 
   /**
    * @brief Get all document IDs
@@ -205,8 +201,7 @@ class DocumentStore {
    * @param replication_gtid Optional GTID position for replication (empty if not using replication)
    * @return true if successful
    */
-  [[nodiscard]] bool SaveToFile(const std::string& filepath,
-                                const std::string& replication_gtid = "") const;
+  [[nodiscard]] bool SaveToFile(const std::string& filepath, const std::string& replication_gtid = "") const;
 
   /**
    * @brief Deserialize document store from file
@@ -214,8 +209,7 @@ class DocumentStore {
    * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
    * @return true if successful
    */
-  [[nodiscard]] bool LoadFromFile(const std::string& filepath,
-                                  std::string* replication_gtid = nullptr);
+  [[nodiscard]] bool LoadFromFile(const std::string& filepath, std::string* replication_gtid = nullptr);
 
  private:
   // Next DocID to assign
@@ -234,5 +228,4 @@ class DocumentStore {
   mutable std::shared_mutex mutex_;
 };
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage

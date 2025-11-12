@@ -13,8 +13,7 @@
 #include "query/query_parser.h"
 #include "storage/document_store.h"
 
-namespace mygramdb {
-namespace query {
+namespace mygramdb::query {
 
 using DocId = uint32_t;
 
@@ -48,8 +47,7 @@ class ResultSorter {
    * @param query Query with ORDER BY, LIMIT, OFFSET clauses
    * @return Sorted and paginated document IDs
    */
-  static std::vector<DocId> SortAndPaginate(std::vector<DocId>& results,
-                                            const storage::DocumentStore& doc_store,
+  static std::vector<DocId> SortAndPaginate(std::vector<DocId>& results, const storage::DocumentStore& doc_store,
                                             const Query& query);
 
  private:
@@ -61,23 +59,21 @@ class ResultSorter {
    * @param order_by ORDER BY clause
    * @return Sort key as string (for comparison)
    */
-  static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
-                                const OrderByClause& order_by);
+  static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store, const OrderByClause& order_by);
 
   /**
    * @brief Compare function for sorting
    */
   struct SortComparator {
-    const storage::DocumentStore& doc_store_;
-    const OrderByClause& order_by_;
+    const storage::DocumentStore& doc_store_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    const OrderByClause& order_by_;            // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     bool ascending_;
 
-    SortComparator(const storage::DocumentStore& ds, const OrderByClause& ob)
-        : doc_store_(ds), order_by_(ob), ascending_(ob.order == SortOrder::ASC) {}
+    SortComparator(const storage::DocumentStore& doc_store, const OrderByClause& order_by)
+        : doc_store_(doc_store), order_by_(order_by), ascending_(order_by.order == SortOrder::ASC) {}
 
-    bool operator()(DocId a, DocId b) const;
+    bool operator()(DocId lhs, DocId rhs) const;
   };
 };
 
-}  // namespace query
-}  // namespace mygramdb
+}  // namespace mygramdb::query

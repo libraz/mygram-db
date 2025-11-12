@@ -18,6 +18,9 @@
  *    - For each row:
  *      - NULL bitmap - which fields are NULL
  *      - Row data - values for non-NULL fields
+ *
+ * Note: This file contains low-level MySQL binlog binary protocol parsing.
+ * Modern C++ guidelines are relaxed for protocol compatibility.
  */
 
 #include "mysql/rows_parser.h"
@@ -32,8 +35,9 @@
 
 #ifdef USE_MYSQL
 
-namespace mygramdb {
-namespace mysql {
+// NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return)
+
+namespace mygramdb::mysql {
 
 /**
  * @brief Decode a single field value as string
@@ -44,9 +48,7 @@ namespace mysql {
  * @param is_null Whether the field is NULL
  * @return String representation of the value
  */
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata,
-                                    bool is_null) {
+static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null) {
   if (is_null) {
     return "";  // NULL values represented as empty string
   }
@@ -171,8 +173,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       unsigned int month = (val >> 5) & 0x0F;
       unsigned int year = (val >> 9);
       std::ostringstream oss;
-      oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-'
-          << std::setw(2) << day;
+      oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day;
       return oss.str();
     }
 
@@ -213,9 +214,8 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       unsigned int second = hms & 0x3F;
 
       std::ostringstream oss;
-      oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-'
-          << std::setw(2) << day << ' ' << std::setw(2) << hour << ':' << std::setw(2) << minute
-          << ':' << std::setw(2) << second;
+      oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
+          << ' ' << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2) << second;
 
       // Process fractional seconds if present
       if (metadata > 0) {
@@ -266,9 +266,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
   }
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer,
-                                                        unsigned long length,
+std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                         const TableMetadata* table_metadata,
                                                         const std::string& pk_column_name,
                                                         const std::string& text_column_name) {
@@ -302,8 +300,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count,
-                    table_metadata->columns.size());
+      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
       return std::nullopt;
     }
 
@@ -371,8 +368,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         }
 
         // Decode field value
-        std::string value =
-            DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
 
         // Store in row data
         row.columns[col_meta.name] = value;
@@ -387,11 +383,10 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
 
         // Advance pointer by field size (if not NULL)
         if (!is_null) {
-          uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type),
-                                                             ptr, col_meta.metadata);
+          uint32_t field_size =
+              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}",
-                         static_cast<int>(col_meta.type), col_meta.name);
+            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
           ptr += field_size;
@@ -401,8 +396,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
       rows.push_back(std::move(row));
     }
 
-    spdlog::debug("Parsed {} rows from WRITE_ROWS event for table {}.{}", rows.size(),
-                  table_metadata->database_name, table_metadata->table_name);
+    spdlog::debug("Parsed {} rows from WRITE_ROWS event for table {}.{}", rows.size(), table_metadata->database_name,
+                  table_metadata->table_name);
 
     return rows;
 
@@ -412,10 +407,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
   }
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
-    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name) {
+std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(const unsigned char* buffer,
+                                                                             unsigned long length,
+                                                                             const TableMetadata* table_metadata,
+                                                                             const std::string& pk_column_name,
+                                                                             const std::string& text_column_name) {
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
@@ -442,8 +438,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count,
-                    table_metadata->columns.size());
+      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
       return std::nullopt;
     }
 
@@ -513,13 +508,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         bool is_null = binlog_util::bitmap_is_set(null_bitmap_before, col_idx);
 
         if (ptr > end) {
-          spdlog::error("UPDATE_ROWS event truncated while parsing before image column {}",
-                        col_idx);
+          spdlog::error("UPDATE_ROWS event truncated while parsing before image column {}", col_idx);
           return std::nullopt;
         }
 
-        std::string value =
-            DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
 
         before_row.columns[col_meta.name] = value;
 
@@ -532,11 +525,10 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         }
 
         if (!is_null) {
-          uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type),
-                                                             ptr, col_meta.metadata);
+          uint32_t field_size =
+              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}",
-                         static_cast<int>(col_meta.type), col_meta.name);
+            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
           ptr += field_size;
@@ -563,8 +555,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
           return std::nullopt;
         }
 
-        std::string value =
-            DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
 
         after_row.columns[col_meta.name] = value;
 
@@ -577,11 +568,10 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         }
 
         if (!is_null) {
-          uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type),
-                                                             ptr, col_meta.metadata);
+          uint32_t field_size =
+              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}",
-                         static_cast<int>(col_meta.type), col_meta.name);
+            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
           ptr += field_size;
@@ -602,9 +592,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
   }
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer,
-                                                         unsigned long length,
+std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                          const TableMetadata* table_metadata,
                                                          const std::string& pk_column_name,
                                                          const std::string& text_column_name) {
@@ -634,8 +622,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count,
-                    table_metadata->columns.size());
+      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
       return std::nullopt;
     }
 
@@ -701,8 +688,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           return std::nullopt;
         }
 
-        std::string value =
-            DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
 
         row.columns[col_meta.name] = value;
 
@@ -715,11 +701,10 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
         }
 
         if (!is_null) {
-          uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type),
-                                                             ptr, col_meta.metadata);
+          uint32_t field_size =
+              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}",
-                         static_cast<int>(col_meta.type), col_meta.name);
+            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
           ptr += field_size;
@@ -729,8 +714,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
       rows.push_back(std::move(row));
     }
 
-    spdlog::debug("Parsed {} rows from DELETE_ROWS event for table {}.{}", rows.size(),
-                  table_metadata->database_name, table_metadata->table_name);
+    spdlog::debug("Parsed {} rows from DELETE_ROWS event for table {}.{}", rows.size(), table_metadata->database_name,
+                  table_metadata->table_name);
 
     return rows;
 
@@ -771,34 +756,32 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
         filters[filter_config.name] = static_cast<uint16_t>(std::stoul(value_str));
       } else if (filter_config.type == "int" || filter_config.type == "mediumint") {
         filters[filter_config.name] = static_cast<int32_t>(std::stoi(value_str));
-      } else if (filter_config.type == "int_unsigned" ||
-                 filter_config.type == "mediumint_unsigned") {
+      } else if (filter_config.type == "int_unsigned" || filter_config.type == "mediumint_unsigned") {
         filters[filter_config.name] = static_cast<uint32_t>(std::stoul(value_str));
       } else if (filter_config.type == "bigint") {
         filters[filter_config.name] = static_cast<int64_t>(std::stoll(value_str));
       } else if (filter_config.type == "float" || filter_config.type == "double") {
         filters[filter_config.name] = std::stod(value_str);
-      } else if (filter_config.type == "string" || filter_config.type == "varchar" ||
-                 filter_config.type == "text" || filter_config.type == "datetime" ||
-                 filter_config.type == "date" || filter_config.type == "timestamp") {
+      } else if (filter_config.type == "string" || filter_config.type == "varchar" || filter_config.type == "text" ||
+                 filter_config.type == "datetime" || filter_config.type == "date" ||
+                 filter_config.type == "timestamp") {
         filters[filter_config.name] = value_str;
       } else if (filter_config.type == "boolean") {
         // Boolean: "1"/"true" = true, "0"/"false" = false
         filters[filter_config.name] = (value_str == "1" || value_str == "true");
       } else {
-        spdlog::warn("Unknown filter type '{}' for column '{}'", filter_config.type,
-                     filter_config.name);
+        spdlog::warn("Unknown filter type '{}' for column '{}'", filter_config.type, filter_config.name);
       }
     } catch (const std::exception& e) {
-      spdlog::error("Failed to convert filter value '{}' for column '{}': {}", value_str,
-                    filter_config.name, e.what());
+      spdlog::error("Failed to convert filter value '{}' for column '{}': {}", value_str, filter_config.name, e.what());
     }
   }
 
   return filters;
 }
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
+
+// NOLINTEND(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return)
 
 #endif  // USE_MYSQL

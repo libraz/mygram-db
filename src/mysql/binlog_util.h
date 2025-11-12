@@ -1,6 +1,12 @@
 /**
  * @file binlog_util.h
  * @brief Utilities for parsing MySQL binlog binary format
+ *
+ * Note: This file contains low-level binary protocol parsing functions that
+ * must match MySQL's wire format exactly. Modern C++ guidelines are relaxed:
+ * - Pointer arithmetic is required for binary parsing
+ * - Magic numbers represent MySQL protocol constants
+ * - C-style arrays and casts are necessary for protocol compatibility
  */
 
 #pragma once
@@ -8,10 +14,11 @@
 #ifdef USE_MYSQL
 
 #include <cstdint>
+#include <string>
 
-namespace mygramdb {
-namespace mysql {
-namespace binlog_util {
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
+
+namespace mygramdb::mysql::binlog_util {
 
 /**
  * @brief Read 2 bytes in little-endian format
@@ -31,17 +38,16 @@ inline uint32_t uint3korr(const unsigned char* ptr) {
  * @brief Read 4 bytes in little-endian format
  */
 inline uint32_t uint4korr(const unsigned char* ptr) {
-  return (uint32_t)(ptr[0]) | ((uint32_t)(ptr[1]) << 8) | ((uint32_t)(ptr[2]) << 16) |
-         ((uint32_t)(ptr[3]) << 24);
+  return (uint32_t)(ptr[0]) | ((uint32_t)(ptr[1]) << 8) | ((uint32_t)(ptr[2]) << 16) | ((uint32_t)(ptr[3]) << 24);
 }
 
 /**
  * @brief Read 8 bytes in little-endian format
  */
 inline uint64_t uint8korr(const unsigned char* ptr) {
-  return (uint64_t)(ptr[0]) | ((uint64_t)(ptr[1]) << 8) | ((uint64_t)(ptr[2]) << 16) |
-         ((uint64_t)(ptr[3]) << 24) | ((uint64_t)(ptr[4]) << 32) | ((uint64_t)(ptr[5]) << 40) |
-         ((uint64_t)(ptr[6]) << 48) | ((uint64_t)(ptr[7]) << 56);
+  return (uint64_t)(ptr[0]) | ((uint64_t)(ptr[1]) << 8) | ((uint64_t)(ptr[2]) << 16) | ((uint64_t)(ptr[3]) << 24) |
+         ((uint64_t)(ptr[4]) << 32) | ((uint64_t)(ptr[5]) << 40) | ((uint64_t)(ptr[6]) << 48) |
+         ((uint64_t)(ptr[7]) << 56);
 }
 
 /**
@@ -207,8 +213,7 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
  * @param metadata Type-specific metadata
  * @return Size of the field in bytes
  */
-inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_data,
-                                uint16_t metadata) {
+inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_data, uint16_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
     case 1:  // MYSQL_TYPE_TINY
@@ -387,8 +392,7 @@ enum class ExtraRowInfoType : uint8_t {
  * @param flags ROWS event flags
  * @return Size of extra_row_info section (including length field)
  */
-inline size_t skip_extra_row_info(const unsigned char** ptr, const unsigned char* end,
-                                  uint16_t flags) {
+inline size_t skip_extra_row_info(const unsigned char** ptr, const unsigned char* end, uint16_t flags) {
   // Check if extra_row_info is present
   if (!(flags & ROWS_EVENT_EXTRA_DATA_PRESENT)) {
     return 0;  // No extra data
@@ -413,8 +417,8 @@ inline size_t skip_extra_row_info(const unsigned char** ptr, const unsigned char
   return extra_data_len;
 }
 
-}  // namespace binlog_util
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql::binlog_util
+
+// NOLINTEND(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
 
 #endif  // USE_MYSQL

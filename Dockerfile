@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libmysqlclient-dev \
     libicu-dev \
+    libreadline-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +43,7 @@ RUN apt-get update && apt-get install -y \
     libstdc++6 \
     libmysqlclient21 \
     libicu70 \
+    libreadline8 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

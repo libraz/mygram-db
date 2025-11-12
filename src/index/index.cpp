@@ -16,8 +16,7 @@
 
 #include "utils/string_utils.h"
 
-namespace mygramdb {
-namespace index {
+namespace mygramdb::index {
 
 Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
     : ngram_size_(ngram_size),
@@ -26,8 +25,7 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
 
 void Index::AddDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams using hybrid mode
-  std::vector<std::string> ngrams =
-      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
   // Remove duplicates while preserving uniqueness
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
@@ -39,8 +37,7 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
   }
 
   const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
-  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, unique_ngrams.size(),
-                ngram_size_, mode);
+  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, unique_ngrams.size(), ngram_size_, mode);
 }
 
 void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
@@ -80,16 +77,13 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     posting->AddBatch(doc_ids);
   }
 
-  spdlog::debug("Added batch of {} documents with {} unique terms", documents.size(),
-                term_to_docs.size());
+  spdlog::debug("Added batch of {} documents with {} unique terms", documents.size(), term_to_docs.size());
 }
 
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text) {
   // Generate n-grams for both texts
-  std::vector<std::string> old_ngrams =
-      utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
-  std::vector<std::string> new_ngrams =
-      utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
 
   std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
   std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
@@ -115,8 +109,7 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
 
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams
-  std::vector<std::string> ngrams =
-      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
 
   // Remove document from posting list for each n-gram
@@ -188,8 +181,7 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
   return SearchOrInternal(terms);
 }
 
-std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs,
-                                    const std::vector<std::string>& terms) const {
+std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const std::vector<std::string>& terms) const {
   if (terms.empty()) {
     return all_docs;
   }
@@ -255,8 +247,10 @@ void Index::Optimize(uint64_t total_docs) {
   for (auto& [term, posting] : term_postings_) {
     posting->Optimize(total_docs);
   }
-  spdlog::info("Optimized index: {} terms, {} MB", term_postings_.size(),
-               MemoryUsage() / (1024 * 1024));
+  // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  // 1024: Standard conversion factor for bytes to KB to MB
+  spdlog::info("Optimized index: {} terms, {} MB", term_postings_.size(), MemoryUsage() / (1024 * 1024));
+  // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 }
 
 bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
@@ -279,8 +273,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  spdlog::info("Starting batch optimization: {} terms, batch_size={}", term_postings_.size(),
-               batch_size);
+  spdlog::info("Starting batch optimization: {} terms, batch_size={}", term_postings_.size(), batch_size);
 
   auto start_time = std::chrono::steady_clock::now();
 
@@ -338,20 +331,25 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     }
 
     // Log progress every 10% or at the end
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // 100, 10: Standard percentage calculation values
     size_t progress = ((batch_end) * 100) / total_terms;
     if (progress % 10 == 0 || batch_end == total_terms) {
+      // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       spdlog::info("Optimization progress: {}/{} terms ({}%)", batch_end, total_terms, progress);
     }
   }
 
   auto end_time = std::chrono::steady_clock::now();
-  auto duration =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
+  // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  // 1000.0: Standard conversion factor from milliseconds to seconds
   spdlog::info(
       "Batch optimization completed: {} terms processed, "
       "{} strategy changes, {:.2f}s elapsed",
       total_terms, converted_count, static_cast<double>(duration) / 1000.0);
+  // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
   return true;
 }
@@ -398,10 +396,12 @@ bool Index::SaveToFile(const std::string& filepath) const {
 
     // Write version
     uint32_t version = 1;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
     // Write ngram_size
     auto ngram = static_cast<uint32_t>(ngram_size_);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ofs.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
 
     uint64_t term_count = 0;
@@ -411,12 +411,14 @@ bool Index::SaveToFile(const std::string& filepath) const {
 
       // Write term count
       term_count = term_postings_.size();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
       ofs.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
 
       // Write each term and its posting list
       for (const auto& [term, posting] : term_postings_) {
         // Write term length and term
         auto term_len = static_cast<uint32_t>(term.size());
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
         ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
         ofs.write(term.data(), static_cast<std::streamsize>(term_len));
 
@@ -426,15 +428,18 @@ bool Index::SaveToFile(const std::string& filepath) const {
 
         // Write posting list size and data
         uint64_t posting_size = posting_data.size();
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
         ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-        ofs.write(reinterpret_cast<const char*>(posting_data.data()),
-                  static_cast<std::streamsize>(posting_size));
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+        ofs.write(reinterpret_cast<const char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
       }
     }
 
     ofs.close();
-    spdlog::info("Saved index to {}: {} terms, {} MB", filepath, term_count,
-                 MemoryUsage() / (1024 * 1024));
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // 1024: Standard conversion factor for bytes to KB to MB
+    spdlog::info("Saved index to {}: {} terms, {} MB", filepath, term_count, MemoryUsage() / (1024 * 1024));
+    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while saving index: {}", e.what());
@@ -460,6 +465,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
     // Read version
     uint32_t version = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (version != 1) {
       spdlog::error("Unsupported index file version: {}", version);
@@ -468,6 +474,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
     // Read ngram_size
     uint32_t ngram = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ifs.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
     if (static_cast<int>(ngram) != ngram_size_) {
       spdlog::warn("Index ngram_size mismatch: file={}, current={}", ngram, ngram_size_);
@@ -476,6 +483,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
     // Read term count
     uint64_t term_count = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Load into a new map to minimize lock time
@@ -485,6 +493,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
     for (uint64_t i = 0; i < term_count; ++i) {
       // Read term length and term
       uint32_t term_len = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
       ifs.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
 
       std::string term(term_len, '\0');
@@ -492,11 +501,12 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
       // Read posting list size and data
       uint64_t posting_size = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
       ifs.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
 
       std::vector<uint8_t> posting_data(posting_size);
-      ifs.read(reinterpret_cast<char*>(posting_data.data()),
-               static_cast<std::streamsize>(posting_size));
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      ifs.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
 
       // Deserialize posting list
       auto posting = std::make_unique<PostingList>(roaring_threshold_);
@@ -517,8 +527,10 @@ bool Index::LoadFromFile(const std::string& filepath) {
       term_postings_ = std::move(new_postings);
     }
 
-    spdlog::info("Loaded index from {}: {} terms, {} MB", filepath, term_count,
-                 MemoryUsage() / (1024 * 1024));
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // 1024: Standard conversion factor for bytes to KB to MB
+    spdlog::info("Loaded index from {}: {} terms, {} MB", filepath, term_count, MemoryUsage() / (1024 * 1024));
+    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading index: {}", e.what());
@@ -526,5 +538,4 @@ bool Index::LoadFromFile(const std::string& filepath) {
   }
 }
 
-}  // namespace index
-}  // namespace mygramdb
+}  // namespace mygramdb::index

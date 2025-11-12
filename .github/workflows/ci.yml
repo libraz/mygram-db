@@ -35,6 +35,7 @@ jobs:
           build-essential \
           libmysqlclient-dev \
           libicu-dev \
+          libreadline-dev \
           pkg-config
 
     - name: Install dependencies (macOS)
@@ -44,6 +45,7 @@ jobs:
           cmake \
           mysql-client@8.4 \
           icu4c \
+          readline \
           pkg-config
 
     - name: Configure CMake
@@ -101,29 +103,30 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          clang-format \
-          clang-tidy \
+          wget \
+          lsb-release \
+          software-properties-common \
+          gnupg \
           cmake \
           build-essential \
           libmysqlclient-dev \
           libicu-dev \
+          libreadline-dev \
           pkg-config
 
-    - name: Check code formatting
-      run: |
-        find src tests -name "*.cpp" -o -name "*.h" | \
-          xargs clang-format --dry-run --Werror
+        # Install LLVM/Clang 18 for clang-format and clang-tidy
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 18
+        sudo apt-get install -y clang-format-18 clang-tidy-18
+        sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 
-    - name: Configure for clang-tidy
-      run: |
-        mkdir -p build
-        cd build
-        cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+    - name: Check code formatting
+      run: make format-check
 
     - name: Run clang-tidy
-      run: |
-        find src -name "*.cpp" | \
-          xargs clang-tidy -p build --warnings-as-errors='*'
+      run: make lint
 
   docker-build:
     name: Docker Build Test
@@ -174,6 +177,7 @@ jobs:
           build-essential \
           libmysqlclient-dev \
           libicu-dev \
+          libreadline-dev \
           pkg-config \
           lcov
 

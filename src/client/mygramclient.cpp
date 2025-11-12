@@ -15,10 +15,16 @@
 #include <sstream>
 #include <utility>
 
-namespace mygramdb {
-namespace client {
+namespace mygramdb::client {
 
 namespace {
+
+// Protocol constants
+constexpr size_t kErrorPrefixLen = 6;    // Length of "ERROR "
+constexpr size_t kSavedPrefixLen = 9;    // Length of "SNAPSHOT "
+constexpr size_t kLoadedPrefixLen = 10;  // Length of "SNAPSHOT: "
+constexpr int kMillisecondsPerSecond = 1000;
+constexpr int kMicrosecondsPerMillisecond = 1000;
 
 /**
  * @brief Parse key=value pairs from string
@@ -43,8 +49,7 @@ std::vector<std::pair<std::string, std::string>> ParseKeyValuePairs(const std::s
 /**
  * @brief Extract debug info from response tokens
  */
-std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens,
-                                        size_t start_index) {
+std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens, size_t start_index) {
   if (start_index >= tokens.size() || tokens[start_index] != "DEBUG") {
     return std::nullopt;
   }
@@ -95,8 +100,8 @@ std::string EscapeQueryString(const std::string& str) {
   // Check if string needs quoting (contains spaces or special chars)
   bool needs_quotes = false;
   for (char character : str) {
-    if (character == ' ' || character == '\t' || character == '\n' || character == '\r' ||
-        character == '"' || character == '\'') {
+    if (character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '"' ||
+        character == '\'') {
       needs_quotes = true;
       break;
     }
@@ -148,9 +153,9 @@ class MygramClient::Impl {
 
     // Set socket timeout
     struct timeval timeout_val = {};
-    timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / 1000);
-    timeout_val.tv_usec =
-        static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % 1000) * 1000);
+    timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / kMillisecondsPerSecond);
+    timeout_val.tv_usec = static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % kMillisecondsPerSecond) *
+                                                                     kMicrosecondsPerMillisecond);
     setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
     setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
 
@@ -165,6 +170,7 @@ class MygramClient::Impl {
       return last_error_;
     }
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
     if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
       last_error_ = std::string("Connection failed: ") + strerror(errno);
       close(sock_);
@@ -224,11 +230,11 @@ class MygramClient::Impl {
     return response;
   }
 
-  std::variant<SearchResponse, Error> Search(
-      const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
-      const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
-      const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by,
-      bool order_desc) {
+  std::variant<SearchResponse, Error> Search(const std::string& table, const std::string& query, uint32_t limit,
+                                             uint32_t offset, const std::vector<std::string>& and_terms,
+                                             const std::vector<std::string>& not_terms,
+                                             const std::vector<std::pair<std::string, std::string>>& filters,
+                                             const std::string& order_by, bool order_desc) {
     // Build command
     std::ostringstream cmd;
     cmd << "SEARCH " << table << " " << EscapeQueryString(query);
@@ -266,7 +272,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(6));  // Remove "ERROR "
+      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
     }
 
     // Parse response: OK RESULTS <total_count> [<id1> <id2> ...] [DEBUG ...]
@@ -311,10 +317,10 @@ class MygramClient::Impl {
     return resp;
   }
 
-  std::variant<CountResponse, Error> Count(
-      const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
-      const std::vector<std::string>& not_terms,
-      const std::vector<std::pair<std::string, std::string>>& filters) {
+  std::variant<CountResponse, Error> Count(const std::string& table, const std::string& query,
+                                           const std::vector<std::string>& and_terms,
+                                           const std::vector<std::string>& not_terms,
+                                           const std::vector<std::pair<std::string, std::string>>& filters) {
     // Build command
     std::ostringstream cmd;
     cmd << "COUNT " << table << " " << EscapeQueryString(query);
@@ -338,7 +344,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(6));  // Remove "ERROR "
+      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
     }
 
     // Parse response: OK COUNT <n> [DEBUG ...]
@@ -380,7 +386,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(6));  // Remove "ERROR "
+      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
     }
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
@@ -404,7 +410,6 @@ class MygramClient::Impl {
     return doc;
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
   std::variant<ServerInfo, Error> Info() {
     auto result = SendCommand("INFO");
     if (auto* err = std::get_if<Error>(&result)) {
@@ -413,7 +418,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(6));
+      return Error(response.substr(kErrorPrefixLen));
     }
 
     if (response.find("OK INFO") != 0) {
@@ -483,7 +488,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     // Return raw config response (already formatted)
@@ -500,7 +505,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     // Parse: OK SAVED <filepath>
@@ -508,7 +513,7 @@ class MygramClient::Impl {
       return Error("Unexpected response format");
     }
 
-    return response.substr(9);  // Return filepath
+    return response.substr(kSavedPrefixLen);  // Return filepath after "OK SAVED "
   }
 
   std::variant<std::string, Error> Load(const std::string& filepath) {
@@ -519,7 +524,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     // Parse: OK LOADED <filepath>
@@ -527,7 +532,7 @@ class MygramClient::Impl {
       return Error("Unexpected response format");
     }
 
-    return response.substr(10);  // Return filepath
+    return response.substr(kLoadedPrefixLen);  // Return filepath after "OK LOADED "
   }
 
   std::variant<ReplicationStatus, Error> GetReplicationStatus() {
@@ -538,7 +543,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(6));
+      return Error(response.substr(kErrorPrefixLen));
     }
 
     if (response.find("OK REPLICATION") != 0) {
@@ -568,7 +573,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     return std::nullopt;
@@ -582,7 +587,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     return std::nullopt;
@@ -596,7 +601,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     return std::nullopt;
@@ -610,7 +615,7 @@ class MygramClient::Impl {
 
     std::string response = std::get<std::string>(result);
     if (response.find("ERROR") == 0) {
-      return response.substr(6);
+      return response.substr(kErrorPrefixLen);
     }
 
     return std::nullopt;
@@ -626,8 +631,7 @@ class MygramClient::Impl {
 
 // MygramClient public interface implementation
 
-MygramClient::MygramClient(ClientConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+MygramClient::MygramClient(ClientConfig config) : impl_(std::make_unique<Impl>(std::move(config))) {}
 
 MygramClient::~MygramClient() = default;
 
@@ -649,21 +653,17 @@ bool MygramClient::IsConnected() const {
 std::variant<SearchResponse, Error> MygramClient::Search(
     const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
     const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by,
-    bool order_desc) {
-  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, order_by,
-                       order_desc);
+    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by, bool order_desc) {
+  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, order_by, order_desc);
 }
 
 std::variant<CountResponse, Error> MygramClient::Count(
     const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
-    const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters) {
+    const std::vector<std::string>& not_terms, const std::vector<std::pair<std::string, std::string>>& filters) {
   return impl_->Count(table, query, and_terms, not_terms, filters);
 }
 
-std::variant<Document, Error> MygramClient::Get(const std::string& table,
-                                                const std::string& primary_key) {
+std::variant<Document, Error> MygramClient::Get(const std::string& table, const std::string& primary_key) {
   return impl_->Get(table, primary_key);
 }
 
@@ -711,5 +711,4 @@ const std::string& MygramClient::GetLastError() const {
   return impl_->GetLastError();
 }
 
-}  // namespace client
-}  // namespace mygramdb
+}  // namespace mygramdb::client

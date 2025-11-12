@@ -9,8 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace mygramdb {
-namespace utils {
+namespace mygramdb::utils {
 
 /**
  * @brief Normalize text according to configuration
@@ -24,8 +23,8 @@ namespace utils {
  * @param lower Convert to lowercase
  * @return Normalized text
  */
-std::string NormalizeText(const std::string& text, bool nfkc = true,
-                          const std::string& width = "narrow", bool lower = false);
+std::string NormalizeText(const std::string& text, bool nfkc = true, const std::string& width = "narrow",
+                          bool lower = false);
 
 #ifdef USE_ICU
 /**
@@ -37,8 +36,7 @@ std::string NormalizeText(const std::string& text, bool nfkc = true,
  * @param lower Convert to lowercase
  * @return Normalized text
  */
-std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width,
-                             bool lower);
+std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width, bool lower);
 #endif
 
 /**
@@ -89,5 +87,4 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints);
  */
 std::string FormatBytes(size_t bytes);
 
-}  // namespace utils
-}  // namespace mygramdb
+}  // namespace mygramdb::utils

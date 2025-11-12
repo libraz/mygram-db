@@ -7,6 +7,7 @@
 
 // Fix for httplib missing NI_MAXHOST on some platforms
 #ifndef NI_MAXHOST
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage) - Required for compatibility with httplib C API
 #define NI_MAXHOST 1025
 #endif
 
@@ -25,24 +26,27 @@
 #include "storage/document_store.h"
 
 #ifdef USE_MYSQL
-namespace mygramdb {
-namespace mysql {
+namespace mygramdb::mysql {
 class BinlogReader;
-}
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 #endif
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
+
+// HTTP server configuration defaults
+namespace defaults {
+constexpr int kHttpPort = 8080;
+constexpr int kHttpTimeoutSec = 5;
+}  // namespace defaults
 
 /**
  * @brief HTTP server configuration
  */
 struct HttpServerConfig {
   std::string bind = "127.0.0.1";
-  int port = 8080;
-  int read_timeout_sec = 5;
-  int write_timeout_sec = 5;
+  int port = defaults::kHttpPort;
+  int read_timeout_sec = defaults::kHttpTimeoutSec;
+  int write_timeout_sec = defaults::kHttpTimeoutSec;
   bool enable_cors = true;
 };
 
@@ -77,6 +81,12 @@ class HttpServer {
   );
 
   ~HttpServer();
+
+  // Non-copyable and non-movable (manages server thread)
+  HttpServer(const HttpServer&) = delete;
+  HttpServer& operator=(const HttpServer&) = delete;
+  HttpServer(HttpServer&&) = delete;
+  HttpServer& operator=(HttpServer&&) = delete;
 
   /**
    * @brief Start server (non-blocking)
@@ -187,5 +197,4 @@ class HttpServer {
   void SetupCors();
 };
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

@@ -6,8 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace mygram {
-namespace mysql {
+namespace mygramdb::mysql {
 
 /**
  * @brief Encodes MySQL GTID sets into binary format for binlog replication
@@ -45,7 +44,7 @@ class GtidEncoder {
   };
 
   struct Sid {
-    std::array<uint8_t, 16> uuid;
+    std::array<uint8_t, 16> uuid = {};  // NOLINT(*-magic-numbers) - UUID is 16 bytes by spec
     std::vector<Interval> intervals;
   };
 
@@ -73,7 +72,6 @@ class GtidEncoder {
   static void StoreInt64(std::vector<uint8_t>& buffer, uint64_t value);
 };
 
-}  // namespace mysql
-}  // namespace mygram
+}  // namespace mygramdb::mysql
 
 #endif  // MYGRAM_MYSQL_GTID_ENCODER_H_

@@ -10,8 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace mygramdb {
-namespace utils {
+namespace mygramdb::utils {
 
 /**
  * @brief CIDR (Classless Inter-Domain Routing) representation
@@ -23,10 +22,10 @@ struct CIDR {
 
   /**
    * @brief Check if an IP address is within this CIDR range
-   * @param ip IP address in host byte order
+   * @param ip_addr IP address in host byte order
    * @return True if IP is within CIDR range
    */
-  bool Contains(uint32_t ip) const;
+  [[nodiscard]] bool Contains(uint32_t ip_addr) const;
 
   /**
    * @brief Parse CIDR notation string
@@ -53,10 +52,9 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allo
 
 /**
  * @brief Convert IPv4 address to string
- * @param ip IP address in host byte order
+ * @param ip_addr IP address in host byte order
  * @return IP address string (e.g., "192.168.1.1")
  */
-std::string IPv4ToString(uint32_t ip);
+std::string IPv4ToString(uint32_t ip_addr);
 
-}  // namespace utils
-}  // namespace mygramdb
+}  // namespace mygramdb::utils

@@ -69,13 +69,12 @@ int main() {
   std::cout << "✓ Connected to MySQL" << std::endl;
 
   // Build snapshot
-  mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store,
-                                                      table_config);
+  mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store, table_config);
 
   bool success = snapshot_builder.Build([](const auto& progress) {
     if (progress.processed_rows % 5000 == 0 && progress.processed_rows > 0) {
-      std::cout << "  Processed " << progress.processed_rows << " rows ("
-                << progress.rows_per_second << " rows/s)" << std::endl;
+      std::cout << "  Processed " << progress.processed_rows << " rows (" << progress.rows_per_second << " rows/s)"
+                << std::endl;
     }
   });
 
@@ -153,8 +152,7 @@ int main() {
     std::cerr << "  Loaded: " << loaded_test_doc_id.value() << std::endl;
     return 1;
   }
-  std::cout << "✓ Document lookup matches: id=100 -> doc_id=" << loaded_test_doc_id.value()
-            << std::endl;
+  std::cout << "✓ Document lookup matches: id=100 -> doc_id=" << loaded_test_doc_id.value() << std::endl;
 
   // Verify document outside range is not present
   auto outside_doc_id = doc_store2->GetDocId("20000");

@@ -7,8 +7,7 @@
 
 #include <string>
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
 /**
  * @brief Snapshot manager
@@ -18,7 +17,6 @@ namespace storage {
 class SnapshotManager {
  public:
   explicit SnapshotManager(std::string snapshot_dir);
-  ~SnapshotManager() = default;
 
   /**
    * @brief Save snapshot to disk
@@ -40,5 +38,4 @@ class SnapshotManager {
   std::string snapshot_dir_;
 };
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage

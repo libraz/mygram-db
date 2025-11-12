@@ -10,8 +10,7 @@
 #include <optional>
 #include <string>
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
 /**
  * @brief GTID state file manager
@@ -34,7 +33,7 @@ class GTIDStateFile {
    *
    * @return GTID string if file exists and is valid, nullopt otherwise
    */
-  std::optional<std::string> Read() const;
+  [[nodiscard]] std::optional<std::string> Read() const;
 
   /**
    * @brief Write GTID to state file (atomic)
@@ -52,7 +51,7 @@ class GTIDStateFile {
    *
    * @return true if file exists, false otherwise
    */
-  bool Exists() const;
+  [[nodiscard]] bool Exists() const;
 
   /**
    * @brief Delete state file
@@ -65,7 +64,6 @@ class GTIDStateFile {
   std::string file_path_;
 };
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage
 
 #endif  // USE_MYSQL

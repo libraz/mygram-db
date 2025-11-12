@@ -5,8 +5,10 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace mygram {
-namespace mysql {
+// NOLINTBEGIN(cppcoreguidelines-avoid-*,cppcoreguidelines-pro-*,readability-magic-numbers) - GTID
+// binary encoding
+
+namespace mygramdb::mysql {
 
 std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
   if (gtid_set.empty()) {
@@ -161,5 +163,6 @@ void GtidEncoder::StoreInt64(std::vector<uint8_t>& buffer, uint64_t value) {
   buffer.push_back(static_cast<uint8_t>((value >> 56) & 0xFF));
 }
 
-}  // namespace mysql
-}  // namespace mygram
+}  // namespace mygramdb::mysql
+
+// NOLINTEND(cppcoreguidelines-avoid-*,cppcoreguidelines-pro-*,readability-magic-numbers)

@@ -10,8 +10,9 @@
 #include <optional>
 #include <sstream>
 
-namespace mygramdb {
-namespace utils {
+namespace mygramdb::utils {
+
+constexpr int kIPv4BitCount = 32;
 
 std::optional<uint32_t> ParseIPv4(const std::string& ip_str) {
   struct in_addr addr = {};
@@ -22,9 +23,9 @@ std::optional<uint32_t> ParseIPv4(const std::string& ip_str) {
   return ntohl(addr.s_addr);
 }
 
-std::string IPv4ToString(uint32_t ip_address) {
+std::string IPv4ToString(uint32_t ip_addr) {
   struct in_addr addr = {};
-  addr.s_addr = htonl(ip_address);  // Convert to network byte order
+  addr.s_addr = htonl(ip_addr);  // Convert to network byte order
   // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   char buf[INET_ADDRSTRLEN];
   if (inet_ntop(AF_INET, &addr, buf, sizeof(buf)) == nullptr) {
@@ -34,8 +35,8 @@ std::string IPv4ToString(uint32_t ip_address) {
   // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 }
 
-bool CIDR::Contains(uint32_t ip_address) const {
-  return (ip_address & netmask) == network;
+bool CIDR::Contains(uint32_t ip_addr) const {
+  return (ip_addr & netmask) == network;
 }
 
 std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
@@ -62,14 +63,14 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
   }
 
   // Validate prefix length
-  if (prefix_length < 0 || prefix_length > 32) {
+  if (prefix_length < 0 || prefix_length > kIPv4BitCount) {
     return std::nullopt;
   }
 
   // Calculate netmask
   uint32_t netmask = 0;
   if (prefix_length > 0) {
-    netmask = ~((1U << (32 - prefix_length)) - 1);
+    netmask = ~((1U << (kIPv4BitCount - prefix_length)) - 1);
   }
 
   // Calculate network address
@@ -105,5 +106,4 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allo
   return false;
 }
 
-}  // namespace utils
-}  // namespace mygramdb
+}  // namespace mygramdb::utils

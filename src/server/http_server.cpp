@@ -29,13 +29,24 @@
 
 using json = nlohmann::json;
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
+
+namespace {
+// HTTP status codes
+constexpr int kHttpOk = 200;
+constexpr int kHttpNoContent = 204;
+constexpr int kHttpBadRequest = 400;
+constexpr int kHttpNotFound = 404;
+constexpr int kHttpInternalServerError = 500;
+constexpr int kHttpServiceUnavailable = 503;
+
+// Server startup delay (milliseconds)
+constexpr int kStartupDelayMs = 100;
+}  // namespace
 
 using storage::DocId;
 
-HttpServer::HttpServer(HttpServerConfig config,
-                       std::unordered_map<std::string, TableContext*> table_contexts,
+HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                        const config::Config* full_config,
 #ifdef USE_MYSQL
                        mysql::BinlogReader* binlog_reader
@@ -68,34 +79,24 @@ HttpServer::~HttpServer() {
 
 void HttpServer::SetupRoutes() {
   // POST /{table}/search - Full-text search
-  server_->Post(R"(/(\w+)/search)", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleSearch(req, res);
-  });
+  server_->Post(R"(/(\w+)/search)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
 
   // GET /{table}/:id - Get document by ID
-  server_->Get(R"(/(\w+)/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleGet(req, res);
-  });
+  server_->Get(R"(/(\w+)/(\d+))", [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
 
   // GET /info - Server information
-  server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleInfo(req, res);
-  });
+  server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
 
   // GET /health - Health check
-  server_->Get("/health", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleHealth(req, res);
-  });
+  server_->Get("/health", [this](const httplib::Request& req, httplib::Response& res) { HandleHealth(req, res); });
 
   // GET /config - Configuration
-  server_->Get("/config", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleConfig(req, res);
-  });
+  server_->Get("/config", [this](const httplib::Request& req, httplib::Response& res) { HandleConfig(req, res); });
 
   // GET /replication/status - Replication status
-  server_->Get("/replication/status", [this](const httplib::Request& req, httplib::Response& res) {
-    HandleReplicationStatus(req, res);
-  });
+  server_->Get("/replication/status",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleReplicationStatus(req, res); });
 }
 
 void HttpServer::SetupCors() {
@@ -104,7 +105,7 @@ void HttpServer::SetupCors() {
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type");
-    res.status = 204;
+    res.status = kHttpNoContent;
   });
 
   // Add CORS headers to all responses
@@ -133,7 +134,7 @@ bool HttpServer::Start() {
   });
 
   // Wait a bit for server to start
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  std::this_thread::sleep_for(std::chrono::milliseconds(kStartupDelayMs));
 
   if (!running_) {
     if (server_thread_ && server_thread_->joinable()) {
@@ -165,7 +166,6 @@ void HttpServer::Stop() {
   spdlog::info("HTTP server stopped");
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
   stats_.IncrementRequests();
 
@@ -176,7 +176,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Lookup table
     auto table_iter = table_contexts_.find(table);
     if (table_iter == table_contexts_.end()) {
-      SendError(res, 404, "Table not found: " + table);
+      SendError(res, kHttpNotFound, "Table not found: " + table);
       return;
     }
     auto* current_index = table_iter->second->index.get();
@@ -187,13 +187,13 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     try {
       body = json::parse(req.body);
     } catch (const json::parse_error& e) {
-      SendError(res, 400, "Invalid JSON: " + std::string(e.what()));
+      SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
       return;
     }
 
     // Validate required field
     if (!body.contains("q")) {
-      SendError(res, 400, "Missing required field: q");
+      SendError(res, kHttpBadRequest, "Missing required field: q");
       return;
     }
 
@@ -226,7 +226,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Parse and execute query
     auto query = query_parser_.Parse(query_str.str());
     if (!query.IsValid()) {
-      SendError(res, 400, "Invalid query: " + query_parser_.GetError());
+      SendError(res, kHttpBadRequest, "Invalid query: " + query_parser_.GetError());
       return;
     }
 
@@ -273,9 +273,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Sort terms by estimated size (smallest first for faster intersection)
-    std::sort(term_infos.begin(), term_infos.end(), [](const TermInfo& lhs, const TermInfo& rhs) {
-      return lhs.estimated_size < rhs.estimated_size;
-    });
+    std::sort(term_infos.begin(), term_infos.end(),
+              [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
 
     // If any term has zero results, return empty immediately
     std::vector<DocId> results;
@@ -291,8 +290,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           }
           auto term_results = current_index->SearchAnd(term_infos[i].ngrams);
           std::vector<DocId> intersection;
-          std::set_intersection(results.begin(), results.end(), term_results.begin(),
-                                term_results.end(), std::back_inserter(intersection));
+          std::set_intersection(results.begin(), results.end(), term_results.begin(), term_results.end(),
+                                std::back_inserter(intersection));
           results = std::move(intersection);
         }
       }
@@ -311,15 +310,15 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         }
         auto not_results = current_index->SearchOr(ngrams);
         std::vector<DocId> union_result;
-        std::set_union(not_results_union.begin(), not_results_union.end(), not_results.begin(),
-                       not_results.end(), std::back_inserter(union_result));
+        std::set_union(not_results_union.begin(), not_results_union.end(), not_results.begin(), not_results.end(),
+                       std::back_inserter(union_result));
         not_results_union = std::move(union_result);
       }
 
       // Remove documents matching NOT terms
       std::vector<DocId> filtered_results;
-      std::set_difference(results.begin(), results.end(), not_results_union.begin(),
-                          not_results_union.end(), std::back_inserter(filtered_results));
+      std::set_difference(results.begin(), results.end(), not_results_union.begin(), not_results_union.end(),
+                          std::back_inserter(filtered_results));
       results = std::move(filtered_results);
     }
 
@@ -375,9 +374,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     size_t end_idx = std::min(start_idx + query.limit, results.size());
 
     if (start_idx < results.size()) {
-      results = std::vector<DocId>(
-          results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
-          results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
+      results = std::vector<DocId>(results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
+                                   results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
     } else {
       results.clear();
     }
@@ -424,10 +422,10 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
     response["results"] = results_array;
 
-    SendJson(res, 200, response);
+    SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, 500, "Internal error: " + std::string(e.what()));
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
   }
 }
 
@@ -442,7 +440,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     // Lookup table
     auto table_iter = table_contexts_.find(table);
     if (table_iter == table_contexts_.end()) {
-      SendError(res, 404, "Table not found: " + table);
+      SendError(res, kHttpNotFound, "Table not found: " + table);
       return;
     }
     auto* current_doc_store = table_iter->second->doc_store.get();
@@ -452,14 +450,14 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     try {
       doc_id = std::stoull(id_str);
     } catch (const std::exception& e) {
-      SendError(res, 400, "Invalid document ID");
+      SendError(res, kHttpBadRequest, "Invalid document ID");
       return;
     }
 
     // Get document
     auto doc = current_doc_store->GetDocument(doc_id);
     if (!doc) {
-      SendError(res, 404, "Document not found");
+      SendError(res, kHttpNotFound, "Document not found");
       return;
     }
 
@@ -488,10 +486,10 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       response["filters"] = filters_obj;
     }
 
-    SendJson(res, 200, response);
+    SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, 500, "Internal error: " + std::string(e.what()));
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
   }
 }
 
@@ -563,8 +561,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     index_obj["total_terms"] = total_terms;
     index_obj["total_postings"] = total_postings;
     if (total_terms > 0) {
-      index_obj["avg_postings_per_term"] =
-          static_cast<double>(total_postings) / static_cast<double>(total_terms);
+      index_obj["avg_postings_per_term"] = static_cast<double>(total_postings) / static_cast<double>(total_terms);
     }
     index_obj["delta_encoded_lists"] = total_delta_encoded;
     index_obj["roaring_bitmap_lists"] = total_roaring_bitmap;
@@ -573,10 +570,10 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     // Per-table breakdown
     response["tables"] = tables_obj;
 
-    SendJson(res, 200, response);
+    SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, 500, "Internal error: " + std::string(e.what()));
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
   }
 }
 
@@ -585,18 +582,17 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
 
   json response;
   response["status"] = "ok";
-  response["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
+  response["timestamp"] =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
-  SendJson(res, 200, response);
+  SendJson(res, kHttpOk, response);
 }
 
 void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response& res) {
   stats_.IncrementRequests();
 
   if (full_config_ == nullptr) {
-    SendError(res, 500, "Configuration not available");
+    SendError(res, kHttpInternalServerError, "Configuration not available");
     return;
   }
 
@@ -626,10 +622,10 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
     repl_obj["server_id"] = full_config_->replication.server_id;
     response["replication"] = repl_obj;
 
-    SendJson(res, 200, response);
+    SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, 500, "Internal error: " + std::string(e.what()));
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
   }
 }
 
@@ -638,7 +634,7 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 
 #ifdef USE_MYSQL
   if (binlog_reader_ == nullptr) {
-    SendError(res, 503, "Replication not configured");
+    SendError(res, kHttpServiceUnavailable, "Replication not configured");
     return;
   }
 
@@ -647,13 +643,13 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
     response["enabled"] = binlog_reader_->IsRunning();
     response["current_gtid"] = binlog_reader_->GetCurrentGTID();
 
-    SendJson(res, 200, response);
+    SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, 500, "Internal error: " + std::string(e.what()));
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
   }
 #else
-  SendError(res, 503, "MySQL replication not compiled");
+  SendError(res, kHttpServiceUnavailable, "MySQL replication not compiled");
 #endif
 }
 
@@ -668,5 +664,4 @@ void HttpServer::SendError(httplib::Response& res, int status_code, const std::s
   SendJson(res, status_code, error_obj);
 }
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

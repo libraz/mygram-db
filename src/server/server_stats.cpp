@@ -7,8 +7,7 @@
 
 #include <algorithm>
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
 
 ServerStats::ServerStats() : start_time_(static_cast<uint64_t>(std::time(nullptr))) {}
 
@@ -101,10 +100,10 @@ Statistics ServerStats::GetStatistics() const {
   stats.cmd_config = cmd_config_.load();
   stats.cmd_unknown = cmd_unknown_.load();
 
-  stats.total_commands_processed =
-      stats.cmd_search + stats.cmd_count + stats.cmd_get + stats.cmd_info + stats.cmd_save +
-      stats.cmd_load + stats.cmd_replication_status + stats.cmd_replication_stop +
-      stats.cmd_replication_start + stats.cmd_config + stats.cmd_unknown;
+  stats.total_commands_processed = stats.cmd_search + stats.cmd_count + stats.cmd_get + stats.cmd_info +
+                                   stats.cmd_save + stats.cmd_load + stats.cmd_replication_status +
+                                   stats.cmd_replication_stop + stats.cmd_replication_start + stats.cmd_config +
+                                   stats.cmd_unknown;
 
   // Memory statistics
   stats.used_memory_bytes = current_memory_.load();
@@ -127,10 +126,9 @@ uint64_t ServerStats::GetUptimeSeconds() const {
 }
 
 uint64_t ServerStats::GetTotalCommands() const {
-  return cmd_search_.load() + cmd_count_.load() + cmd_get_.load() + cmd_info_.load() +
-         cmd_save_.load() + cmd_load_.load() + cmd_replication_status_.load() +
-         cmd_replication_stop_.load() + cmd_replication_start_.load() + cmd_config_.load() +
-         cmd_unknown_.load();
+  return cmd_search_.load() + cmd_count_.load() + cmd_get_.load() + cmd_info_.load() + cmd_save_.load() +
+         cmd_load_.load() + cmd_replication_status_.load() + cmd_replication_stop_.load() +
+         cmd_replication_start_.load() + cmd_config_.load() + cmd_unknown_.load();
 }
 
 uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
@@ -191,5 +189,4 @@ void ServerStats::Reset() {
   // Note: start_time_ is NOT reset
 }
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

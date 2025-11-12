@@ -7,9 +7,14 @@
  *
  * All functions return 0 on success, non-zero on error.
  * Use mygramclient_get_last_error() to retrieve error messages.
+ *
+ * Note: This is a C API header, so typedef is used instead of using declarations
+ * for C compatibility. The modernize-use-using check is disabled for this file.
  */
 
 #pragma once
+
+// NOLINTBEGIN(modernize-use-using) - C API requires typedef for C compatibility
 
 #ifdef __cplusplus
 extern "C" {
@@ -115,8 +120,8 @@ int mygramclient_is_connected(const MygramClient_C* client);
  * @param result Output search results (caller must free with mygramclient_free_search_result)
  * @return 0 on success, -1 on error
  */
-int mygramclient_search(MygramClient_C* client, const char* table, const char* query,
-                        uint32_t limit, uint32_t offset, MygramSearchResult_C** result);
+int mygramclient_search(MygramClient_C* client, const char* table, const char* query, uint32_t limit, uint32_t offset,
+                        MygramSearchResult_C** result);
 
 /**
  * @brief Search for documents with AND/NOT/FILTER clauses
@@ -138,10 +143,9 @@ int mygramclient_search(MygramClient_C* client, const char* table, const char* q
  * @param result Output search results (caller must free with mygramclient_free_search_result)
  * @return 0 on success, -1 on error
  */
-int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query,
-                                 uint32_t limit, uint32_t offset, const char** and_terms,
-                                 size_t and_count, const char** not_terms, size_t not_count,
-                                 const char** filter_keys, const char** filter_values,
+int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                 uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
+                                 size_t not_count, const char** filter_keys, const char** filter_values,
                                  size_t filter_count, const char* order_by, int order_desc,
                                  MygramSearchResult_C** result);
 
@@ -154,8 +158,7 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
  * @param count Output count
  * @return 0 on success, -1 on error
  */
-int mygramclient_count(MygramClient_C* client, const char* table, const char* query,
-                       uint64_t* count);
+int mygramclient_count(MygramClient_C* client, const char* table, const char* query, uint64_t* count);
 
 /**
  * @brief Count matching documents with AND/NOT/FILTER clauses
@@ -173,9 +176,8 @@ int mygramclient_count(MygramClient_C* client, const char* table, const char* qu
  * @param count Output count
  * @return 0 on success, -1 on error
  */
-int mygramclient_count_advanced(MygramClient_C* client, const char* table, const char* query,
-                                const char** and_terms, size_t and_count, const char** not_terms,
-                                size_t not_count, const char** filter_keys,
+int mygramclient_count_advanced(MygramClient_C* client, const char* table, const char* query, const char** and_terms,
+                                size_t and_count, const char** not_terms, size_t not_count, const char** filter_keys,
                                 const char** filter_values, size_t filter_count, uint64_t* count);
 
 /**
@@ -187,8 +189,7 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
  * @param doc Output document (caller must free with mygramclient_free_document)
  * @return 0 on success, -1 on error
  */
-int mygramclient_get(MygramClient_C* client, const char* table, const char* primary_key,
-                     MygramDocument_C** doc);
+int mygramclient_get(MygramClient_C* client, const char* table, const char* primary_key, MygramDocument_C** doc);
 
 /**
  * @brief Get server information
@@ -299,3 +300,5 @@ void mygramclient_free_string(char* str);
 #ifdef __cplusplus
 }
 #endif
+
+// NOLINTEND(modernize-use-using)

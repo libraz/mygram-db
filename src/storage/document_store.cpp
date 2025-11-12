@@ -12,8 +12,77 @@
 #include <cstring>
 #include <fstream>
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
+
+namespace {
+
+// Binary I/O constants
+constexpr size_t kBytesPerKilobyte = 1024;
+constexpr size_t kBytesPerMegabyte = kBytesPerKilobyte * 1024;
+
+// FilterValue type indices for serialization
+// These map to std::variant<std::monostate, bool, int8_t, uint8_t, int16_t, uint16_t, int32_t,
+// uint32_t, int64_t, uint64_t, std::string, double>
+constexpr uint8_t kTypeIndexMonostate = 0;
+constexpr uint8_t kTypeIndexBool = 1;
+constexpr uint8_t kTypeIndexInt8 = 2;
+constexpr uint8_t kTypeIndexUInt8 = 3;
+constexpr uint8_t kTypeIndexInt16 = 4;
+constexpr uint8_t kTypeIndexUInt16 = 5;
+constexpr uint8_t kTypeIndexInt32 = 6;
+constexpr uint8_t kTypeIndexUInt32 = 7;
+constexpr uint8_t kTypeIndexInt64 = 8;
+constexpr uint8_t kTypeIndexUInt64 = 9;
+constexpr uint8_t kTypeIndexString = 10;
+constexpr uint8_t kTypeIndexDouble = 11;
+
+/**
+ * @brief Helper to write binary data to output stream
+ *
+ * std::ofstream::write() requires const char* but we work with typed data.
+ * This helper encapsulates the required type conversion.
+ *
+ * Why reinterpret_cast is necessary:
+ * - std::ofstream::write() signature: write(const char*, streamsize)
+ * - We need to write binary representations of typed objects (uint32_t, etc.)
+ * - reinterpret_cast to const char* is the standard pattern for binary I/O
+ * - This is type-safe as we're writing the exact binary representation
+ *
+ * @tparam T Type of data to write
+ * @param ofs Output file stream
+ * @param data Reference to data to write
+ */
+template <typename T>
+inline void WriteBinary(std::ofstream& ofs, const T& data) {
+  // Suppressing clang-tidy warning for standard binary I/O pattern
+  ofs.write(reinterpret_cast<const char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+            sizeof(T));
+}
+
+/**
+ * @brief Helper to read binary data from input stream
+ *
+ * std::ifstream::read() requires char* but we work with typed data.
+ * This helper encapsulates the required type conversion.
+ *
+ * Why reinterpret_cast is necessary:
+ * - std::ifstream::read() signature: read(char*, streamsize)
+ * - We need to read binary data into typed objects (uint32_t, etc.)
+ * - reinterpret_cast to char* is the standard pattern for binary I/O
+ * - This is type-safe as we're reading the exact binary representation
+ *
+ * @tparam T Type of data to read
+ * @param ifs Input file stream
+ * @param data Reference to data to read into
+ */
+template <typename T>
+inline void ReadBinary(std::ifstream& ifs, T& data) {
+  // Suppressing clang-tidy warning for standard binary I/O pattern
+  ifs.read(reinterpret_cast<char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+           sizeof(T));
+}
+
+}  // namespace
 
 DocId DocumentStore::AddDocument(const std::string& primary_key,
                                  const std::unordered_map<std::string, FilterValue>& filters) {
@@ -58,8 +127,7 @@ std::vector<DocId> DocumentStore::AddDocumentBatch(const std::vector<DocumentIte
     // Check if primary key already exists
     auto iterator = pk_to_doc_id_.find(doc.primary_key);
     if (iterator != pk_to_doc_id_.end()) {
-      spdlog::warn("Primary key {} already exists with DocID {}", doc.primary_key,
-                   iterator->second);
+      spdlog::warn("Primary key {} already exists with DocID {}", doc.primary_key, iterator->second);
       doc_ids.push_back(iterator->second);
       continue;
     }
@@ -84,8 +152,7 @@ std::vector<DocId> DocumentStore::AddDocumentBatch(const std::vector<DocumentIte
   return doc_ids;
 }
 
-bool DocumentStore::UpdateDocument(DocId doc_id,
-                                   const std::unordered_map<std::string, FilterValue>& filters) {
+bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if document exists
@@ -165,8 +232,7 @@ std::optional<std::string> DocumentStore::GetPrimaryKey(DocId doc_id) const {
   return iterator->second;
 }
 
-std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id,
-                                                         const std::string& filter_name) const {
+std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, const std::string& filter_name) const {
   std::shared_lock lock(mutex_);
   auto doc_it = doc_filters_.find(doc_id);
   if (doc_it == doc_filters_.end()) {
@@ -181,8 +247,7 @@ std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id,
   return filter_it->second;
 }
 
-std::vector<DocId> DocumentStore::FilterByValue(const std::string& filter_name,
-                                                const FilterValue& value) const {
+std::vector<DocId> DocumentStore::FilterByValue(const std::string& filter_name, const FilterValue& value) const {
   std::shared_lock lock(mutex_);
   std::vector<DocId> results;
 
@@ -219,10 +284,9 @@ bool DocumentStore::HasFilterColumn(const std::string& filter_name) const {
   std::shared_lock lock(mutex_);
 
   // Check if any document has this filter column
-  return std::any_of(doc_filters_.begin(), doc_filters_.end(),
-                     [&filter_name](const auto& doc_filter) {
-                       return doc_filter.second.find(filter_name) != doc_filter.second.end();
-                     });
+  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name](const auto& doc_filter) {
+    return doc_filter.second.find(filter_name) != doc_filter.second.end();
+  });
 }
 
 size_t DocumentStore::MemoryUsage() const {
@@ -269,8 +333,7 @@ void DocumentStore::Clear() {
   spdlog::info("Document store cleared");
 }
 
-bool DocumentStore::SaveToFile(const std::string& filepath,
-                               const std::string& replication_gtid) const {
+bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& replication_gtid) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) {
@@ -289,7 +352,7 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
 
     // Write version
     uint32_t version = 1;
-    ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    WriteBinary(ofs, version);
 
     uint32_t next_id = 0;
     uint64_t doc_count = 0;
@@ -300,28 +363,28 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
 
       // Write next_doc_id
       next_id = static_cast<uint32_t>(next_doc_id_);
-      ofs.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+      WriteBinary(ofs, next_id);
 
       // Write GTID (for replication position)
       auto gtid_len = static_cast<uint32_t>(replication_gtid.size());
-      ofs.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+      WriteBinary(ofs, gtid_len);
       if (gtid_len > 0) {
         ofs.write(replication_gtid.data(), gtid_len);
       }
 
       // Write document count
       doc_count = doc_id_to_pk_.size();
-      ofs.write(reinterpret_cast<const char*>(&doc_count), sizeof(doc_count));
+      WriteBinary(ofs, doc_count);
 
       // Write doc_id -> pk mappings
       for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
         // Write doc_id
         auto doc_id_value = static_cast<uint32_t>(doc_id);
-        ofs.write(reinterpret_cast<const char*>(&doc_id_value), sizeof(doc_id_value));
+        WriteBinary(ofs, doc_id_value);
 
         // Write pk length and pk
         auto pk_len = static_cast<uint32_t>(primary_key_str.size());
-        ofs.write(reinterpret_cast<const char*>(&pk_len), sizeof(pk_len));
+        WriteBinary(ofs, pk_len);
         ofs.write(primary_key_str.data(), pk_len);
 
         // Write filters for this document
@@ -330,18 +393,18 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
         if (filter_it != doc_filters_.end()) {
           filter_count = static_cast<uint32_t>(filter_it->second.size());
         }
-        ofs.write(reinterpret_cast<const char*>(&filter_count), sizeof(filter_count));
+        WriteBinary(ofs, filter_count);
 
         if (filter_count > 0) {
           for (const auto& [name, value] : filter_it->second) {
             // Write filter name
             auto name_len = static_cast<uint32_t>(name.size());
-            ofs.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+            WriteBinary(ofs, name_len);
             ofs.write(name.data(), name_len);
 
             // Write filter type and value
             auto type_idx = static_cast<uint8_t>(value.index());
-            ofs.write(reinterpret_cast<const char*>(&type_idx), sizeof(type_idx));
+            WriteBinary(ofs, type_idx);
 
             std::visit(
                 [&ofs](const auto& filter_value) {
@@ -350,10 +413,10 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
                     // std::monostate (NULL) has no data to write
                   } else if constexpr (std::is_same_v<T, std::string>) {
                     auto str_len = static_cast<uint32_t>(filter_value.size());
-                    ofs.write(reinterpret_cast<const char*>(&str_len), sizeof(str_len));
+                    WriteBinary(ofs, str_len);
                     ofs.write(filter_value.data(), str_len);
                   } else {
-                    ofs.write(reinterpret_cast<const char*>(&filter_value), sizeof(filter_value));
+                    WriteBinary(ofs, filter_value);
                   }
                 },
                 value);
@@ -364,7 +427,7 @@ bool DocumentStore::SaveToFile(const std::string& filepath,
 
     ofs.close();
     spdlog::info("Saved document store to {}: {} documents, {} MB", filepath, doc_count,
-                 MemoryUsage() / (1024 * 1024));
+                 MemoryUsage() / kBytesPerMegabyte);
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while saving document store: {}", e.what());
@@ -390,7 +453,7 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
     // Read version
     uint32_t version = 0;
-    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
+    ReadBinary(ifs, version);
     if (version != 1) {
       spdlog::error("Unsupported document store file version: {}", version);
       return false;
@@ -398,12 +461,12 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
     // Read next_doc_id
     uint32_t next_id = 0;
-    ifs.read(reinterpret_cast<char*>(&next_id), sizeof(next_id));
+    ReadBinary(ifs, next_id);
     next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
     uint32_t gtid_len = 0;
-    ifs.read(reinterpret_cast<char*>(&gtid_len), sizeof(gtid_len));
+    ReadBinary(ifs, gtid_len);
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       ifs.read(gtid.data(), gtid_len);
@@ -416,7 +479,7 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
     // Read document count
     uint64_t doc_count = 0;
-    ifs.read(reinterpret_cast<char*>(&doc_count), sizeof(doc_count));
+    ReadBinary(ifs, doc_count);
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
@@ -427,12 +490,12 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     for (uint64_t i = 0; i < doc_count; ++i) {
       // Read doc_id
       uint32_t doc_id_value = 0;
-      ifs.read(reinterpret_cast<char*>(&doc_id_value), sizeof(doc_id_value));
+      ReadBinary(ifs, doc_id_value);
       auto doc_id = static_cast<DocId>(doc_id_value);
 
       // Read pk length and pk
       uint32_t pk_len = 0;
-      ifs.read(reinterpret_cast<char*>(&pk_len), sizeof(pk_len));
+      ReadBinary(ifs, pk_len);
 
       std::string primary_key_str(pk_len, '\0');
       ifs.read(primary_key_str.data(), pk_len);
@@ -442,7 +505,7 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
       // Read filters
       uint32_t filter_count = 0;
-      ifs.read(reinterpret_cast<char*>(&filter_count), sizeof(filter_count));
+      ReadBinary(ifs, filter_count);
 
       if (filter_count > 0) {
         std::unordered_map<std::string, FilterValue> filters;
@@ -450,87 +513,87 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
         for (uint32_t j = 0; j < filter_count; ++j) {
           // Read filter name
           uint32_t name_len = 0;
-          ifs.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
+          ReadBinary(ifs, name_len);
 
           std::string name(name_len, '\0');
           ifs.read(name.data(), name_len);
 
           // Read filter type
           uint8_t type_idx = 0;
-          ifs.read(reinterpret_cast<char*>(&type_idx), sizeof(type_idx));
+          ReadBinary(ifs, type_idx);
 
           // Read filter value based on type
           FilterValue value;
           switch (type_idx) {
-            case 0: {  // std::monostate (NULL)
+            case kTypeIndexMonostate: {  // std::monostate (NULL)
               value = std::monostate{};
               break;
             }
-            case 1: {  // bool
+            case kTypeIndexBool: {  // bool
               bool bool_value = false;
-              ifs.read(reinterpret_cast<char*>(&bool_value), sizeof(bool_value));
+              ReadBinary(ifs, bool_value);
               value = bool_value;
               break;
             }
-            case 2: {  // int8_t
+            case kTypeIndexInt8: {  // int8_t
               int8_t int8_value = 0;
-              ifs.read(reinterpret_cast<char*>(&int8_value), sizeof(int8_value));
+              ReadBinary(ifs, int8_value);
               value = int8_value;
               break;
             }
-            case 3: {  // uint8_t
+            case kTypeIndexUInt8: {  // uint8_t
               uint8_t uint8_value = 0;
-              ifs.read(reinterpret_cast<char*>(&uint8_value), sizeof(uint8_value));
+              ReadBinary(ifs, uint8_value);
               value = uint8_value;
               break;
             }
-            case 4: {  // int16_t
+            case kTypeIndexInt16: {  // int16_t
               int16_t int16_value = 0;
-              ifs.read(reinterpret_cast<char*>(&int16_value), sizeof(int16_value));
+              ReadBinary(ifs, int16_value);
               value = int16_value;
               break;
             }
-            case 5: {  // uint16_t
+            case kTypeIndexUInt16: {  // uint16_t
               uint16_t uint16_value = 0;
-              ifs.read(reinterpret_cast<char*>(&uint16_value), sizeof(uint16_value));
+              ReadBinary(ifs, uint16_value);
               value = uint16_value;
               break;
             }
-            case 6: {  // int32_t
+            case kTypeIndexInt32: {  // int32_t
               int32_t int32_value = 0;
-              ifs.read(reinterpret_cast<char*>(&int32_value), sizeof(int32_value));
+              ReadBinary(ifs, int32_value);
               value = int32_value;
               break;
             }
-            case 7: {  // uint32_t
+            case kTypeIndexUInt32: {  // uint32_t
               uint32_t uint32_value = 0;
-              ifs.read(reinterpret_cast<char*>(&uint32_value), sizeof(uint32_value));
+              ReadBinary(ifs, uint32_value);
               value = uint32_value;
               break;
             }
-            case 8: {  // int64_t
+            case kTypeIndexInt64: {  // int64_t
               int64_t int64_value = 0;
-              ifs.read(reinterpret_cast<char*>(&int64_value), sizeof(int64_value));
+              ReadBinary(ifs, int64_value);
               value = int64_value;
               break;
             }
-            case 9: {  // uint64_t
+            case kTypeIndexUInt64: {  // uint64_t
               uint64_t uint64_value = 0;
-              ifs.read(reinterpret_cast<char*>(&uint64_value), sizeof(uint64_value));
+              ReadBinary(ifs, uint64_value);
               value = uint64_value;
               break;
             }
-            case 10: {  // std::string
+            case kTypeIndexString: {  // std::string
               uint32_t str_len = 0;
-              ifs.read(reinterpret_cast<char*>(&str_len), sizeof(str_len));
+              ReadBinary(ifs, str_len);
               std::string string_value(str_len, '\0');
               ifs.read(string_value.data(), str_len);
               value = string_value;
               break;
             }
-            case 11: {  // double
+            case kTypeIndexDouble: {  // double
               double double_value = NAN;
-              ifs.read(reinterpret_cast<char*>(&double_value), sizeof(double_value));
+              ReadBinary(ifs, double_value);
               value = double_value;
               break;
             }
@@ -558,7 +621,7 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     }
 
     spdlog::info("Loaded document store from {}: {} documents, {} MB", filepath, doc_count,
-                 MemoryUsage() / (1024 * 1024));
+                 MemoryUsage() / kBytesPerMegabyte);
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading document store: {}", e.what());
@@ -566,5 +629,4 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
   }
 }
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage

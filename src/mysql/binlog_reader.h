@@ -22,19 +22,17 @@
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
 
-namespace mygramdb {
-
 // Forward declaration
-namespace server {
+namespace mygramdb::server {
 struct TableContext;
 }
 
-namespace mysql {
+namespace mygramdb::mysql {
 
 /**
  * @brief Binlog event type
  */
-enum class BinlogEventType {
+enum class BinlogEventType : uint8_t {
   INSERT,
   UPDATE,
   DELETE,
@@ -46,7 +44,7 @@ enum class BinlogEventType {
  * @brief Binlog event
  */
 struct BinlogEvent {
-  BinlogEventType type;
+  BinlogEventType type = BinlogEventType::UNKNOWN;
   std::string table_name;
   std::string primary_key;
   std::string text;  // Normalized text for INSERT/UPDATE
@@ -64,13 +62,16 @@ class BinlogReader {
   /**
    * @brief Configuration for binlog reader
    */
+  // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default binlog
+  // reader settings
   struct Config {
-    std::string start_gtid;     // Starting GTID
-    size_t queue_size = 10000;  // Maximum queue size
-    int reconnect_delay_ms = 1000;
+    std::string start_gtid;                 // Starting GTID
+    size_t queue_size = 10000;              // Maximum queue size
+    int reconnect_delay_ms = 1000;          // Reconnect delay in milliseconds
     std::string state_file_path;            // Path to GTID state file (empty = no persistence)
     int state_write_interval_events = 100;  // Write state every N events
   };
+  // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
   /**
    * @brief Construct binlog reader (single-table mode)
@@ -85,11 +86,16 @@ class BinlogReader {
    * @param table_contexts Map of table name to TableContext pointer
    * @param config Binlog reader configuration
    */
-  BinlogReader(Connection& connection,
-               std::unordered_map<std::string, server::TableContext*> table_contexts,
+  BinlogReader(Connection& connection, std::unordered_map<std::string, server::TableContext*> table_contexts,
                const Config& config);
 
   ~BinlogReader();
+
+  // Non-copyable and non-movable (manages thread and connection state)
+  BinlogReader(const BinlogReader&) = delete;
+  BinlogReader& operator=(const BinlogReader&) = delete;
+  BinlogReader(BinlogReader&&) = delete;
+  BinlogReader& operator=(BinlogReader&&) = delete;
 
   /**
    * @brief Start reading binlog events
@@ -212,8 +218,8 @@ class BinlogReader {
    * @param table_config Table configuration containing required_filters
    * @return true if all required_filters conditions are satisfied
    */
-  bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
-                               const config::TableConfig& table_config) const;
+  static bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
+                                      const config::TableConfig& table_config);
 
   /**
    * @brief Compare filter value against required filter condition
@@ -221,16 +227,14 @@ class BinlogReader {
    * @param filter Required filter configuration
    * @return true if condition is satisfied
    */
-  static bool CompareFilterValue(const storage::FilterValue& value,
-                                 const config::RequiredFilterConfig& filter);
+  static bool CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter);
 
   /**
    * @brief Extract all filter columns (both required and optional) from row data
    * @param row_data Row data from binlog
    * @return Map of filter name to FilterValue
    */
-  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
-      const RowData& row_data) const;
+  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(const RowData& row_data) const;
 
   /**
    * @brief Update current GTID
@@ -264,8 +268,7 @@ class BinlogReader {
    * @param length Buffer length
    * @return TableMetadata if successfully parsed
    */
-  static std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer,
-                                                         unsigned long length);
+  static std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer, unsigned long length);
 
   /**
    * @brief Extract SQL query string from QUERY_EVENT
@@ -273,8 +276,7 @@ class BinlogReader {
    * @param length Buffer length
    * @return Query string if successfully extracted
    */
-  static std::optional<std::string> ExtractQueryString(const unsigned char* buffer,
-                                                       unsigned long length);
+  static std::optional<std::string> ExtractQueryString(const unsigned char* buffer, unsigned long length);
 
   /**
    * @brief Check if DDL affects target table
@@ -285,7 +287,6 @@ class BinlogReader {
   static bool IsTableAffectingDDL(const std::string& query, const std::string& table_name);
 };
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

@@ -94,8 +94,7 @@ class TcpServerTest : public ::testing::Test {
     std::string response(buffer);
 
     // Remove trailing \r\n
-    if (response.size() >= 2 && response[response.size() - 2] == '\r' &&
-        response[response.size() - 1] == '\n') {
+    if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
       response = response.substr(0, response.size() - 2);
     }
 
@@ -948,8 +947,7 @@ TEST_F(TcpServerTest, InfoCommandWithTables) {
   full_config.tables.push_back(table3);
 
   // Create server with config
-  auto server_with_config =
-      std::make_unique<TcpServer>(config_, multi_table_contexts, "./snapshots", &full_config);
+  auto server_with_config = std::make_unique<TcpServer>(config_, multi_table_contexts, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -1017,8 +1015,7 @@ TEST_F(TcpServerTest, InfoCommandWithSingleTable) {
   full_config.tables.push_back(table);
 
   // Create server with config
-  auto server_with_config =
-      std::make_unique<TcpServer>(config_, table_contexts_, "./snapshots", &full_config);
+  auto server_with_config = std::make_unique<TcpServer>(config_, table_contexts_, "./snapshots", &full_config);
 
   ASSERT_TRUE(server_with_config->Start());
   uint16_t port = server_with_config->GetPort();
@@ -1080,12 +1077,11 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
   std::string load_response;
 
   // Start LOAD in a separate thread
-  std::thread load_thread(
-      [this, load_sock, &test_file, &load_response, &load_started, &load_finished]() {
-        load_started = true;
-        load_response = SendRequest(load_sock, "LOAD " + test_file);
-        load_finished = true;
-      });
+  std::thread load_thread([this, load_sock, &test_file, &load_response, &load_started, &load_finished]() {
+    load_started = true;
+    load_response = SendRequest(load_sock, "LOAD " + test_file);
+    load_finished = true;
+  });
 
   // Wait for LOAD to start
   while (!load_started) {

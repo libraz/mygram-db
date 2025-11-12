@@ -14,13 +14,15 @@
 
 # 開発ツールをインストール
 brew install cmake
-brew install llvm  # clang、clang-tidy、clang-format、clangd を含む
+brew install llvm@18  # バージョン 18 が必要（一貫したフォーマットのため）
 brew install mysql-client@8.4
 brew install icu4c
 
-# LLVM を PATH に追加（オプション、最新の clangd を使用する場合）
-echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+# LLVM 18 をデフォルトで使用するためのシンボリックリンクを作成
+# 重要: CI と一貫したコードフォーマットを保証するため
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-format /opt/homebrew/bin/clang-format
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-tidy /opt/homebrew/bin/clang-tidy
+ln -sf /opt/homebrew/opt/llvm@18/bin/clangd /opt/homebrew/bin/clangd
 ```
 
 ### Linux（Ubuntu/Debian）
@@ -29,12 +31,31 @@ source ~/.zshrc
 # パッケージリストを更新
 sudo apt-get update
 
-# 開発ツールをインストール
-sudo apt-get install -y cmake
-sudo apt-get install -y clang clang-tidy clang-format clangd
-sudo apt-get install -y libmysqlclient-dev
-sudo apt-get install -y libicu-dev
-sudo apt-get install -y pkg-config
+# 基本的な開発ツールをインストール
+sudo apt-get install -y \
+  cmake \
+  build-essential \
+  libmysqlclient-dev \
+  libicu-dev \
+  pkg-config \
+  wget \
+  lsb-release \
+  software-properties-common \
+  gnupg
+
+# LLVM/Clang 18 をインストール（一貫したフォーマットのため必須）
+# 重要: CI 環境と一致させるためバージョン 18 が必要
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+
+# clang-format、clang-tidy、clangd バージョン 18 をインストール
+sudo apt-get install -y clang-format-18 clang-tidy-18 clangd-18
+
+# バージョン 18 をデフォルトに設定
+sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
+sudo update-alternatives --install /usr/bin/clangd clangd /usr/bin/clangd-18 100
 ```
 
 ## インストールの確認
@@ -42,11 +63,12 @@ sudo apt-get install -y pkg-config
 ```bash
 # ツールがインストールされているか確認
 cmake --version        # 3.15+ であることを確認
-clang++ --version      # C++17 サポートを確認
-clang-tidy --version   # リンティング用
-clang-format --version # フォーマット用
-clangd --version       # LSP 用（オプション）
+clang-format --version # 18.x.x であることを確認
+clang-tidy --version   # 18.x.x であることを確認
+clangd --version       # 18.x.x であることを確認（オプション、LSP 用）
 ```
+
+**なぜバージョン 18 が必要なのか？** clang-format のバージョンが異なると、フォーマット結果も異なります。ローカル開発環境と CI の一貫性を保つため、バージョン 18 に統一しています。
 
 ## プロジェクトのビルド
 
@@ -116,10 +138,18 @@ VS Code ウィンドウをリロード（Cmd/Ctrl + Shift + P → "Developer: Re
 ### コードフォーマット
 
 - ベーススタイル: Google
-- カラム制限: 100 文字
+- カラム制限: 120 文字
 - インデント: 2 スペース（タブなし）
 - ポインタ配置: 左（`int* ptr`、`int *ptr` ではない）
 - ブレース: アタッチスタイル（`if (x) {`）
+
+フォーマットツールの実行:
+
+```bash
+make format        # コードを自動整形
+make format-check  # フォーマットをチェック（CI モード）
+make lint          # clang-tidy で静的解析（時間がかかる）
+```
 
 ### 命名規則
 
@@ -146,6 +176,30 @@ VS Code ウィンドウをリロード（Cmd/Ctrl + Shift + P → "Developer: Re
 ReturnType FunctionName(Type param_name);
 ```
 
+### clang-tidy 警告の抑制
+
+必要に応じて、NOLINTコメントで警告を抑制します:
+
+```cpp
+// ✅ 良い例: 問題のある行の前に NOLINTNEXTLINE を使用
+// NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+snprintf(buf, sizeof(buf), "%d", value);
+
+// ✅ 良い例: インライン NOLINT（120文字以内に収める）
+char buf[32];  // NOLINT(cppcoreguidelines-avoid-c-arrays)
+
+// ❌ 悪い例: 複数行の NOLINT（clang-tidy が認識しない）
+snprintf(buf, sizeof(buf), "%d",
+         value);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+
+// ✅ 良い例: ファイルレベルの抑制（広範囲に影響する問題）
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+// ... ポインタ演算が必要なコード ...
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+```
+
+**重要:** NOLINTコメントは1行で記述する必要があります。複数行のコメントは認識されません。
+
 ## テストの実行
 
 Makefile を使用:
@@ -169,14 +223,19 @@ ctest --output-on-failure
 
 ### "clang-tidy: error while loading shared libraries"
 
-**解決策:** clang-tidy をインストール：
+**解決策:** clang-tidy バージョン 18 をインストール：
 
 ```bash
 # macOS
-brew install llvm
+brew install llvm@18
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-tidy /opt/homebrew/bin/clang-tidy
 
 # Linux
-sudo apt-get install clang-tidy
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+sudo apt-get install -y clang-tidy-18
+sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 ```
 
 ### "Many errors in VS Code after opening project"
@@ -188,25 +247,32 @@ sudo apt-get install clang-tidy
 
 ### "clang-format not working"
 
-**解決策:**
+**解決策:** clang-format バージョン 18 をインストール：
 
 ```bash
 # macOS
-brew install clang-format
+brew install llvm@18
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-format /opt/homebrew/bin/clang-format
 
 # Linux
-sudo apt-get install clang-format
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+sudo apt-get install -y clang-format-18
+sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
 ```
 
-`.vscode/settings.json` のパスがインストールと一致することを確認：
+バージョンを確認：
 
 ```bash
-which clang-format  # 実際のパスを確認
+clang-format --version  # 18.x.x であることを確認
 ```
 
 ## クイックスタートチェックリスト
 
-- [ ] cmake、clang、clang-tidy、clang-format をインストール
+- [ ] cmake をインストール
+- [ ] LLVM 18（clang-format-18、clang-tidy-18、clangd-18）をインストール
+- [ ] clang-format --version で 18.x.x が表示されることを確認
 - [ ] MySQL クライアントライブラリをインストール
 - [ ] ICU ライブラリをインストール
 - [ ] `make` を実行してプロジェクトをビルド
@@ -236,13 +302,22 @@ which clang-format  # 実際のパスを確認
 
 ## コントリビューション
 
-変更を送信する前に：
+変更を送信する前に:
 
-- [ ] コードが Google C++ スタイルガイドに従っている
-- [ ] すべてのコメントとドキュメントが英語である
-- [ ] 公開 API に Doxygen コメントを追加
+1. **コードを記述** - Google C++ Style Guide に従う
+2. **`make format` を実行** - コードを自動整形
+3. **`make format-check` を実行** - フォーマットを検証（CI相当）
+4. **`make lint` を実行** - コード品質をチェック（ローカルでは任意、CIでは必須）
+5. **`make test` を実行** - すべてのテストが通ることを確認
+6. **変更をコミット** - すべてのチェックが通った場合
+
+チェックリスト:
+- [ ] コードが Google C++ Style Guide に従っている（120文字制限）
+- [ ] すべてのコメントとドキュメントが英語で記述されている
+- [ ] パブリック API に Doxygen コメントを追加
 - [ ] ユニットテストを追加/更新
-- [ ] すべてのテストが成功（`make test`）
-- [ ] コードが clang-format でフォーマットされている（`make format`）
+- [ ] すべてのテストが通る (`make test`)
+- [ ] コードが整形済み (`make format-check` が通る)
+- [ ] clang-tidy 警告がない (`make lint` が通る)
 - [ ] コンパイラ警告がない
-- [ ] ドキュメントを更新（必要な場合）
+- [ ] ドキュメントを更新済み（必要な場合）

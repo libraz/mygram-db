@@ -11,8 +11,7 @@
 
 #include "query/query_parser.h"
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
 
 /**
  * @brief Server statistics snapshot
@@ -188,5 +187,4 @@ class ServerStats {
   std::atomic<uint64_t> total_requests_{0};
 };
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

@@ -9,6 +9,7 @@
   "clangd.onConfigChanged": "ignore",
 
   // When ready to use clangd, uncomment these lines:
+  // Note: clangd automatically uses .clang-tidy from project root
   // "C_Cpp.intelliSenseEngine": "disabled",
   // "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",  // or "/usr/bin/clangd" on Linux
   // "clangd.arguments": [
@@ -38,7 +39,10 @@
   "C_Cpp.codeAnalysis.clangTidy.path": "/opt/homebrew/opt/llvm/bin/clang-tidy",
   "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true,
   "C_Cpp.codeAnalysis.clangTidy.config": "",
-  "C_Cpp.codeAnalysis.clangTidy.args": [],
+  "C_Cpp.codeAnalysis.clangTidy.args": [
+    "--config-file=.clang-tidy",
+    "--header-filter=src/.*"
+  ],
   "C_Cpp.codeAnalysis.runAutomatically": true,
   "C_Cpp.codeAnalysis.updateDelay": 500,  // Fast response like ESLint
 

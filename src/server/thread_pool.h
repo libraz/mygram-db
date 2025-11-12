@@ -14,8 +14,7 @@
 #include <thread>
 #include <vector>
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
 
 /**
  * @brief Thread pool for executing tasks concurrently
@@ -42,9 +41,11 @@ class ThreadPool {
    */
   ~ThreadPool();
 
-  // Non-copyable
+  // Non-copyable and non-movable
   ThreadPool(const ThreadPool&) = delete;
   ThreadPool& operator=(const ThreadPool&) = delete;
+  ThreadPool(ThreadPool&&) = delete;
+  ThreadPool& operator=(ThreadPool&&) = delete;
 
   /**
    * @brief Submit task to pool
@@ -89,5 +90,4 @@ class ThreadPool {
   void WorkerThread();
 };
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

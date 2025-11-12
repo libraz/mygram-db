@@ -1,13 +1,16 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test clean rebuild install uninstall format configure run docker-build docker-up docker-down docker-logs docker-test
+.PHONY: help build test clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
 
 # Build directory
 BUILD_DIR := build
 
 # Install prefix (can be overridden: make PREFIX=/opt/mygramdb install)
 PREFIX ?= /usr/local
+
+# clang-format command (can be overridden: make CLANG_FORMAT=clang-format-18 format)
+CLANG_FORMAT ?= clang-format
 
 # Default target
 .DEFAULT_GOAL := build
@@ -22,7 +25,9 @@ help:
 	@echo "  make rebuild   - Clean and rebuild"
 	@echo "  make install   - Install binaries and files"
 	@echo "  make uninstall - Uninstall binaries and files"
-	@echo "  make format    - Format code with clang-format"
+	@echo "  make format       - Format code with clang-format"
+	@echo "  make format-check - Check code formatting (CI)"
+	@echo "  make lint         - Check code with clang-tidy"
 	@echo "  make configure - Configure CMake (for changing options)"
 	@echo "  make run       - Build and run mygramdb"
 	@echo "  make help      - Show this help message"
@@ -96,8 +101,18 @@ uninstall:
 # Format code with clang-format
 format:
 	@echo "Formatting code..."
-	@find src tests -name "*.cpp" -o -name "*.h" | xargs clang-format -i
+	@find src tests -name "*.cpp" -o -name "*.h" | xargs $(CLANG_FORMAT) -i
 	@echo "Format complete!"
+
+# Check code formatting (CI mode - fails on formatting issues)
+format-check:
+	@echo "Checking code formatting..."
+	@find src tests -name "*.cpp" -o -name "*.h" | xargs $(CLANG_FORMAT) --dry-run --Werror
+	@echo "Format check passed!"
+
+# Check code with clang-tidy
+lint: build
+	@bash scripts/run-clang-tidy.sh
 
 # Build and run mygramdb
 run: build

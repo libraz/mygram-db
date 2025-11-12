@@ -14,8 +14,7 @@
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
-namespace mygramdb {
-namespace query {
+namespace mygramdb::query {
 
 namespace {
 
@@ -124,8 +123,8 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
         } else {
           // Intersect with previous results
           std::vector<DocId> intersection;
-          std::set_intersection(current_result.begin(), current_result.end(), child_result.begin(),
-                                child_result.end(), std::back_inserter(intersection));
+          std::set_intersection(current_result.begin(), current_result.end(), child_result.begin(), child_result.end(),
+                                std::back_inserter(intersection));
           current_result = std::move(intersection);
         }
 
@@ -165,8 +164,8 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
 
       // Return complement (all_docs - exclude_docs)
       std::vector<DocId> result;
-      std::set_difference(all_docs.begin(), all_docs.end(), exclude_docs.begin(),
-                          exclude_docs.end(), std::back_inserter(result));
+      std::set_difference(all_docs.begin(), all_docs.end(), exclude_docs.begin(), exclude_docs.end(),
+                          std::back_inserter(result));
 
       return result;
     }
@@ -187,10 +186,12 @@ void Tokenizer::SkipWhitespace() {
   }
 }
 
+constexpr unsigned char kMaxAsciiValue = 127;
+
 bool Tokenizer::IsTermChar(char character) {
   // Allow alphanumeric, underscore, and non-ASCII characters
   return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_' ||
-         static_cast<unsigned char>(character) > 127;
+         static_cast<unsigned char>(character) > kMaxAsciiValue;
 }
 
 std::string Tokenizer::ReadQuotedString(char quote_char) {
@@ -488,5 +489,4 @@ std::unique_ptr<QueryNode> QueryASTParser::ParsePrimary() {
   return nullptr;
 }
 
-}  // namespace query
-}  // namespace mygramdb
+}  // namespace mygramdb::query

@@ -11,8 +11,7 @@
 #include <cctype>
 #include <sstream>
 
-namespace mygramdb {
-namespace query {
+namespace mygramdb::query {
 
 namespace {
 
@@ -39,9 +38,8 @@ bool Query::IsValid() const {
   // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_* commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
-      type != QueryType::REPLICATION_START && type != QueryType::CONFIG &&
-      type != QueryType::OPTIMIZE && type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF &&
-      table.empty()) {
+      type != QueryType::REPLICATION_START && type != QueryType::CONFIG && type != QueryType::OPTIMIZE &&
+      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && table.empty()) {
     return false;
   }
 
@@ -66,7 +64,6 @@ bool Query::IsValid() const {
   return true;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::Parse(const std::string& query_str) {
   error_.clear();
 
@@ -101,7 +98,8 @@ Query QueryParser::Parse(const std::string& query_str) {
     query.type = QueryType::SAVE;
     query.table = "";  // SAVE doesn't need a table
     // Optional filepath argument
-    if (tokens.size() > 1) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() > 1) {  // 1: Check for optional filepath after SAVE
       query.filepath = tokens[1];
     }
     return query;
@@ -111,14 +109,16 @@ Query QueryParser::Parse(const std::string& query_str) {
     query.type = QueryType::LOAD;
     query.table = "";  // LOAD doesn't need a table
     // Optional filepath argument
-    if (tokens.size() > 1) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() > 1) {  // 1: Check for optional filepath after LOAD
       query.filepath = tokens[1];
     }
     return query;
   }
   if (command == "REPLICATION") {
     // REPLICATION STATUS | STOP | START
-    if (tokens.size() < 2) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() < 2) {  // 2: REPLICATION + subcommand
       SetError("REPLICATION requires a subcommand (STATUS, STOP, START)");
       return Query{};
     }
@@ -156,7 +156,8 @@ Query QueryParser::Parse(const std::string& query_str) {
   }
   if (command == "DEBUG") {
     // DEBUG ON | OFF
-    if (tokens.size() < 2) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() < 2) {  // 2: DEBUG + mode (ON/OFF)
       SetError("DEBUG requires ON or OFF");
       return Query{};
     }
@@ -181,13 +182,13 @@ Query QueryParser::Parse(const std::string& query_str) {
   return Query{};
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   Query query;
   query.type = QueryType::SEARCH;
 
   // SEARCH <table> <text> [FILTER ...] [LIMIT n] [OFFSET n]
-  if (tokens.size() < 3) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  if (tokens.size() < 3) {  // 3: SEARCH + table + text (minimum)
     SetError("SEARCH requires at least table and search text");
     return query;
   }
@@ -202,14 +203,14 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     char quote_char = '\0';
 
     for (size_t i = 0; i < token.size(); ++i) {
-      char c = token[i];
+      char chr = token[i];
 
       // Handle quote state
-      if ((c == '"' || c == '\'') && (i == 0 || token[i - 1] != '\\')) {
+      if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
         if (!in_quote) {
           in_quote = true;
-          quote_char = c;
-        } else if (c == quote_char) {
+          quote_char = chr;
+        } else if (chr == quote_char) {
           in_quote = false;
           quote_char = '\0';
         }
@@ -217,10 +218,10 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(') {
+        if (chr == '(') {
           open++;
         }
-        if (c == ')') {
+        if (chr == ')') {
           close++;
         }
       }
@@ -231,7 +232,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
   // First pass: check parentheses balance across ALL tokens
   int total_paren_depth = 0;
-  for (size_t i = 2; i < tokens.size(); ++i) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Skip SEARCH and table name
     auto [open, close] = count_parens(tokens[i]);
     total_paren_depth += open - close;
 
@@ -252,7 +254,8 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
   // Extract search text: consume tokens until we hit a keyword (AND, OR, NOT, FILTER, ORDER, LIMIT,
   // OFFSET) Handle parentheses by tracking nesting level - but respect quoted strings
-  size_t pos = 2;
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  size_t pos = 2;  // 2: Start after SEARCH and table name
   std::vector<std::string> search_tokens;
   int paren_depth = 0;
 
@@ -265,9 +268,9 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)
-    if (paren_depth == 0 && (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
-                             upper_token == "FILTER" || upper_token == "ORDER" ||
-                             upper_token == "LIMIT" || upper_token == "OFFSET")) {
+    if (paren_depth == 0 &&
+        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
+         upper_token == "ORDER" || upper_token == "LIMIT" || upper_token == "OFFSET")) {
       break;  // Stop consuming search text
     }
 
@@ -282,11 +285,13 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
   // Join search tokens with spaces to form complete search expression
   query.search_text = search_tokens[0];
-  for (size_t i = 1; i < search_tokens.size(); ++i) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  for (size_t i = 1; i < search_tokens.size(); ++i) {  // 1: Start from second token
     const std::string& token = search_tokens[i];
     // Don't add space before closing parentheses or after opening parentheses
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     bool prev_ends_with_open_paren =
-        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
+        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';  // 1: Check previous token
     bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
@@ -362,13 +367,13 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   return query;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   Query query;
   query.type = QueryType::COUNT;
 
   // COUNT <table> <text> [FILTER ...]
-  if (tokens.size() < 3) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  if (tokens.size() < 3) {  // 3: COUNT + table + text (minimum)
     SetError("COUNT requires at least table and search text");
     return query;
   }
@@ -383,14 +388,14 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     char quote_char = '\0';
 
     for (size_t i = 0; i < token.size(); ++i) {
-      char c = token[i];
+      char chr = token[i];
 
       // Handle quote state
-      if ((c == '"' || c == '\'') && (i == 0 || token[i - 1] != '\\')) {
+      if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
         if (!in_quote) {
           in_quote = true;
-          quote_char = c;
-        } else if (c == quote_char) {
+          quote_char = chr;
+        } else if (chr == quote_char) {
           in_quote = false;
           quote_char = '\0';
         }
@@ -398,10 +403,10 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
       // Count parentheses only when not inside quotes
       if (!in_quote) {
-        if (c == '(') {
+        if (chr == '(') {
           open++;
         }
-        if (c == ')') {
+        if (chr == ')') {
           close++;
         }
       }
@@ -412,7 +417,8 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
   // First pass: check parentheses balance across ALL tokens
   int total_paren_depth = 0;
-  for (size_t i = 2; i < tokens.size(); ++i) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Skip COUNT and table name
     auto [open, close] = count_parens(tokens[i]);
     total_paren_depth += open - close;
 
@@ -433,7 +439,8 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
   // Extract search text: consume tokens until we hit a keyword
   // Handle parentheses by tracking nesting level - but respect quoted strings
-  size_t pos = 2;
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  size_t pos = 2;  // 2: Start after COUNT and table name
   std::vector<std::string> search_tokens;
   int paren_depth = 0;
 
@@ -447,9 +454,9 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
     // Check if this is a keyword (only when not inside parentheses)
     // Include LIMIT/OFFSET/ORDER so they stop token consumption and get rejected below
-    if (paren_depth == 0 && (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" ||
-                             upper_token == "FILTER" || upper_token == "LIMIT" ||
-                             upper_token == "OFFSET" || upper_token == "ORDER")) {
+    if (paren_depth == 0 &&
+        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
+         upper_token == "LIMIT" || upper_token == "OFFSET" || upper_token == "ORDER")) {
       break;  // Stop consuming search text
     }
 
@@ -464,11 +471,13 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
 
   // Join search tokens with spaces
   query.search_text = search_tokens[0];
-  for (size_t i = 1; i < search_tokens.size(); ++i) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  for (size_t i = 1; i < search_tokens.size(); ++i) {  // 1: Start from second token
     const std::string& token = search_tokens[i];
     // Don't add space before closing parentheses or after opening parentheses
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     bool prev_ends_with_open_paren =
-        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
+        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';  // 1: Check previous token
     bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
@@ -527,7 +536,8 @@ Query QueryParser::ParseGet(const std::vector<std::string>& tokens) {
   query.type = QueryType::GET;
 
   // GET <table> <primary_key>
-  if (tokens.size() != 3) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  if (tokens.size() != 3) {  // 3: GET + table + primary_key (exact)
     SetError("GET requires table and primary_key");
     return query;
   }
@@ -568,7 +578,8 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
   // FILTER <col> <op> <value>
   pos++;  // Skip "FILTER"
 
-  if (pos + 2 >= tokens.size()) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  if (pos + 2 >= tokens.size()) {  // 2: Need column, operator, and value after current pos
     SetError("FILTER requires column, operator, and value");
     return false;
   }
@@ -704,7 +715,6 @@ bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens, size_t& p
   return true;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   std::vector<std::string> tokens;
   std::string token;
@@ -824,5 +834,4 @@ std::optional<FilterOp> QueryParser::ParseFilterOp(const std::string& op_str) {
   return std::nullopt;
 }
 
-}  // namespace query
-}  // namespace mygramdb
+}  // namespace mygramdb::query

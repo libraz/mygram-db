@@ -20,8 +20,8 @@ using namespace mygramdb::mysql;
 class RowsParserTest : public ::testing::Test {
  protected:
   // Helper function to create a simple WRITE_ROWS event buffer
-  std::vector<unsigned char> CreateWriteRowsEvent(
-      const TableMetadata& table_meta, const std::vector<std::vector<std::string>>& rows) {
+  std::vector<unsigned char> CreateWriteRowsEvent(const TableMetadata& table_meta,
+                                                  const std::vector<std::vector<std::string>>& rows) {
     std::vector<unsigned char> buffer;
 
     // Common header (19 bytes) - simplified

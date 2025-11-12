@@ -16,8 +16,7 @@
 #include "mysql/connection.h"
 #include "storage/document_store.h"
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
 /**
  * @brief Snapshot builder progress callback
@@ -48,8 +47,6 @@ class SnapshotBuilder {
    */
   SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
                   config::TableConfig table_config, config::BuildConfig build_config = {});
-
-  ~SnapshotBuilder() = default;
 
   /**
    * @brief Build snapshot from SELECT query with consistent GTID
@@ -133,11 +130,9 @@ class SnapshotBuilder {
   /**
    * @brief Find field index by name
    */
-  static int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields,
-                            unsigned int num_fields);
+  static int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields);
 };
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage
 
 #endif  // USE_MYSQL

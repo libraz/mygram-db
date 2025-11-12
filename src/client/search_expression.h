@@ -28,8 +28,7 @@
 #include <variant>
 #include <vector>
 
-namespace mygramdb {
-namespace client {
+namespace mygramdb::client {
 
 /**
  * @brief Parsed search expression components
@@ -117,8 +116,6 @@ std::variant<std::string, std::string> ConvertSearchExpression(const std::string
  * @return true on success, false on error (check error message)
  */
 bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
-                              std::vector<std::string>& and_terms,
-                              std::vector<std::string>& not_terms);
+                              std::vector<std::string>& and_terms, std::vector<std::string>& not_terms);
 
-}  // namespace client
-}  // namespace mygramdb
+}  // namespace mygramdb::client

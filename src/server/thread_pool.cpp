@@ -7,8 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
 
 ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
   // Default to CPU count if not specified
@@ -118,5 +117,4 @@ void ThreadPool::WorkerThread() {
   }
 }
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

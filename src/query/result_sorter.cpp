@@ -9,8 +9,27 @@
 
 #include <variant>
 
-namespace mygramdb {
-namespace query {
+namespace mygramdb::query {
+
+namespace {
+
+// Buffer sizes for string formatting
+constexpr size_t kDocIdBufferSize = 16;
+constexpr size_t kNumericBufferSize = 32;
+
+// Format widths for zero-padded strings
+constexpr int kDocIdWidth = 10;
+constexpr int kNumericWidth = 20;
+constexpr int kDoubleWidth = 20;
+constexpr int kDoublePrecision = 6;
+
+// Signed integer offset to make all values positive for sorting
+constexpr long long kSignedOffset = (1LL << 60);
+
+// Partial sort threshold: use partial_sort when needed elements < 50% of total
+constexpr double kPartialSortThreshold = 0.5;
+
+}  // namespace
 
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
                                      const OrderByClause& order_by) {
@@ -23,9 +42,12 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
     }
     // Fallback: use DocID itself (numeric)
     // Pre-pad to avoid repeated string allocation in comparator
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%010u", doc_id);
-    return std::string(buf);
+    // Note: Using C-style buffer and snprintf for optimal performance in hot path
+    // This sorting function is called millions of times, std::format is too slow
+    char buf[kDocIdBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    snprintf(buf, sizeof(buf), "%0*u", kDocIdWidth, doc_id);
+    return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   }
 
   // Ordering by filter column
@@ -49,67 +71,71 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
         } else {
           // Numeric types: pad with zeros for lexicographic comparison
           // This ensures proper numeric ordering
-          // Using fixed-size buffer to reduce heap allocations
-          char buf[32];
+          // Note: Using C-style buffer and snprintf for optimal performance
+          // This lambda is called millions of times in sorting, std::format is too slow
+          char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
           if constexpr (std::is_same_v<T, double>) {
-            snprintf(buf, sizeof(buf), "%020.6f", arg);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            snprintf(buf, sizeof(buf), "%0*.*f", kDoubleWidth, kDoublePrecision, arg);
           } else if constexpr (std::is_signed_v<T>) {
             // Signed: add offset to make all values positive for sorting
-            snprintf(buf, sizeof(buf), "%020lld", static_cast<long long>(arg) + (1LL << 60));
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            snprintf(buf, sizeof(buf), "%0*lld", kNumericWidth, static_cast<long long>(arg) + kSignedOffset);
           } else {
             // Unsigned
-            snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(arg));
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            snprintf(buf, sizeof(buf), "%0*llu", kNumericWidth, static_cast<unsigned long long>(arg));
           }
-          return std::string(buf);
+          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
         }
       },
       filter_val.value());
 }
 
-bool ResultSorter::SortComparator::operator()(DocId a, DocId b) const {
+bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   // Optimization: for primary key ordering, try numeric comparison first
   // This avoids string allocation for numeric primary keys
   if (order_by_.IsPrimaryKey()) {
-    auto pk_a = doc_store_.GetPrimaryKey(a);
-    auto pk_b = doc_store_.GetPrimaryKey(b);
+    auto pk_lhs = doc_store_.GetPrimaryKey(lhs);
+    auto pk_rhs = doc_store_.GetPrimaryKey(rhs);
 
-    if (pk_a.has_value() && pk_b.has_value()) {
-      const auto& str_a = pk_a.value();
-      const auto& str_b = pk_b.value();
+    if (pk_lhs.has_value() && pk_rhs.has_value()) {
+      const auto& str_lhs = pk_lhs.value();
+      const auto& str_rhs = pk_rhs.value();
 
       // Fast path: both are pure numeric strings
-      if (!str_a.empty() && !str_b.empty() && std::all_of(str_a.begin(), str_a.end(), ::isdigit) &&
-          std::all_of(str_b.begin(), str_b.end(), ::isdigit)) {
+      if (!str_lhs.empty() && !str_rhs.empty() &&
+          std::all_of(str_lhs.begin(), str_lhs.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; }) &&
+          std::all_of(str_rhs.begin(), str_rhs.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
         try {
-          uint64_t num_a = std::stoull(str_a);
-          uint64_t num_b = std::stoull(str_b);
-          return ascending_ ? (num_a < num_b) : (num_a > num_b);
+          uint64_t num_lhs = std::stoull(str_lhs);
+          uint64_t num_rhs = std::stoull(str_rhs);
+          return ascending_ ? (num_lhs < num_rhs) : (num_lhs > num_rhs);
         } catch (...) {
           // Overflow, fall through to string comparison
         }
       }
 
       // String comparison for non-numeric primary keys
-      int cmp = str_a.compare(str_b);
+      int cmp = str_lhs.compare(str_rhs);
       return ascending_ ? (cmp < 0) : (cmp > 0);
     }
 
     // Fallback: use DocId if primary key not available
-    return ascending_ ? (a < b) : (a > b);
+    return ascending_ ? (lhs < rhs) : (lhs > rhs);
   }
 
   // For filter columns, we need to get the filter values
   // This generates strings for numeric types, but it's unavoidable
-  std::string key_a = GetSortKey(a, doc_store_, order_by_);
-  std::string key_b = GetSortKey(b, doc_store_, order_by_);
+  std::string key_lhs = GetSortKey(lhs, doc_store_, order_by_);
+  std::string key_rhs = GetSortKey(rhs, doc_store_, order_by_);
 
   // String comparison
-  int cmp = key_a.compare(key_b);
+  int cmp = key_lhs.compare(key_rhs);
   return ascending_ ? (cmp < 0) : (cmp > 0);
 }
 
-std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results,
-                                                 const storage::DocumentStore& doc_store,
+std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, const storage::DocumentStore& doc_store,
                                                  const Query& query) {
   // No results to sort
   if (results.empty()) {
@@ -168,7 +194,9 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results,
   // Use partial_sort aggressively when total_needed is significantly smaller than result size
   // Threshold: if we need less than 50% of results, use partial_sort
   // For 800K results with LIMIT 100, partial_sort is ~3x faster (O(N*log(K)) vs O(N*log(N)))
-  if (total_needed < results.size() && static_cast<double>(total_needed) < results.size() * 0.5) {
+  auto results_size_double = static_cast<double>(results.size());
+  auto total_needed_double = static_cast<double>(total_needed);
+  if (total_needed < results.size() && total_needed_double < results_size_double * kPartialSortThreshold) {
     // partial_sort: O(N * log(K)) where K = total_needed
     // For 800K results with K=100: ~800K * log2(100) ≈ 5.3M operations
     // vs full sort: 800K * log2(800K) ≈ 15.9M operations
@@ -186,12 +214,13 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results,
   }
 
   // Apply OFFSET and LIMIT after sorting
-  size_t start = std::min(static_cast<size_t>(query.offset), results.size());
-  size_t end = std::min(start + query.limit, results.size());
+  auto start = std::min(static_cast<size_t>(query.offset), results.size());
+  auto end = std::min(start + static_cast<size_t>(query.limit), results.size());
 
   // Return paginated slice (minimal copy, only final results)
-  return std::vector<DocId>(results.begin() + start, results.begin() + end);
+  auto start_iter = results.begin() + static_cast<ptrdiff_t>(start);
+  auto end_iter = results.begin() + static_cast<ptrdiff_t>(end);
+  return {start_iter, end_iter};
 }
 
-}  // namespace query
-}  // namespace mygramdb
+}  // namespace mygramdb::query

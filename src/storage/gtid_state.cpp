@@ -14,8 +14,7 @@
 
 #ifdef USE_MYSQL
 
-namespace mygramdb {
-namespace storage {
+namespace mygramdb::storage {
 
 GTIDStateFile::GTIDStateFile(std::string file_path) : file_path_(std::move(file_path)) {}
 
@@ -137,7 +136,6 @@ bool GTIDStateFile::Delete() {
   }
 }
 
-}  // namespace storage
-}  // namespace mygramdb
+}  // namespace mygramdb::storage
 
 #endif  // USE_MYSQL

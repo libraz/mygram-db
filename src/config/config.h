@@ -9,22 +9,54 @@
 #include <string>
 #include <vector>
 
-namespace mygramdb {
-namespace config {
+namespace mygramdb::config {
+
+// Default values for configuration
+namespace defaults {
+
+// MySQL connection defaults
+constexpr int kMysqlPort = 3306;
+constexpr int kMysqlConnectTimeoutMs = 3000;
+
+// Posting list defaults
+constexpr int kPostingBlockSize = 128;
+
+// Build defaults
+constexpr int kBuildBatchSize = 5000;
+
+// Replication defaults
+constexpr int kReplicationQueueSize = 10000;
+constexpr int kReconnectBackoffMinMs = 500;
+constexpr int kReconnectBackoffMaxMs = 10000;
+
+// Memory defaults
+constexpr int kMemoryHardLimitMb = 8192;
+constexpr int kMemorySoftTargetMb = 4096;
+constexpr int kMemoryArenaChunkMb = 64;
+constexpr double kRoaringThreshold = 0.18;
+
+// Snapshot defaults
+constexpr int kSnapshotIntervalSec = 600;
+
+// API defaults
+constexpr int kTcpPort = 11016;
+constexpr int kHttpPort = 8080;
+
+}  // namespace defaults
 
 /**
  * @brief MySQL connection configuration
  */
 struct MysqlConfig {
   std::string host = "127.0.0.1";
-  int port = 3306;
+  int port = defaults::kMysqlPort;
   std::string user;
   std::string password;
   std::string database;
   bool use_gtid = true;
   std::string binlog_format = "ROW";
   std::string binlog_row_image = "FULL";
-  int connect_timeout_ms = 3000;
+  int connect_timeout_ms = defaults::kMysqlConnectTimeoutMs;
 };
 
 /**
@@ -76,7 +108,7 @@ struct TextSourceConfig {
  * @brief Posting list configuration
  */
 struct PostingConfig {
-  int block_size = 128;
+  int block_size = defaults::kPostingBlockSize;
   int freq_bits = 0;                 // 0=boolean, 4, or 8
   std::string use_roaring = "auto";  // "auto", "always", "never"
 };
@@ -90,7 +122,7 @@ struct TableConfig {
   TextSourceConfig text_source;
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
   std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
-  int ngram_size = 2;        // N-gram size for ASCII/alphanumeric characters
+  int ngram_size = 2;                                  // N-gram size for ASCII/alphanumeric characters
   int kanji_ngram_size = 0;  // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
   PostingConfig posting;
 };
@@ -100,7 +132,7 @@ struct TableConfig {
  */
 struct BuildConfig {
   std::string mode = "select_snapshot";
-  int batch_size = 5000;
+  int batch_size = defaults::kBuildBatchSize;
   int parallelism = 2;
   int throttle_ms = 0;
 };
@@ -110,22 +142,22 @@ struct BuildConfig {
  */
 struct ReplicationConfig {
   bool enable = true;
-  uint32_t server_id = 0;  // MySQL server ID for replication (must be unique, 0 = disabled)
+  uint32_t server_id = 0;               // MySQL server ID for replication (must be unique, 0 = disabled)
   std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest", "state_file"
   std::string state_file = "./mygramdb_replication.state";  // File to persist current GTID position
-  int queue_size = 10000;                                   // Queue size for binlog events
-  int reconnect_backoff_min_ms = 500;
-  int reconnect_backoff_max_ms = 10000;
+  int queue_size = defaults::kReplicationQueueSize;
+  int reconnect_backoff_min_ms = defaults::kReconnectBackoffMinMs;
+  int reconnect_backoff_max_ms = defaults::kReconnectBackoffMaxMs;
 };
 
 /**
  * @brief Memory configuration
  */
 struct MemoryConfig {
-  int hard_limit_mb = 8192;
-  int soft_target_mb = 4096;
-  int arena_chunk_mb = 64;
-  double roaring_threshold = 0.18;
+  int hard_limit_mb = defaults::kMemoryHardLimitMb;
+  int soft_target_mb = defaults::kMemorySoftTargetMb;
+  int arena_chunk_mb = defaults::kMemoryArenaChunkMb;
+  double roaring_threshold = defaults::kRoaringThreshold;
   bool minute_epoch = true;
 
   struct {
@@ -140,7 +172,7 @@ struct MemoryConfig {
  */
 struct SnapshotConfig {
   std::string dir = "/var/lib/mygramdb/snapshots";
-  int interval_sec = 600;
+  int interval_sec = defaults::kSnapshotIntervalSec;
   int retain = 3;
 };
 
@@ -150,13 +182,13 @@ struct SnapshotConfig {
 struct ApiConfig {
   struct {
     std::string bind = "0.0.0.0";
-    int port = 11016;
+    int port = defaults::kTcpPort;
   } tcp;
 
   struct {
     bool enable = true;
     std::string bind = "127.0.0.1";
-    int port = 8080;
+    int port = defaults::kHttpPort;
   } http;
 };
 
@@ -232,5 +264,4 @@ Config LoadConfigJson(const std::string& path, const std::string& schema_path = 
  */
 void ValidateConfigJson(const std::string& config_json_str, const std::string& schema_json_str);
 
-}  // namespace config
-}  // namespace mygramdb
+}  // namespace mygramdb::config

@@ -13,15 +13,14 @@
 #include <optional>
 #include <string>
 
-namespace mygramdb {
-namespace mysql {
+namespace mygramdb::mysql {
 
 /**
  * @brief MySQL GTID representation
  */
 struct GTID {
-  std::string server_uuid;  // MySQL server UUID
-  uint64_t transaction_id;  // Transaction sequence number
+  std::string server_uuid;      // MySQL server UUID
+  uint64_t transaction_id = 0;  // Transaction sequence number
 
   /**
    * @brief Parse GTID from string format (UUID:transaction_id)
@@ -31,7 +30,7 @@ struct GTID {
   /**
    * @brief Convert GTID to string format
    */
-  std::string ToString() const;
+  [[nodiscard]] std::string ToString() const;
 
   bool operator==(const GTID& other) const {
     return server_uuid == other.server_uuid && transaction_id == other.transaction_id;
@@ -50,16 +49,19 @@ class Connection {
   /**
    * @brief Connection configuration
    */
+  // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default MySQL
+  // connection settings
   struct Config {
     std::string host = "localhost";
-    uint16_t port = 3306;
+    uint16_t port = 3306;  // MySQL default port
     std::string user;
     std::string password;
     std::string database;
-    uint32_t connect_timeout = 10;  // seconds
-    uint32_t read_timeout = 30;     // seconds
-    uint32_t write_timeout = 30;    // seconds
+    uint32_t connect_timeout = 10;  // Default timeout in seconds
+    uint32_t read_timeout = 30;     // Default timeout in seconds
+    uint32_t write_timeout = 30;    // Default timeout in seconds
   };
+  // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
   /**
    * @brief Construct connection (not yet connected)
@@ -88,7 +90,7 @@ class Connection {
   /**
    * @brief Check if connection is alive
    */
-  bool IsConnected() const;
+  [[nodiscard]] bool IsConnected() const;
 
   /**
    * @brief Ping MySQL server to check if connection is still alive
@@ -165,12 +167,12 @@ class Connection {
   /**
    * @brief Get last error message
    */
-  const std::string& GetLastError() const { return last_error_; }
+  [[nodiscard]] const std::string& GetLastError() const { return last_error_; }
 
   /**
    * @brief Get connection configuration
    */
-  const Config& GetConfig() const { return config_; }
+  [[nodiscard]] const Config& GetConfig() const { return config_; }
 
   /**
    * @brief Get raw MYSQL handle
@@ -188,7 +190,6 @@ class Connection {
   void SetMySQLError();
 };
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

@@ -22,26 +22,28 @@
 #include "storage/document_store.h"
 
 #ifdef USE_MYSQL
-namespace mygramdb {
-namespace mysql {
+namespace mygramdb::mysql {
 class BinlogReader;
-}
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 #endif
 
-namespace mygramdb {
-namespace server {
+namespace mygramdb::server {
+
+constexpr uint16_t kDefaultPort = 11211;       // memcached default port
+constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
+constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
+constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
 
 /**
  * @brief TCP server configuration
  */
 struct ServerConfig {
   std::string host = "0.0.0.0";
-  uint16_t port = 11211;        // memcached default port
-  int max_connections = 10000;  // Maximum concurrent connections
-  int worker_threads = 0;       // Number of worker threads (0 = CPU count)
-  int recv_buffer_size = 4096;
-  int send_buffer_size = 65536;
+  uint16_t port = kDefaultPort;
+  int max_connections = kDefaultMaxConnections;
+  int worker_threads = 0;  // Number of worker threads (0 = CPU count)
+  int recv_buffer_size = kDefaultRecvBufferSize;
+  int send_buffer_size = kDefaultSendBufferSize;
 };
 
 /**
@@ -90,6 +92,12 @@ class TcpServer {
   );
 
   ~TcpServer();
+
+  // Non-copyable and non-movable
+  TcpServer(const TcpServer&) = delete;
+  TcpServer& operator=(const TcpServer&) = delete;
+  TcpServer(TcpServer&&) = delete;
+  TcpServer& operator=(TcpServer&&) = delete;
 
   /**
    * @brief Start server
@@ -196,9 +204,8 @@ class TcpServer {
    * @param debug_info Optional debug information
    * @return Formatted response
    */
-  std::string FormatSearchResponse(const std::vector<index::DocId>& results, uint32_t limit,
-                                   uint32_t offset, storage::DocumentStore* doc_store,
-                                   const query::DebugInfo* debug_info = nullptr);
+  std::string FormatSearchResponse(const std::vector<index::DocId>& results, uint32_t limit, uint32_t offset,
+                                   storage::DocumentStore* doc_store, const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format COUNT response
@@ -206,8 +213,7 @@ class TcpServer {
    * @param debug_info Optional debug information
    * @return Formatted response
    */
-  static std::string FormatCountResponse(uint64_t count,
-                                         const query::DebugInfo* debug_info = nullptr);
+  static std::string FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response
@@ -265,5 +271,4 @@ class TcpServer {
   void RemoveConnection(int socket_fd);
 };
 
-}  // namespace server
-}  // namespace mygramdb
+}  // namespace mygramdb::server

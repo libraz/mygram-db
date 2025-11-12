@@ -14,13 +14,15 @@ Before starting development, install the required tools.
 
 # Install development tools
 brew install cmake
-brew install llvm  # Includes clang, clang-tidy, clang-format, clangd
+brew install llvm@18  # Version 18 required for consistent formatting
 brew install mysql-client@8.4
 brew install icu4c
 
-# Add LLVM to PATH (optional, for using latest clangd)
-echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+# Create symlinks to use LLVM 18 by default
+# IMPORTANT: This ensures consistent code formatting with CI
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-format /opt/homebrew/bin/clang-format
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-tidy /opt/homebrew/bin/clang-tidy
+ln -sf /opt/homebrew/opt/llvm@18/bin/clangd /opt/homebrew/bin/clangd
 ```
 
 ### Linux (Ubuntu/Debian)
@@ -29,12 +31,31 @@ source ~/.zshrc
 # Update package list
 sudo apt-get update
 
-# Install development tools
-sudo apt-get install -y cmake
-sudo apt-get install -y clang clang-tidy clang-format clangd
-sudo apt-get install -y libmysqlclient-dev
-sudo apt-get install -y libicu-dev
-sudo apt-get install -y pkg-config
+# Install basic development tools
+sudo apt-get install -y \
+  cmake \
+  build-essential \
+  libmysqlclient-dev \
+  libicu-dev \
+  pkg-config \
+  wget \
+  lsb-release \
+  software-properties-common \
+  gnupg
+
+# Install LLVM/Clang 18 (required for consistent formatting)
+# IMPORTANT: Version 18 is required to match CI environment
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+
+# Install clang-format, clang-tidy, and clangd version 18
+sudo apt-get install -y clang-format-18 clang-tidy-18 clangd-18
+
+# Set version 18 as default
+sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
+sudo update-alternatives --install /usr/bin/clangd clangd /usr/bin/clangd-18 100
 ```
 
 ## Verify Installation
@@ -42,11 +63,12 @@ sudo apt-get install -y pkg-config
 ```bash
 # Check if tools are installed
 cmake --version        # Should show 3.15+
-clang++ --version      # Should show C++17 support
-clang-tidy --version   # For linting
-clang-format --version # For formatting
-clangd --version       # For LSP (optional)
+clang-format --version # Should show 18.x.x
+clang-tidy --version   # Should show 18.x.x
+clangd --version       # Should show 18.x.x (optional, for LSP)
 ```
+
+**Why version 18?** Different versions of clang-format produce different formatting results. We standardize on version 18 to ensure consistency between local development and CI.
 
 ## Build Project
 
@@ -116,10 +138,18 @@ This project follows the **Google C++ Style Guide** with specific configurations
 ### Code Formatting
 
 - Base style: Google
-- Column limit: 100 characters
+- Column limit: 120 characters
 - Indentation: 2 spaces (no tabs)
 - Pointer alignment: Left (`int* ptr`, not `int *ptr`)
 - Braces: Attach style (`if (x) {`)
+
+Run formatting tools:
+
+```bash
+make format        # Auto-format all code
+make format-check  # Check formatting (CI mode - fails if not formatted)
+make lint          # Run clang-tidy static analysis (takes time)
+```
 
 ### Naming Conventions
 
@@ -146,6 +176,30 @@ Use Doxygen-style comments for all public APIs:
 ReturnType FunctionName(Type param_name);
 ```
 
+### Suppressing clang-tidy Warnings
+
+When necessary, suppress warnings using NOLINT comments:
+
+```cpp
+// ✅ Good: Use NOLINTNEXTLINE before the problematic line
+// NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+snprintf(buf, sizeof(buf), "%d", value);
+
+// ✅ Good: Inline NOLINT (keep comments within 120 chars)
+char buf[32];  // NOLINT(cppcoreguidelines-avoid-c-arrays)
+
+// ❌ Bad: Multi-line NOLINT (not recognized by clang-tidy)
+snprintf(buf, sizeof(buf), "%d",
+         value);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+
+// ✅ Good: File-level suppression for pervasive issues
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+// ... code requiring pointer arithmetic ...
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+```
+
+**Important:** NOLINT comments must be on a single line. Multi-line comments are not recognized.
+
 ## Running Tests
 
 Using Makefile:
@@ -169,14 +223,19 @@ ctest --output-on-failure
 
 ### "clang-tidy: error while loading shared libraries"
 
-**Solution:** Install clang-tidy:
+**Solution:** Install clang-tidy version 18:
 
 ```bash
 # macOS
-brew install llvm
+brew install llvm@18
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-tidy /opt/homebrew/bin/clang-tidy
 
 # Linux
-sudo apt-get install clang-tidy
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+sudo apt-get install -y clang-tidy-18
+sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 ```
 
 ### "Many errors in VS Code after opening project"
@@ -188,25 +247,32 @@ sudo apt-get install clang-tidy
 
 ### "clang-format not working"
 
-**Solution:**
+**Solution:** Install clang-format version 18:
 
 ```bash
 # macOS
-brew install clang-format
+brew install llvm@18
+ln -sf /opt/homebrew/opt/llvm@18/bin/clang-format /opt/homebrew/bin/clang-format
 
 # Linux
-sudo apt-get install clang-format
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+sudo apt-get install -y clang-format-18
+sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
 ```
 
-Verify the path in `.vscode/settings.json` matches your installation:
+Verify the version:
 
 ```bash
-which clang-format  # Check the actual path
+clang-format --version  # Should show 18.x.x
 ```
 
 ## Quick Start Checklist
 
-- [ ] Install cmake, clang, clang-tidy, clang-format
+- [ ] Install cmake
+- [ ] Install LLVM 18 (clang-format-18, clang-tidy-18, clangd-18)
+- [ ] Verify clang-format --version shows 18.x.x
 - [ ] Install MySQL client library
 - [ ] Install ICU library
 - [ ] Run `make` to build project
@@ -238,11 +304,20 @@ For detailed coding guidelines, see [CLAUDE.md](../../CLAUDE.md) in the project 
 
 Before submitting changes:
 
-- [ ] Code follows Google C++ Style Guide
+1. **Write code** following Google C++ Style Guide
+2. **Run `make format`** to auto-format code
+3. **Run `make format-check`** to verify formatting (CI equivalent)
+4. **Run `make lint`** to check code quality (optional locally, required in CI)
+5. **Run `make test`** to ensure all tests pass
+6. **Commit changes** if all checks pass
+
+Checklist:
+- [ ] Code follows Google C++ Style Guide (120 char line limit)
 - [ ] All comments and documentation are in English
 - [ ] Doxygen comments added for public APIs
 - [ ] Unit tests added/updated
 - [ ] All tests pass (`make test`)
-- [ ] Code formatted with clang-format (`make format`)
+- [ ] Code formatted (`make format-check` passes)
+- [ ] No clang-tidy warnings (`make lint` passes)
 - [ ] No compiler warnings
 - [ ] Documentation updated (if needed)

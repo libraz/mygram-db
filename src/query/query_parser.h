@@ -11,13 +11,12 @@
 #include <unordered_map>
 #include <vector>
 
-namespace mygramdb {
-namespace query {
+namespace mygramdb::query {
 
 /**
  * @brief Query command type
  */
-enum class QueryType {
+enum class QueryType : uint8_t {
   SEARCH,              // Search with limit/offset
   COUNT,               // Get total count
   GET,                 // Get document by primary key
@@ -37,7 +36,7 @@ enum class QueryType {
 /**
  * @brief Filter operator
  */
-enum class FilterOp {
+enum class FilterOp : uint8_t {
   EQ,   // Equal
   NE,   // Not equal
   GT,   // Greater than
@@ -51,14 +50,14 @@ enum class FilterOp {
  */
 struct FilterCondition {
   std::string column;
-  FilterOp op;
+  FilterOp op = FilterOp::EQ;
   std::string value;
 };
 
 /**
  * @brief Sort order for ORDER BY clause
  */
-enum class SortOrder {
+enum class SortOrder : uint8_t {
   ASC,  // Ascending
   DESC  // Descending (default)
 };
@@ -73,7 +72,7 @@ struct OrderByClause {
   /**
    * @brief Check if ordering by primary key
    */
-  bool IsPrimaryKey() const { return column.empty(); }
+  [[nodiscard]] bool IsPrimaryKey() const { return column.empty(); }
 };
 
 /**
@@ -106,15 +105,16 @@ struct Query {
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
   std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
-  uint32_t limit = 100;                   // Default limit
-  uint32_t offset = 0;                    // Default offset
-  std::string primary_key;                // For GET command
-  std::string filepath;                   // For SAVE/LOAD command (optional)
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  uint32_t limit = 100;     // Default limit: 100 results per query
+  uint32_t offset = 0;      // Default offset
+  std::string primary_key;  // For GET command
+  std::string filepath;     // For SAVE/LOAD command (optional)
 
   /**
    * @brief Check if query is valid
    */
-  bool IsValid() const;
+  [[nodiscard]] bool IsValid() const;
 };
 
 /**
@@ -144,6 +144,12 @@ class QueryParser {
   QueryParser() = default;
   ~QueryParser() = default;
 
+  // Copyable and movable
+  QueryParser(const QueryParser&) = default;
+  QueryParser& operator=(const QueryParser&) = default;
+  QueryParser(QueryParser&&) noexcept = default;
+  QueryParser& operator=(QueryParser&&) noexcept = default;
+
   /**
    * @brief Parse query string
    *
@@ -155,7 +161,7 @@ class QueryParser {
   /**
    * @brief Get last error message
    */
-  const std::string& GetError() const { return error_; }
+  [[nodiscard]] const std::string& GetError() const { return error_; }
 
  private:
   std::string error_;
@@ -221,5 +227,4 @@ class QueryParser {
   void SetError(const std::string& msg) { error_ = msg; }
 };
 
-}  // namespace query
-}  // namespace mygramdb
+}  // namespace mygramdb::query

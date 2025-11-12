@@ -7,8 +7,7 @@
 
 #ifdef USE_MYSQL
 
-namespace mygramdb {
-namespace mysql {
+namespace mygramdb::mysql {
 
 void TableMetadataCache::Add(uint64_t table_id, const TableMetadata& metadata) {
   cache_[table_id] = metadata;
@@ -30,7 +29,6 @@ void TableMetadataCache::Clear() {
   cache_.clear();
 }
 
-}  // namespace mysql
-}  // namespace mygramdb
+}  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

@@ -7,12 +7,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 
-namespace mygramdb {
-namespace client {
+namespace mygramdb::client {
 
 namespace {
+
+// UTF-8 byte sequence for full-width space (U+3000)
+constexpr unsigned char kFullWidthSpaceByte1 = 0xE3;
+constexpr unsigned char kFullWidthSpaceByte2 = 0x80;
+constexpr unsigned char kFullWidthSpaceByte3 = 0x80;
 
 /**
  * @brief Check if character sequence is full-width space (U+3000)
@@ -22,15 +27,15 @@ inline bool IsFullWidthSpace(const std::string& str, size_t pos) {
     return false;
   }
   // Full-width space in UTF-8: 0xE3 0x80 0x80
-  return static_cast<unsigned char>(str[pos]) == 0xE3 &&
-         static_cast<unsigned char>(str[pos + 1]) == 0x80 &&
-         static_cast<unsigned char>(str[pos + 2]) == 0x80;
+  return static_cast<unsigned char>(str[pos]) == kFullWidthSpaceByte1 &&
+         static_cast<unsigned char>(str[pos + 1]) == kFullWidthSpaceByte2 &&
+         static_cast<unsigned char>(str[pos + 2]) == kFullWidthSpaceByte3;
 }
 
 /**
  * @brief Token types for lexical analysis
  */
-enum class TokenType {
+enum class TokenType : uint8_t {
   kTerm,        // Regular term
   kQuotedTerm,  // "quoted phrase"
   kPlus,        // + prefix
@@ -48,7 +53,7 @@ struct Token {
   TokenType type;
   std::string value;
 
-  Token(TokenType t, std::string v = "") : type(t), value(std::move(v)) {}
+  Token(TokenType token_type, std::string token_value = "") : type(token_type), value(std::move(token_value)) {}
 };
 
 /**
@@ -56,7 +61,7 @@ struct Token {
  */
 class Tokenizer {
  public:
-  explicit Tokenizer(const std::string& input) : input_(input), pos_(0) {}
+  explicit Tokenizer(const std::string& input) : input_(input) {}
 
   /**
    * @brief Get next token
@@ -65,33 +70,33 @@ class Tokenizer {
     SkipWhitespace();
 
     if (pos_ >= input_.size()) {
-      return Token(TokenType::kEnd);
+      return {TokenType::kEnd};
     }
 
-    char ch = input_[pos_];
+    char current_char = input_[pos_];
 
     // Quoted string
-    if (ch == '"') {
+    if (current_char == '"') {
       std::string quoted = ReadQuotedString();
-      return Token(TokenType::kQuotedTerm, quoted);
+      return {TokenType::kQuotedTerm, quoted};
     }
 
     // Single-character tokens
-    if (ch == '+') {
+    if (current_char == '+') {
       ++pos_;
-      return Token(TokenType::kPlus);
+      return {TokenType::kPlus};
     }
-    if (ch == '-') {
+    if (current_char == '-') {
       ++pos_;
-      return Token(TokenType::kMinus);
+      return {TokenType::kMinus};
     }
-    if (ch == '(') {
+    if (current_char == '(') {
       ++pos_;
-      return Token(TokenType::kLParen);
+      return {TokenType::kLParen};
     }
-    if (ch == ')') {
+    if (current_char == ')') {
       ++pos_;
-      return Token(TokenType::kRParen);
+      return {TokenType::kRParen};
     }
 
     // Check for OR operator
@@ -100,22 +105,21 @@ class Tokenizer {
       if (maybe_or == "OR") {
         // Make sure it's a whole word (not part of another word)
         bool is_whole_word = true;
-        if (pos_ > 0 && std::isalnum(static_cast<unsigned char>(input_[pos_ - 1]))) {
+        if (pos_ > 0 && std::isalnum(static_cast<unsigned char>(input_[pos_ - 1])) != 0) {
           is_whole_word = false;
         }
-        if (pos_ + 2 < input_.size() &&
-            std::isalnum(static_cast<unsigned char>(input_[pos_ + 2]))) {
+        if (pos_ + 2 < input_.size() && std::isalnum(static_cast<unsigned char>(input_[pos_ + 2])) != 0) {
           is_whole_word = false;
         }
         if (is_whole_word) {
           pos_ += 2;
-          return Token(TokenType::kOr, "OR");
+          return {TokenType::kOr, "OR"};
         }
       }
     }
 
     // Term (everything else)
-    return Token(TokenType::kTerm, ReadTerm());
+    return {TokenType::kTerm, ReadTerm()};
   }
 
   [[nodiscard]] size_t GetPosition() const { return pos_; }
@@ -131,7 +135,7 @@ class Tokenizer {
         continue;
       }
       // Check for ASCII whitespace
-      if (std::isspace(static_cast<unsigned char>(input_[pos_]))) {
+      if (std::isspace(static_cast<unsigned char>(input_[pos_])) != 0) {
         ++pos_;
         continue;
       }
@@ -146,13 +150,13 @@ class Tokenizer {
       if (IsFullWidthSpace(input_, pos_)) {
         break;
       }
-      char ch = input_[pos_];
+      char current_char = input_[pos_];
       // Stop at whitespace or special characters
-      if (std::isspace(static_cast<unsigned char>(ch)) || ch == '+' || ch == '-' || ch == '(' ||
-          ch == ')' || ch == '"') {
+      if (std::isspace(static_cast<unsigned char>(current_char)) != 0 || current_char == '+' || current_char == '-' ||
+          current_char == '(' || current_char == ')' || current_char == '"') {
         break;
       }
-      term += ch;
+      term += current_char;
       ++pos_;
     }
     return term;
@@ -166,18 +170,18 @@ class Tokenizer {
 
     std::string term;
     while (pos_ < input_.size()) {
-      char ch = input_[pos_];
-      if (ch == '"') {
+      char current_char = input_[pos_];
+      if (current_char == '"') {
         ++pos_;  // Skip closing quote
         return term;
       }
-      if (ch == '\\' && pos_ + 1 < input_.size()) {
+      if (current_char == '\\' && pos_ + 1 < input_.size()) {
         // Handle escaped characters
         ++pos_;
         term += input_[pos_];
         ++pos_;
       } else {
-        term += ch;
+        term += current_char;
         ++pos_;
       }
     }
@@ -185,8 +189,8 @@ class Tokenizer {
     return term;
   }
 
-  const std::string& input_;
-  size_t pos_;
+  const std::string& input_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - Necessary for parser
+  size_t pos_ = 0;
 };
 
 /**
@@ -194,10 +198,7 @@ class Tokenizer {
  */
 class Parser {
  public:
-  explicit Parser(const std::string& input)
-      : tokenizer_(input), current_(TokenType::kEnd), last_pos_(0) {
-    Advance();
-  }
+  explicit Parser(const std::string& input) : tokenizer_(input), current_(TokenType::kEnd) { Advance(); }
 
   /**
    * @brief Parse the expression
@@ -243,7 +244,8 @@ class Parser {
           // Regular term (implicit AND) - add quotes if it was a quoted term
           std::string term = current_.value;
           if (current_.type == TokenType::kQuotedTerm) {
-            term = "\"" + term + "\"";
+            term.insert(0, "\"");
+            term += "\"";
           }
           expr.required_terms.push_back(term);
           Advance();
@@ -344,6 +346,7 @@ class Parser {
     std::ostringstream oss;
     int depth = 0;
 
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while) - do-while is appropriate for paren matching
     do {
       if (current_.type == TokenType::kLParen) {
         ++depth;
@@ -376,7 +379,7 @@ class Parser {
 
   Tokenizer tokenizer_;
   Token current_;
-  size_t last_pos_;
+  size_t last_pos_ = 0;
 };
 
 }  // namespace
@@ -392,25 +395,9 @@ bool SearchExpression::HasComplexExpression() const {
            term.find(')') != std::string::npos;
   };
 
-  for (const auto& term : required_terms) {
-    if (has_or_or_parens(term)) {
-      return true;
-    }
-  }
-
-  for (const auto& term : excluded_terms) {
-    if (has_or_or_parens(term)) {
-      return true;
-    }
-  }
-
-  for (const auto& term : optional_terms) {
-    if (has_or_or_parens(term)) {
-      return true;
-    }
-  }
-
-  return false;
+  return std::any_of(required_terms.begin(), required_terms.end(), has_or_or_parens) ||
+         std::any_of(excluded_terms.begin(), excluded_terms.end(), has_or_or_parens) ||
+         std::any_of(optional_terms.begin(), optional_terms.end(), has_or_or_parens);
 }
 
 std::string SearchExpression::ToQueryString() const {
@@ -469,10 +456,9 @@ std::variant<std::string, std::string> ConvertSearchExpression(const std::string
 }
 
 bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
-                              std::vector<std::string>& and_terms,
-                              std::vector<std::string>& not_terms) {
+                              std::vector<std::string>& and_terms, std::vector<std::string>& not_terms) {
   auto result = ParseSearchExpression(expression);
-  if (std::get_if<std::string>(&result)) {
+  if (std::get_if<std::string>(&result) != nullptr) {
     return false;
   }
 
@@ -490,5 +476,4 @@ bool SimplifySearchExpression(const std::string& expression, std::string& main_t
   return true;
 }
 
-}  // namespace client
-}  // namespace mygramdb
+}  // namespace mygramdb::client

@@ -449,8 +449,7 @@ TEST(QueryParserTest, SearchWithNotAndFilter) {
  */
 TEST(QueryParserTest, SearchWithNotFilterLimitOffset) {
   QueryParser parser;
-  auto query =
-      parser.Parse("SEARCH articles hello NOT world FILTER status = 1 LIMIT 50 OFFSET 100");
+  auto query = parser.Parse("SEARCH articles hello NOT world FILTER status = 1 LIMIT 50 OFFSET 100");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.not_terms.size(), 1);
@@ -698,8 +697,7 @@ TEST(QueryParserTest, JapaneseQuotedString) {
  */
 TEST(QueryParserTest, ComplexQueryWithQuotesAndNot) {
   QueryParser parser;
-  auto query = parser.Parse(
-      R"(SEARCH articles "hello world" AND test NOT bad FILTER status = 1 LIMIT 50 OFFSET 100)");
+  auto query = parser.Parse(R"(SEARCH articles "hello world" AND test NOT bad FILTER status = 1 LIMIT 50 OFFSET 100)");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.search_text, "hello world");
@@ -823,8 +821,7 @@ TEST(QueryParserTest, SearchWithOrderByCaseInsensitive) {
 
 TEST(QueryParserTest, SearchWithOrderByAndFilter) {
   QueryParser parser;
-  auto query = parser.Parse(
-      "SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
+  auto query = parser.Parse("SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.filters.size(), 1);
@@ -988,8 +985,8 @@ TEST(QueryParserTest, SearchWithParenthesesAndOrderBy) {
  */
 TEST(QueryParserTest, SearchWithComplexExpressionAndOrderBy) {
   QueryParser parser;
-  auto query = parser.Parse(
-      R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
+  auto query =
+      parser.Parse(R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "posts");
