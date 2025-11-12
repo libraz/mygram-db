@@ -775,10 +775,15 @@ void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) const {
 }
 
 std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* buffer, unsigned long length) {
-  if ((buffer == nullptr) || length < 19) {
-    // Minimum event size is 19 bytes (header)
+  if ((buffer == nullptr) || length < 20) {
+    // Minimum event size is 20 bytes (1 byte OK packet + 19 bytes binlog header)
     return std::nullopt;
   }
+
+  // MySQL C API prepends an OK packet byte (0x00) before the actual binlog event
+  // Skip the OK byte to get to the actual binlog event data
+  buffer++;
+  length--;
 
   // Binlog event header format (19 bytes):
   // timestamp (4 bytes)
@@ -791,7 +796,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
   auto event_type = static_cast<MySQLBinlogEventType>(buffer[4]);
 
   // Log event type for debugging
-  spdlog::debug("Received binlog event: {}", GetEventTypeName(event_type));
+  spdlog::debug("Received binlog event: {} (type={})", GetEventTypeName(event_type), static_cast<int>(buffer[4]));
 
   // Handle different event types
   switch (event_type) {
@@ -811,6 +816,12 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       {
         auto metadata_opt = ParseTableMapEvent(buffer, length);
         if (metadata_opt) {
+          // Fetch actual column names from SHOW COLUMNS (cached per table)
+          // Binlog TABLE_MAP events don't include column names, only types
+          if (!FetchColumnNames(metadata_opt.value())) {
+            spdlog::warn("Failed to fetch column names for {}.{}, using col_N placeholders",
+                         metadata_opt->database_name, metadata_opt->table_name);
+          }
           table_metadata_cache_.Add(metadata_opt->table_id, metadata_opt.value());
           spdlog::debug("Cached TABLE_MAP: {}.{} (table_id={})", metadata_opt->database_name, metadata_opt->table_name,
                         metadata_opt->table_id);
@@ -1262,6 +1273,73 @@ std::optional<TableMetadata> BinlogReader::ParseTableMapEvent(const unsigned cha
                 metadata.table_id, column_count);
 
   return metadata;
+}
+
+bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
+  std::string cache_key = metadata.database_name + "." + metadata.table_name;
+
+  // Check cache first
+  {
+    std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
+    auto cache_it = column_names_cache_.find(cache_key);
+    if (cache_it != column_names_cache_.end()) {
+      // Cache hit: update column names from cache
+      const auto& column_names = cache_it->second;
+      if (column_names.size() == metadata.columns.size()) {
+        for (size_t i = 0; i < metadata.columns.size(); i++) {
+          metadata.columns[i].name = column_names[i];
+        }
+        spdlog::debug("Column names for {}.{} loaded from cache", metadata.database_name, metadata.table_name);
+        return true;
+      }
+      // Cache mismatch (column count changed?), fall through to query
+      spdlog::warn("Cached column names for {}.{} have mismatched count (cached={}, current={})",
+                   metadata.database_name, metadata.table_name, column_names.size(), metadata.columns.size());
+      column_names_cache_.erase(cache_it);  // Remove stale cache entry
+    }
+  }
+
+  // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
+  std::string query = "SHOW COLUMNS FROM `" + metadata.database_name + "`.`" + metadata.table_name + "`";
+
+  MYSQL_RES* result = connection_.Execute(query);
+  if (result == nullptr) {
+    spdlog::error("Failed to query column names for {}.{}: {}", metadata.database_name, metadata.table_name,
+                  connection_.GetLastError());
+    return false;
+  }
+
+  std::vector<std::string> column_names;
+  column_names.reserve(metadata.columns.size());
+
+  MYSQL_ROW row = nullptr;
+  while ((row = mysql_fetch_row(result)) != nullptr) {
+    column_names.emplace_back(row[0]);
+  }
+
+  mysql_free_result(result);
+
+  if (column_names.size() != metadata.columns.size()) {
+    spdlog::error("Column count mismatch for {}.{}: SHOW COLUMNS returned {}, binlog has {}", metadata.database_name,
+                  metadata.table_name, column_names.size(), metadata.columns.size());
+    return false;
+  }
+
+  // Update metadata with actual column names
+  for (size_t i = 0; i < metadata.columns.size(); i++) {
+    metadata.columns[i].name = column_names[i];
+  }
+
+  // Store in cache
+  {
+    std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
+    column_names_cache_[cache_key] = std::move(column_names);
+  }
+
+  spdlog::info("Fetched {} column names for {}.{} from SHOW COLUMNS", metadata.columns.size(), metadata.database_name,
+               metadata.table_name);
+
+  return true;
 }
 
 void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set) {

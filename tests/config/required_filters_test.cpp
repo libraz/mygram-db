@@ -67,8 +67,8 @@ replication:
   EXPECT_EQ(table.required_filters[0].name, "enabled");
   EXPECT_EQ(table.required_filters[0].type, "int");
   EXPECT_EQ(table.required_filters[0].op, "=");
-  // Value is converted to string via std::to_string(double), so "1" becomes "1.000000"
-  EXPECT_EQ(table.required_filters[0].value, "1.000000");
+  // Integer values should not have decimal point (e.g., "1" not "1.000000")
+  EXPECT_EQ(table.required_filters[0].value, "1");
   EXPECT_FALSE(table.required_filters[0].bitmap_index);
 
   EXPECT_EQ(table.required_filters[1].name, "deleted_at");
@@ -145,11 +145,11 @@ TEST(RequiredFiltersTest, ParseJsonConfig) {
 
   EXPECT_EQ(table.required_filters[0].name, "enabled");
   EXPECT_EQ(table.required_filters[0].op, "=");
-  EXPECT_EQ(table.required_filters[0].value, "1.000000");
+  EXPECT_EQ(table.required_filters[0].value, "1");  // Integer: no decimal point
 
   EXPECT_EQ(table.required_filters[1].name, "priority");
   EXPECT_EQ(table.required_filters[1].op, ">");
-  EXPECT_EQ(table.required_filters[1].value, "0.000000");
+  EXPECT_EQ(table.required_filters[1].value, "0");  // Integer: no decimal point
 
   // Cleanup
   std::remove(temp_file.c_str());

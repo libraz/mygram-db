@@ -120,7 +120,11 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
     // value can be string or number, convert to string
     if (json_obj["value"].is_string()) {
       config.value = json_obj["value"].get<std::string>();
-    } else if (json_obj["value"].is_number()) {
+    } else if (json_obj["value"].is_number_integer()) {
+      // Integer types: format without decimal point
+      config.value = std::to_string(json_obj["value"].get<int64_t>());
+    } else if (json_obj["value"].is_number_float()) {
+      // Floating point types: format with decimal point
       config.value = std::to_string(json_obj["value"].get<double>());
     } else if (json_obj["value"].is_boolean()) {
       config.value = json_obj["value"].get<bool>() ? "1" : "0";

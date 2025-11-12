@@ -70,13 +70,26 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
     MYSQL_ROW row = mysql_fetch_row(gtid_result);
     if (row != nullptr && row[0] != nullptr) {
       snapshot_gtid_ = std::string(row[0]);
-      spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
     }
     mysql_free_result(gtid_result);
-  } else {
-    spdlog::warn("Failed to capture GTID, continuing without it");
-    snapshot_gtid_ = "";
   }
+
+  // GTID must not be empty for replication to work
+  if (snapshot_gtid_.empty()) {
+    last_error_ =
+        "GTID is empty - cannot start replication from undefined position.\n"
+        "This typically happens when GTID mode was recently enabled.\n"
+        "To resolve this issue:\n"
+        "  1. Execute any write operation on MySQL (e.g., INSERT/UPDATE/DELETE)\n"
+        "  2. Verify GTID is set: SELECT @@global.gtid_executed;\n"
+        "  3. Restart MygramDB\n"
+        "Alternatively, disable replication by setting replication.enable=false in config.";
+    spdlog::error(last_error_);
+    connection_.ExecuteUpdate("ROLLBACK");
+    return false;
+  }
+
+  spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
 
   // Build SELECT query
   std::string query = BuildSelectQuery();

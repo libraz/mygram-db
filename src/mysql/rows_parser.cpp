@@ -291,6 +291,16 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     uint16_t flags = binlog_util::uint2korr(ptr);
     ptr += 2;
 
+    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
+      if (ptr >= end) {
+        spdlog::error("WRITE_ROWS event too short for extra_row_info_length");
+        return std::nullopt;
+      }
+      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
+      ptr += extra_info_len;  // Skip the extra row info data
+    }
+
     // Parse body
     // width (packed integer) - number of columns
     if (ptr >= end) {
@@ -417,8 +427,14 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
   }
 
   try {
-    const unsigned char* ptr = buffer + 19;  // Skip common header
-    const unsigned char* end = buffer + length;
+    // Read event_size from binlog header (bytes 9-12, little-endian)
+    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+
+    const unsigned char* ptr = buffer + 19;          // Skip common header
+    const unsigned char* end = buffer + event_size;  // Use event_size from header, not length param
+
+    spdlog::debug("UPDATE_ROWS buffer: length_param={}, event_size_from_header={}, using event_size", length,
+                  event_size);
 
     // Parse post-header (same as WRITE_ROWS)
     if (ptr + 8 > end) {
@@ -430,12 +446,75 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     uint16_t flags = binlog_util::uint2korr(ptr);
     ptr += 2;  // flags
 
+    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    // The flags field indicates if extra info exists
+    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
+      // Read extra_row_info_length (packed integer)
+      if (ptr >= end) {
+        spdlog::error("UPDATE_ROWS event too short for extra_row_info_length");
+        return std::nullopt;
+      }
+
+      // NOLINTBEGIN(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
+      // Reason: C-style arrays are used with snprintf() for debug hex formatting
+      // Debug: show bytes before reading
+      char pre_hex[31];
+      for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
+        snprintf(&pre_hex[i * 3], 4, "%02x ", ptr[i]);
+      }
+      spdlog::debug("Before extra_row_info_len read: {}", pre_hex);
+
+      const unsigned char* ptr_before = ptr;
+      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
+      auto len_bytes = static_cast<int>(ptr - ptr_before);
+
+      spdlog::debug("Extra_row_info_len: {} bytes, packed_int used {} bytes", extra_info_len, len_bytes);
+
+      // In MySQL 8.0, extra_row_info_len is the TOTAL length including the length field itself
+      // So we need to skip (extra_info_len - len_bytes) more bytes
+      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
+      if (skip_bytes < 0) {
+        spdlog::error("Invalid extra_row_info_len: {} (packed int used {} bytes)", extra_info_len, len_bytes);
+        return std::nullopt;
+      }
+
+      if (ptr + skip_bytes > end) {
+        spdlog::error("UPDATE_ROWS event too short for extra_row_info data");
+        return std::nullopt;
+      }
+
+      // Debug: show the extra bytes we're skipping
+      if (skip_bytes > 0) {
+        char skip_hex[31];
+        for (int i = 0; i < std::min(10, skip_bytes); i++) {
+          snprintf(&skip_hex[i * 3], 4, "%02x ", ptr[i]);
+        }
+        spdlog::debug("Skipping {} extra_row_info bytes: {}", skip_bytes, skip_hex);
+      }
+
+      ptr += skip_bytes;  // Skip the extra row info data
+      spdlog::debug("After extra_row_info skip, now at offset {}", ptr - buffer);
+    }
+
     // Parse body
     if (ptr >= end) {
       spdlog::error("UPDATE_ROWS event too short for width");
       return std::nullopt;
     }
+
+    // Debug: log the bytes we're about to read
+    char debug_hex[31];
+    for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
+      snprintf(&debug_hex[i * 3], 4, "%02x ", ptr[i]);
+    }
+    spdlog::debug("UPDATE_ROWS body start hex: {}", debug_hex);
+    // NOLINTEND(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
+
+    const unsigned char* column_count_ptr = ptr;  // Save position before read
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
+
+    spdlog::debug("Column count parsed: {} (ptr moved {} bytes from 0x{:02x})", column_count, ptr - column_count_ptr,
+                  *column_count_ptr);
 
     if (column_count != table_metadata->columns.size()) {
       spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
@@ -459,11 +538,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     const unsigned char* columns_after = ptr;
     ptr += bitmap_size;
 
-    // Parse extra_row_info if present
-    size_t extra_info_size = binlog_util::skip_extra_row_info(&ptr, end, flags);
-    if (extra_info_size > 0) {
-      spdlog::debug("Skipped {} bytes of extra_row_info in UPDATE_ROWS", extra_info_size);
-    }
+    // NOTE: extra_row_info was already handled in the post-header section (lines 443-489)
+    // No need to skip it again here
 
     // Pre-calculate bitmap size
     const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);
@@ -488,37 +564,67 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
       row_pairs.reserve(estimated_pairs);
     }
 
+    spdlog::debug("Starting row parsing loop: ptr offset={}, end offset={}, available={} bytes", ptr - buffer,
+                  end - buffer, end - ptr);
+
     while (ptr < end) {
       RowData before_row;
       RowData after_row;
 
+      spdlog::debug("Row start: ptr offset={}, kNullBitmapSize={}", ptr - buffer, kNullBitmapSize);
+
       // Parse before image
       if (ptr + kNullBitmapSize > end) {
+        spdlog::debug("Not enough space for NULL bitmap, breaking loop");
         break;
       }
       const unsigned char* null_bitmap_before = ptr;
       ptr += kNullBitmapSize;
 
+      // Debug: Show which columns are in columns_before bitmap and null_bitmap_before
+      std::string col_bitmap_str;
+      std::string null_bitmap_str;
+      for (size_t i = 0; i < column_count; i++) {
+        col_bitmap_str += binlog_util::bitmap_is_set(columns_before, i) ? "1" : "0";
+        null_bitmap_str += binlog_util::bitmap_is_set(null_bitmap_before, i) ? "N" : ".";
+      }
+      spdlog::debug("Before image - columns_bitmap: {} (1=included)", col_bitmap_str);
+      spdlog::debug("Before image - null_bitmap:    {} (N=null, .=not null)", null_bitmap_str);
+
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_before, col_idx)) {
+          spdlog::debug("  Col {} ({}) - not in bitmap, skipping", col_idx,
+                        col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?");
           continue;
         }
 
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap_before, col_idx);
 
-        if (ptr > end) {
-          spdlog::error("UPDATE_ROWS event truncated while parsing before image column {}", col_idx);
-          return std::nullopt;
+        spdlog::debug("  Col {} ({}, type={}) - ptr_offset={}, end_offset={}, remaining={} bytes, is_null={}", col_idx,
+                      col_meta.name, static_cast<int>(col_meta.type), ptr - buffer, end - buffer, end - ptr, is_null);
+
+        // Check if we have data remaining before attempting to decode
+        // If not, this means we've reached the end (e.g., checksum/padding bytes)
+        if (ptr >= end) {
+          spdlog::debug("Reached end of event data while parsing before image at column {}, breaking", col_idx);
+          goto end_of_rows;  // Exit both loops cleanly
         }
 
         std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+
+        // Check again after decode, as DecodeFieldValue advances ptr
+        if (ptr > end) {
+          spdlog::debug("Exceeded end after decoding column {}, breaking", col_idx);
+          goto end_of_rows;  // Exit both loops cleanly
+        }
 
         before_row.columns[col_meta.name] = value;
 
         // Check using cached indices
         if (static_cast<int>(col_idx) == pk_col_idx) {
           before_row.primary_key = value;
+          spdlog::debug("    -> Set PK = '{}'", value);
         }
         if (static_cast<int>(col_idx) == text_col_idx) {
           before_row.text = value;
@@ -531,37 +637,66 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
             spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
+          spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
+                        value.size() > 50 ? value.substr(0, 50) + "..." : value, field_size,
+                        (ptr + field_size) - buffer);
           ptr += field_size;
+        } else {
+          spdlog::debug("    -> Column is NULL, not advancing ptr");
         }
       }
 
       // Parse after image
       if (ptr + kNullBitmapSize > end) {
+        spdlog::debug("Not enough space for after image NULL bitmap, breaking loop");
         break;
       }
       const unsigned char* null_bitmap_after = ptr;
       ptr += kNullBitmapSize;
 
+      // Debug: Show which columns are in columns_after bitmap and null_bitmap_after
+      std::string col_bitmap_after_str;
+      std::string null_bitmap_after_str;
+      for (size_t i = 0; i < column_count; i++) {
+        col_bitmap_after_str += binlog_util::bitmap_is_set(columns_after, i) ? "1" : "0";
+        null_bitmap_after_str += binlog_util::bitmap_is_set(null_bitmap_after, i) ? "N" : ".";
+      }
+      spdlog::debug("After image - columns_bitmap: {} (1=included)", col_bitmap_after_str);
+      spdlog::debug("After image - null_bitmap:    {} (N=null, .=not null)", null_bitmap_after_str);
+
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_after, col_idx)) {
+          spdlog::debug("  Col {} ({}) - not in after bitmap, skipping", col_idx,
+                        col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?");
           continue;
         }
 
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap_after, col_idx);
 
-        if (ptr > end) {
-          spdlog::error("UPDATE_ROWS event truncated while parsing after image column {}", col_idx);
-          return std::nullopt;
+        spdlog::debug("  Col {} ({}, type={}) - ptr_offset={}, end_offset={}, remaining={} bytes, is_null={}", col_idx,
+                      col_meta.name, static_cast<int>(col_meta.type), ptr - buffer, end - buffer, end - ptr, is_null);
+
+        // Check if we have data remaining before attempting to decode
+        if (ptr >= end) {
+          spdlog::debug("Reached end of event data while parsing after image at column {}, breaking", col_idx);
+          goto end_of_rows;
         }
 
         std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+
+        // Check again after decode
+        if (ptr > end) {
+          spdlog::debug("Exceeded end after decoding after image column {}, breaking", col_idx);
+          goto end_of_rows;
+        }
 
         after_row.columns[col_meta.name] = value;
 
         // Check using cached indices
         if (static_cast<int>(col_idx) == pk_col_idx) {
           after_row.primary_key = value;
+          spdlog::debug("    -> Set PK = '{}'", value);
         }
         if (static_cast<int>(col_idx) == text_col_idx) {
           after_row.text = value;
@@ -574,13 +709,19 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
             spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
             return std::nullopt;
           }
+          spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
+                        value.size() > 50 ? value.substr(0, 50) + "..." : value, field_size,
+                        (ptr + field_size) - buffer);
           ptr += field_size;
+        } else {
+          spdlog::debug("    -> Column is NULL, not advancing ptr");
         }
       }
 
       row_pairs.emplace_back(std::move(before_row), std::move(after_row));
     }
 
+  end_of_rows:  // Label for graceful early exit from nested loops
     spdlog::debug("Parsed {} row pairs from UPDATE_ROWS event for table {}.{}", row_pairs.size(),
                   table_metadata->database_name, table_metadata->table_name);
 
@@ -613,6 +754,16 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     ptr += 6;  // table_id
     uint16_t flags = binlog_util::uint2korr(ptr);
     ptr += 2;  // flags
+
+    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
+      if (ptr >= end) {
+        spdlog::error("DELETE_ROWS event too short for extra_row_info_length");
+        return std::nullopt;
+      }
+      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
+      ptr += extra_info_len;  // Skip the extra row info data
+    }
 
     // Parse body
     if (ptr >= end) {

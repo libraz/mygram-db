@@ -177,6 +177,10 @@ class BinlogReader {
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
 
+  // Column names cache: key = "database.table", value = vector of column names in order
+  std::unordered_map<std::string, std::vector<std::string>> column_names_cache_;
+  mutable std::mutex column_names_cache_mutex_;
+
   // GTID encoding data (must persist during mysql_binlog_open call)
   std::vector<uint8_t> gtid_encoded_data_;
 
@@ -228,6 +232,13 @@ class BinlogReader {
    * @return true if condition is satisfied
    */
   static bool CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter);
+
+  /**
+   * @brief Fetch column names from INFORMATION_SCHEMA and update TableMetadata
+   * @param metadata Table metadata to update with actual column names
+   * @return true if successful, false otherwise
+   */
+  bool FetchColumnNames(TableMetadata& metadata);
 
   /**
    * @brief Extract all filter columns (both required and optional) from row data
