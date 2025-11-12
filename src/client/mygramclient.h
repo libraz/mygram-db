@@ -116,7 +116,7 @@ struct ReplicationStatus {
 // client settings
 struct ClientConfig {
   std::string host = "127.0.0.1";     // Server hostname
-  uint16_t port = 11211;              // Default port for MygramDB protocol
+  uint16_t port = 11016;              // Default port for MygramDB protocol
   uint32_t timeout_ms = 5000;         // Default timeout in milliseconds
   uint32_t recv_buffer_size = 65536;  // Default buffer size (64KB)
 };
@@ -132,7 +132,7 @@ struct ClientConfig {
  * @code
  *   ClientConfig config;
  *   config.host = "localhost";
- *   config.port = 11211;
+ *   config.port = 11016;
  *
  *   MygramClient client(config);
  *   if (auto err = client.Connect()) {

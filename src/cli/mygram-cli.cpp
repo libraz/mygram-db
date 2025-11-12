@@ -302,7 +302,7 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
 struct Config {
   std::string host = "127.0.0.1";
-  uint16_t port = 11211;
+  uint16_t port = 11016;
   bool interactive = true;
   int retry_count = 0;     // Number of retries (0 = no retry)
   int retry_interval = 3;  // Seconds between retries
@@ -364,7 +364,7 @@ class MygramClient {
           std::cerr << "\nPossible reasons:\n";
           std::cerr << "  1. MygramDB server is not running\n";
           std::cerr << "  2. Server is still initializing (building initial index from MySQL)\n";
-          std::cerr << "  3. Wrong port (check config.yaml - default is 11211)\n";
+          std::cerr << "  3. Wrong port (check config.yaml - default is 11016)\n";
           std::cerr << "\nTo check server status:\n";
           std::cerr << "  ps aux | grep mygramdb\n";
           std::cerr << "  lsof -i -P | grep LISTEN | grep " << config_.port << "\n";
@@ -458,7 +458,12 @@ class MygramClient {
     std::string msg = command + "\r\n";
     ssize_t sent = send(sock_, msg.c_str(), msg.length(), 0);
     if (sent < 0) {
-      return "(error) Failed to send command: " + std::string(strerror(errno));
+      int saved_errno = errno;
+      if (saved_errno == EPIPE || saved_errno == ECONNRESET) {
+        return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may have "
+               "crashed or been shut down.";
+      }
+      return "(error) Failed to send command: " + std::string(strerror(saved_errno));
     }
 
     // Receive response
@@ -468,9 +473,20 @@ class MygramClient {
     ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
     if (received <= 0) {
       if (received == 0) {
-        return "(error) Connection closed by server";
+        return "(error) SERVER_DISCONNECTED: Server closed the connection. This usually means:\n"
+               "  1. Server was shut down gracefully\n"
+               "  2. Server crashed or encountered a fatal error\n"
+               "  3. Server restarted and dropped all connections\n"
+               "\nTry reconnecting to check if the server is still running.";
       }
-      return "(error) Failed to receive response: " + std::string(strerror(errno));
+      int saved_errno = errno;
+      if (saved_errno == ECONNRESET) {
+        return "(error) SERVER_DISCONNECTED: Connection reset by server. The server may have crashed.";
+      }
+      if (saved_errno == ETIMEDOUT) {
+        return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or frozen.";
+      }
+      return "(error) Failed to receive response: " + std::string(strerror(saved_errno));
     }
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
@@ -564,6 +580,15 @@ class MygramClient {
 
       // Send command and print response
       std::string response = SendCommand(line);
+
+      // Check if server disconnected
+      if (response.find("SERVER_DISCONNECTED") != std::string::npos ||
+          response.find("SERVER_TIMEOUT") != std::string::npos) {
+        PrintResponse(response);
+        std::cout << "\nConnection to server lost. Exiting...\n";
+        break;
+      }
+
       PrintResponse(response);
     }
   }
@@ -735,14 +760,14 @@ void PrintUsage(const char* program_name) {
   std::cout << '\n';
   std::cout << "Options:" << '\n';
   std::cout << "  -h HOST         Server hostname (default: 127.0.0.1)" << '\n';
-  std::cout << "  -p PORT         Server port (default: 11211)" << '\n';
+  std::cout << "  -p PORT         Server port (default: 11016)" << '\n';
   std::cout << "  --retry N       Retry connection N times if refused (default: 0)" << '\n';
   std::cout << "  --wait-ready    Keep retrying until server is ready (max 100 attempts)" << '\n';
   std::cout << "  --help          Show this help" << '\n';
   std::cout << '\n';
   std::cout << "Examples:" << '\n';
   std::cout << "  " << program_name << "                          # Interactive mode" << '\n';
-  std::cout << "  " << program_name << " -h localhost -p 11211    # Connect to specific server" << '\n';
+  std::cout << "  " << program_name << " -h localhost -p 11016    # Connect to specific server" << '\n';
   std::cout << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
   std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready" << '\n';
   std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';

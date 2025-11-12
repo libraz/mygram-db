@@ -133,18 +133,43 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   // Validate operator
   std::vector<std::string> valid_ops = {"=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"};
   if (std::find(valid_ops.begin(), valid_ops.end(), config.op) == valid_ops.end()) {
-    throw std::runtime_error("Invalid operator in required_filters: '" + config.op +
-                             "'. Valid operators: =, !=, <, >, <=, >=, IS NULL, IS NOT NULL");
+    std::stringstream err_msg;
+    err_msg << "Invalid operator in required_filters: '" << config.op << "'\n";
+    err_msg << "  Valid operators: =, !=, <, >, <=, >=, IS NULL, IS NOT NULL\n";
+    err_msg << "  Example:\n";
+    err_msg << "    required_filters:\n";
+    err_msg << "      - name: status\n";
+    err_msg << "        type: int\n";
+    err_msg << "        op: \"=\"\n";
+    err_msg << "        value: 1";
+    throw std::runtime_error(err_msg.str());
   }
 
   // Validate: IS NULL/IS NOT NULL should not have a value
   if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && !config.value.empty()) {
-    throw std::runtime_error("Required filter with operator '" + config.op + "' should not have a value");
+    std::stringstream err_msg;
+    err_msg << "Required filter error: Operator '" << config.op << "' should not have a value\n";
+    err_msg << "  For NULL checks, omit the 'value' field.\n";
+    err_msg << "  Example:\n";
+    err_msg << "    required_filters:\n";
+    err_msg << "      - name: deleted_at\n";
+    err_msg << "        type: datetime\n";
+    err_msg << "        op: \"IS NULL\"";
+    throw std::runtime_error(err_msg.str());
   }
 
   // Validate: Other operators should have a value
   if (config.op != "IS NULL" && config.op != "IS NOT NULL" && config.value.empty()) {
-    throw std::runtime_error("Required filter with operator '" + config.op + "' must have a value");
+    std::stringstream err_msg;
+    err_msg << "Required filter error: Operator '" << config.op << "' requires a value\n";
+    err_msg << "  Please provide a 'value' field for this operator.\n";
+    err_msg << "  Example:\n";
+    err_msg << "    required_filters:\n";
+    err_msg << "      - name: status\n";
+    err_msg << "        type: int\n";
+    err_msg << "        op: \"" << config.op << "\"\n";
+    err_msg << "        value: 1";
+    throw std::runtime_error(err_msg.str());
   }
 
   return config;
@@ -182,7 +207,16 @@ TableConfig ParseTableConfig(const json& json_obj) {
   TableConfig config;
 
   if (!json_obj.contains("name")) {
-    throw std::runtime_error("Table configuration missing 'name' field");
+    std::stringstream err_msg;
+    err_msg << "Table configuration error: Missing required 'name' field\n";
+    err_msg << "  Each table configuration must have a 'name' field.\n";
+    err_msg << "  Example:\n";
+    err_msg << "    tables:\n";
+    err_msg << "      - name: my_table\n";
+    err_msg << "        primary_key: id\n";
+    err_msg << "        text_source:\n";
+    err_msg << "          column: content";
+    throw std::runtime_error(err_msg.str());
   }
   config.name = json_obj["name"].get<std::string>();
 
@@ -202,9 +236,18 @@ TableConfig ParseTableConfig(const json& json_obj) {
 
   // Check for deprecated where_clause
   if (json_obj.contains("where_clause")) {
-    throw std::runtime_error(
-        "Configuration error: 'where_clause' is no longer supported. "
-        "Please use 'required_filters' instead. See documentation for details.");
+    std::stringstream err_msg;
+    err_msg << "Configuration error in table '" << config.name << "': 'where_clause' is no longer supported\n";
+    err_msg << "  Please use 'required_filters' instead.\n";
+    err_msg << "  Migration guide:\n";
+    err_msg << "    Old format: where_clause: \"status = 1\"\n";
+    err_msg << "    New format:\n";
+    err_msg << "      required_filters:\n";
+    err_msg << "        - name: status\n";
+    err_msg << "          type: int\n";
+    err_msg << "          op: \"=\"\n";
+    err_msg << "          value: 1";
+    throw std::runtime_error(err_msg.str());
   }
 
   // Parse text_source
@@ -325,16 +368,31 @@ Config ParseConfigFromJson(const json& root) {
 
     // Validate server_id
     if (config.replication.enable && config.replication.server_id == 0) {
-      throw std::runtime_error("replication.server_id must be set to a non-zero value when replication is enabled");
+      std::stringstream err_msg;
+      err_msg << "Replication configuration error: server_id must be set when replication is enabled\n";
+      err_msg << "  The server_id must be a unique non-zero value.\n";
+      err_msg << "  Example:\n";
+      err_msg << "    replication:\n";
+      err_msg << "      enable: true\n";
+      err_msg << "      server_id: 100";
+      throw std::runtime_error(err_msg.str());
     }
 
     // Validate start_from
     if (config.replication.enable) {
       const auto& start = config.replication.start_from;
       if (start != "snapshot" && start != "latest" && start != "state_file" && start.find("gtid=") != 0) {
-        throw std::runtime_error(
-            "replication.start_from must be one of: snapshot, latest, state_file, or "
-            "gtid=<UUID:txn>");
+        std::stringstream err_msg;
+        err_msg << "Replication configuration error: Invalid start_from value: '" << start << "'\n";
+        err_msg << "  Valid options:\n";
+        err_msg << "    - snapshot    : Start from snapshot GTID\n";
+        err_msg << "    - latest      : Start from current GTID\n";
+        err_msg << "    - state_file  : Resume from saved state\n";
+        err_msg << "    - gtid=<UUID:txn> : Start from specific GTID\n";
+        err_msg << "  Example:\n";
+        err_msg << "    replication:\n";
+        err_msg << "      start_from: snapshot";
+        throw std::runtime_error(err_msg.str());
       }
 
       // If gtid= format, validate the GTID format
@@ -343,16 +401,23 @@ Config ParseConfigFromJson(const json& root) {
 #ifdef USE_MYSQL
         auto gtid = mysql::GTID::Parse(gtid_str);
         if (!gtid.has_value()) {
-          throw std::runtime_error("Invalid GTID format in replication.start_from: " + gtid_str +
-                                   ". Expected format: gtid=UUID:transaction_id (e.g., "
-                                   "gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1)");
+          std::stringstream err_msg;
+          err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
+          err_msg << "  Expected format: gtid=UUID:transaction_id\n";
+          err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1\n";
+          err_msg << "  Where:\n";
+          err_msg << "    - UUID is the MySQL server UUID\n";
+          err_msg << "    - transaction_id is the transaction number";
+          throw std::runtime_error(err_msg.str());
         }
 #else
         // Basic GTID format check when MySQL is not available
         if (gtid_str.find(':') == std::string::npos) {
-          throw std::runtime_error("Invalid GTID format in replication.start_from: " + gtid_str +
-                                   ". Expected format: gtid=UUID:transaction_id (e.g., "
-                                   "gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1)");
+          std::stringstream err_msg;
+          err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
+          err_msg << "  Expected format: gtid=UUID:transaction_id\n";
+          err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1";
+          throw std::runtime_error(err_msg.str());
         }
 #endif
       }
@@ -468,13 +533,41 @@ Config ParseConfigFromJson(const json& root) {
  * @brief Read file contents as string
  */
 std::string ReadFileToString(const std::string& path) {
+  // Check if file exists
   std::ifstream file(path);
   if (!file.is_open()) {
+    // Try to determine the reason for failure
+    std::ifstream test_file(path, std::ios::in);
+    if (!test_file.good()) {
+      // File doesn't exist or is not accessible
+      std::stringstream err_msg;
+      err_msg << "Failed to open configuration file: " << path << "\n";
+      err_msg << "  Possible reasons:\n";
+      err_msg << "    - File does not exist\n";
+      err_msg << "    - Insufficient read permissions\n";
+      err_msg << "    - Invalid file path\n";
+      err_msg << "  Please verify:\n";
+      err_msg << "    - The file path is correct\n";
+      err_msg << "    - The file exists and is readable\n";
+      err_msg << "  Example config: examples/config.yaml";
+      throw std::runtime_error(err_msg.str());
+    }
     throw std::runtime_error("Failed to open file: " + path);
   }
   std::stringstream buffer;
   buffer << file.rdbuf();
-  return buffer.str();
+
+  // Check if file is empty
+  std::string content = buffer.str();
+  if (content.empty()) {
+    std::stringstream err_msg;
+    err_msg << "Configuration file is empty: " << path << "\n";
+    err_msg << "  Please provide a valid configuration file.\n";
+    err_msg << "  Example config: examples/config.yaml";
+    throw std::runtime_error(err_msg.str());
+  }
+
+  return content;
 }
 
 /**
@@ -518,7 +611,18 @@ void ValidateConfigJson(const std::string& config_json_str, const std::string& s
       validator.validate(config_json);
       spdlog::debug("Configuration validation passed");
     } catch (const std::exception& e) {
-      throw std::runtime_error(std::string("Configuration validation failed: ") + e.what());
+      std::stringstream err_msg;
+      err_msg << "Configuration validation failed:\n";
+      err_msg << "  " << e.what() << "\n\n";
+      err_msg << "  Common configuration issues:\n";
+      err_msg << "    - Missing required fields (mysql.host, mysql.user, tables, etc.)\n";
+      err_msg << "    - Invalid data types (string instead of number, etc.)\n";
+      err_msg << "    - Invalid enum values (check allowed values)\n";
+      err_msg << "    - Table configuration missing 'name' or 'text_source'\n";
+      err_msg << "    - Invalid filter operators or types\n\n";
+      err_msg << "  Please check your configuration against the schema.\n";
+      err_msg << "  Example config: examples/config.yaml";
+      throw std::runtime_error(err_msg.str());
     }
   } catch (const json::parse_error& e) {
     throw std::runtime_error(std::string("JSON parse error: ") + e.what());
@@ -547,7 +651,20 @@ Config LoadConfigJson(const std::string& path, const std::string& schema_path) {
 
     return config;
   } catch (const json::parse_error& e) {
-    throw std::runtime_error(std::string("JSON parse error in ") + path + ": " + e.what());
+    std::stringstream err_msg;
+    err_msg << "JSON parse error in configuration file: " << path << "\n";
+    err_msg << "  Error details: " << e.what() << "\n";
+    if (e.byte != 0) {
+      err_msg << "  Error position: byte " << e.byte << "\n";
+    }
+    err_msg << "  Common issues:\n";
+    err_msg << "    - Missing or extra commas\n";
+    err_msg << "    - Unquoted string values\n";
+    err_msg << "    - Invalid escape sequences\n";
+    err_msg << "    - Mismatched brackets or braces\n";
+    err_msg << "  Tip: Use a JSON validator to check syntax\n";
+    err_msg << "  Example config: examples/config.yaml";
+    throw std::runtime_error(err_msg.str());
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string("Failed to load config from ") + path + ": " + e.what());
   }
@@ -567,7 +684,20 @@ Config LoadConfigYaml(const std::string& path) {
 
     return config;
   } catch (const YAML::Exception& e) {
-    throw std::runtime_error(std::string("YAML parse error in ") + path + ": " + e.what());
+    std::stringstream err_msg;
+    err_msg << "YAML parse error in configuration file: " << path << "\n";
+    err_msg << "  Error details: " << e.what() << "\n";
+    if (e.mark.line != static_cast<size_t>(-1)) {
+      err_msg << "  Error location: line " << (e.mark.line + 1) << ", column " << (e.mark.column + 1) << "\n";
+    }
+    err_msg << "  Common issues:\n";
+    err_msg << "    - Incorrect indentation (use spaces, not tabs)\n";
+    err_msg << "    - Missing colon after key name\n";
+    err_msg << "    - Unquoted special characters in values\n";
+    err_msg << "    - Inconsistent list formatting\n";
+    err_msg << "  Tip: Check YAML syntax, especially indentation\n";
+    err_msg << "  Example config: examples/config.yaml";
+    throw std::runtime_error(err_msg.str());
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string("Failed to load config from ") + path + ": " + e.what());
   }
@@ -595,7 +725,8 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
         // ValidateConfigJson will use embedded schema if schema_str is empty
         ValidateConfigJson(config_json_str, schema_str);
       } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("YAML config validation failed: ") + e.what());
+        // Re-throw with original error message (already enhanced)
+        throw;
       }
       return LoadConfigYaml(path);
 
@@ -605,9 +736,19 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
       try {
         spdlog::debug("Unknown file format, trying YAML first: {}", path);
         return LoadConfigYaml(path);
-      } catch (...) {
-        spdlog::debug("YAML parsing failed, trying JSON: {}", path);
-        return LoadConfigJson(path, schema_path);
+      } catch (const std::exception& yaml_error) {
+        try {
+          spdlog::debug("YAML parsing failed, trying JSON: {}", path);
+          return LoadConfigJson(path, schema_path);
+        } catch (const std::exception& json_error) {
+          std::stringstream err_msg;
+          err_msg << "Failed to load configuration file: " << path << "\n";
+          err_msg << "  File format could not be determined (.yaml, .yml, or .json expected)\n";
+          err_msg << "  Attempted YAML parsing: " << yaml_error.what() << "\n";
+          err_msg << "  Attempted JSON parsing: " << json_error.what() << "\n";
+          err_msg << "  Please ensure the file has the correct extension and valid syntax.";
+          throw std::runtime_error(err_msg.str());
+        }
       }
   }
 }

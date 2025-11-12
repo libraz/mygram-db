@@ -76,7 +76,7 @@ MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
 
   ClientConfig cpp_config;
   cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
-  cpp_config.port = config->port != 0 ? config->port : 11211;
+  cpp_config.port = config->port != 0 ? config->port : 11016;
   cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
   cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
 

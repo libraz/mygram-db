@@ -266,8 +266,8 @@ TEST(ConfigTest, InvalidStartFrom) {
           LoadConfig("invalid_start_from.yaml");
         } catch (const std::runtime_error& e) {
           std::string error_msg(e.what());
-          EXPECT_TRUE(error_msg.find("replication.start_from must be one of: snapshot, latest, "
-                                     "state_file, or gtid=<UUID:txn>") != std::string::npos);
+          EXPECT_TRUE(error_msg.find("Replication configuration error") != std::string::npos);
+          EXPECT_TRUE(error_msg.find("Invalid start_from value") != std::string::npos);
           throw;
         }
       },

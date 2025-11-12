@@ -586,5 +586,156 @@ TEST(QueryASTEvaluationTest, SingleCharTermWithBigrams) {
   EXPECT_EQ(results5.size(), 3);  // All documents (NOT empty = all)
 }
 
+// ============================================================================
+// Japanese/CJK Text Normalization Tests
+// ============================================================================
+
+/**
+ * @brief Test Japanese keyword search with proper text normalization
+ *
+ * This test verifies the fix for the Japanese search bug where text
+ * normalization parameters differed between indexing and querying.
+ * The bug caused Japanese keywords to return 0 results.
+ *
+ * Fix: Ensure both index and query use:
+ * - NormalizeText(text, true, "keep", true)
+ * - GenerateHybridNgrams (not GenerateNgrams)
+ */
+TEST(QueryASTEvaluationTest, JapaneseTextNormalization) {
+  // Use hybrid mode: ASCII bigram (2), CJK unigram (1)
+  index::Index idx(2, 1);
+  storage::DocumentStore doc_store;
+
+  // Add documents with Japanese text (normalized before indexing)
+  auto doc1 = doc_store.AddDocument("1");
+  idx.AddDocument(doc1, utils::NormalizeText("二次創作", true, "keep", true));  // "Derivative work"
+
+  auto doc2 = doc_store.AddDocument("2");
+  idx.AddDocument(doc2, utils::NormalizeText("東方Project", true, "keep", true));  // "Touhou Project"
+
+  auto doc3 = doc_store.AddDocument("3");
+  idx.AddDocument(doc3, utils::NormalizeText("艦これ", true, "keep", true));  // "KanColle"
+
+  auto doc4 = doc_store.AddDocument("4");
+  idx.AddDocument(doc4, utils::NormalizeText("test", true, "keep", true));  // English control
+
+  QueryASTParser parser;
+
+  // Test Japanese keyword "二次" (2-char)
+  auto ast1 = parser.Parse("二次");
+  ASSERT_NE(ast1, nullptr);
+  auto results1 = ast1->Evaluate(idx, doc_store);
+  EXPECT_EQ(results1.size(), 1);  // Should match doc1
+  EXPECT_EQ(results1[0], doc1);
+
+  // Test Japanese keyword "東方" (2-char)
+  auto ast2 = parser.Parse("東方");
+  ASSERT_NE(ast2, nullptr);
+  auto results2 = ast2->Evaluate(idx, doc_store);
+  EXPECT_EQ(results2.size(), 1);  // Should match doc2
+  EXPECT_EQ(results2[0], doc2);
+
+  // Test Japanese keyword "艦これ" (3-char, should use unigrams)
+  auto ast3 = parser.Parse("艦これ");
+  ASSERT_NE(ast3, nullptr);
+  auto results3 = ast3->Evaluate(idx, doc_store);
+  EXPECT_EQ(results3.size(), 1);  // Should match doc3
+  EXPECT_EQ(results3[0], doc3);
+
+  // Test English still works
+  auto ast4 = parser.Parse("test");
+  ASSERT_NE(ast4, nullptr);
+  auto results4 = ast4->Evaluate(idx, doc_store);
+  EXPECT_EQ(results4.size(), 1);  // Should match doc4
+  EXPECT_EQ(results4[0], doc4);
+
+  // Test mixed Japanese/English query
+  auto ast5 = parser.Parse("東方 OR test");
+  ASSERT_NE(ast5, nullptr);
+  auto results5 = ast5->Evaluate(idx, doc_store);
+  EXPECT_EQ(results5.size(), 2);  // Should match doc2 and doc4
+}
+
+/**
+ * @brief Test that hybrid ngrams are used for mixed CJK/ASCII text
+ */
+TEST(QueryASTEvaluationTest, HybridNgramConsistency) {
+  // ASCII bigram (2), CJK unigram (1)
+  index::Index idx(2, 1);
+  storage::DocumentStore doc_store;
+
+  // Add document with mixed text (normalized before indexing)
+  auto doc1 = doc_store.AddDocument("1");
+  idx.AddDocument(doc1, utils::NormalizeText("東方project", true, "keep", true));  // Mixed: CJK + ASCII
+
+  QueryASTParser parser;
+
+  // Search for CJK part
+  auto ast1 = parser.Parse("東方");
+  ASSERT_NE(ast1, nullptr);
+  auto results1 = ast1->Evaluate(idx, doc_store);
+  EXPECT_EQ(results1.size(), 1);  // Should find doc1
+
+  // Search for ASCII part (bigram "pr" from "project")
+  auto ast2 = parser.Parse("pr");
+  ASSERT_NE(ast2, nullptr);
+  auto results2 = ast2->Evaluate(idx, doc_store);
+  EXPECT_EQ(results2.size(), 1);  // Should find doc1
+
+  // Combined search
+  auto ast3 = parser.Parse("東方 AND pr");
+  ASSERT_NE(ast3, nullptr);
+  auto results3 = ast3->Evaluate(idx, doc_store);
+  EXPECT_EQ(results3.size(), 1);  // Should find doc1
+}
+
+/**
+ * @brief Test normalization parameter consistency
+ *
+ * This specifically tests that the same normalization parameters
+ * (nfkc=true, width="keep", lower=true) are used in both indexing
+ * and query evaluation.
+ */
+TEST(QueryASTEvaluationTest, NormalizationParameterConsistency) {
+  // Use default configuration from production
+  index::Index idx(2, 1);
+  storage::DocumentStore doc_store;
+
+  // Add documents with text that requires normalization
+  // NOTE: In production, text is normalized before being added to index (snapshot_builder.cpp)
+  // We must do the same in tests
+  auto doc1 = doc_store.AddDocument("1");
+  std::string normalized1 = utils::NormalizeText("Test", true, "keep", true);  // -> "test"
+  idx.AddDocument(doc1, normalized1);
+
+  auto doc2 = doc_store.AddDocument("2");
+  std::string normalized2 = utils::NormalizeText("テスト", true, "keep", true);  // Full-width katakana
+  idx.AddDocument(doc2, normalized2);
+
+  auto doc3 = doc_store.AddDocument("3");
+  std::string normalized3 = utils::NormalizeText("ﾃｽﾄ", true, "keep", true);  // Half-width katakana
+  idx.AddDocument(doc3, normalized3);
+
+  QueryASTParser parser;
+
+  // Search with lowercase (should match doc1 due to lower=true)
+  auto ast1 = parser.Parse("test");
+  ASSERT_NE(ast1, nullptr);
+  auto results1 = ast1->Evaluate(idx, doc_store);
+  EXPECT_EQ(results1.size(), 1);  // Should match doc1
+
+  // Both full-width and half-width katakana are normalized to same form with nfkc=true
+  // NFKC converts half-width katakana to full-width, so both queries should match both docs
+  auto ast2 = parser.Parse("テスト");
+  ASSERT_NE(ast2, nullptr);
+  auto results2 = ast2->Evaluate(idx, doc_store);
+  EXPECT_EQ(results2.size(), 2);  // Should match both doc2 and doc3 (NFKC normalizes to same form)
+
+  auto ast3 = parser.Parse("ﾃｽﾄ");
+  ASSERT_NE(ast3, nullptr);
+  auto results3 = ast3->Evaluate(idx, doc_store);
+  EXPECT_EQ(results3.size(), 2);  // Should match both doc2 and doc3 (NFKC normalizes to same form)
+}
+
 }  // namespace query
 }  // namespace mygramdb

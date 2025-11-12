@@ -1146,3 +1146,148 @@ TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
   std::remove((test_file + "/test.docs").c_str());
   std::remove(test_file.c_str());
 }
+
+/**
+ * @brief Test hybrid n-gram search with kanji_ngram_size
+ *
+ * This test verifies that the server correctly uses kanji_ngram_size when
+ * processing search queries. It ensures that:
+ * - Single kanji characters can be searched (using unigram)
+ * - Hiragana/Katakana use bigrams (ngram_size=2)
+ * - Mixed text (kanji + hiragana + ASCII) is handled correctly
+ */
+TEST_F(TcpServerTest, HybridNgramSearchWithKanjiNgramSize) {
+  // Set up index with hybrid n-gram configuration
+  // ngram_size = 2 (for ASCII, hiragana, katakana)
+  // kanji_ngram_size = 1 (for kanji)
+  table_context_.config.ngram_size = 2;
+  table_context_.config.kanji_ngram_size = 1;
+
+  // Recreate index with hybrid configuration
+  table_context_.index = std::make_unique<index::Index>(2, 1);
+  index_ = table_context_.index.get();
+
+  // Add test documents with Japanese text
+  // Document 1: Contains kanji "東"
+  doc_store_->AddDocument("1", {});
+  index_->AddDocument(1, "東京タワー");  // Tokyo Tower (all kanji)
+
+  // Document 2: Contains kanji "料"
+  doc_store_->AddDocument("2", {});
+  index_->AddDocument(2, "日本料理");  // Japanese cuisine (all kanji)
+
+  // Document 3: Contains hiragana "ひまわり"
+  doc_store_->AddDocument("3", {});
+  index_->AddDocument(3, "ひまわり畑");  // sunflower field (hiragana + kanji)
+
+  // Document 4: Contains same kanji as doc 1
+  doc_store_->AddDocument("4", {});
+  index_->AddDocument(4, "東北地方");  // Tohoku region (kanji only)
+
+  // Start server
+  ASSERT_TRUE(server_->Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint16_t port = server_->GetPort();
+  ASSERT_GT(port, 0);
+
+  // Test 1: Search for single kanji "東" (should use unigram)
+  int sock1 = CreateClientSocket(port);
+  ASSERT_GE(sock1, 0);
+
+  std::string response1 = SendRequest(sock1, "SEARCH test 東");
+  EXPECT_TRUE(response1.find("OK") == 0) << "Response: " << response1;
+
+  // Should find documents 1 and 4 (both contain "東")
+  // Parse IDs from response: "OK RESULTS <count> <id1> <id2> ..."
+  std::istringstream iss1(response1);
+  std::string ok, results;
+  int count;
+  iss1 >> ok >> results >> count;  // Skip "OK RESULTS <count>"
+  std::vector<int> ids1;
+  int id;
+  while (iss1 >> id)
+    ids1.push_back(id);
+
+  EXPECT_TRUE(std::find(ids1.begin(), ids1.end(), 1) != ids1.end()) << "Doc 1 not found";
+  EXPECT_TRUE(std::find(ids1.begin(), ids1.end(), 4) != ids1.end()) << "Doc 4 not found";
+  EXPECT_TRUE(std::find(ids1.begin(), ids1.end(), 2) == ids1.end()) << "Doc 2 should not match";
+  EXPECT_TRUE(std::find(ids1.begin(), ids1.end(), 3) == ids1.end()) << "Doc 3 should not match";
+
+  close(sock1);
+
+  // Test 2: Search for single kanji "料" (should use unigram)
+  int sock2 = CreateClientSocket(port);
+  ASSERT_GE(sock2, 0);
+
+  std::string response2 = SendRequest(sock2, "SEARCH test 料");
+  EXPECT_TRUE(response2.find("OK") == 0) << "Response: " << response2;
+
+  // Should find only document 2
+  // Parse IDs from response: "OK RESULTS <count> <id1> <id2> ..."
+  std::istringstream iss2(response2);
+  std::string ok2, results2;
+  int count2;
+  iss2 >> ok2 >> results2 >> count2;  // Skip "OK RESULTS <count>"
+  std::vector<int> ids2;
+  int id2;
+  while (iss2 >> id2)
+    ids2.push_back(id2);
+
+  EXPECT_TRUE(std::find(ids2.begin(), ids2.end(), 2) != ids2.end()) << "Doc 2 not found";
+  EXPECT_TRUE(std::find(ids2.begin(), ids2.end(), 1) == ids2.end()) << "Doc 1 should not match";
+  EXPECT_TRUE(std::find(ids2.begin(), ids2.end(), 3) == ids2.end()) << "Doc 3 should not match";
+  EXPECT_TRUE(std::find(ids2.begin(), ids2.end(), 4) == ids2.end()) << "Doc 4 should not match";
+
+  close(sock2);
+
+  // Test 3: Search for hiragana "ひまわり" (should use bigram)
+  int sock3 = CreateClientSocket(port);
+  ASSERT_GE(sock3, 0);
+
+  std::string response3 = SendRequest(sock3, "SEARCH test ひまわり");
+  EXPECT_TRUE(response3.find("OK") == 0) << "Response: " << response3;
+
+  // Should find only document 3
+  // Parse IDs from response: "OK RESULTS <count> <id1> <id2> ..."
+  std::istringstream iss3(response3);
+  std::string ok3, results3;
+  int count3;
+  iss3 >> ok3 >> results3 >> count3;  // Skip "OK RESULTS <count>"
+  std::vector<int> ids3;
+  int id3;
+  while (iss3 >> id3)
+    ids3.push_back(id3);
+
+  EXPECT_TRUE(std::find(ids3.begin(), ids3.end(), 3) != ids3.end()) << "Doc 3 not found";
+  EXPECT_TRUE(std::find(ids3.begin(), ids3.end(), 1) == ids3.end()) << "Doc 1 should not match";
+  EXPECT_TRUE(std::find(ids3.begin(), ids3.end(), 2) == ids3.end()) << "Doc 2 should not match";
+  EXPECT_TRUE(std::find(ids3.begin(), ids3.end(), 4) == ids3.end()) << "Doc 4 should not match";
+
+  close(sock3);
+
+  // Test 4: Search for mixed text "東京" (both kanji, should use unigrams)
+  int sock4 = CreateClientSocket(port);
+  ASSERT_GE(sock4, 0);
+
+  std::string response4 = SendRequest(sock4, "SEARCH test 東京");
+  EXPECT_TRUE(response4.find("OK") == 0) << "Response: " << response4;
+
+  // Should find only document 1 (contains both "東" and "京")
+  // Parse IDs from response: "OK RESULTS <count> <id1> <id2> ..."
+  std::istringstream iss4(response4);
+  std::string ok4, results4;
+  int count4;
+  iss4 >> ok4 >> results4 >> count4;  // Skip "OK RESULTS <count>"
+  std::vector<int> ids4;
+  int id4;
+  while (iss4 >> id4)
+    ids4.push_back(id4);
+
+  EXPECT_TRUE(std::find(ids4.begin(), ids4.end(), 1) != ids4.end()) << "Doc 1 not found";
+  EXPECT_TRUE(std::find(ids4.begin(), ids4.end(), 2) == ids4.end()) << "Doc 2 should not match";
+  EXPECT_TRUE(std::find(ids4.begin(), ids4.end(), 3) == ids4.end()) << "Doc 3 should not match";
+  EXPECT_TRUE(std::find(ids4.begin(), ids4.end(), 4) == ids4.end()) << "Doc 4 should not match";
+
+  close(sock4);
+}

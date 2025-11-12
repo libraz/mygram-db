@@ -76,8 +76,6 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     auto* posting = GetOrCreatePostingList(term);
     posting->AddBatch(doc_ids);
   }
-
-  spdlog::debug("Added batch of {} documents with {} unique terms", documents.size(), term_to_docs.size());
 }
 
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text) {

@@ -29,7 +29,7 @@ class BinlogReader;
 
 namespace mygramdb::server {
 
-constexpr uint16_t kDefaultPort = 11211;       // memcached default port
+constexpr uint16_t kDefaultPort = 11016;       // memcached default port
 constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
 constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
 constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size

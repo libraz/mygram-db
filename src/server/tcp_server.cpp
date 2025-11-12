@@ -361,6 +361,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
   index::Index* current_index = nullptr;
   storage::DocumentStore* current_doc_store = nullptr;
   int current_ngram_size = 0;
+  int current_kanji_ngram_size = 0;
 
   // For queries that require a table, validate and fetch context
   if (!query.table.empty()) {
@@ -371,6 +372,7 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
     current_index = table_iter->second->index.get();
     current_doc_store = table_iter->second->doc_store.get();
     current_ngram_size = table_iter->second->config.ngram_size;
+    current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
   }
 
   try {
@@ -410,7 +412,10 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         for (const auto& search_term : all_search_terms) {
           std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
           std::vector<std::string> ngrams;
-          if (current_ngram_size == 0) {
+          // Always use hybrid n-grams if kanji_ngram_size is configured
+          if (current_kanji_ngram_size > 0) {
+            ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          } else if (current_ngram_size == 0) {
             ngrams = utils::GenerateHybridNgrams(normalized);
           } else {
             ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
@@ -589,7 +594,10 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
         for (const auto& search_term : all_search_terms) {
           std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
           std::vector<std::string> ngrams;
-          if (current_ngram_size == 0) {
+          // Always use hybrid n-grams if kanji_ngram_size is configured
+          if (current_kanji_ngram_size > 0) {
+            ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          } else if (current_ngram_size == 0) {
             ngrams = utils::GenerateHybridNgrams(normalized);
           } else {
             ngrams = utils::GenerateNgrams(normalized, current_ngram_size);

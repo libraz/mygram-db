@@ -401,3 +401,216 @@ TEST(StringUtilsTest, EmojiNormalization) {
   EXPECT_EQ(normalized, "ライブ😀楽しい🎉");  // Emojis preserved
 }
 #endif  // USE_ICU
+
+/**
+ * @brief Test hybrid n-grams: ASCII only text
+ *
+ * For ASCII-only text with ascii_ngram_size=2, should generate bigrams
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsASCIIOnly) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("hello", 2, 1);
+
+  // Should generate bigrams: "he", "el", "ll", "lo"
+  ASSERT_EQ(ngrams.size(), 4);
+  EXPECT_EQ(ngrams[0], "he");
+  EXPECT_EQ(ngrams[1], "el");
+  EXPECT_EQ(ngrams[2], "ll");
+  EXPECT_EQ(ngrams[3], "lo");
+}
+
+/**
+ * @brief Test hybrid n-grams: CJK only text with unigrams
+ *
+ * For CJK-only text with kanji_ngram_size=1, should generate unigrams
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsKanjiUnigrams) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("東方艦", 2, 1);
+
+  // Should generate unigrams: "東", "方", "艦"
+  ASSERT_EQ(ngrams.size(), 3);
+  EXPECT_EQ(ngrams[0], "東");
+  EXPECT_EQ(ngrams[1], "方");
+  EXPECT_EQ(ngrams[2], "艦");
+}
+
+/**
+ * @brief Test hybrid n-grams: CJK only text with bigrams
+ *
+ * For CJK-only text with kanji_ngram_size=2, should generate bigrams
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsKanjiBigrams) {
+  // ascii_ngram_size=2, kanji_ngram_size=2
+  auto ngrams = GenerateHybridNgrams("東方艦", 2, 2);
+
+  // Should generate bigrams: "東方", "方艦"
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "東方");
+  EXPECT_EQ(ngrams[1], "方艦");
+}
+
+/**
+ * @brief Test hybrid n-grams: Mixed CJK/ASCII text
+ *
+ * CRITICAL TEST: Mixed text should NOT create cross-boundary n-grams
+ * "東方Project" should generate:
+ * - CJK unigrams: "東", "方"
+ * - ASCII bigrams: "Pr", "ro", "oj", "je", "ec", "ct"
+ * - NO mixed n-grams like "方P" or "tP"
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsMixedText) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("東方Project", 2, 1);
+
+  // Expected n-grams:
+  // - CJK unigrams: "東", "方"
+  // - ASCII bigrams: "Pr", "ro", "oj", "je", "ec", "ct"
+  // Total: 2 + 6 = 8
+  ASSERT_EQ(ngrams.size(), 8);
+
+  // Verify CJK unigrams
+  EXPECT_EQ(ngrams[0], "東");
+  EXPECT_EQ(ngrams[1], "方");
+
+  // Verify ASCII bigrams
+  EXPECT_EQ(ngrams[2], "Pr");
+  EXPECT_EQ(ngrams[3], "ro");
+  EXPECT_EQ(ngrams[4], "oj");
+  EXPECT_EQ(ngrams[5], "je");
+  EXPECT_EQ(ngrams[6], "ec");
+  EXPECT_EQ(ngrams[7], "ct");
+
+  // Verify NO mixed n-grams (critical!)
+  for (const auto& ngram : ngrams) {
+    // Check if ngram contains both Kanji and non-Kanji characters
+    bool has_kanji = false;
+    bool has_non_kanji = false;
+
+    auto codepoints = Utf8ToCodepoints(ngram);
+    for (uint32_t cp : codepoints) {
+      // Kanji (CJK Ideographs only)
+      if (cp >= 0x4E00 && cp <= 0x9FFF) {  // CJK Ideographs (main block)
+        has_kanji = true;
+      } else {
+        // Non-Kanji (ASCII, Hiragana, Katakana, etc.)
+        has_non_kanji = true;
+      }
+    }
+
+    // N-gram should be either purely Kanji or purely non-Kanji, not mixed
+    EXPECT_FALSE(has_kanji && has_non_kanji) << "Found mixed Kanji/non-Kanji n-gram: " << ngram;
+  }
+}
+
+/**
+ * @brief Test hybrid n-grams: Kanji + ASCII boundaries
+ *
+ * Test "艦隊ABC" to ensure Kanji/ASCII boundaries are respected
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsMixedBoundaries) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("艦隊ABC", 2, 1);
+
+  // "艦" (U+8266) - CJK Ideograph (Kanji)
+  // "隊" (U+968A) - CJK Ideograph (Kanji)
+  // "ABC" - ASCII
+
+  // Expected:
+  // - Kanji unigrams: "艦", "隊"
+  // - ASCII bigrams: "AB", "BC"
+  // Total: 2 + 2 = 4
+
+  ASSERT_EQ(ngrams.size(), 4);
+  EXPECT_EQ(ngrams[0], "艦");
+  EXPECT_EQ(ngrams[1], "隊");
+  EXPECT_EQ(ngrams[2], "AB");
+  EXPECT_EQ(ngrams[3], "BC");
+}
+
+/**
+ * @brief Test hybrid n-grams: Hiragana should use bigrams (ascii_ngram_size=2)
+ *
+ * Hiragana are NOT CJK Ideographs, so they should be processed with ascii_ngram_size
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsHiraganaBigrams) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("これは", 2, 1);
+
+  // "これは" (all Hiragana)
+  // Expected bigrams: "これ", "れは"
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "これ");
+  EXPECT_EQ(ngrams[1], "れは");
+}
+
+/**
+ * @brief Test hybrid n-grams: Katakana should use bigrams (ascii_ngram_size=2)
+ *
+ * Katakana are NOT CJK Ideographs, so they should be processed with ascii_ngram_size
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsKatakanaBigrams) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("ライブ", 2, 1);
+
+  // "ライブ" (all Katakana)
+  // Expected bigrams: "ライ", "イブ"
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "ライ");
+  EXPECT_EQ(ngrams[1], "イブ");
+}
+
+/**
+ * @brief Test hybrid n-grams: Single CJK character
+ *
+ * CRITICAL TEST FOR THE BUG: Single Kanji should be indexed with kanji_ngram_size=1
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsSingleKanji) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("東", 2, 1);
+
+  // Should generate single unigram: "東"
+  ASSERT_EQ(ngrams.size(), 1);
+  EXPECT_EQ(ngrams[0], "東");
+
+  // Test other single Kanji
+  ngrams = GenerateHybridNgrams("艦", 2, 1);
+  ASSERT_EQ(ngrams.size(), 1);
+  EXPECT_EQ(ngrams[0], "艦");
+
+  ngrams = GenerateHybridNgrams("二", 2, 1);
+  ASSERT_EQ(ngrams.size(), 1);
+  EXPECT_EQ(ngrams[0], "二");
+}
+
+/**
+ * @brief Test hybrid n-grams: Two consecutive CJK characters
+ *
+ * With kanji_ngram_size=1, should generate 2 unigrams
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsTwoKanji) {
+  // ascii_ngram_size=2, kanji_ngram_size=1
+  auto ngrams = GenerateHybridNgrams("二次", 2, 1);
+
+  // Should generate unigrams: "二", "次"
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "二");
+  EXPECT_EQ(ngrams[1], "次");
+}
+
+/**
+ * @brief Test hybrid n-grams: Empty string
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsEmpty) {
+  auto ngrams = GenerateHybridNgrams("", 2, 1);
+  EXPECT_EQ(ngrams.size(), 0);
+}
+
+/**
+ * @brief Test hybrid n-grams: Text too short for n-gram size
+ */
+TEST(StringUtilsTest, GenerateHybridNgramsTooShort) {
+  // Single ASCII character with ascii_ngram_size=2
+  auto ngrams = GenerateHybridNgrams("a", 2, 1);
+  EXPECT_EQ(ngrams.size(), 0);  // Cannot generate bigram from single char
+}

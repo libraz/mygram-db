@@ -237,8 +237,8 @@ int main(int argc, char* argv[]) {
 
     bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
       if (progress.processed_rows % kProgressLogInterval == 0) {
-        spdlog::info("[{}] Processed {} rows ({:.0f} rows/s)", table_config.name, progress.processed_rows,
-                     progress.rows_per_second);
+        spdlog::debug("[{}] Processed {} rows ({:.0f} rows/s)", table_config.name, progress.processed_rows,
+                      progress.rows_per_second);
       }
     });
 

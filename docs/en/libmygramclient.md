@@ -49,7 +49,7 @@ int main() {
     // Configure client
     ClientConfig config;
     config.host = "localhost";
-    config.port = 11211;
+    config.port = 11016;
     config.timeout_ms = 5000;
 
     // Create client
@@ -283,7 +283,7 @@ int main() {
     // Configure client
     MygramClientConfig_C config = {
         .host = "localhost",
-        .port = 11211,
+        .port = 11016,
         .timeout_ms = 5000,
         .recv_buffer_size = 65536
     };
@@ -401,7 +401,7 @@ Napi::Value Search(const Napi::CallbackInfo& info) {
     // Create and connect client
     MygramClientConfig_C config = {
         .host = "localhost",
-        .port = 11211,
+        .port = 11016,
         .timeout_ms = 5000,
         .recv_buffer_size = 65536
     };
@@ -449,7 +449,7 @@ NODE_API_MODULE(mygramdb, Init)
 
 #### ClientConfig
 - `host` - Server hostname (default: "127.0.0.1")
-- `port` - Server port (default: 11211)
+- `port` - Server port (default: 11016)
 - `timeout_ms` - Connection timeout (default: 5000)
 - `recv_buffer_size` - Receive buffer size (default: 65536)
 
