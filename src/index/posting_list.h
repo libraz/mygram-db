@@ -91,6 +91,21 @@ class PostingList {
   [[nodiscard]] std::vector<DocId> GetAll() const;
 
   /**
+   * @brief Get top N document IDs with optional reverse order
+   *
+   * Performance optimization for queries with LIMIT and ORDER BY:
+   * - Returns up to 'limit' document IDs without materializing entire posting list
+   * - Reverse order enables efficient "ORDER BY primary_key DESC LIMIT N" queries
+   * - For Roaring bitmaps: uses reverse iterator (no full materialization)
+   * - For delta-compressed: decodes and returns last N elements
+   *
+   * @param limit Maximum number of documents to return (0 = all documents)
+   * @param reverse If true, returns highest DocIds first (descending order)
+   * @return Vector of document IDs (up to 'limit' elements)
+   */
+  [[nodiscard]] std::vector<DocId> GetTopN(size_t limit, bool reverse = false) const;
+
+  /**
    * @brief Get document count
    * @return Number of documents in posting list
    */

@@ -462,12 +462,47 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
           return FormatSearchResponse({}, 0, current_doc_store);
         }
 
+        // Optimization: For single-term, single-ngram queries with LIMIT + PRIMARY KEY order,
+        // use Index::SearchAnd() with limit/reverse to avoid materializing all results
+        //  - Condition: single term, single n-gram, no NOT, no filters, limit > 0, order by primary_key
+        //  - Benefit: O(limit) instead of O(total_candidates) for large result sets
+        //  - Note: Multi-ngram terms (e.g., "漫画" -> ["漫","画"]) require intersection, cannot optimize
+        // Determine ORDER BY clause (default: primary key DESC)
+        query::OrderByClause order_by;
+        if (query.order_by.has_value()) {
+          order_by = query.order_by.value();
+        } else {
+          // Default: primary key DESC
+          order_by.column = "";  // Empty = primary key
+          order_by.order = query::SortOrder::DESC;
+        }
+
+        // Check optimization conditions (single term AND single n-gram)
+        bool can_optimize = term_infos.size() == 1 && term_infos[0].ngrams.size() == 1 &&
+                            query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
+                            order_by.IsPrimaryKey();
+
         // Process most selective term first
-        auto results = current_index->SearchAnd(term_infos[0].ngrams);
-        if (ctx.debug_mode) {
-          debug_info.total_candidates = results.size();
-          debug_info.after_intersection = results.size();
-          debug_info.optimization_used = "size-based term ordering";
+        std::vector<storage::DocId> results;
+        if (can_optimize) {
+          // Use GetTopN optimization: only retrieve top (offset + limit) results
+          size_t index_limit = query.offset + query.limit;
+          bool reverse = (order_by.order == query::SortOrder::DESC);
+          results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
+          if (ctx.debug_mode) {
+            debug_info.total_candidates = results.size();
+            debug_info.after_intersection = results.size();
+            std::string direction = reverse ? "DESC" : "ASC";
+            debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+          }
+        } else {
+          // Standard path: retrieve all results
+          results = current_index->SearchAnd(term_infos[0].ngrams);
+          if (ctx.debug_mode) {
+            debug_info.total_candidates = results.size();
+            debug_info.after_intersection = results.size();
+            debug_info.optimization_used = "size-based term ordering";
+          }
         }
 
         // Intersect with remaining terms

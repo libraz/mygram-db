@@ -119,14 +119,26 @@ void Index::RemoveDocument(DocId doc_id, const std::string& text) {
   spdlog::debug("Removed document {}", doc_id);
 }
 
-std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const {
+std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_t limit, bool reverse) const {
   std::scoped_lock lock(postings_mutex_);
 
   if (terms.empty()) {
     return {};
   }
 
-  // Get posting list for first term
+  // Optimization: Single term with limit and reverse
+  // This is common for "ORDER BY primary_key DESC LIMIT N" queries
+  // For multi-term queries, we cannot optimize here because we don't know
+  // the offset, and intersection size is unpredictable
+  if (terms.size() == 1 && limit > 0 && reverse) {
+    const auto* posting = GetPostingList(terms[0]);
+    if (posting == nullptr) {
+      return {};
+    }
+    return posting->GetTopN(limit, true);
+  }
+
+  // Standard path: Get all documents from all terms and intersect
   const auto* first_posting = GetPostingList(terms[0]);
   if (first_posting == nullptr) {
     return {};
@@ -149,10 +161,13 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms) const
     result = std::move(intersection);
 
     if (result.empty()) {
-      break;  // Early termination
+      break;  // Early termination if no matches
     }
   }
 
+  // Note: limit and reverse are applied by ResultSorter layer, not here
+  // This is because we don't know the offset, and for multi-term queries
+  // the intersection result size is unpredictable
   return result;
 }
 

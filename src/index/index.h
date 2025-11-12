@@ -100,9 +100,12 @@ class Index {
    * @brief Search for documents containing all terms (AND)
    *
    * @param terms Search terms
+   * @param limit Maximum number of results (0 = unlimited)
+   * @param reverse Return results in reverse order (highest DocIds first)
    * @return Vector of document IDs
    */
-  [[nodiscard]] std::vector<DocId> SearchAnd(const std::vector<std::string>& terms) const;
+  [[nodiscard]] std::vector<DocId> SearchAnd(const std::vector<std::string>& terms, size_t limit = 0,
+                                             bool reverse = false) const;
 
   /**
    * @brief Search for documents containing any term (OR)

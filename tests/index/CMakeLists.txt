@@ -22,3 +22,15 @@ target_link_libraries(index_concurrent_test
 )
 
 gtest_discover_tests(index_concurrent_test)
+
+# Index GetTopN tests
+add_executable(index_gettopn_test
+  index_gettopn_test.cpp
+)
+
+target_link_libraries(index_gettopn_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(index_gettopn_test)

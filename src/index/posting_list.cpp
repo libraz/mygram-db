@@ -164,6 +164,70 @@ std::vector<DocId> PostingList::GetAll() const {
   return result;
 }
 
+std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
+  // If limit is 0, return all documents
+  if (limit == 0) {
+    auto result = GetAll();
+    if (reverse) {
+      std::reverse(result.begin(), result.end());
+    }
+    return result;
+  }
+
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    // Delta-compressed: decode and extract top N
+    auto all_docs = DecodeDelta(delta_compressed_);
+    size_t actual_limit = std::min(limit, all_docs.size());
+
+    std::vector<DocId> result;
+    result.reserve(actual_limit);
+
+    if (reverse) {
+      // Return last N elements in reverse order (highest DocIds first)
+      auto start_it = all_docs.rbegin();
+      auto end_it = all_docs.rbegin() + static_cast<std::vector<DocId>::difference_type>(actual_limit);
+      result.assign(start_it, end_it);
+    } else {
+      // Return first N elements (lowest DocIds first)
+      auto end_it = all_docs.begin() + static_cast<std::vector<DocId>::difference_type>(actual_limit);
+      result.assign(all_docs.begin(), end_it);
+    }
+    return result;
+  }
+
+  // Roaring bitmap: use iterator for efficient top-N retrieval
+  uint64_t total_size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  size_t actual_limit = std::min(limit, static_cast<size_t>(total_size));
+
+  std::vector<DocId> result;
+  result.reserve(actual_limit);
+
+  if (reverse) {
+    // For reverse order: get all and return last N in reverse
+    // TODO: Optimize with roaring_iterator_create_last() + roaring_uint32_iterator_previous()
+    std::vector<DocId> all_docs(total_size);
+    roaring_bitmap_to_uint32_array(roaring_bitmap_, all_docs.data());
+
+    auto start_it = all_docs.rbegin();
+    auto end_it = all_docs.rbegin() + static_cast<std::vector<DocId>::difference_type>(actual_limit);
+    result.assign(start_it, end_it);
+  } else {
+    // For forward order: use iterator to get first N
+    roaring_uint32_iterator_t* iter = roaring_iterator_create(roaring_bitmap_);
+    if (iter != nullptr) {
+      size_t count = 0;
+      while (count < actual_limit && iter->has_value) {
+        result.push_back(iter->current_value);
+        roaring_uint32_iterator_advance(iter);
+        count++;
+      }
+      roaring_uint32_iterator_free(iter);
+    }
+  }
+
+  return result;
+}
+
 uint64_t PostingList::Size() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return DecodeDelta(delta_compressed_).size();
