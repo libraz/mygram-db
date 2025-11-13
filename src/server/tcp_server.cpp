@@ -180,7 +180,7 @@ bool TcpServer::Start() {
   accept_thread_ = std::make_unique<std::thread>(&TcpServer::AcceptThreadFunc, this);
 
   // Start auto-save thread if interval is configured
-  if (full_config_ && full_config_->dump.interval_sec > 0) {
+  if (full_config_ != nullptr && full_config_->dump.interval_sec > 0) {
     StartAutoSave();
   }
 
@@ -487,7 +487,7 @@ void TcpServer::StartAutoSave() {
     return;
   }
 
-  if (!full_config_ || full_config_->dump.interval_sec <= 0) {
+  if (full_config_ == nullptr || full_config_->dump.interval_sec <= 0) {
     return;
   }
 
@@ -580,7 +580,7 @@ void TcpServer::AutoSaveThread() {
 }
 
 void TcpServer::CleanupOldDumps() {
-  if (!full_config_ || full_config_->dump.retain <= 0) {
+  if (full_config_ == nullptr || full_config_->dump.retain <= 0) {
     return;
   }
 
@@ -604,10 +604,11 @@ void TcpServer::CleanupOldDumps() {
     }
 
     // Sort by modification time (newest first)
-    std::sort(dump_files.begin(), dump_files.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::sort(dump_files.begin(), dump_files.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.second > rhs.second; });
 
     // Delete old files beyond retain count
-    const size_t retain_count = static_cast<size_t>(full_config_->dump.retain);
+    const auto retain_count = static_cast<size_t>(full_config_->dump.retain);
     for (size_t i = retain_count; i < dump_files.size(); ++i) {
       spdlog::info("Removing old dump file: {}", dump_files[i].first.string());
       std::filesystem::remove(dump_files[i].first);
