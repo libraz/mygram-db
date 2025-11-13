@@ -163,6 +163,10 @@ class TcpServer {
   std::atomic<bool> loading_{false};    // Loading mode flag (blocks queries during LOAD)
   const config::Config* full_config_;   // Full configuration for CONFIG command
 
+  // Auto-save functionality
+  std::unique_ptr<std::thread> auto_save_thread_;
+  std::atomic<bool> auto_save_running_{false};
+
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;
 #else
@@ -202,6 +206,26 @@ class TcpServer {
    * @brief Set socket options
    */
   bool SetSocketOptions(int socket_fd);
+
+  /**
+   * @brief Start auto-save thread
+   */
+  void StartAutoSave();
+
+  /**
+   * @brief Stop auto-save thread
+   */
+  void StopAutoSave();
+
+  /**
+   * @brief Auto-save thread function
+   */
+  void AutoSaveThread();
+
+  /**
+   * @brief Clean up old dump files based on retention policy
+   */
+  void CleanupOldDumps();
 
   /**
    * @brief Remove connection from active list

@@ -68,8 +68,9 @@ memory:
     width: "narrow"
     lower: false
 
-snapshot:
-  dir: "/var/lib/mygramdb/snapshots"
+dump:
+  dir: "/var/lib/mygramdb/dumps"
+  default_filename: "mygramdb.dmp"
   interval_sec: 600
   retain: 3
 
@@ -147,8 +148,9 @@ JSON 形式での同じ設定：
       "lower": false
     }
   },
-  "snapshot": {
-    "dir": "/var/lib/mygramdb/snapshots",
+  "dump": {
+    "dir": "/var/lib/mygramdb/dumps",
+    "default_filename": "mygramdb.dmp",
     "interval_sec": 600,
     "retain": 3
   },
@@ -345,13 +347,20 @@ normalize:
   lower: false                      # 小文字変換（デフォルト: false）
 ```
 
-## Snapshot セクション
+## Dump セクション
 
-スナップショット永続化設定：
+ダンプ（スナップショット）の永続化設定と自動バックアップ：
 
-- **dir**: スナップショットディレクトリのパス（デフォルト: `/var/lib/mygramdb/snapshots`）
-- **interval_sec**: スナップショット間隔（秒、デフォルト: `600`）
-- **retain**: 保持するスナップショット数（デフォルト: `3`）
+- **dir**: ダンプディレクトリのパス（デフォルト: `/var/lib/mygramdb/dumps`）
+  - ディレクトリが存在しない場合は起動時に自動作成されます
+  - 起動時に書き込み権限が検証されます
+- **default_filename**: 手動`DUMP SAVE`コマンドのデフォルトファイル名（デフォルト: `mygramdb.dmp`）
+- **interval_sec**: 自動保存間隔（秒、デフォルト: `600`、`0` = 無効）
+  - 自動ダンプはタイムスタンプベースのファイル名で保存されます：`auto_YYYYMMDD_HHMMSS.dmp`
+  - Redis RDB永続化と同様の仕組み
+- **retain**: 保持する自動保存ダンプ数（デフォルト: `3`）
+  - 古い自動保存ファイルは自動的にクリーンアップされます
+  - 手動ダンプ（`DUMP SAVE`コマンド経由）はクリーンアップの影響を受けません
 
 ## API セクション
 

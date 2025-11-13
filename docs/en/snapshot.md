@@ -28,15 +28,15 @@ DUMP SAVE <filepath> [WITH STATISTICS]
 **Examples:**
 ```sql
 -- Basic snapshot
-DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP SAVE /var/lib/mygramdb/dumps/mygramdb.dmp
 
 -- Snapshot with statistics
-DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp WITH STATISTICS
+DUMP SAVE /var/lib/mygramdb/dumps/mygramdb.dmp WITH STATISTICS
 ```
 
 **Response:**
 ```
-OK SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK SAVE /var/lib/mygramdb/dumps/mygramdb.dmp
 tables: 2
 size: 1234567 bytes
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
@@ -56,12 +56,12 @@ DUMP LOAD <filepath>
 
 **Examples:**
 ```sql
-DUMP LOAD /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP LOAD /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **Response:**
 ```
-OK LOAD /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK LOAD /var/lib/mygramdb/dumps/mygramdb.dmp
 tables: 2
 documents: 10000
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
@@ -86,12 +86,12 @@ DUMP VERIFY <filepath>
 
 **Examples:**
 ```sql
-DUMP VERIFY /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP VERIFY /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **Response (Success):**
 ```
-OK VERIFY /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK VERIFY /var/lib/mygramdb/dumps/mygramdb.dmp
 status: valid
 crc: verified
 size: verified
@@ -118,12 +118,12 @@ DUMP INFO <filepath>
 
 **Examples:**
 ```sql
-DUMP INFO /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP INFO /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **Response:**
 ```
-OK INFO /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK INFO /var/lib/mygramdb/dumps/mygramdb.dmp
 version: 1
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
 tables: 2
@@ -205,15 +205,33 @@ ERROR Snapshot file version 2 is newer than supported version 1
 
 ## Best Practices
 
-### Regular Backups
+### Automatic Snapshots
 
-Schedule regular snapshots for disaster recovery:
+MygramDB supports automatic periodic snapshots for continuous backup:
+
+```yaml
+# config.yaml
+dump:
+  dir: /var/lib/mygramdb/dumps    # Directory for dump files
+  interval_sec: 600                 # Auto-save every 10 minutes (0 = disabled)
+  retain: 3                         # Keep last 3 auto-saved dumps
+```
+
+**Features:**
+- Automatic snapshots are saved with timestamp-based filenames (`auto_YYYYMMDD_HHMMSS.dmp`)
+- Old auto-saved files are automatically cleaned up based on `retain` count
+- Manual snapshots (via `DUMP SAVE`) are not affected by auto-cleanup
+- Directory permissions are verified on startup
+
+### Manual Backups
+
+You can also schedule manual snapshots for disaster recovery:
 
 ```bash
 # Example: Daily backup script
 #!/bin/bash
 DATE=$(date +%Y%m%d)
-echo "DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb_${DATE}.dmp WITH STATISTICS" | mygram-cli
+echo "DUMP SAVE /var/lib/mygramdb/dumps/manual_${DATE}.dmp WITH STATISTICS" | mygram-cli
 ```
 
 ### Retention Policy
@@ -222,8 +240,8 @@ Keep multiple snapshot versions:
 
 ```yaml
 # config.yaml
-snapshot:
-  dir: /var/lib/mygramdb/snapshots
+dump:
+  dir: /var/lib/mygramdb/dumps
   default_filename: mygramdb.dmp
   interval_sec: 600      # Save every 10 minutes
   retain: 3              # Keep last 3 snapshots
@@ -290,22 +308,27 @@ If snapshot size grows unexpectedly:
 
 ## Configuration
 
-Snapshot behavior can be configured in `config.yaml`:
+Dump behavior can be configured in `config.yaml`:
 
 ```yaml
-snapshot:
-  # Directory for snapshot files
-  dir: /var/lib/mygramdb/snapshots
+dump:
+  # Directory for dump files
+  dir: /var/lib/mygramdb/dumps
 
-  # Default filename when not specified
+  # Default filename when not specified (for manual DUMP SAVE commands)
   default_filename: mygramdb.dmp
 
-  # Automatic snapshot interval (seconds)
-  interval_sec: 600
+  # Automatic dump interval in seconds (0 = disabled)
+  interval_sec: 600  # Auto-save every 10 minutes
 
-  # Number of snapshots to retain (0 = unlimited)
-  retain: 3
+  # Number of auto-saved dumps to retain (manual dumps are not affected)
+  retain: 3  # Keep last 3 auto-saved dumps
 ```
+
+**Startup Checks:**
+- MygramDB verifies dump directory permissions on startup
+- If the directory doesn't exist, it will be created automatically
+- If the directory is not writable, the server will fail to start with an error
 
 ## Replication Recovery
 

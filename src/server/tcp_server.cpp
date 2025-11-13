@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -178,6 +179,11 @@ bool TcpServer::Start() {
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(&TcpServer::AcceptThreadFunc, this);
 
+  // Start auto-save thread if interval is configured
+  if (full_config_ && full_config_->dump.interval_sec > 0) {
+    StartAutoSave();
+  }
+
   spdlog::info("TCP server started on {}:{}", config_.host, actual_port_);
   return true;
 }
@@ -189,6 +195,9 @@ void TcpServer::Stop() {
 
   spdlog::info("Stopping TCP server...");
   should_stop_ = true;
+
+  // Stop auto-save thread
+  StopAutoSave();
 
   // Close server socket to unblock accept()
   if (server_fd_ >= 0) {
@@ -471,6 +480,142 @@ bool TcpServer::SetSocketOptions(int socket_fd) {
 void TcpServer::RemoveConnection(int socket_fd) {
   std::scoped_lock lock(connections_mutex_);
   connection_fds_.erase(socket_fd);
+}
+
+void TcpServer::StartAutoSave() {
+  if (auto_save_running_) {
+    return;
+  }
+
+  if (!full_config_ || full_config_->dump.interval_sec <= 0) {
+    return;
+  }
+
+  spdlog::info("Starting auto-save thread (interval: {}s, retain: {})", full_config_->dump.interval_sec,
+               full_config_->dump.retain);
+
+  auto_save_running_ = true;
+  auto_save_thread_ = std::make_unique<std::thread>(&TcpServer::AutoSaveThread, this);
+}
+
+void TcpServer::StopAutoSave() {
+  if (!auto_save_running_) {
+    return;
+  }
+
+  spdlog::info("Stopping auto-save thread...");
+  auto_save_running_ = false;
+
+  if (auto_save_thread_ && auto_save_thread_->joinable()) {
+    auto_save_thread_->join();
+  }
+
+  spdlog::info("Auto-save thread stopped");
+}
+
+void TcpServer::AutoSaveThread() {
+  const int interval_sec = full_config_->dump.interval_sec;
+  const int check_interval_ms = 1000;  // Check for shutdown every second
+
+  spdlog::info("Auto-save thread started");
+
+  // Calculate next save time
+  auto next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(interval_sec);
+
+  while (auto_save_running_) {
+    auto now = std::chrono::steady_clock::now();
+
+    // Check if it's time to save
+    if (now >= next_save_time) {
+      try {
+        // Generate timestamp-based filename
+        auto timestamp = std::time(nullptr);
+        std::ostringstream filename;
+        filename << "auto_" << std::put_time(std::localtime(&timestamp), "%Y%m%d_%H%M%S") << ".dmp";
+
+        std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
+
+        spdlog::info("Auto-saving dump to: {}", dump_path.string());
+
+        // Get current GTID
+        std::string gtid;
+#ifdef USE_MYSQL
+        if (binlog_reader_ != nullptr) {
+          auto* reader = static_cast<mysql::BinlogReader*>(binlog_reader_);
+          gtid = reader->GetCurrentGTID();
+        }
+#endif
+
+        // Convert table_contexts to format expected by WriteDumpV1
+        std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
+        for (const auto& [table_name, table_ctx] : table_contexts_) {
+          converted_contexts[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};
+        }
+
+        // Perform save using dump_v1 API
+        bool success = storage::dump_v1::WriteDumpV1(dump_path.string(), gtid, *full_config_, converted_contexts);
+
+        if (success) {
+          spdlog::info("Auto-save completed successfully: {}", dump_path.string());
+
+          // Clean up old dumps
+          CleanupOldDumps();
+        } else {
+          spdlog::error("Auto-save failed: {}", dump_path.string());
+        }
+
+      } catch (const std::exception& e) {
+        spdlog::error("Exception during auto-save: {}", e.what());
+      }
+
+      // Schedule next save
+      next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(interval_sec);
+    }
+
+    // Sleep for check interval
+    std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
+  }
+
+  spdlog::info("Auto-save thread exiting");
+}
+
+void TcpServer::CleanupOldDumps() {
+  if (!full_config_ || full_config_->dump.retain <= 0) {
+    return;
+  }
+
+  try {
+    std::filesystem::path dump_path(dump_dir_);
+
+    if (!std::filesystem::exists(dump_path) || !std::filesystem::is_directory(dump_path)) {
+      return;
+    }
+
+    // Collect all .dmp files with their modification times
+    std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> dump_files;
+
+    for (const auto& entry : std::filesystem::directory_iterator(dump_path)) {
+      if (entry.is_regular_file() && entry.path().extension() == ".dmp") {
+        // Only manage auto-saved files (starting with "auto_")
+        if (entry.path().filename().string().rfind("auto_", 0) == 0) {
+          dump_files.emplace_back(entry.path(), std::filesystem::last_write_time(entry));
+        }
+      }
+    }
+
+    // Sort by modification time (newest first)
+    std::sort(dump_files.begin(), dump_files.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    // Delete old files beyond retain count
+    const size_t retain_count = static_cast<size_t>(full_config_->dump.retain);
+    for (size_t i = retain_count; i < dump_files.size(); ++i) {
+      spdlog::info("Removing old dump file: {}", dump_files[i].first.string());
+      std::filesystem::remove(dump_files[i].first);
+    }
+
+  } catch (const std::exception& e) {
+    spdlog::error("Exception during dump cleanup: {}", e.what());
+  }
 }
 
 }  // namespace mygramdb::server

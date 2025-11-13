@@ -28,15 +28,15 @@ DUMP SAVE <filepath> [WITH STATISTICS]
 **例:**
 ```sql
 -- 基本的なスナップショット
-DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP SAVE /var/lib/mygramdb/dumps/mygramdb.dmp
 
 -- 統計情報付きスナップショット
-DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp WITH STATISTICS
+DUMP SAVE /var/lib/mygramdb/dumps/mygramdb.dmp WITH STATISTICS
 ```
 
 **レスポンス:**
 ```
-OK SAVE /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK SAVE /var/lib/mygramdb/dumps/mygramdb.dmp
 tables: 2
 size: 1234567 bytes
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
@@ -56,12 +56,12 @@ DUMP LOAD <filepath>
 
 **例:**
 ```sql
-DUMP LOAD /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP LOAD /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **レスポンス:**
 ```
-OK LOAD /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK LOAD /var/lib/mygramdb/dumps/mygramdb.dmp
 tables: 2
 documents: 10000
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
@@ -86,12 +86,12 @@ DUMP VERIFY <filepath>
 
 **例:**
 ```sql
-DUMP VERIFY /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP VERIFY /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **レスポンス（成功）:**
 ```
-OK VERIFY /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK VERIFY /var/lib/mygramdb/dumps/mygramdb.dmp
 status: valid
 crc: verified
 size: verified
@@ -118,12 +118,12 @@ DUMP INFO <filepath>
 
 **例:**
 ```sql
-DUMP INFO /var/lib/mygramdb/snapshots/mygramdb.dmp
+DUMP INFO /var/lib/mygramdb/dumps/mygramdb.dmp
 ```
 
 **レスポンス:**
 ```
-OK INFO /var/lib/mygramdb/snapshots/mygramdb.dmp
+OK INFO /var/lib/mygramdb/dumps/mygramdb.dmp
 version: 1
 gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
 tables: 2
@@ -205,15 +205,33 @@ ERROR Snapshot file version 2 is newer than supported version 1
 
 ## ベストプラクティス
 
-### 定期的なバックアップ
+### 自動スナップショット
 
-災害復旧のために定期的なスナップショットをスケジュールします：
+MygramDBは継続的なバックアップのための自動定期スナップショットをサポートしています：
+
+```yaml
+# config.yaml
+dump:
+  dir: /var/lib/mygramdb/dumps    # ダンプファイルのディレクトリ
+  interval_sec: 600                 # 10分ごとに自動保存（0 = 無効）
+  retain: 3                         # 最新の3つの自動保存ダンプを保持
+```
+
+**機能:**
+- 自動スナップショットはタイムスタンプベースのファイル名（`auto_YYYYMMDD_HHMMSS.dmp`）で保存されます
+- `retain`カウントに基づいて古い自動保存ファイルが自動的にクリーンアップされます
+- 手動スナップショット（`DUMP SAVE`経由）は自動クリーンアップの影響を受けません
+- ディレクトリのパーミッションは起動時に検証されます
+
+### 手動バックアップ
+
+災害復旧のために手動スナップショットをスケジュールすることもできます：
 
 ```bash
 # 例: 日次バックアップスクリプト
 #!/bin/bash
 DATE=$(date +%Y%m%d)
-echo "DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb_${DATE}.dmp WITH STATISTICS" | mygram-cli
+echo "DUMP SAVE /var/lib/mygramdb/dumps/manual_${DATE}.dmp WITH STATISTICS" | mygram-cli
 ```
 
 ### 保持ポリシー
@@ -222,8 +240,8 @@ echo "DUMP SAVE /var/lib/mygramdb/snapshots/mygramdb_${DATE}.dmp WITH STATISTICS
 
 ```yaml
 # config.yaml
-snapshot:
-  dir: /var/lib/mygramdb/snapshots
+dump:
+  dir: /var/lib/mygramdb/dumps
   default_filename: mygramdb.dmp
   interval_sec: 600      # 10分ごとに保存
   retain: 3              # 最新の3つを保持
@@ -290,22 +308,27 @@ echo "DUMP INFO mygramdb.dmp" | mygram-cli
 
 ## 設定
 
-スナップショットの動作は `config.yaml` で設定できます：
+ダンプの動作は `config.yaml` で設定できます：
 
 ```yaml
-snapshot:
-  # スナップショットファイルのディレクトリ
-  dir: /var/lib/mygramdb/snapshots
+dump:
+  # ダンプファイルのディレクトリ
+  dir: /var/lib/mygramdb/dumps
 
-  # 指定されない場合のデフォルトファイル名
+  # 指定されない場合のデフォルトファイル名（手動DUMP SAVEコマンド用）
   default_filename: mygramdb.dmp
 
-  # 自動スナップショット間隔（秒）
-  interval_sec: 600
+  # 自動ダンプ間隔（秒、0 = 無効）
+  interval_sec: 600  # 10分ごとに自動保存
 
-  # 保持するスナップショット数（0 = 無制限）
-  retain: 3
+  # 保持する自動保存ダンプ数（手動ダンプは影響を受けません）
+  retain: 3  # 最新の3つの自動保存ダンプを保持
 ```
+
+**起動時チェック:**
+- MygramDBは起動時にダンプディレクトリの権限を検証します
+- ディレクトリが存在しない場合は自動的に作成されます
+- ディレクトリが書き込み不可の場合、サーバーはエラーで起動に失敗します
 
 ## レプリケーションリカバリ
 

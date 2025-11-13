@@ -68,8 +68,9 @@ memory:
     width: "narrow"
     lower: false
 
-snapshot:
-  dir: "/var/lib/mygramdb/snapshots"
+dump:
+  dir: "/var/lib/mygramdb/dumps"
+  default_filename: "mygramdb.dmp"
   interval_sec: 600
   retain: 3
 
@@ -151,8 +152,9 @@ The same configuration in JSON format:
       "lower": false
     }
   },
-  "snapshot": {
-    "dir": "/var/lib/mygramdb/snapshots",
+  "dump": {
+    "dir": "/var/lib/mygramdb/dumps",
+    "default_filename": "mygramdb.dmp",
     "interval_sec": 600,
     "retain": 3
   },
@@ -354,13 +356,20 @@ normalize:
   lower: false                      # Lowercase conversion (default: false)
 ```
 
-## Snapshot Section
+## Dump Section
 
-Snapshot persistence settings:
+Dump (snapshot) persistence settings with automatic backup:
 
-- **dir**: Snapshot directory path (default: `/var/lib/mygramdb/snapshots`)
-- **interval_sec**: Snapshot interval in seconds (default: `600`)
-- **retain**: Number of snapshots to retain (default: `3`)
+- **dir**: Dump directory path (default: `/var/lib/mygramdb/dumps`)
+  - Directory is created automatically on startup if it doesn't exist
+  - Write permissions are verified at startup
+- **default_filename**: Default filename for manual `DUMP SAVE` commands (default: `mygramdb.dmp`)
+- **interval_sec**: Auto-save interval in seconds (default: `600`, `0` = disabled)
+  - Automatic dumps are saved with timestamp-based filenames: `auto_YYYYMMDD_HHMMSS.dmp`
+  - Similar to Redis RDB persistence
+- **retain**: Number of auto-saved dumps to retain (default: `3`)
+  - Older auto-saved files are automatically cleaned up
+  - Manual dumps (via `DUMP SAVE` command) are not affected by cleanup
 
 ## API Section
 

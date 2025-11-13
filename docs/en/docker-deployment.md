@@ -254,7 +254,7 @@ curl http://localhost:11016/metrics
 docker exec mygramdb_mysql mysqldump -u root -p${MYSQL_ROOT_PASSWORD} mydb > backup.sql
 
 # Backup MygramDB snapshot
-docker cp mygramdb:/var/lib/mygramdb/snapshots ./backup-snapshots/
+docker cp mygramdb:/var/lib/mygramdb/dumps ./backup-dumps/
 ```
 
 ### Restore
@@ -264,7 +264,7 @@ docker cp mygramdb:/var/lib/mygramdb/snapshots ./backup-snapshots/
 docker exec -i mygramdb_mysql mysql -u root -p${MYSQL_ROOT_PASSWORD} mydb < backup.sql
 
 # Restore MygramDB snapshot
-docker cp ./backup-snapshots/ mygramdb:/var/lib/mygramdb/snapshots/
+docker cp ./backup-dumps/ mygramdb:/var/lib/mygramdb/dumps/
 docker-compose restart mygramdb
 ```
 

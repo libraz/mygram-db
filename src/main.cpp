@@ -19,6 +19,8 @@
 #include <spdlog/spdlog.h>
 
 #include <csignal>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -184,6 +186,33 @@ int main(int argc, char* argv[]) {
 
   if (config.tables.empty()) {
     spdlog::error("No tables configured");
+    return 1;
+  }
+
+  // Verify dump directory permissions
+  try {
+    std::filesystem::path dump_dir(config.dump.dir);
+
+    // Create directory if it doesn't exist
+    if (!std::filesystem::exists(dump_dir)) {
+      spdlog::info("Creating dump directory: {}", config.dump.dir);
+      std::filesystem::create_directories(dump_dir);
+    }
+
+    // Check if directory is writable by attempting to create a test file
+    std::filesystem::path test_file = dump_dir / ".write_test";
+    std::ofstream test_stream(test_file);
+    if (!test_stream.is_open()) {
+      spdlog::error("Dump directory is not writable: {}", config.dump.dir);
+      spdlog::error("Please check directory permissions");
+      return 1;
+    }
+    test_stream.close();
+    std::filesystem::remove(test_file);
+
+    spdlog::info("Dump directory verified: {}", config.dump.dir);
+  } catch (const std::exception& e) {
+    spdlog::error("Failed to verify dump directory: {}", e.what());
     return 1;
   }
 

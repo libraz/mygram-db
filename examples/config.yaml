@@ -137,11 +137,18 @@ memory:
     width: "narrow"                 # Width conversion: "keep", "narrow", "wide" (default: narrow)
     lower: false                    # Lowercase conversion (default: false)
 
-# Snapshot Persistence
-snapshot:
-  dir: "/var/lib/mygramdb/snapshots"  # Snapshot directory path (default: /var/lib/mygramdb/snapshots)
-  interval_sec: 600                 # Snapshot interval in seconds (default: 600)
-  retain: 3                         # Number of snapshots to retain (default: 3)
+# Dump Persistence (Automatic Backup)
+dump:
+  dir: "/var/lib/mygramdb/dumps"    # Dump directory path (default: /var/lib/mygramdb/dumps)
+                                     # - Created automatically if doesn't exist
+                                     # - Write permissions verified at startup
+  default_filename: "mygramdb.dmp"  # Default filename for manual DUMP SAVE (default: mygramdb.dmp)
+  interval_sec: 600                 # Auto-save interval in seconds (0 = disabled, default: 600)
+                                     # - Auto-saved files: auto_YYYYMMDD_HHMMSS.dmp
+                                     # - Similar to Redis RDB persistence
+  retain: 3                         # Number of auto-saved dumps to retain (default: 3)
+                                     # - Older auto-saved files are cleaned up automatically
+                                     # - Manual dumps (via DUMP SAVE) are not affected
 
 # API Server Configuration
 api:

@@ -103,3 +103,20 @@ target_link_libraries(gtid_dump_integration_test
 )
 
 gtest_discover_tests(gtid_dump_integration_test)
+
+# Dump Auto-Save tests
+
+add_executable(dump_auto_save_test
+  dump_auto_save_test.cpp
+)
+
+target_link_libraries(dump_auto_save_test
+  mygramdb_server
+  mygramdb_storage
+  mygramdb_index
+  mygramdb_query
+  mygramdb_mysql
+  GTest::gtest_main
+)
+
+gtest_discover_tests(dump_auto_save_test)

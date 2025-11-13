@@ -86,8 +86,9 @@
       "lower": false
     }
   },
-  "snapshot": {
-    "dir": "/var/lib/mygramdb/snapshots",
+  "dump": {
+    "dir": "/var/lib/mygramdb/dumps",
+    "default_filename": "mygramdb.dmp",
     "interval_sec": 600,
     "retain": 3
   },
