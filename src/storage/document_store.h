@@ -204,12 +204,28 @@ class DocumentStore {
   [[nodiscard]] bool SaveToFile(const std::string& filepath, const std::string& replication_gtid = "") const;
 
   /**
+   * @brief Serialize document store to output stream
+   * @param output_stream Output stream
+   * @param replication_gtid Optional GTID position for replication (empty if not using replication)
+   * @return true if successful
+   */
+  [[nodiscard]] bool SaveToStream(std::ostream& output_stream, const std::string& replication_gtid = "") const;
+
+  /**
    * @brief Deserialize document store from file
    * @param filepath Input file path
    * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
    * @return true if successful
    */
   [[nodiscard]] bool LoadFromFile(const std::string& filepath, std::string* replication_gtid = nullptr);
+
+  /**
+   * @brief Deserialize document store from input stream
+   * @param input_stream Input stream
+   * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
+   * @return true if successful
+   */
+  [[nodiscard]] bool LoadFromStream(std::istream& input_stream, std::string* replication_gtid = nullptr);
 
  private:
   // Next DocID to assign

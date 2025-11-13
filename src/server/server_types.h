@@ -1,0 +1,69 @@
+/**
+ * @file server_types.h
+ * @brief Common server type definitions
+ */
+
+#pragma once
+
+#include <atomic>
+#include <memory>
+#include <string>
+#include <unordered_map>
+
+#include "config/config.h"
+#include "index/index.h"
+#include "server/server_stats.h"
+#include "storage/document_store.h"
+
+#ifdef USE_MYSQL
+namespace mygramdb::mysql {
+class BinlogReader;
+}  // namespace mygramdb::mysql
+#endif
+
+namespace mygramdb::server {
+
+/**
+ * @brief Per-connection context
+ */
+struct ConnectionContext {
+  int client_fd = -1;
+  bool debug_mode = false;  // Debug mode flag
+};
+
+/**
+ * @brief Table context managing resources for a single table
+ */
+struct TableContext {
+  std::string name;
+  config::TableConfig config;
+  std::unique_ptr<index::Index> index;
+  std::unique_ptr<storage::DocumentStore> doc_store;
+  // Note: BinlogReader is shared across all tables (single GTID stream)
+};
+
+/**
+ * @brief Context passed to command handlers
+ *
+ * Contains all necessary dependencies and state for command execution.
+ * Reference members are intentional: this struct does not own the data,
+ * it provides access to objects managed by TCPServer.
+ */
+struct HandlerContext {
+  // NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members) - Intentional design: context references external
+  // state
+  std::unordered_map<std::string, TableContext*>& table_contexts;
+  ServerStats& stats;
+  const config::Config* full_config;
+  std::string dump_dir;
+  std::atomic<bool>& loading;
+  std::atomic<bool>& read_only;
+  // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
+#ifdef USE_MYSQL
+  mysql::BinlogReader* binlog_reader;
+#else
+  void* binlog_reader;
+#endif
+};
+
+}  // namespace mygramdb::server

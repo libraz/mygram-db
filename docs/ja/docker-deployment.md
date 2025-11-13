@@ -292,7 +292,7 @@ docker run --rm mygramdb:latest --help
 # 設定をテスト
 docker-compose exec mygramdb /usr/local/bin/entrypoint.sh test-config
 
-# または環境変数でテスト
+# または環境変数でテスト（未指定の値はデフォルトが使用されます）
 docker run --rm -e MYSQL_HOST=testdb -e TABLE_NAME=test mygramdb:latest test-config
 
 # 生成された設定を表示
@@ -340,8 +340,8 @@ nginx または HAProxy を使用して複数の MygramDB インスタンス間�
 ```nginx
 upstream mygramdb_backend {
     server localhost:11016;
-    server localhost:11312;
-    server localhost:11313;
+    server localhost:11017;
+    server localhost:11018;
 }
 
 server {

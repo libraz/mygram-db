@@ -192,7 +192,7 @@ class MygramClient {
    *
    * @param table Table name
    * @param query Search query text
-   * @param limit Maximum number of results to return (default: 1000)
+   * @param limit Maximum number of results to return (default: 100)
    * @param offset Result offset for pagination (default: 0)
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms

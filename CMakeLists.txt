@@ -93,6 +93,7 @@ endif()
 
 # Find packages
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # MySQL Client Library detection
 find_package(PkgConfig QUIET)

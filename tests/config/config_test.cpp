@@ -76,10 +76,10 @@ TEST(ConfigTest, LoadValidConfig) {
   EXPECT_EQ(config.memory.normalize.width, "narrow");
   EXPECT_FALSE(config.memory.normalize.lower);
 
-  // Snapshot config
-  EXPECT_EQ(config.snapshot.dir, "/tmp/test_snapshots");
-  EXPECT_EQ(config.snapshot.interval_sec, 300);
-  EXPECT_EQ(config.snapshot.retain, 2);
+  // Dump config
+  EXPECT_EQ(config.dump.dir, "/tmp/test_dumps");
+  EXPECT_EQ(config.dump.interval_sec, 300);
+  EXPECT_EQ(config.dump.retain, 2);
 
   // API config
   EXPECT_EQ(config.api.tcp.bind, "127.0.0.1");

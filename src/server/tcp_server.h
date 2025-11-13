@@ -18,6 +18,7 @@
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/server_stats.h"
+#include "server/server_types.h"
 #include "server/thread_pool.h"
 #include "storage/document_store.h"
 
@@ -29,10 +30,14 @@ class BinlogReader;
 
 namespace mygramdb::server {
 
+// Forward declaration
+class CommandHandler;
+
 constexpr uint16_t kDefaultPort = 11016;       // memcached default port
 constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
 constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
 constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
+constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queries (range: 5-1000)
 
 /**
  * @brief TCP server configuration
@@ -44,26 +49,7 @@ struct ServerConfig {
   int worker_threads = 0;  // Number of worker threads (0 = CPU count)
   int recv_buffer_size = kDefaultRecvBufferSize;
   int send_buffer_size = kDefaultSendBufferSize;
-  int default_limit = 1000;  // Default LIMIT for SEARCH queries (range: 5-1000)
-};
-
-/**
- * @brief Per-connection context
- */
-struct ConnectionContext {
-  int client_fd = -1;
-  bool debug_mode = false;  // Debug mode flag
-};
-
-/**
- * @brief Table context managing resources for a single table
- */
-struct TableContext {
-  std::string name;
-  config::TableConfig config;
-  std::unique_ptr<index::Index> index;
-  std::unique_ptr<storage::DocumentStore> doc_store;
-  // Note: BinlogReader is shared across all tables (single GTID stream)
+  int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
 };
 
 /**
@@ -79,12 +65,12 @@ class TcpServer {
    * @brief Construct TCP server
    * @param config Server configuration
    * @param table_contexts Map of table name to TableContext pointer
-   * @param snapshot_dir Snapshot directory path
+   * @param dump_dir Dump directory path
    * @param full_config Full application configuration (for CONFIG command)
    * @param binlog_reader Optional BinlogReader for replication status
    */
   TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-            std::string snapshot_dir = "./snapshots", const config::Config* full_config = nullptr,
+            std::string dump_dir = "./dumps", const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
             mysql::BinlogReader* binlog_reader = nullptr
 #else
@@ -172,7 +158,7 @@ class TcpServer {
   mutable std::mutex contexts_mutex_;
 
   std::string last_error_;
-  std::string snapshot_dir_;            // Snapshot directory
+  std::string dump_dir_;                // Dump directory
   std::atomic<bool> read_only_{false};  // Read-only mode flag
   std::atomic<bool> loading_{false};    // Loading mode flag (blocks queries during LOAD)
   const config::Config* full_config_;   // Full configuration for CONFIG command
@@ -182,6 +168,17 @@ class TcpServer {
 #else
   void* binlog_reader_;
 #endif
+
+  // Command handler context (must outlive handlers)
+  std::unique_ptr<HandlerContext> handler_context_;
+
+  // Command handlers
+  std::unique_ptr<CommandHandler> search_handler_;
+  std::unique_ptr<CommandHandler> document_handler_;
+  std::unique_ptr<CommandHandler> dump_handler_;
+  std::unique_ptr<CommandHandler> admin_handler_;
+  std::unique_ptr<CommandHandler> replication_handler_;
+  std::unique_ptr<CommandHandler> debug_handler_;
 
   /**
    * @brief Accept thread function
@@ -200,70 +197,6 @@ class TcpServer {
    * @return Response string
    */
   std::string ProcessRequest(const std::string& request, ConnectionContext& ctx);
-
-  /**
-   * @brief Format SEARCH response
-   * @param results Search results (already sorted and paginated)
-   * @param total_results Total number of results before pagination
-   * @param doc_store Document store for retrieving primary keys
-   * @param debug_info Optional debug information
-   * @return Formatted response
-   */
-  std::string FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
-                                   storage::DocumentStore* doc_store, const query::DebugInfo* debug_info = nullptr);
-
-  /**
-   * @brief Format COUNT response
-   * @param count Result count
-   * @param debug_info Optional debug information
-   * @return Formatted response
-   */
-  static std::string FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info = nullptr);
-
-  /**
-   * @brief Format GET response
-   */
-  static std::string FormatGetResponse(const std::optional<storage::Document>& doc);
-
-  /**
-   * @brief Format INFO response
-   */
-  std::string FormatInfoResponse();
-
-  /**
-   * @brief Format SAVE response
-   */
-  static std::string FormatSaveResponse(const std::string& filepath);
-
-  /**
-   * @brief Format LOAD response
-   */
-  static std::string FormatLoadResponse(const std::string& filepath);
-
-  /**
-   * @brief Format REPLICATION STATUS response
-   */
-  std::string FormatReplicationStatusResponse();
-
-  /**
-   * @brief Format REPLICATION STOP response
-   */
-  static std::string FormatReplicationStopResponse();
-
-  /**
-   * @brief Format REPLICATION START response
-   */
-  static std::string FormatReplicationStartResponse();
-
-  /**
-   * @brief Format CONFIG response
-   */
-  std::string FormatConfigResponse();
-
-  /**
-   * @brief Format error response
-   */
-  static std::string FormatError(const std::string& message);
 
   /**
    * @brief Set socket options

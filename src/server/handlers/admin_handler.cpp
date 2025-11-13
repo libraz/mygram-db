@@ -1,0 +1,27 @@
+/**
+ * @file admin_handler.cpp
+ * @brief Handler for administrative commands
+ */
+
+#include "server/handlers/admin_handler.h"
+
+namespace mygramdb::server {
+
+std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
+  (void)conn_ctx;  // Unused for admin commands
+
+  switch (query.type) {
+    case query::QueryType::INFO:
+      return ResponseFormatter::FormatInfoResponse(ctx_.table_contexts, ctx_.stats, ctx_.binlog_reader);
+
+    case query::QueryType::CONFIG:
+      return ResponseFormatter::FormatConfigResponse(ctx_.full_config, ctx_.stats.GetActiveConnections(),
+                                                     0,  // max_connections (TODO: pass from server config)
+                                                     ctx_.read_only, ctx_.stats.GetUptimeSeconds());
+
+    default:
+      return ResponseFormatter::FormatError("Invalid query type for AdminHandler");
+  }
+}
+
+}  // namespace mygramdb::server

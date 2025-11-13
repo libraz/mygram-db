@@ -66,11 +66,9 @@ class BinlogReader {
   // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default binlog
   // reader settings
   struct Config {
-    std::string start_gtid;                 // Starting GTID
-    size_t queue_size = 10000;              // Maximum queue size
-    int reconnect_delay_ms = 1000;          // Reconnect delay in milliseconds
-    std::string state_file_path;            // Path to GTID state file (empty = no persistence)
-    int state_write_interval_events = 100;  // Write state every N events
+    std::string start_gtid;         // Starting GTID
+    size_t queue_size = 10000;      // Maximum queue size
+    int reconnect_delay_ms = 1000;  // Reconnect delay in milliseconds
   };
   // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 

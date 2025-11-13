@@ -225,16 +225,16 @@ Key metrics:
 
 ### 4. Backup Strategy
 
-Use `SAVE` command to create snapshots:
+Use `DUMP SAVE` command to create snapshots:
 
 ```
-SAVE /path/to/snapshot.bin
+DUMP SAVE /path/to/snapshot.dmp
 ```
 
 Schedule regular snapshots:
 ```bash
 # Daily snapshot
-0 2 * * * echo "SAVE /backup/mygramdb-$(date +\%Y\%m\%d).bin" | mygram-cli
+0 2 * * * echo "DUMP SAVE /backup/mygramdb-$(date +\%Y\%m\%d).dmp" | mygram-cli
 ```
 
 ## Troubleshooting

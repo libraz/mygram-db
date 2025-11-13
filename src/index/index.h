@@ -192,11 +192,25 @@ class Index {
   [[nodiscard]] bool SaveToFile(const std::string& filepath) const;
 
   /**
+   * @brief Serialize index to output stream
+   * @param output_stream Output stream
+   * @return true if successful
+   */
+  [[nodiscard]] bool SaveToStream(std::ostream& output_stream) const;
+
+  /**
    * @brief Deserialize index from file
    * @param filepath Input file path
    * @return true if successful
    */
   [[nodiscard]] bool LoadFromFile(const std::string& filepath);
+
+  /**
+   * @brief Deserialize index from input stream
+   * @param input_stream Input stream
+   * @return true if successful
+   */
+  [[nodiscard]] bool LoadFromStream(std::istream& input_stream);
 
   /**
    * @brief Get posting list for term (read-only)

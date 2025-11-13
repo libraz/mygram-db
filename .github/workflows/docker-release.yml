@@ -99,8 +99,10 @@ jobs:
           -e MYSQL_PASSWORD=your_password \\
           -e MYSQL_DATABASE=mydb \\
           -e TABLE_NAME=articles \\
+          -e TABLE_PRIMARY_KEY=id \\
+          -e TABLE_TEXT_COLUMN=content \\
+          -e TABLE_NGRAM_SIZE=2 \\
           -e REPLICATION_SERVER_ID=12345 \\
-          -v mygramdb-data:/var/lib/mygramdb \\
           ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${GITHUB_REF#refs/tags/}
 
         # Or using custom config file
@@ -110,7 +112,6 @@ jobs:
         docker run -d --name mygramdb \\
           -p 11016:11016 \\
           -v \$(pwd)/config.yaml:/etc/mygramdb/config.yaml:ro \\
-          -v mygramdb-data:/var/lib/mygramdb \\
           -e SKIP_CONFIG_GEN=true \\
           ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${GITHUB_REF#refs/tags/} \\
           mygramdb -c /etc/mygramdb/config.yaml

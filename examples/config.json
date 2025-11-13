@@ -70,7 +70,6 @@
     "enable": true,
     "server_id": 12345,
     "start_from": "snapshot",
-    "state_file": "./mygramdb_replication.state",
     "queue_size": 10000,
     "reconnect_backoff_min_ms": 500,
     "reconnect_backoff_max_ms": 10000

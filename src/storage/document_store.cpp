@@ -49,14 +49,14 @@ constexpr uint8_t kTypeIndexDouble = 11;
  * - This is type-safe as we're writing the exact binary representation
  *
  * @tparam T Type of data to write
- * @param ofs Output file stream
+ * @param output_stream Output stream
  * @param data Reference to data to write
  */
 template <typename T>
-inline void WriteBinary(std::ofstream& ofs, const T& data) {
+inline void WriteBinary(std::ostream& output_stream, const T& data) {
   // Suppressing clang-tidy warning for standard binary I/O pattern
-  ofs.write(reinterpret_cast<const char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-            sizeof(T));
+  output_stream.write(reinterpret_cast<const char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                      sizeof(T));
 }
 
 /**
@@ -72,14 +72,14 @@ inline void WriteBinary(std::ofstream& ofs, const T& data) {
  * - This is type-safe as we're reading the exact binary representation
  *
  * @tparam T Type of data to read
- * @param ifs Input file stream
+ * @param input_stream Input stream
  * @param data Reference to data to read into
  */
 template <typename T>
-inline void ReadBinary(std::ifstream& ifs, T& data) {
+inline void ReadBinary(std::istream& input_stream, T& data) {
   // Suppressing clang-tidy warning for standard binary I/O pattern
-  ifs.read(reinterpret_cast<char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-           sizeof(T));
+  input_stream.read(reinterpret_cast<char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                    sizeof(T));
 }
 
 }  // namespace
@@ -625,6 +625,295 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading document store: {}", e.what());
+    return false;
+  }
+}
+
+bool DocumentStore::SaveToStream(std::ostream& output_stream, const std::string& replication_gtid) const {
+  try {
+    // File format:
+    // [4 bytes: magic "MGDS"] [4 bytes: version] [4 bytes: next_doc_id]
+    // [4 bytes: gtid_length] [gtid_length bytes: GTID string]
+    // [8 bytes: doc_count] [doc_id -> pk mappings...]
+    // [filters...]
+
+    // Write magic number
+    output_stream.write("MGDS", 4);
+
+    // Write version
+    uint32_t version = 1;
+    WriteBinary(output_stream, version);
+
+    uint32_t next_id = 0;
+    uint64_t doc_count = 0;
+
+    // Lock scope: read data structures
+    {
+      std::shared_lock lock(mutex_);
+
+      // Write next_doc_id
+      next_id = static_cast<uint32_t>(next_doc_id_);
+      WriteBinary(output_stream, next_id);
+
+      // Write GTID (for replication position)
+      auto gtid_len = static_cast<uint32_t>(replication_gtid.size());
+      WriteBinary(output_stream, gtid_len);
+      if (gtid_len > 0) {
+        output_stream.write(replication_gtid.data(), static_cast<std::streamsize>(gtid_len));
+      }
+
+      // Write document count
+      doc_count = doc_id_to_pk_.size();
+      WriteBinary(output_stream, doc_count);
+
+      // Write doc_id -> pk mappings
+      for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
+        // Write doc_id
+        auto doc_id_value = static_cast<uint32_t>(doc_id);
+        WriteBinary(output_stream, doc_id_value);
+
+        // Write pk length and pk
+        auto pk_len = static_cast<uint32_t>(primary_key_str.size());
+        WriteBinary(output_stream, pk_len);
+        output_stream.write(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
+
+        // Write filters for this document
+        auto filter_it = doc_filters_.find(doc_id);
+        uint32_t filter_count = 0;
+        if (filter_it != doc_filters_.end()) {
+          filter_count = static_cast<uint32_t>(filter_it->second.size());
+        }
+        WriteBinary(output_stream, filter_count);
+
+        if (filter_count > 0) {
+          for (const auto& [name, value] : filter_it->second) {
+            // Write filter name
+            auto name_len = static_cast<uint32_t>(name.size());
+            WriteBinary(output_stream, name_len);
+            output_stream.write(name.data(), static_cast<std::streamsize>(name_len));
+
+            // Write filter type and value
+            auto type_idx = static_cast<uint8_t>(value.index());
+            WriteBinary(output_stream, type_idx);
+
+            std::visit(
+                [&output_stream](const auto& filter_value) {
+                  using T = std::decay_t<decltype(filter_value)>;
+                  if constexpr (std::is_same_v<T, std::monostate>) {
+                    // std::monostate (NULL) has no data to write
+                  } else if constexpr (std::is_same_v<T, std::string>) {
+                    auto str_len = static_cast<uint32_t>(filter_value.size());
+                    WriteBinary(output_stream, str_len);
+                    output_stream.write(filter_value.data(), static_cast<std::streamsize>(str_len));
+                  } else {
+                    WriteBinary(output_stream, filter_value);
+                  }
+                },
+                value);
+          }
+        }
+      }
+    }
+
+    if (!output_stream.good()) {
+      spdlog::error("Stream error while saving document store");
+      return false;
+    }
+
+    spdlog::debug("Saved document store to stream: {} documents", doc_count);
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while saving document store to stream: {}", e.what());
+    return false;
+  }
+}
+
+bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* replication_gtid) {
+  try {
+    // Read and verify magic number
+    std::array<char, 4> magic{};
+    input_stream.read(magic.data(), magic.size());
+    if (std::memcmp(magic.data(), "MGDS", 4) != 0) {
+      spdlog::error("Invalid document store stream format (bad magic number)");
+      return false;
+    }
+
+    // Read version
+    uint32_t version = 0;
+    ReadBinary(input_stream, version);
+    if (version != 1) {
+      spdlog::error("Unsupported document store stream version: {}", version);
+      return false;
+    }
+
+    // Read next_doc_id
+    uint32_t next_id = 0;
+    ReadBinary(input_stream, next_id);
+    next_doc_id_ = static_cast<DocId>(next_id);
+
+    // Read GTID (for replication position)
+    uint32_t gtid_len = 0;
+    ReadBinary(input_stream, gtid_len);
+    if (gtid_len > 0) {
+      std::string gtid(gtid_len, '\0');
+      input_stream.read(gtid.data(), static_cast<std::streamsize>(gtid_len));
+      if (replication_gtid != nullptr) {
+        *replication_gtid = gtid;
+      }
+    } else if (replication_gtid != nullptr) {
+      replication_gtid->clear();
+    }
+
+    // Read document count
+    uint64_t doc_count = 0;
+    ReadBinary(input_stream, doc_count);
+
+    // Load into new maps to minimize lock time
+    std::unordered_map<DocId, std::string> new_doc_id_to_pk;
+    std::unordered_map<std::string, DocId> new_pk_to_doc_id;
+    std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
+
+    // Read doc_id -> pk mappings and filters
+    for (uint64_t i = 0; i < doc_count; ++i) {
+      // Read doc_id
+      uint32_t doc_id_value = 0;
+      ReadBinary(input_stream, doc_id_value);
+      auto doc_id = static_cast<DocId>(doc_id_value);
+
+      // Read pk length and pk
+      uint32_t pk_len = 0;
+      ReadBinary(input_stream, pk_len);
+
+      std::string primary_key_str(pk_len, '\0');
+      input_stream.read(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
+
+      new_doc_id_to_pk[doc_id] = primary_key_str;
+      new_pk_to_doc_id[primary_key_str] = doc_id;
+
+      // Read filters
+      uint32_t filter_count = 0;
+      ReadBinary(input_stream, filter_count);
+
+      if (filter_count > 0) {
+        std::unordered_map<std::string, FilterValue> filters;
+
+        for (uint32_t j = 0; j < filter_count; ++j) {
+          // Read filter name
+          uint32_t name_len = 0;
+          ReadBinary(input_stream, name_len);
+
+          std::string name(name_len, '\0');
+          input_stream.read(name.data(), static_cast<std::streamsize>(name_len));
+
+          // Read filter type
+          uint8_t type_idx = 0;
+          ReadBinary(input_stream, type_idx);
+
+          // Read filter value based on type
+          FilterValue value;
+          switch (type_idx) {
+            case kTypeIndexMonostate: {  // std::monostate (NULL)
+              value = std::monostate{};
+              break;
+            }
+            case kTypeIndexBool: {  // bool
+              bool bool_value = false;
+              ReadBinary(input_stream, bool_value);
+              value = bool_value;
+              break;
+            }
+            case kTypeIndexInt8: {  // int8_t
+              int8_t int8_value = 0;
+              ReadBinary(input_stream, int8_value);
+              value = int8_value;
+              break;
+            }
+            case kTypeIndexUInt8: {  // uint8_t
+              uint8_t uint8_value = 0;
+              ReadBinary(input_stream, uint8_value);
+              value = uint8_value;
+              break;
+            }
+            case kTypeIndexInt16: {  // int16_t
+              int16_t int16_value = 0;
+              ReadBinary(input_stream, int16_value);
+              value = int16_value;
+              break;
+            }
+            case kTypeIndexUInt16: {  // uint16_t
+              uint16_t uint16_value = 0;
+              ReadBinary(input_stream, uint16_value);
+              value = uint16_value;
+              break;
+            }
+            case kTypeIndexInt32: {  // int32_t
+              int32_t int32_value = 0;
+              ReadBinary(input_stream, int32_value);
+              value = int32_value;
+              break;
+            }
+            case kTypeIndexUInt32: {  // uint32_t
+              uint32_t uint32_value = 0;
+              ReadBinary(input_stream, uint32_value);
+              value = uint32_value;
+              break;
+            }
+            case kTypeIndexInt64: {  // int64_t
+              int64_t int64_value = 0;
+              ReadBinary(input_stream, int64_value);
+              value = int64_value;
+              break;
+            }
+            case kTypeIndexUInt64: {  // uint64_t
+              uint64_t uint64_value = 0;
+              ReadBinary(input_stream, uint64_value);
+              value = uint64_value;
+              break;
+            }
+            case kTypeIndexString: {  // std::string
+              uint32_t str_len = 0;
+              ReadBinary(input_stream, str_len);
+              std::string str_value(str_len, '\0');
+              input_stream.read(str_value.data(), static_cast<std::streamsize>(str_len));
+              value = str_value;
+              break;
+            }
+            case kTypeIndexDouble: {  // double
+              double double_value = NAN;
+              ReadBinary(input_stream, double_value);
+              value = double_value;
+              break;
+            }
+            default:
+              spdlog::error("Unknown filter type index: {}", type_idx);
+              return false;
+          }
+
+          filters[name] = value;
+        }
+
+        new_doc_filters[doc_id] = filters;
+      }
+    }
+
+    if (!input_stream.good()) {
+      spdlog::error("Stream error while loading document store");
+      return false;
+    }
+
+    // Swap the loaded data in with minimal lock time
+    {
+      std::unique_lock lock(mutex_);
+      doc_id_to_pk_ = std::move(new_doc_id_to_pk);
+      pk_to_doc_id_ = std::move(new_pk_to_doc_id);
+      doc_filters_ = std::move(new_doc_filters);
+      next_doc_id_ = next_id;
+    }
+
+    spdlog::debug("Loaded document store from stream: {} documents", doc_count);
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while loading document store from stream: {}", e.what());
     return false;
   }
 }

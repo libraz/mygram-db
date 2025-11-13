@@ -37,15 +37,16 @@ constexpr int kMemorySoftTargetMb = 4096;
 constexpr int kMemoryArenaChunkMb = 64;
 constexpr double kRoaringThreshold = 0.18;
 
-// Snapshot defaults
-constexpr int kSnapshotIntervalSec = 600;
+// Dump defaults
+constexpr int kDumpIntervalSec = 600;
+constexpr const char* kDumpDefaultFilename = "mygramdb.dmp";
 
 // API defaults
 constexpr int kTcpPort = 11016;
 constexpr int kHttpPort = 8080;
 
 // Query defaults
-constexpr int kDefaultLimit = 1000;
+constexpr int kDefaultLimit = 100;
 constexpr int kMinLimit = 5;
 constexpr int kMaxLimit = 1000;
 
@@ -152,8 +153,7 @@ struct BuildConfig {
 struct ReplicationConfig {
   bool enable = true;
   uint32_t server_id = 0;               // MySQL server ID for replication (must be unique, 0 = disabled)
-  std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest", "state_file"
-  std::string state_file = "./mygramdb_replication.state";  // File to persist current GTID position
+  std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest"
   int queue_size = defaults::kReplicationQueueSize;
   int reconnect_backoff_min_ms = defaults::kReconnectBackoffMinMs;
   int reconnect_backoff_max_ms = defaults::kReconnectBackoffMaxMs;
@@ -177,11 +177,12 @@ struct MemoryConfig {
 };
 
 /**
- * @brief Snapshot configuration
+ * @brief Dump configuration
  */
-struct SnapshotConfig {
-  std::string dir = "/var/lib/mygramdb/snapshots";
-  int interval_sec = defaults::kSnapshotIntervalSec;
+struct DumpConfig {
+  std::string dir = "/var/lib/mygramdb/dumps";
+  std::string default_filename = defaults::kDumpDefaultFilename;
+  int interval_sec = defaults::kDumpIntervalSec;
   int retain = 3;
 };
 
@@ -231,7 +232,7 @@ struct Config {
   BuildConfig build;
   ReplicationConfig replication;
   MemoryConfig memory;
-  SnapshotConfig snapshot;
+  DumpConfig dump;
   ApiConfig api;
   NetworkConfig network;
   LoggingConfig logging;

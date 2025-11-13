@@ -108,24 +108,6 @@ replication:
 - 特定のポイントからの手動リカバリ
 - テストやデバッグ
 
-### state_file
-
-保存された GTID 状態ファイルから再開：
-
-```yaml
-replication:
-  start_from: "state_file"
-  state_file: "./mygramdb_replication.state"
-```
-
-**動作原理:**
-- 状態ファイルから GTID を読み込み（自動作成）
-- クラッシュリカバリと再開を可能にします
-
-**使用するタイミング:**
-- シャットダウン後の MygramDB 再起動
-- クラッシュ後の自動再開
-
 ## サポートされている操作
 
 ### DML 操作
@@ -353,8 +335,7 @@ mysql:
 replication:
   enable: true
   server_id: 0                    # 0 = 自動生成
-  start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>|state_file
-  state_file: "./mygramdb_replication.state"
+  start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>
   queue_size: 10000
   reconnect_backoff_min_ms: 500
   reconnect_backoff_max_ms: 10000

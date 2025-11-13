@@ -363,9 +363,6 @@ Config ParseConfigFromJson(const json& root) {
     if (repl.contains("start_from")) {
       config.replication.start_from = repl["start_from"].get<std::string>();
     }
-    if (repl.contains("state_file")) {
-      config.replication.state_file = repl["state_file"].get<std::string>();
-    }
     if (repl.contains("queue_size")) {
       config.replication.queue_size = repl["queue_size"].get<int>();
     }
@@ -391,13 +388,12 @@ Config ParseConfigFromJson(const json& root) {
     // Validate start_from
     if (config.replication.enable) {
       const auto& start = config.replication.start_from;
-      if (start != "snapshot" && start != "latest" && start != "state_file" && start.find("gtid=") != 0) {
+      if (start != "snapshot" && start != "latest" && start.find("gtid=") != 0) {
         std::stringstream err_msg;
         err_msg << "Replication configuration error: Invalid start_from value: '" << start << "'\n";
         err_msg << "  Valid options:\n";
         err_msg << "    - snapshot    : Start from snapshot GTID\n";
         err_msg << "    - latest      : Start from current GTID\n";
-        err_msg << "    - state_file  : Resume from saved state\n";
         err_msg << "    - gtid=<UUID:txn> : Start from specific GTID\n";
         err_msg << "  Example:\n";
         err_msg << "    replication:\n";
@@ -467,17 +463,17 @@ Config ParseConfigFromJson(const json& root) {
     }
   }
 
-  // Parse snapshot config
-  if (root.contains("snapshot")) {
-    const auto& snap = root["snapshot"];
-    if (snap.contains("dir")) {
-      config.snapshot.dir = snap["dir"].get<std::string>();
+  // Parse dump config
+  if (root.contains("dump")) {
+    const auto& dmp = root["dump"];
+    if (dmp.contains("dir")) {
+      config.dump.dir = dmp["dir"].get<std::string>();
     }
-    if (snap.contains("interval_sec")) {
-      config.snapshot.interval_sec = snap["interval_sec"].get<int>();
+    if (dmp.contains("interval_sec")) {
+      config.dump.interval_sec = dmp["interval_sec"].get<int>();
     }
-    if (snap.contains("retain")) {
-      config.snapshot.retain = snap["retain"].get<int>();
+    if (dmp.contains("retain")) {
+      config.dump.retain = dmp["retain"].get<int>();
     }
   }
 

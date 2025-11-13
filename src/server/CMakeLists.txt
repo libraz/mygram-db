@@ -3,6 +3,14 @@ add_library(mygramdb_server STATIC
   http_server.cpp
   thread_pool.cpp
   server_stats.cpp
+  response_formatter.cpp
+  handlers/command_handler.cpp
+  handlers/search_handler.cpp
+  handlers/document_handler.cpp
+  handlers/dump_handler.cpp
+  handlers/admin_handler.cpp
+  handlers/replication_handler.cpp
+  handlers/debug_handler.cpp
 )
 
 target_include_directories(mygramdb_server PUBLIC

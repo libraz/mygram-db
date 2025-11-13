@@ -225,16 +225,16 @@ INFO
 
 ### 4. バックアップ戦略
 
-`SAVE` コマンドでスナップショットを作成:
+`DUMP SAVE` コマンドでスナップショットを作成:
 
 ```
-SAVE /path/to/snapshot.bin
+DUMP SAVE /path/to/snapshot.dmp
 ```
 
 定期的なスナップショットをスケジュール:
 ```bash
 # 毎日のスナップショット
-0 2 * * * echo "SAVE /backup/mygramdb-$(date +\%Y\%m\%d).bin" | mygram-cli
+0 2 * * * echo "DUMP SAVE /backup/mygramdb-$(date +\%Y\%m\%d).dmp" | mygram-cli
 ```
 
 ## トラブルシューティング

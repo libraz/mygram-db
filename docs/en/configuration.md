@@ -53,7 +53,6 @@ replication:
   enable: true
   server_id: 12345
   start_from: "snapshot"
-  state_file: "./mygramdb_replication.state"
   queue_size: 10000
   reconnect_backoff_min_ms: 500
   reconnect_backoff_max_ms: 10000
@@ -136,7 +135,6 @@ The same configuration in JSON format:
     "enable": true,
     "server_id": 12345,
     "start_from": "snapshot",
-    "state_file": "./mygramdb_replication.state",
     "queue_size": 10000,
     "reconnect_backoff_min_ms": 500,
     "reconnect_backoff_max_ms": 10000
@@ -333,8 +331,6 @@ MySQL binlog replication settings:
   - `snapshot`: Start from snapshot GTID (recommended)
   - `latest`: Start from current GTID
   - `gtid=<UUID:txn>`: Start from specific GTID (e.g., `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1`)
-  - `state_file`: Resume from saved state file
-- **state_file**: GTID state persistence file path (default: `./mygramdb_replication.state`)
 - **queue_size**: Binlog event queue size (default: `10000`)
 - **reconnect_backoff_min_ms**: Minimum reconnect backoff delay (default: `500`)
 - **reconnect_backoff_max_ms**: Maximum reconnect backoff delay (default: `10000`)

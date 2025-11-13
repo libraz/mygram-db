@@ -108,24 +108,6 @@ replication:
 - Manual recovery from specific point
 - Testing or debugging
 
-### state_file
-
-Resumes from saved GTID state file:
-
-```yaml
-replication:
-  start_from: "state_file"
-  state_file: "./mygramdb_replication.state"
-```
-
-**How it works:**
-- Reads GTID from state file (created automatically)
-- Enables crash recovery and resume
-
-**When to use:**
-- Restarting MygramDB after shutdown
-- Automatic resume after crash
-
 ## Supported Operations
 
 ### DML Operations
@@ -353,8 +335,7 @@ mysql:
 replication:
   enable: true
   server_id: 0                    # 0 = auto-generate
-  start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>|state_file
-  state_file: "./mygramdb_replication.state"
+  start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>
   queue_size: 10000
   reconnect_backoff_min_ms: 500
   reconnect_backoff_max_ms: 10000

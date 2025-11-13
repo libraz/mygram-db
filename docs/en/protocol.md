@@ -20,6 +20,8 @@ Or use the CLI client:
 
 Commands are text-based, one command per line. Responses are terminated with newline.
 
+---
+
 ## SEARCH Command
 
 Search for documents containing specified text.
@@ -27,65 +29,20 @@ Search for documents containing specified text.
 ### Syntax
 
 ```
-SEARCH <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...] [LIMIT <n>] [OFFSET <n>]
+SEARCH <table> <text> [OPTIONS]
 ```
 
-### Parameters
+### Basic Examples
 
-- **table**: Table name
-- **text**: Search text or phrase
-- **AND term**: Additional required terms (multiple allowed)
-- **NOT term**: Excluded terms (multiple allowed)
-- **FILTER col=val**: Filter by column value (multiple allowed)
-- **LIMIT n**: Maximum number of results (default: 1000)
-- **OFFSET n**: Result offset for pagination (default: 0)
-
-### Examples
-
-Basic search:
+Simple search:
 ```
 SEARCH articles hello
 ```
 
-Phrase search (quoted):
+With filters and pagination:
 ```
-SEARCH articles "live streaming" LIMIT 100
+SEARCH articles tech FILTER status=1 LIMIT 10
 ```
-
-Multiple required terms:
-```
-SEARCH articles tech AND AI
-```
-
-Combine AND and NOT:
-```
-SEARCH articles news AND breaking NOT old
-```
-
-With filters:
-```
-SEARCH articles news NOT old FILTER status=1
-```
-
-Pagination:
-```
-SEARCH articles tech FILTER category=AI LIMIT 50 OFFSET 100
-```
-
-### Search Syntax Features
-
-**Quoted strings:**
-- Use single `'` or double `"` quotes for phrase searches
-- Example: `"hello world"` searches for the exact phrase
-- Escape sequences supported: `\n`, `\t`, `\r`, `\\`, `\"`, `\'`
-
-**AND operator:**
-- Search for documents containing all specified terms
-- Example: `term1 AND term2 AND term3`
-
-**NOT operator:**
-- Exclude documents containing specific terms
-- Example: `term1 NOT excluded`
 
 ### Response
 
@@ -93,10 +50,9 @@ SEARCH articles tech FILTER category=AI LIMIT 50 OFFSET 100
 OK RESULTS <total_count> <id1> <id2> <id3> ...
 ```
 
-Example:
-```
-OK RESULTS 3 101 205 387
-```
+**For detailed query syntax, boolean operators, filters, sorting, and advanced features, see [Query Syntax Guide](query_syntax.md).**
+
+---
 
 ## COUNT Command
 
@@ -105,24 +61,13 @@ Count documents matching search criteria (without returning IDs).
 ### Syntax
 
 ```
-COUNT <table> <text> [AND <term>...] [NOT <term>...] [FILTER <col=val>...]
+COUNT <table> <text> [OPTIONS]
 ```
 
-### Examples
+### Example
 
-Basic count:
 ```
-COUNT articles hello
-```
-
-Count with multiple terms:
-```
-COUNT articles tech AND AI
-```
-
-Count with filters:
-```
-COUNT articles news NOT old FILTER status=1
+COUNT articles tech AND AI FILTER status=1
 ```
 
 ### Response
@@ -131,10 +76,9 @@ COUNT articles news NOT old FILTER status=1
 OK COUNT <number>
 ```
 
-Example:
-```
-OK COUNT 42
-```
+**For full query syntax, see [Query Syntax Guide](query_syntax.md).**
+
+---
 
 ## GET Command
 
@@ -146,7 +90,7 @@ Retrieve a document by primary key.
 GET <table> <primary_key>
 ```
 
-### Examples
+### Example
 
 ```
 GET articles 12345
@@ -162,6 +106,8 @@ Example:
 ```
 OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 ```
+
+---
 
 ## INFO Command
 
@@ -184,6 +130,8 @@ Example:
 OK INFO version=1.0.0 uptime=3600 total_requests=10000 connections=5 index_size=1048576 doc_count=1000000
 ```
 
+---
+
 ## CONFIG Command
 
 Get current server configuration (all settings).
@@ -200,101 +148,114 @@ Returns a YAML-style formatted configuration showing:
 - MySQL connection settings
 - Table configurations (name, primary_key, ngram_size, filters count)
 - API server settings (bind address and port)
-- Replication settings (enable, server_id, start_from, state_file)
+- Replication settings (enable, server_id, start_from)
 - Memory configuration (limits, thresholds)
 - Snapshot directory
 - Logging level
 - Runtime status (connections, uptime, read_only mode)
 
-Example:
-```
-CONFIG
-OK CONFIG
-  mysql:
-    host: 127.0.0.1
-    port: 3306
-    user: repl_user
-    database: mydb
-    use_gtid: true
-  tables: 1
-    - name: articles
-      primary_key: id
-      ngram_size: 1
-      filters: 3
-  api:
-    tcp.bind: 0.0.0.0
-    tcp.port: 11016
-  replication:
-    enable: true
-    server_id: 12345
-    start_from: snapshot
-    state_file: ./mygramdb_replication.state
-  memory:
-    hard_limit_mb: 8192
-    soft_target_mb: 4096
-    roaring_threshold: 0.18
-  snapshot:
-    dir: /var/lib/mygramdb/snapshots
-  logging:
-    level: info
-  runtime:
-    connections: 5
-    max_connections: 1000
-    read_only: false
-    uptime: 3600s
-```
+---
 
-## SAVE Command
+## CONFIG VERIFY
 
-Save current index snapshot to disk.
+Validate current configuration and check system status.
 
 ### Syntax
 
 ```
-SAVE [<filepath>]
-```
-
-### Examples
-
-Save to default location:
-```
-SAVE
-```
-
-Save to specific file:
-```
-SAVE /path/to/snapshot.bin
+CONFIG VERIFY
 ```
 
 ### Response
 
 ```
-OK SAVED <filepath>
+OK CONFIG VERIFIED
+tables: <count>
+
+table: <table_name>
+  primary_key: <column>
+  text_source: <source>
+  ngram_size: <size>
+  filters: <count>
+  required_filters: <count>
+  status: loaded|not_loaded
+  documents: <count>
+  terms: <count>
+
+replication:
+  status: running|stopped
+  gtid: <gtid>
+
+END
 ```
 
-## LOAD Command
+---
 
-Load index snapshot from disk.
+## DUMP Commands
 
-### Syntax
+The DUMP command family provides unified snapshot management with integrity verification.
 
+### DUMP SAVE
+
+Save complete snapshot to single binary file (`.dmp`).
+
+**Syntax:**
 ```
-LOAD <filepath>
-```
-
-### Examples
-
-```
-LOAD /path/to/snapshot.bin
-```
-
-### Response
-
-```
-OK LOADED <filepath> docs=<count>
+DUMP SAVE [<filepath>] [WITH STATISTICS]
 ```
 
-## REPLICATION STATUS Command
+**Example:**
+```
+DUMP SAVE /backup/mygramdb.dmp WITH STATISTICS
+```
+
+### DUMP LOAD
+
+Load snapshot from binary file.
+
+**Syntax:**
+```
+DUMP LOAD [<filepath>]
+```
+
+**Example:**
+```
+DUMP LOAD /backup/mygramdb.dmp
+```
+
+### DUMP VERIFY
+
+Verify snapshot file integrity without loading data.
+
+**Syntax:**
+```
+DUMP VERIFY [<filepath>]
+```
+
+**Example:**
+```
+DUMP VERIFY /backup/mygramdb.dmp
+```
+
+### DUMP INFO
+
+Display snapshot file metadata (version, GTID, tables, size, flags).
+
+**Syntax:**
+```
+DUMP INFO [<filepath>]
+```
+
+**Example:**
+```
+DUMP INFO /backup/mygramdb.dmp
+```
+
+**For detailed snapshot management, integrity protection, best practices, and troubleshooting, see [Snapshot Guide](snapshot.md).**
+
+---
+
+## REPLICATION STATUS
 
 Get current replication status.
 
@@ -315,7 +276,9 @@ Example:
 OK REPLICATION status=running gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
 ```
 
-## REPLICATION STOP Command
+---
+
+## REPLICATION STOP
 
 Stop binlog replication (index becomes read-only).
 
@@ -331,7 +294,9 @@ REPLICATION STOP
 OK REPLICATION STOPPED
 ```
 
-## REPLICATION START Command
+---
+
+## REPLICATION START
 
 Resume binlog replication.
 
@@ -346,6 +311,8 @@ REPLICATION START
 ```
 OK REPLICATION STARTED
 ```
+
+---
 
 ## OPTIMIZE Command
 
@@ -393,6 +360,8 @@ Error (if already optimizing):
 ERROR Optimization already in progress
 ```
 
+---
+
 ## DEBUG Command
 
 Enable or disable debug mode for the current connection to see detailed query execution metrics.
@@ -411,18 +380,6 @@ DEBUG OFF
 - **Search Details**: Displays n-grams generated, posting list sizes, and candidate counts
 - **Optimization Visibility**: Reports which optimization strategies were applied
 - **Performance Impact**: Minimal overhead, only collects metrics when enabled
-
-### Examples
-
-Enable debug mode:
-```
-DEBUG ON
-```
-
-Disable debug mode:
-```
-DEBUG OFF
-```
 
 ### Response
 
@@ -460,31 +417,6 @@ limit: <value> [(default)]
 offset: <value> [(default)]
 ```
 
-Example:
-```
-> DEBUG ON
-OK DEBUG_ON
-
-> SEARCH articles tech AND AI FILTER status=1 LIMIT 10
-OK RESULTS 1200 101 205 387 450 512 608 721 835 904 1015
-
-# DEBUG
-query_time: 2.450ms
-index_time: 1.200ms
-filter_time: 0.850ms
-terms: 2
-ngrams: 8
-candidates: 15000
-after_intersection: 5000
-after_not: 5000
-after_filters: 1200
-final: 1200
-optimization: merge_join
-order_by: id ASC
-limit: 10
-offset: 0 (default)
-```
-
 ### Debug Metrics Explained
 
 - **query_time**: Total query execution time in milliseconds
@@ -502,6 +434,8 @@ offset: 0 (default)
 - **limit**: Maximum results returned (shows "(default)" if not explicitly specified)
 - **offset**: Result offset for pagination (shows "(default)" if not explicitly specified)
 
+---
+
 ## Error Response
 
 All errors follow this format:
@@ -516,6 +450,8 @@ ERROR Unknown command
 ERROR Table not found: products
 ERROR Invalid GTID format
 ```
+
+---
 
 ## CLI Client Features
 
@@ -548,11 +484,20 @@ In interactive mode, type `help` to see available commands:
 ```
 > help
 Available commands:
-  SEARCH, COUNT, GET    - Search and retrieval
-  INFO, CONFIG          - Server information
-  SAVE, LOAD            - Snapshot management
-  REPLICATION STATUS/STOP/START - Replication control
-  OPTIMIZE              - Index optimization
-  DEBUG ON/OFF          - Enable/disable debug mode
-  quit, exit            - Exit client
+  SEARCH, COUNT, GET              - Search and retrieval
+  INFO, CONFIG, CONFIG VERIFY     - Server information and validation
+  DUMP SAVE/LOAD/VERIFY/INFO      - Snapshot management
+  REPLICATION STATUS/STOP/START   - Replication control
+  OPTIMIZE                        - Index optimization
+  DEBUG ON/OFF                    - Enable/disable debug mode
+  quit, exit                      - Exit client
 ```
+
+---
+
+## See Also
+
+- [Query Syntax Guide](query_syntax.md) - Detailed SEARCH/COUNT query syntax
+- [Snapshot Guide](snapshot.md) - Snapshot management and best practices
+- [Configuration Guide](configuration.md) - Server configuration
+- [Replication Setup](replication.md) - MySQL replication configuration

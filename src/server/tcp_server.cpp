@@ -25,6 +25,14 @@
 #include <utility>
 
 #include "query/result_sorter.h"
+#include "server/handlers/admin_handler.h"
+#include "server/handlers/debug_handler.h"
+#include "server/handlers/document_handler.h"
+#include "server/handlers/dump_handler.h"
+#include "server/handlers/replication_handler.h"
+#include "server/handlers/search_handler.h"
+#include "server/response_formatter.h"
+#include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
@@ -69,7 +77,7 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
 }  // namespace
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-                     std::string snapshot_dir, const config::Config* full_config,
+                     std::string dump_dir, const config::Config* full_config,
 #ifdef USE_MYSQL
                      mysql::BinlogReader* binlog_reader
 #else
@@ -78,12 +86,31 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
                      )
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
-      snapshot_dir_(std::move(snapshot_dir)),
+      dump_dir_(std::move(dump_dir)),
       full_config_(full_config),
       binlog_reader_(binlog_reader) {
   // Create thread pool
   thread_pool_ =
       std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, kThreadPoolQueueSize);
+
+  // Initialize command handler context (must outlive handlers)
+  handler_context_ = std::make_unique<HandlerContext>(HandlerContext{
+      .table_contexts = table_contexts_,
+      .stats = stats_,
+      .full_config = full_config_,
+      .dump_dir = dump_dir_,
+      .loading = loading_,
+      .read_only = read_only_,
+      .binlog_reader = binlog_reader_,
+  });
+
+  // Initialize command handlers
+  search_handler_ = std::make_unique<SearchHandler>(*handler_context_);
+  document_handler_ = std::make_unique<DocumentHandler>(*handler_context_);
+  dump_handler_ = std::make_unique<DumpHandler>(*handler_context_);
+  admin_handler_ = std::make_unique<AdminHandler>(*handler_context_);
+  replication_handler_ = std::make_unique<ReplicationHandler>(*handler_context_);
+  debug_handler_ = std::make_unique<DebugHandler>(*handler_context_);
 }
 
 TcpServer::~TcpServer() {
@@ -344,15 +371,11 @@ void TcpServer::HandleClient(int client_fd) {
 std::string TcpServer::ProcessRequest(const std::string& request, ConnectionContext& ctx) {
   spdlog::debug("Processing request: {}", request);
 
-  // Start timing for debug mode
-  auto start_time = std::chrono::high_resolution_clock::now();
-  query::DebugInfo debug_info;
-
   // Parse query
   auto query = query_parser_.Parse(request);
 
   if (!query.IsValid()) {
-    return FormatError(query_parser_.GetError());
+    return ResponseFormatter::FormatError(query_parser_.GetError());
   }
 
   // Apply configured default LIMIT if not explicitly specified
@@ -363,1168 +386,62 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
   // Increment command statistics
   stats_.IncrementCommand(query.type);
 
-  // Lookup table from query
+  // Lookup table from query (for commands that don't use handlers yet)
   index::Index* current_index = nullptr;
   storage::DocumentStore* current_doc_store = nullptr;
   int current_ngram_size = 0;
   int current_kanji_ngram_size = 0;
 
-  // For queries that require a table, validate and fetch context
+  // For queries that require a table, validate table exists
   if (!query.table.empty()) {
     auto table_iter = table_contexts_.find(query.table);
     if (table_iter == table_contexts_.end()) {
-      return FormatError("Table not found: " + query.table);
+      return ResponseFormatter::FormatError("Table not found: " + query.table);
     }
-    current_index = table_iter->second->index.get();
-    current_doc_store = table_iter->second->doc_store.get();
-    current_ngram_size = table_iter->second->config.ngram_size;
-    current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    // Note: Each handler fetches its own context via HandlerContext
   }
 
   try {
     switch (query.type) {
-      case query::QueryType::SEARCH: {
-        // Check if server is loading
-        if (loading_) {
-          return FormatError("Server is loading, please try again later");
-        }
-
-        // Verify index is available
-        if (current_index == nullptr) {
-          return FormatError("Index not available");
-        }
-
-        // Start index search timing
-        auto index_start = std::chrono::high_resolution_clock::now();
-
-        // Collect all search terms (main + AND terms)
-        std::vector<std::string> all_search_terms;
-        all_search_terms.push_back(query.search_text);
-        all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-        // Collect debug info for search terms
-        if (ctx.debug_mode) {
-          debug_info.search_terms = all_search_terms;
-        }
-
-        // Generate n-grams for each term and estimate result sizes
-        struct TermInfo {
-          std::vector<std::string> ngrams;
-          size_t estimated_size;
-        };
-        std::vector<TermInfo> term_infos;
-        term_infos.reserve(all_search_terms.size());
-
-        for (const auto& search_term : all_search_terms) {
-          std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
-          std::vector<std::string> ngrams;
-          // Always use hybrid n-grams if kanji_ngram_size is configured
-          if (current_kanji_ngram_size > 0) {
-            ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
-          } else if (current_ngram_size == 0) {
-            ngrams = utils::GenerateHybridNgrams(normalized);
-          } else {
-            ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-          }
-
-          // Estimate result size by checking the smallest posting list
-          size_t min_size = std::numeric_limits<size_t>::max();
-          for (const auto& ngram : ngrams) {
-            const auto* posting = current_index->GetPostingList(ngram);
-            if (posting != nullptr) {
-              min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
-            } else {
-              min_size = 0;
-              break;
-            }
-          }
-
-          // Collect debug info for n-grams and posting list sizes
-          if (ctx.debug_mode) {
-            for (const auto& ngram : ngrams) {
-              debug_info.ngrams_used.push_back(ngram);
-            }
-            debug_info.posting_list_sizes.push_back(min_size);
-          }
-
-          term_infos.push_back({std::move(ngrams), min_size});
-        }
-
-        // Sort terms by estimated size (smallest first for faster intersection)
-        std::sort(term_infos.begin(), term_infos.end(),
-                  [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
-
-        // If any term has zero results, return empty immediately
-        if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
-          if (ctx.debug_mode) {
-            debug_info.optimization_used = "early-exit (empty posting list)";
-            debug_info.final_results = 0;
-            auto end_time = std::chrono::high_resolution_clock::now();
-            debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-            debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-            return FormatSearchResponse({}, 0, current_doc_store, &debug_info);
-          }
-          return FormatSearchResponse({}, 0, current_doc_store);
-        }
-
-        // Optimization: For queries with LIMIT + PRIMARY KEY order,
-        // use Index::SearchAnd() with limit/reverse to avoid materializing all results
-        //  - Condition: single term (any number of n-grams), no NOT, no filters, limit > 0, order by primary_key
-        //  - Benefit: O(limit) instead of O(total_candidates) for large result sets
-        //  - Now supports multi-ngram terms (e.g., Japanese/CJK characters) via streaming intersection
-        // Determine ORDER BY clause (default: primary key DESC)
-        query::OrderByClause order_by;
-        bool order_by_implicit = false;
-        if (query.order_by.has_value()) {
-          order_by = query.order_by.value();
-        } else {
-          // Default: primary key DESC
-          order_by.column = "";  // Empty = primary key
-          order_by.order = query::SortOrder::DESC;
-          order_by_implicit = true;
-        }
-
-        // Record applied ORDER BY for debug
-        if (ctx.debug_mode) {
-          std::string order_str = order_by.column.empty() ? "id" : order_by.column;
-          order_str += (order_by.order == query::SortOrder::ASC) ? " ASC" : " DESC";
-          if (order_by_implicit) {
-            order_str += " (default)";
-          }
-          debug_info.order_by_applied = order_str;
-          debug_info.limit_applied = query.limit;
-          debug_info.offset_applied = query.offset;
-          debug_info.limit_explicit = query.limit_explicit;
-          debug_info.offset_explicit = query.offset_explicit;
-        }
-
-        // Check optimization conditions: single search term (multi-ngram OK now!)
-        // The Index::SearchAnd() now supports streaming intersection for multi-ngram queries
-        // IMPORTANT: Skip optimization for deep offsets (>10000) as it becomes inefficient
-        // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-        constexpr uint32_t kMaxOffsetForOptimization = 10000;
-        // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-        bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() &&
-                            query.limit > 0 && query.offset <= kMaxOffsetForOptimization && order_by.IsPrimaryKey();
-
-        // Calculate total results count (needed for accurate response)
-        // For optimization path: we need to count all results first, then decide best strategy
-        size_t total_results = 0;
-        std::vector<storage::DocId> results;
-
-        if (can_optimize) {
-          // Fetch all matching results once (without limit) for accurate total_results
-          auto all_results = current_index->SearchAnd(term_infos[0].ngrams);
-          total_results = all_results.size();
-
-          // Heuristic: If total results is small enough, reuse the fetched results
-          // instead of doing a second GetTopN fetch. This avoids double index scan.
-          // Threshold: if (offset + limit) is close to total_results, reuse is more efficient
-          // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-          constexpr double kReuseThreshold = 0.5;  // Reuse if fetching >50% of results
-          // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-          size_t index_limit = query.offset + query.limit;
-          bool should_reuse = (static_cast<double>(index_limit) / total_results) > kReuseThreshold;
-
-          if (should_reuse) {
-            // Reuse the already-fetched results (more efficient for small result sets)
-            results = std::move(all_results);
-            can_optimize = false;  // Use standard sort+paginate path
-            if (ctx.debug_mode) {
-              debug_info.total_candidates = results.size();
-              debug_info.after_intersection = results.size();
-              debug_info.optimization_used = "reuse-fetch (small result set)";
-            }
-          } else {
-            // Result set is large: use GetTopN optimization to avoid sorting all results
-            bool reverse = (order_by.order == query::SortOrder::DESC);
-            results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
-            if (ctx.debug_mode) {
-              debug_info.total_candidates = results.size();
-              debug_info.after_intersection = results.size();
-              std::string direction = reverse ? "DESC" : "ASC";
-              if (term_infos[0].ngrams.size() == 1) {
-                debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
-              } else {
-                debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
-              }
-            }
-          }
-        } else {
-          // Standard path: retrieve all results
-          results = current_index->SearchAnd(term_infos[0].ngrams);
-          if (ctx.debug_mode) {
-            debug_info.total_candidates = results.size();
-            debug_info.after_intersection = results.size();
-            debug_info.optimization_used = "size-based term ordering";
-          }
-        }
-
-        // Intersect with remaining terms
-        for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
-          auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
-          std::vector<storage::DocId> intersection;
-          intersection.reserve(std::min(results.size(), and_results.size()));
-          std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
-                                std::back_inserter(intersection));
-          results = std::move(intersection);
-        }
-
-        // Apply NOT filter if present
-        if (!query.not_terms.empty()) {
-          // Generate NOT term n-grams
-          std::vector<std::string> not_ngrams;
-          for (const auto& not_term : query.not_terms) {
-            std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
-            std::vector<std::string> ngrams;
-            if (current_ngram_size == 0) {
-              ngrams = utils::GenerateHybridNgrams(norm_not);
-            } else {
-              ngrams = utils::GenerateNgrams(norm_not, current_ngram_size);
-            }
-            not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
-          }
-
-          results = current_index->SearchNot(results, not_ngrams);
-          if (ctx.debug_mode) {
-            debug_info.after_not = results.size();
-          }
-        } else if (ctx.debug_mode) {
-          debug_info.after_not = results.size();
-        }
-
-        // Apply filter conditions
-        auto filter_start = std::chrono::high_resolution_clock::now();
-        if (!query.filters.empty()) {
-          std::vector<storage::DocId> filtered_results;
-          filtered_results.reserve(results.size());
-
-          for (const auto& doc_id : results) {
-            bool matches_all_filters = true;
-
-            for (const auto& filter_cond : query.filters) {
-              auto stored_value = current_doc_store->GetFilterValue(doc_id, filter_cond.column);
-
-              // For now, only support equality operator
-              if (filter_cond.op == query::FilterOp::EQ) {
-                // Convert filter value string to appropriate type and compare
-                bool matches = stored_value && std::visit(
-                                                   [&](const auto& val) {
-                                                     using T = std::decay_t<decltype(val)>;
-                                                     if constexpr (std::is_same_v<T, std::monostate>) {
-                                                       // NULL value never matches
-                                                       return false;
-                                                     } else if constexpr (std::is_same_v<T, std::string>) {
-                                                       return val == filter_cond.value;
-                                                     } else {
-                                                       return std::to_string(val) == filter_cond.value;
-                                                     }
-                                                   },
-                                                   stored_value.value());
-
-                if (!matches) {
-                  matches_all_filters = false;
-                  break;
-                }
-              }
-            }
-
-            if (matches_all_filters) {
-              filtered_results.push_back(doc_id);
-            }
-          }
-
-          results = filtered_results;
-          if (ctx.debug_mode) {
-            auto filter_end = std::chrono::high_resolution_clock::now();
-            debug_info.filter_time_ms = std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
-            debug_info.after_filters = results.size();
-          }
-        } else if (ctx.debug_mode) {
-          debug_info.after_filters = results.size();
-        }
-
-        // Sort and paginate results using ResultSorter
-        // This uses in-place sorting with partial_sort optimization for memory efficiency
-        // Note: total_results is already set for optimized path, otherwise set it here
-        if (!can_optimize) {
-          total_results = results.size();
-        }
-        auto sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
-
-        // Calculate final debug info
-        if (ctx.debug_mode) {
-          auto end_time = std::chrono::high_resolution_clock::now();
-          auto index_end = std::chrono::high_resolution_clock::now();
-          debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-          debug_info.index_time_ms = std::chrono::duration<double, std::milli>(index_end - index_start).count();
-          debug_info.final_results = sorted_results.size();
-          return FormatSearchResponse(sorted_results, total_results, current_doc_store, &debug_info);
-        }
-
-        return FormatSearchResponse(sorted_results, total_results, current_doc_store);
-      }
-
-      case query::QueryType::COUNT: {
-        // Check if server is loading
-        if (loading_) {
-          return FormatError("Server is loading, please try again later");
-        }
-
-        // Verify index is available
-        if (current_index == nullptr) {
-          return FormatError("Index not available");
-        }
-
-        // Start index search timing
-        auto index_start = std::chrono::high_resolution_clock::now();
-
-        // Collect all search terms (main + AND terms)
-        std::vector<std::string> all_search_terms;
-        all_search_terms.push_back(query.search_text);
-        all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-        // Collect debug info for search terms
-        if (ctx.debug_mode) {
-          debug_info.search_terms = all_search_terms;
-        }
-
-        // Generate n-grams for each term and estimate result sizes
-        struct TermInfo {
-          std::vector<std::string> ngrams;
-          size_t estimated_size;
-        };
-        std::vector<TermInfo> term_infos;
-        term_infos.reserve(all_search_terms.size());
-
-        for (const auto& search_term : all_search_terms) {
-          std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
-          std::vector<std::string> ngrams;
-          // Always use hybrid n-grams if kanji_ngram_size is configured
-          if (current_kanji_ngram_size > 0) {
-            ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
-          } else if (current_ngram_size == 0) {
-            ngrams = utils::GenerateHybridNgrams(normalized);
-          } else {
-            ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-          }
-
-          // Estimate result size by checking the smallest posting list
-          size_t min_size = std::numeric_limits<size_t>::max();
-          for (const auto& ngram : ngrams) {
-            const auto* posting = current_index->GetPostingList(ngram);
-            if (posting != nullptr) {
-              min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
-            } else {
-              min_size = 0;
-              break;
-            }
-          }
-
-          // Collect debug info for n-grams and posting list sizes
-          if (ctx.debug_mode) {
-            for (const auto& ngram : ngrams) {
-              debug_info.ngrams_used.push_back(ngram);
-            }
-            debug_info.posting_list_sizes.push_back(min_size);
-          }
-
-          term_infos.push_back({std::move(ngrams), min_size});
-        }
-
-        // Sort terms by estimated size (smallest first for faster intersection)
-        std::sort(term_infos.begin(), term_infos.end(),
-                  [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
-
-        // If any term has zero results, return 0 immediately
-        if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
-          if (ctx.debug_mode) {
-            auto end_time = std::chrono::high_resolution_clock::now();
-            debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-            debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-            return FormatCountResponse(0, &debug_info);
-          }
-          return FormatCountResponse(0);
-        }
-
-        // Process most selective term first
-        auto results = current_index->SearchAnd(term_infos[0].ngrams);
-
-        // Intersect with remaining terms
-        for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
-          auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
-          std::vector<storage::DocId> intersection;
-          intersection.reserve(std::min(results.size(), and_results.size()));
-          std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
-                                std::back_inserter(intersection));
-          results = std::move(intersection);
-        }
-
-        // Apply NOT filter if present
-        if (!query.not_terms.empty()) {
-          std::vector<std::string> not_ngrams;
-          for (const auto& not_term : query.not_terms) {
-            std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
-            std::vector<std::string> ngrams;
-            if (current_ngram_size == 0) {
-              ngrams = utils::GenerateHybridNgrams(norm_not);
-            } else {
-              ngrams = utils::GenerateNgrams(norm_not, current_ngram_size);
-            }
-            not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
-          }
-
-          results = current_index->SearchNot(results, not_ngrams);
-        }
-
-        // Apply filter conditions
-        if (!query.filters.empty()) {
-          std::vector<storage::DocId> filtered_results;
-          filtered_results.reserve(results.size());
-
-          for (const auto& doc_id : results) {
-            bool matches_all_filters = true;
-
-            for (const auto& filter_cond : query.filters) {
-              auto stored_value = current_doc_store->GetFilterValue(doc_id, filter_cond.column);
-
-              // For now, only support equality operator
-              if (filter_cond.op == query::FilterOp::EQ) {
-                // Convert filter value string to appropriate type and compare
-                bool matches = stored_value && std::visit(
-                                                   [&](const auto& val) {
-                                                     using T = std::decay_t<decltype(val)>;
-                                                     if constexpr (std::is_same_v<T, std::monostate>) {
-                                                       // NULL value never matches
-                                                       return false;
-                                                     } else if constexpr (std::is_same_v<T, std::string>) {
-                                                       return val == filter_cond.value;
-                                                     } else {
-                                                       return std::to_string(val) == filter_cond.value;
-                                                     }
-                                                   },
-                                                   stored_value.value());
-
-                if (!matches) {
-                  matches_all_filters = false;
-                  break;
-                }
-              }
-            }
-
-            if (matches_all_filters) {
-              filtered_results.push_back(doc_id);
-            }
-          }
-
-          results = filtered_results;
-        }
-
-        // Calculate final debug info
-        if (ctx.debug_mode) {
-          auto end_time = std::chrono::high_resolution_clock::now();
-          debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-          debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-          return FormatCountResponse(results.size(), &debug_info);
-        }
-
-        return FormatCountResponse(results.size());
-      }
-
-      case query::QueryType::GET: {
-        // Check if server is loading
-        if (loading_) {
-          return FormatError("Server is loading, please try again later");
-        }
-
-        // Verify doc_store is available
-        if (current_doc_store == nullptr) {
-          return FormatError("Document store not available");
-        }
-
-        auto doc_id_opt = current_doc_store->GetDocId(query.primary_key);
-        if (!doc_id_opt) {
-          return FormatError("Document not found");
-        }
-
-        auto doc = current_doc_store->GetDocument(doc_id_opt.value());
-        return FormatGetResponse(doc);
-      }
-
-      case query::QueryType::INFO: {
-        return FormatInfoResponse();
-      }
-
-      case query::QueryType::SAVE: {
-        // Determine filepath
-        std::string filepath;
-        if (!query.filepath.empty()) {
-          filepath = query.filepath;
-          // If relative path, prepend snapshot_dir
-          if (filepath[0] != '/') {
-            filepath = snapshot_dir_ + "/" + filepath;
-          }
-        } else {
-          // Generate default filepath with timestamp
-          auto now = std::time(nullptr);
-          std::array<char, kIpAddressBufferSize> buf{};
-          std::strftime(buf.data(), buf.size(), "snapshot_%Y%m%d_%H%M%S", std::localtime(&now));
-          filepath = snapshot_dir_ + "/" + std::string(buf.data());
-        }
-
-        spdlog::info("Attempting to save snapshot to: {}", filepath);
-
-        // Get current GTID from shared binlog reader
-        // TODO: Need access to shared binlog_reader from main
-        std::string current_gtid;
-        spdlog::info("GTID capture in SAVE not yet implemented (need shared binlog_reader reference)");
-
-        // Set read-only mode
-        read_only_ = true;
-
-        // Save all tables to directory
-        bool success = false;
-
-        // Create directory
-        spdlog::debug("Creating directory: {}", filepath);
-        if (system(("mkdir -p \"" + filepath + "\"").c_str()) != 0) {
-          read_only_ = false;
-          std::string error_msg = "Failed to create snapshot directory: " + filepath + " (check permissions and disk space)";
-          spdlog::error("{}", error_msg);
-          return FormatError(error_msg);
-        }
-
-        // Save each table
-        spdlog::info("Saving snapshot to: {}", filepath);
-        spdlog::info("This may take a while for large datasets. Please wait...");
-        success = true;
-        std::string failed_table;
-        for (const auto& [table_name, ctx] : table_contexts_) {
-          std::string table_index_path = filepath;
-          table_index_path += "/";
-          table_index_path += table_name;
-          table_index_path += ".index";
-          std::string table_doc_path = filepath;
-          table_doc_path += "/";
-          table_doc_path += table_name;
-          table_doc_path += ".docs";
-
-          spdlog::info("Saving table: {}", table_name);
-          if (!ctx->index->SaveToFile(table_index_path)) {
-            spdlog::error("Failed to save index for table: {}", table_name);
-            failed_table = table_name;
-            success = false;
-            break;
-          }
-          if (!ctx->doc_store->SaveToFile(table_doc_path, "")) {
-            spdlog::error("Failed to save documents for table: {}", table_name);
-            failed_table = table_name;
-            success = false;
-            break;
-          }
-          spdlog::info("Saved table to snapshot: {}", table_name);
-        }
-
-        // Save metadata
-        if (success) {
-          std::string meta_path = filepath + "/meta.json";
-          std::ofstream meta_file(meta_path);
-          if (meta_file) {
-            // NOLINTNEXTLINE(modernize-raw-string-literal)
-            meta_file << "{\n";
-            meta_file << "  \"version\": \"1.0\",\n";
-            // NOLINTNEXTLINE(modernize-raw-string-literal)
-            meta_file << "  \"gtid\": \"" << current_gtid << "\",\n";
-            meta_file << "  \"tables\": [";
-            bool first = true;
-            for (const auto& [table_name, ctx] : table_contexts_) {
-              if (!first) {
-                meta_file << ", ";
-              }
-              meta_file << "\"" << table_name << "\"";
-              first = false;
-            }
-            meta_file << "]\n";
-            meta_file << "}\n";
-            meta_file.close();
-            spdlog::info("Saved snapshot metadata with {} table(s)", table_contexts_.size());
-          } else {
-            spdlog::error("Failed to write metadata file: {}", meta_path);
-            std::string error_msg = "Failed to write metadata file: " + meta_path + " (check permissions)";
-            read_only_ = false;
-            return FormatError(error_msg);
-          }
-        }
-
-        // Clear read-only mode
-        read_only_ = false;
-
-        if (success) {
-          spdlog::info("Successfully saved snapshot to: {}", filepath);
-          return FormatSaveResponse(filepath);
-        }
-
-        std::string error_msg = "Failed to save snapshot to: " + filepath;
-        if (!failed_table.empty()) {
-          error_msg += " (failed at table: " + failed_table + ")";
-        }
-        spdlog::error("{}", error_msg);
-        return FormatError(error_msg);
-      }
-
-      case query::QueryType::LOAD: {
-        // Determine filepath
-        std::string filepath;
-        if (!query.filepath.empty()) {
-          filepath = query.filepath;
-          // If relative path, prepend snapshot_dir
-          if (filepath[0] != '/') {
-            filepath = snapshot_dir_ + "/" + filepath;
-          }
-        } else {
-          return FormatError("LOAD requires a filepath");
-        }
-
-        // TODO: Stop shared binlog replication if running (need binlog_reader reference)
-
-        // Set loading mode (blocks queries)
-        loading_ = true;
-
-        // Load from directory
-        // Check if directory exists
-        struct stat file_stat = {};
-        if (stat(filepath.c_str(), &file_stat) != 0 || !S_ISDIR(file_stat.st_mode)) {
-          loading_ = false;
-          return FormatError("Snapshot directory not found: " + filepath);
-        }
-
-        // Read metadata
-        std::string meta_path = filepath + "/meta.json";
-        std::ifstream meta_file(meta_path);
-        if (!meta_file) {
-          loading_ = false;
-          return FormatError("Snapshot metadata file not found");
-        }
-
-        // Simple JSON parsing (extract GTID)
-        std::string meta_content((std::istreambuf_iterator<char>(meta_file)), std::istreambuf_iterator<char>());
-        meta_file.close();
-
-        std::string loaded_gtid;
-        size_t gtid_pos = meta_content.find("\"gtid\":");
-        if (gtid_pos != std::string::npos) {
-          // Skip past "gtid":" to find the opening quote of the value
-          size_t quote_start = meta_content.find('\"', gtid_pos + kGtidPrefixLength);
-          size_t quote_end = meta_content.find('\"', quote_start + 1);
-          if (quote_start != std::string::npos && quote_end != std::string::npos) {
-            loaded_gtid = meta_content.substr(quote_start + 1, quote_end - quote_start - 1);
-          }
-        }
-
-        // Load each table
-        spdlog::info("Loading snapshot from: {}", filepath);
-        spdlog::info("This may take a while for large snapshots. Please wait...");
-        bool success = true;
-        for (const auto& [table_name, ctx] : table_contexts_) {
-          std::string table_index_path = filepath;
-          table_index_path += "/";
-          table_index_path += table_name;
-          table_index_path += ".index";
-          std::string table_doc_path = filepath;
-          table_doc_path += "/";
-          table_doc_path += table_name;
-          table_doc_path += ".docs";
-
-          // Check if snapshot files exist for this table
-          if (stat(table_index_path.c_str(), &file_stat) != 0) {
-            spdlog::warn("Snapshot not found for table: {} (table may be new), skipping", table_name);
-            continue;
-          }
-
-          spdlog::info("Loading table: {}", table_name);
-          if (!ctx->index->LoadFromFile(table_index_path) || !ctx->doc_store->LoadFromFile(table_doc_path, nullptr)) {
-            spdlog::error("Failed to load table: {}", table_name);
-            success = false;
-            break;
-          }
-          spdlog::info("Loaded table from snapshot: {}", table_name);
-        }
-
-        // Clear loading mode
-        loading_ = false;
-
-        // TODO: Restore GTID to shared binlog_reader
-        if (success && !loaded_gtid.empty()) {
-          spdlog::info("Found GTID in snapshot: {} (TODO: apply to shared binlog_reader)", loaded_gtid);
-        }
-
-        if (success) {
-          return FormatLoadResponse(filepath);
-        }
-        return FormatError("Failed to load snapshot");
-      }
-
-      case query::QueryType::REPLICATION_STATUS: {
-        return FormatReplicationStatusResponse();
-      }
-
-      case query::QueryType::REPLICATION_STOP: {
-#ifdef USE_MYSQL
-        if (binlog_reader_ != nullptr) {
-          // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-          if (binlog_reader_->IsRunning()) {
-            spdlog::info("Stopping binlog replication by user request");
-            binlog_reader_->Stop();
-            return FormatReplicationStopResponse();
-          }
-          return FormatError("Replication is not running");
-        }
-        return FormatError("Replication is not configured");
-
-#else
-        return FormatError("MySQL support not compiled");
-#endif
-      }
-
-      case query::QueryType::REPLICATION_START: {
-#ifdef USE_MYSQL
-        if (binlog_reader_ != nullptr) {
-          // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-          if (!binlog_reader_->IsRunning()) {
-            spdlog::info("Starting binlog replication by user request");
-            if (binlog_reader_->Start()) {
-              return FormatReplicationStartResponse();
-            }
-            return FormatError("Failed to start replication: " + binlog_reader_->GetLastError());
-          }
-          return FormatError("Replication is already running");
-        }
-        return FormatError("Replication is not configured");
-#else
-        return FormatError("MySQL support not compiled");
-#endif
-      }
-
-      case query::QueryType::CONFIG: {
-        return FormatConfigResponse();
-      }
-
-      case query::QueryType::OPTIMIZE: {
-        // Verify index is available
-        if (current_index == nullptr) {
-          return FormatError("Index not available");
-        }
-
-        // Check if optimization is already running
-        if (current_index->IsOptimizing()) {
-          return FormatError("Optimization already in progress");
-        }
-
-        spdlog::info("Starting index optimization by user request");
-        uint64_t total_docs = current_doc_store->Size();
-
-        // Run optimization (this will block, but it's intentional for now)
-        bool started = current_index->OptimizeInBatches(total_docs);
-
-        if (started) {
-          auto stats = current_index->GetStatistics();
-          std::ostringstream oss;
-          oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-              << " roaring=" << stats.roaring_bitmap_lists;
-          return oss.str();
-        }
-        return FormatError("Failed to start optimization");
-      }
-
-      case query::QueryType::DEBUG_ON: {
-        ctx.debug_mode = true;
-        spdlog::debug("Debug mode enabled for connection {}", ctx.client_fd);
-        return "OK DEBUG_ON";
-      }
-
-      case query::QueryType::DEBUG_OFF: {
-        ctx.debug_mode = false;
-        spdlog::debug("Debug mode disabled for connection {}", ctx.client_fd);
-        return "OK DEBUG_OFF";
-      }
+      // Search commands
+      case query::QueryType::SEARCH:
+      case query::QueryType::COUNT:
+        return search_handler_->Handle(query, ctx);
+
+      // Document commands
+      case query::QueryType::GET:
+        return document_handler_->Handle(query, ctx);
+
+      // Snapshot commands
+      case query::QueryType::DUMP_SAVE:
+      case query::QueryType::DUMP_LOAD:
+      case query::QueryType::DUMP_VERIFY:
+      case query::QueryType::DUMP_INFO:
+        return dump_handler_->Handle(query, ctx);
+
+      // Admin commands
+      case query::QueryType::INFO:
+      case query::QueryType::CONFIG:
+        return admin_handler_->Handle(query, ctx);
+
+      // Replication commands
+      case query::QueryType::REPLICATION_STATUS:
+      case query::QueryType::REPLICATION_STOP:
+      case query::QueryType::REPLICATION_START:
+        return replication_handler_->Handle(query, ctx);
+
+      // Debug commands
+      case query::QueryType::DEBUG_ON:
+      case query::QueryType::DEBUG_OFF:
+      case query::QueryType::OPTIMIZE:
+        return debug_handler_->Handle(query, ctx);
 
       default:
-        return FormatError("Unknown query type");
+        return ResponseFormatter::FormatError("Unknown query type");
     }
   } catch (const std::exception& e) {
-    return FormatError(std::string("Exception: ") + e.what());
+    return ResponseFormatter::FormatError(std::string("Exception: ") + e.what());
   }
-}
-
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-std::string TcpServer::FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
-                                            storage::DocumentStore* doc_store, const query::DebugInfo* debug_info) {
-  std::ostringstream oss;
-  oss << "OK RESULTS " << total_results;
-
-  // Results are already sorted and paginated by ResultSorter::SortAndPaginate
-  // Just format them directly (no offset/limit needed)
-  for (const auto& doc_id : results) {
-    auto pk_opt = doc_store->GetPrimaryKey(static_cast<storage::DocId>(doc_id));
-    if (pk_opt) {
-      oss << " " << pk_opt.value();
-    }
-  }
-
-  // Add debug information if provided
-  if (debug_info != nullptr) {
-    oss << "\r\n\r\n# DEBUG\r\n";
-    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
-    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
-    if (debug_info->filter_time_ms > 0.0) {
-      oss << "filter_time: " << debug_info->filter_time_ms << "ms\r\n";
-    }
-    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
-    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
-    oss << "candidates: " << debug_info->total_candidates << "\r\n";
-    oss << "after_intersection: " << debug_info->after_intersection << "\r\n";
-    if (debug_info->after_not > 0) {
-      oss << "after_not: " << debug_info->after_not << "\r\n";
-    }
-    if (debug_info->after_filters > 0) {
-      oss << "after_filters: " << debug_info->after_filters << "\r\n";
-    }
-    oss << "final: " << debug_info->final_results << "\r\n";
-    if (!debug_info->optimization_used.empty()) {
-      oss << "optimization: " << debug_info->optimization_used << "\r\n";
-    }
-    // Show applied ORDER BY, LIMIT, OFFSET
-    if (!debug_info->order_by_applied.empty()) {
-      oss << "order_by: " << debug_info->order_by_applied << "\r\n";
-    }
-    // Always show LIMIT (it has a default value of 1000)
-    oss << "limit: " << debug_info->limit_applied;
-    if (!debug_info->limit_explicit) {
-      oss << " (default)";
-    }
-    oss << "\r\n";
-    // Show OFFSET if non-zero
-    if (debug_info->offset_applied > 0) {
-      oss << "offset: " << debug_info->offset_applied;
-      if (!debug_info->offset_explicit) {
-        oss << " (default)";
-      }
-      oss << "\r\n";
-    }
-  }
-
-  return oss.str();
-}
-
-std::string TcpServer::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {
-  std::ostringstream oss;
-  oss << "OK COUNT " << count;
-
-  // Add debug information if provided
-  if (debug_info != nullptr) {
-    oss << "\r\n\r\n# DEBUG\r\n";
-    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
-    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
-    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
-    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
-  }
-
-  return oss.str();
-}
-
-std::string TcpServer::FormatGetResponse(const std::optional<storage::Document>& doc) {
-  if (!doc) {
-    return FormatError("Document not found");
-  }
-
-  std::ostringstream oss;
-  oss << "OK DOC " << doc->primary_key;
-
-  // Add filters
-  for (const auto& [name, value] : doc->filters) {
-    oss << " " << name << "=";
-    if (std::holds_alternative<int64_t>(value)) {
-      oss << std::get<int64_t>(value);
-    } else if (std::holds_alternative<std::string>(value)) {
-      oss << std::get<std::string>(value);
-    }
-  }
-
-  return oss.str();
-}
-
-std::string TcpServer::FormatInfoResponse() {
-  std::ostringstream oss;
-  oss << "OK INFO\r\n\r\n";
-
-  // Server information
-  oss << "# Server\r\n";
-  oss << "version: " << mygramdb::Version::FullString() << "\r\n";
-  oss << "uptime_seconds: " << stats_.GetUptimeSeconds() << "\r\n";
-  oss << "\r\n";
-
-  // Stats - Command counters
-  oss << "# Stats\r\n";
-  oss << "total_commands_processed: " << stats_.GetTotalCommands() << "\r\n";
-  oss << "total_connections_received: " << stats_.GetStatistics().total_connections_received << "\r\n";
-  oss << "total_requests: " << stats_.GetTotalRequests() << "\r\n";
-  oss << "\r\n";
-
-  // Command counters
-  oss << "# Commandstats\r\n";
-  auto cmd_stats = stats_.GetStatistics();
-  if (cmd_stats.cmd_search > 0) {
-    oss << "cmd_search: " << cmd_stats.cmd_search << "\r\n";
-  }
-  if (cmd_stats.cmd_count > 0) {
-    oss << "cmd_count: " << cmd_stats.cmd_count << "\r\n";
-  }
-  if (cmd_stats.cmd_get > 0) {
-    oss << "cmd_get: " << cmd_stats.cmd_get << "\r\n";
-  }
-  if (cmd_stats.cmd_info > 0) {
-    oss << "cmd_info: " << cmd_stats.cmd_info << "\r\n";
-  }
-  if (cmd_stats.cmd_save > 0) {
-    oss << "cmd_save: " << cmd_stats.cmd_save << "\r\n";
-  }
-  if (cmd_stats.cmd_load > 0) {
-    oss << "cmd_load: " << cmd_stats.cmd_load << "\r\n";
-  }
-  if (cmd_stats.cmd_replication_status > 0) {
-    oss << "cmd_replication_status: " << cmd_stats.cmd_replication_status << "\r\n";
-  }
-  if (cmd_stats.cmd_replication_stop > 0) {
-    oss << "cmd_replication_stop: " << cmd_stats.cmd_replication_stop << "\r\n";
-  }
-  if (cmd_stats.cmd_replication_start > 0) {
-    oss << "cmd_replication_start: " << cmd_stats.cmd_replication_start << "\r\n";
-  }
-  if (cmd_stats.cmd_config > 0) {
-    oss << "cmd_config: " << cmd_stats.cmd_config << "\r\n";
-  }
-  oss << "\r\n";
-
-  // Aggregate memory and index statistics across all tables
-  size_t total_index_memory = 0;
-  size_t total_doc_memory = 0;
-  size_t total_documents = 0;
-  size_t total_terms = 0;
-  size_t total_postings = 0;
-  size_t total_delta_encoded = 0;
-  size_t total_roaring_bitmap = 0;
-  bool any_optimizing = false;
-
-  for (const auto& [table_name, ctx] : table_contexts_) {
-    total_index_memory += ctx->index->MemoryUsage();
-    total_doc_memory += ctx->doc_store->MemoryUsage();
-    total_documents += ctx->doc_store->Size();
-    auto idx_stats = ctx->index->GetStatistics();
-    total_terms += idx_stats.total_terms;
-    total_postings += idx_stats.total_postings;
-    total_delta_encoded += idx_stats.delta_encoded_lists;
-    total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
-    if (ctx->index->IsOptimizing()) {
-      any_optimizing = true;
-    }
-  }
-
-  size_t total_memory = total_index_memory + total_doc_memory;
-
-  // Memory statistics
-  oss << "# Memory\r\n";
-
-  // Update memory stats in real-time
-  stats_.UpdateMemoryUsage(total_memory);
-
-  oss << "used_memory_bytes: " << total_memory << "\r\n";
-  oss << "used_memory_human: " << utils::FormatBytes(total_memory) << "\r\n";
-  oss << "used_memory_peak_bytes: " << stats_.GetPeakMemoryUsage() << "\r\n";
-  oss << "used_memory_peak_human: " << utils::FormatBytes(stats_.GetPeakMemoryUsage()) << "\r\n";
-  oss << "used_memory_index: " << utils::FormatBytes(total_index_memory) << "\r\n";
-  oss << "used_memory_documents: " << utils::FormatBytes(total_doc_memory) << "\r\n";
-
-  // Memory fragmentation estimate
-  if (total_memory > 0) {
-    size_t peak = stats_.GetPeakMemoryUsage();
-    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
-    oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2) << fragmentation << "\r\n";
-  }
-  oss << "\r\n";
-
-  // Index statistics (aggregated)
-  oss << "# Index\r\n";
-  oss << "total_documents: " << total_documents << "\r\n";
-  oss << "total_terms: " << total_terms << "\r\n";
-  oss << "total_postings: " << total_postings << "\r\n";
-  if (total_terms > 0) {
-    double avg_postings = static_cast<double>(total_postings) / static_cast<double>(total_terms);
-    oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2) << avg_postings << "\r\n";
-  }
-  oss << "delta_encoded_lists: " << total_delta_encoded << "\r\n";
-  oss << "roaring_bitmap_lists: " << total_roaring_bitmap << "\r\n";
-
-  // Optimization status
-  if (any_optimizing) {
-    oss << "optimization_status: in_progress\r\n";
-  } else {
-    oss << "optimization_status: idle\r\n";
-  }
-  oss << "\r\n";
-
-  // Tables
-  oss << "# Tables\r\n";
-  oss << "tables: ";
-  size_t idx = 0;
-  for (const auto& [name, unused_context] : table_contexts_) {
-    (void)unused_context;  // Mark as intentionally unused
-    if (idx++ > 0) {
-      oss << ",";
-    }
-    oss << name;
-  }
-  oss << "\r\n\r\n";
-
-  // Clients
-  oss << "# Clients\r\n";
-  oss << "connected_clients: " << stats_.GetActiveConnections() << "\r\n";
-  oss << "\r\n";
-
-  // Replication information
-#ifdef USE_MYSQL
-  oss << "# Replication\r\n";
-  if (binlog_reader_ != nullptr) {
-    oss << "replication_status: " << (binlog_reader_->IsRunning() ? "running" : "stopped") << "\r\n";
-    oss << "replication_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
-    oss << "replication_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
-  } else {
-    oss << "replication_status: disabled\r\n";
-  }
-
-  // Event statistics (always shown, even when binlog_reader is null)
-  oss << "replication_inserts_applied: " << stats_.GetReplInsertsApplied() << "\r\n";
-  oss << "replication_inserts_skipped: " << stats_.GetReplInsertsSkipped() << "\r\n";
-  oss << "replication_updates_applied: " << stats_.GetReplUpdatesApplied() << "\r\n";
-  oss << "replication_updates_added: " << stats_.GetReplUpdatesAdded() << "\r\n";
-  oss << "replication_updates_removed: " << stats_.GetReplUpdatesRemoved() << "\r\n";
-  oss << "replication_updates_modified: " << stats_.GetReplUpdatesModified() << "\r\n";
-  oss << "replication_updates_skipped: " << stats_.GetReplUpdatesSkipped() << "\r\n";
-  oss << "replication_deletes_applied: " << stats_.GetReplDeletesApplied() << "\r\n";
-  oss << "replication_deletes_skipped: " << stats_.GetReplDeletesSkipped() << "\r\n";
-  oss << "replication_ddl_executed: " << stats_.GetReplDdlExecuted() << "\r\n";
-  oss << "replication_events_skipped_other_tables: " << stats_.GetReplEventsSkippedOtherTables() << "\r\n";
-  oss << "\r\n";
-#endif
-
-  oss << "END";
-  return oss.str();
-}
-
-std::string TcpServer::FormatSaveResponse(const std::string& filepath) {
-  return "OK SAVED " + filepath;
-}
-
-std::string TcpServer::FormatLoadResponse(const std::string& filepath) {
-  return "OK LOADED " + filepath;
-}
-
-std::string TcpServer::FormatReplicationStatusResponse() {
-#ifdef USE_MYSQL
-  std::ostringstream oss;
-  oss << "OK REPLICATION\r\n";
-
-  if (binlog_reader_ != nullptr) {
-    bool is_running = binlog_reader_->IsRunning();
-    oss << "status: " << (is_running ? "running" : "stopped") << "\r\n";
-    oss << "current_gtid: " << binlog_reader_->GetCurrentGTID() << "\r\n";
-    oss << "processed_events: " << binlog_reader_->GetProcessedEvents() << "\r\n";
-
-    if (is_running) {
-      oss << "queue_size: " << binlog_reader_->GetQueueSize() << "\r\n";
-    }
-  } else {
-    oss << "status: not_configured\r\n";
-  }
-
-  oss << "END";
-  return oss.str();
-#else
-  return FormatError("MySQL support not compiled");
-#endif
-}
-
-std::string TcpServer::FormatReplicationStopResponse() {
-  return "OK REPLICATION_STOPPED";
-}
-
-std::string TcpServer::FormatReplicationStartResponse() {
-  return "OK REPLICATION_STARTED";
-}
-
-std::string TcpServer::FormatConfigResponse() {
-  std::ostringstream oss;
-  oss << "OK CONFIG\n";
-
-  if (full_config_ == nullptr) {
-    oss << "  [Configuration not available]\n";
-    return oss.str();
-  }
-
-  // MySQL configuration
-  oss << "  mysql:\n";
-  oss << "    host: " << full_config_->mysql.host << "\n";
-  oss << "    port: " << full_config_->mysql.port << "\n";
-  oss << "    user: " << full_config_->mysql.user << "\n";
-  oss << "    database: " << full_config_->mysql.database << "\n";
-  oss << "    use_gtid: " << (full_config_->mysql.use_gtid ? "true" : "false") << "\n";
-
-  // Tables configuration
-  oss << "  tables: " << full_config_->tables.size() << "\n";
-  for (const auto& table : full_config_->tables) {
-    oss << "    - name: " << table.name << "\n";
-    oss << "      primary_key: " << table.primary_key << "\n";
-    oss << "      ngram_size: " << table.ngram_size << "\n";
-    oss << "      filters: " << table.filters.size() << "\n";
-  }
-
-  // API configuration
-  oss << "  api:\n";
-  oss << "    tcp.bind: " << full_config_->api.tcp.bind << "\n";
-  oss << "    tcp.port: " << full_config_->api.tcp.port << "\n";
-
-  // Replication configuration
-  oss << "  replication:\n";
-  oss << "    enable: " << (full_config_->replication.enable ? "true" : "false") << "\n";
-  oss << "    server_id: " << full_config_->replication.server_id << "\n";
-  oss << "    start_from: " << full_config_->replication.start_from << "\n";
-  oss << "    state_file: " << full_config_->replication.state_file << "\n";
-
-  // Memory configuration
-  oss << "  memory:\n";
-  oss << "    hard_limit_mb: " << full_config_->memory.hard_limit_mb << "\n";
-  oss << "    soft_target_mb: " << full_config_->memory.soft_target_mb << "\n";
-  oss << "    roaring_threshold: " << full_config_->memory.roaring_threshold << "\n";
-
-  // Snapshot configuration
-  oss << "  snapshot:\n";
-  oss << "    dir: " << full_config_->snapshot.dir << "\n";
-
-  // Logging configuration
-  oss << "  logging:\n";
-  oss << "    level: " << full_config_->logging.level << "\n";
-
-  // Runtime status
-  oss << "  runtime:\n";
-  oss << "    connections: " << GetConnectionCount() << "\n";
-  oss << "    max_connections: " << config_.max_connections << "\n";
-  oss << "    read_only: " << (read_only_ ? "true" : "false") << "\n";
-  oss << "    uptime: " << stats_.GetUptimeSeconds() << "s\n";
-
-  return oss.str();
-}
-
-std::string TcpServer::FormatError(const std::string& message) {
-  return "ERROR " + message;
 }
 
 bool TcpServer::SetSocketOptions(int socket_fd) {

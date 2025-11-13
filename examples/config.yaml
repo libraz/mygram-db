@@ -117,10 +117,8 @@ replication:
   # - "snapshot": Start from snapshot GTID (recommended, ensures consistency)
   # - "latest": Start from current GTID (only new changes)
   # - "gtid=<UUID:txn>": Start from specific GTID (e.g., gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1)
-  # - "state_file": Resume from saved state file (for restart/recovery)
   start_from: "snapshot"            # Default: snapshot
 
-  state_file: "./mygramdb_replication.state"  # GTID state persistence file (default: ./mygramdb_replication.state)
   queue_size: 10000                 # Binlog event queue size (default: 10000)
   reconnect_backoff_min_ms: 500     # Minimum reconnect backoff delay (default: 500)
   reconnect_backoff_max_ms: 10000   # Maximum reconnect backoff delay (default: 10000)

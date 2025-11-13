@@ -25,7 +25,6 @@
 #include "mysql/gtid_encoder.h"
 #include "mysql/rows_parser.h"
 #include "server/tcp_server.h"  // For TableContext definition
-#include "storage/gtid_state.h"
 #include "utils/string_utils.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -390,20 +389,6 @@ void BinlogReader::WorkerThreadFunc() {
 
     processed_events_++;
     UpdateCurrentGTID(event.gtid);
-
-    // Periodically write GTID to state file
-    if (!config_.state_file_path.empty() && config_.state_write_interval_events > 0 &&
-        processed_events_ % config_.state_write_interval_events == 0) {
-      WriteGTIDToStateFile(event.gtid);
-    }
-  }
-
-  // Write final GTID to state file before stopping
-  if (!config_.state_file_path.empty()) {
-    std::string final_gtid = GetCurrentGTID();
-    if (!final_gtid.empty()) {
-      WriteGTIDToStateFile(final_gtid);
-    }
   }
 
   spdlog::info("Binlog worker thread stopped");
@@ -805,21 +790,6 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
-}
-
-void BinlogReader::WriteGTIDToStateFile(const std::string& gtid) const {
-  if (gtid.empty()) {
-    return;
-  }
-
-  try {
-    storage::GTIDStateFile state_file(config_.state_file_path);
-    if (!state_file.Write(gtid)) {
-      spdlog::warn("Failed to write GTID to state file: {}", gtid);
-    }
-  } catch (const std::exception& e) {
-    spdlog::error("Exception while writing GTID to state file: {}", e.what());
-  }
 }
 
 std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* buffer, unsigned long length) {

@@ -115,6 +115,94 @@ Query QueryParser::Parse(const std::string& query_str) {
     }
     return query;
   }
+  if (command == "DUMP") {
+    // DUMP SAVE | LOAD | VERIFY | INFO
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() < 2) {  // 2: DUMP + subcommand
+      SetError("DUMP requires a subcommand (SAVE, LOAD, VERIFY, INFO)");
+      return Query{};
+    }
+
+    std::string subcommand = ToUpper(tokens[1]);
+    Query query;
+    query.table = "";  // DUMP doesn't need a table
+
+    if (subcommand == "SAVE") {
+      query.type = QueryType::DUMP_SAVE;
+      // DUMP SAVE [filepath] [--compact] [--with-stats]
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Start after DUMP SAVE
+        const std::string& token = tokens[i];
+        if (token == "--compact") {
+          query.dump_compact = true;
+        } else if (token == "--with-stats") {
+          query.dump_with_stats = true;
+        } else if (token[0] != '-') {
+          // Filepath (not a flag)
+          query.filepath = token;
+        } else {
+          SetError("Unknown DUMP SAVE flag: " + token);
+          return Query{};
+        }
+      }
+    } else if (subcommand == "LOAD") {
+      query.type = QueryType::DUMP_LOAD;
+      // DUMP LOAD filepath
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (tokens.size() > 2) {  // 2: DUMP LOAD + filepath
+        query.filepath = tokens[2];
+      } else {
+        SetError("DUMP LOAD requires a filepath");
+        return Query{};
+      }
+    } else if (subcommand == "VERIFY") {
+      query.type = QueryType::DUMP_VERIFY;
+      // DUMP VERIFY filepath
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (tokens.size() > 2) {  // 2: DUMP VERIFY + filepath
+        query.filepath = tokens[2];
+      } else {
+        SetError("DUMP VERIFY requires a filepath");
+        return Query{};
+      }
+    } else if (subcommand == "INFO") {
+      query.type = QueryType::DUMP_INFO;
+      // DUMP INFO filepath
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (tokens.size() > 2) {  // 2: DUMP INFO + filepath
+        query.filepath = tokens[2];
+      } else {
+        SetError("DUMP INFO requires a filepath");
+        return Query{};
+      }
+    } else {
+      SetError("Unknown DUMP subcommand: " + subcommand);
+      return Query{};
+    }
+
+    return query;
+  }
+  if (command == "CONFIG") {
+    Query query;
+    query.table = "";  // CONFIG doesn't need a table
+
+    // CONFIG [VERIFY]
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() > 1) {  // 1: CONFIG + subcommand
+      std::string subcommand = ToUpper(tokens[1]);
+      if (subcommand == "VERIFY") {
+        query.type = QueryType::CONFIG_VERIFY;
+      } else {
+        SetError("Unknown CONFIG subcommand: " + subcommand);
+        return Query{};
+      }
+    } else {
+      // CONFIG without subcommand means CONFIG SHOW
+      query.type = QueryType::CONFIG;
+    }
+
+    return query;
+  }
   if (command == "REPLICATION") {
     // REPLICATION STATUS | STOP | START
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

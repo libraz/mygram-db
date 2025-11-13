@@ -621,6 +621,70 @@ bool Index::SaveToFile(const std::string& filepath) const {
   }
 }
 
+bool Index::SaveToStream(std::ostream& output_stream) const {
+  try {
+    // File format:
+    // [4 bytes: magic "MGIX"] [4 bytes: version] [4 bytes: ngram_size]
+    // [8 bytes: term_count] [terms and posting lists...]
+
+    // Write magic number
+    output_stream.write("MGIX", 4);
+
+    // Write version
+    uint32_t version = 1;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    output_stream.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    // Write ngram_size
+    auto ngram = static_cast<uint32_t>(ngram_size_);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    output_stream.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
+
+    uint64_t term_count = 0;
+    // Lock scope: iterate and serialize posting lists
+    {
+      std::scoped_lock lock(postings_mutex_);
+
+      // Write term count
+      term_count = term_postings_.size();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      output_stream.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+
+      // Write each term and its posting list
+      for (const auto& [term, posting] : term_postings_) {
+        // Write term length and term
+        auto term_len = static_cast<uint32_t>(term.size());
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+        output_stream.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+        output_stream.write(term.data(), static_cast<std::streamsize>(term_len));
+
+        // Serialize posting list to buffer
+        std::vector<uint8_t> posting_data;
+        posting->Serialize(posting_data);
+
+        // Write posting list size and data
+        uint64_t posting_size = posting_data.size();
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+        output_stream.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+        output_stream.write(reinterpret_cast<const char*>(posting_data.data()),
+                            static_cast<std::streamsize>(posting_size));
+      }
+    }
+
+    if (!output_stream.good()) {
+      spdlog::error("Stream error while saving index");
+      return false;
+    }
+
+    spdlog::debug("Saved index to stream: {} terms", term_count);
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while saving index to stream: {}", e.what());
+    return false;
+  }
+}
+
 bool Index::LoadFromFile(const std::string& filepath) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
@@ -708,6 +772,91 @@ bool Index::LoadFromFile(const std::string& filepath) {
     return true;
   } catch (const std::exception& e) {
     spdlog::error("Exception while loading index: {}", e.what());
+    return false;
+  }
+}
+
+bool Index::LoadFromStream(std::istream& input_stream) {
+  try {
+    // Read and verify magic number
+    std::array<char, 4> magic{};
+    input_stream.read(magic.data(), magic.size());
+    if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
+      spdlog::error("Invalid index stream format (bad magic number)");
+      return false;
+    }
+
+    // Read version
+    uint32_t version = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    input_stream.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version != 1) {
+      spdlog::error("Unsupported index stream version: {}", version);
+      return false;
+    }
+
+    // Read ngram_size
+    uint32_t ngram = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    input_stream.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
+    if (static_cast<int>(ngram) != ngram_size_) {
+      spdlog::warn("Index ngram_size mismatch: stream={}, current={}", ngram, ngram_size_);
+      // Continue anyway, but this might cause issues
+    }
+
+    // Read term count
+    uint64_t term_count = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    input_stream.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
+
+    // Load into a new map to minimize lock time
+    std::unordered_map<std::string, std::unique_ptr<PostingList>> new_postings;
+
+    // Read each term and its posting list
+    for (uint64_t i = 0; i < term_count; ++i) {
+      // Read term length and term
+      uint32_t term_len = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      input_stream.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
+
+      std::string term(term_len, '\0');
+      input_stream.read(term.data(), static_cast<std::streamsize>(term_len));
+
+      // Read posting list size and data
+      uint64_t posting_size = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      input_stream.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
+
+      std::vector<uint8_t> posting_data(posting_size);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      input_stream.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
+
+      // Deserialize posting list
+      auto posting = std::make_unique<PostingList>(roaring_threshold_);
+      size_t offset = 0;
+      if (!posting->Deserialize(posting_data, offset)) {
+        spdlog::error("Failed to deserialize posting list for term: {}", term);
+        return false;
+      }
+
+      new_postings[term] = std::move(posting);
+    }
+
+    if (!input_stream.good()) {
+      spdlog::error("Stream error while loading index");
+      return false;
+    }
+
+    // Swap the loaded data in with minimal lock time
+    {
+      std::scoped_lock lock(postings_mutex_);
+      term_postings_ = std::move(new_postings);
+    }
+
+    spdlog::debug("Loaded index from stream: {} terms", term_count);
+    return true;
+  } catch (const std::exception& e) {
+    spdlog::error("Exception while loading index from stream: {}", e.what());
     return false;
   }
 }

@@ -389,3 +389,153 @@ TEST_F(DocumentStoreSerializationTest, MultipleDocumentsMixedTypes) {
   EXPECT_EQ(std::get<int32_t>(doc3->filters["status"]), 0);
   EXPECT_EQ(std::get<bool>(doc3->filters["active"]), false);
 }
+
+/**
+ * @brief Test stream-based serialization with all types
+ */
+TEST_F(DocumentStoreSerializationTest, StreamSerializationAllTypes) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["null"] = std::monostate{};
+  filters["bool"] = true;
+  filters["int8"] = static_cast<int8_t>(-42);
+  filters["uint8"] = static_cast<uint8_t>(200);
+  filters["int16"] = static_cast<int16_t>(-1000);
+  filters["uint16"] = static_cast<uint16_t>(50000);
+  filters["int32"] = static_cast<int32_t>(-100000);
+  filters["uint32"] = static_cast<uint32_t>(3000000);
+  filters["int64"] = static_cast<int64_t>(-1000000000LL);
+  filters["uint64"] = static_cast<uint64_t>(9000000000ULL);
+  filters["string"] = std::string("test value");
+  filters["double"] = 3.14159;
+
+  store1.AddDocument("doc1", filters);
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(store1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  DocumentStore store2;
+  ASSERT_TRUE(store2.LoadFromStream(stream));
+
+  auto doc = store2.GetDocument(1);
+  ASSERT_TRUE(doc.has_value());
+  ASSERT_EQ(doc->filters.size(), 12);
+
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(doc->filters["null"]));
+  EXPECT_EQ(std::get<bool>(doc->filters["bool"]), true);
+  EXPECT_EQ(std::get<int8_t>(doc->filters["int8"]), -42);
+  EXPECT_EQ(std::get<uint8_t>(doc->filters["uint8"]), 200);
+  EXPECT_EQ(std::get<int16_t>(doc->filters["int16"]), -1000);
+  EXPECT_EQ(std::get<uint16_t>(doc->filters["uint16"]), 50000);
+  EXPECT_EQ(std::get<int32_t>(doc->filters["int32"]), -100000);
+  EXPECT_EQ(std::get<uint32_t>(doc->filters["uint32"]), 3000000);
+  EXPECT_EQ(std::get<int64_t>(doc->filters["int64"]), -1000000000LL);
+  EXPECT_EQ(std::get<uint64_t>(doc->filters["uint64"]), 9000000000ULL);
+  EXPECT_EQ(std::get<std::string>(doc->filters["string"]), "test value");
+  EXPECT_DOUBLE_EQ(std::get<double>(doc->filters["double"]), 3.14159);
+}
+
+/**
+ * @brief Test stream-based serialization with GTID
+ */
+TEST_F(DocumentStoreSerializationTest, StreamSerializationWithGTID) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["id"] = static_cast<int32_t>(42);
+  filters["name"] = std::string("test");
+
+  store1.AddDocument("doc1", filters);
+
+  // Serialize with GTID
+  std::string original_gtid = "00000000-0000-0000-0000-000000000000:1-100";
+  std::stringstream stream;
+  ASSERT_TRUE(store1.SaveToStream(stream, original_gtid));
+
+  // Deserialize and verify GTID
+  DocumentStore store2;
+  std::string loaded_gtid;
+  ASSERT_TRUE(store2.LoadFromStream(stream, &loaded_gtid));
+
+  EXPECT_EQ(loaded_gtid, original_gtid);
+
+  auto doc = store2.GetDocument(1);
+  ASSERT_TRUE(doc.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc->filters["id"]), 42);
+  EXPECT_EQ(std::get<std::string>(doc->filters["name"]), "test");
+}
+
+/**
+ * @brief Test stream-based serialization with empty GTID
+ */
+TEST_F(DocumentStoreSerializationTest, StreamSerializationEmptyGTID) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["value"] = static_cast<int32_t>(123);
+
+  store1.AddDocument("doc1", filters);
+
+  // Serialize without GTID
+  std::stringstream stream;
+  ASSERT_TRUE(store1.SaveToStream(stream, ""));
+
+  // Deserialize and verify empty GTID
+  DocumentStore store2;
+  std::string loaded_gtid;
+  ASSERT_TRUE(store2.LoadFromStream(stream, &loaded_gtid));
+
+  EXPECT_EQ(loaded_gtid, "");
+
+  auto doc = store2.GetDocument(1);
+  ASSERT_TRUE(doc.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc->filters["value"]), 123);
+}
+
+/**
+ * @brief Test stream-based serialization with multiple documents
+ */
+TEST_F(DocumentStoreSerializationTest, StreamSerializationMultipleDocuments) {
+  DocumentStore store1;
+
+  // Add 100 documents with various data
+  for (int i = 1; i <= 100; ++i) {
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["id"] = static_cast<int32_t>(i);
+    filters["value"] = static_cast<double>(i * 1.5);
+    filters["name"] = std::string("doc_") + std::to_string(i);
+    store1.AddDocument("pk_" + std::to_string(i), filters);
+  }
+
+  // Serialize to stream
+  std::stringstream stream;
+  ASSERT_TRUE(store1.SaveToStream(stream));
+
+  // Deserialize from stream
+  DocumentStore store2;
+  ASSERT_TRUE(store2.LoadFromStream(stream));
+
+  EXPECT_EQ(store2.Size(), 100);
+
+  // Verify random documents
+  auto doc1 = store2.GetDocument(1);
+  ASSERT_TRUE(doc1.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc1->filters["id"]), 1);
+  EXPECT_DOUBLE_EQ(std::get<double>(doc1->filters["value"]), 1.5);
+  EXPECT_EQ(std::get<std::string>(doc1->filters["name"]), "doc_1");
+
+  auto doc50 = store2.GetDocument(50);
+  ASSERT_TRUE(doc50.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc50->filters["id"]), 50);
+  EXPECT_DOUBLE_EQ(std::get<double>(doc50->filters["value"]), 75.0);
+  EXPECT_EQ(std::get<std::string>(doc50->filters["name"]), "doc_50");
+
+  auto doc100 = store2.GetDocument(100);
+  ASSERT_TRUE(doc100.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc100->filters["id"]), 100);
+  EXPECT_DOUBLE_EQ(std::get<double>(doc100->filters["value"]), 150.0);
+  EXPECT_EQ(std::get<std::string>(doc100->filters["name"]), "doc_100");
+}

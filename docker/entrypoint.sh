@@ -102,7 +102,6 @@ replication:
   enable: ${REPLICATION_ENABLE}
   server_id: ${REPLICATION_SERVER_ID}
   start_from: "${REPLICATION_START_FROM}"
-  state_file: "${REPLICATION_STATE_FILE}"
   queue_size: 10000
   reconnect_backoff_min_ms: 500
   reconnect_backoff_max_ms: 10000

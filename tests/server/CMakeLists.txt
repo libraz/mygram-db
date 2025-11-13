@@ -69,3 +69,37 @@ target_link_libraries(http_server_test
 target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_test)
+
+# DumpHandler tests
+
+add_executable(dump_handler_test
+  dump_handler_test.cpp
+)
+
+target_link_libraries(dump_handler_test
+  mygramdb_server
+  mygramdb_storage
+  mygramdb_index
+  mygramdb_query
+  mygramdb_mysql
+  GTest::gtest_main
+)
+
+gtest_discover_tests(dump_handler_test)
+
+# GTID Dump Integration tests
+
+add_executable(gtid_dump_integration_test
+  gtid_dump_integration_test.cpp
+)
+
+target_link_libraries(gtid_dump_integration_test
+  mygramdb_server
+  mygramdb_storage
+  mygramdb_index
+  mygramdb_query
+  mygramdb_mysql
+  GTest::gtest_main
+)
+
+gtest_discover_tests(gtid_dump_integration_test)

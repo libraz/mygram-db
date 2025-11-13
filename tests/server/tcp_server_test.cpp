@@ -638,166 +638,6 @@ TEST_F(TcpServerTest, InfoCommand) {
 /**
  * @brief Test SAVE command
  */
-TEST_F(TcpServerTest, SaveCommand) {
-  // Add some documents first
-  index_->AddDocument(1, "test document");
-  index_->AddDocument(2, "another document");
-  doc_store_->AddDocument("1", {});
-  doc_store_->AddDocument("2", {});
-
-  ASSERT_TRUE(server_->Start());
-  uint16_t port = server_->GetPort();
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  int sock = CreateClientSocket(port);
-  ASSERT_GE(sock, 0);
-
-  // Send SAVE command
-  std::string test_file = "/tmp/test_snapshot_" + std::to_string(std::time(nullptr));
-  std::string response = SendRequest(sock, "SAVE " + test_file);
-
-  // Should return OK SAVED
-  EXPECT_TRUE(response.find("OK SAVED") == 0);
-  EXPECT_TRUE(response.find(test_file) != std::string::npos);
-
-  // Check directory and files exist (new directory format)
-  std::ifstream meta_file(test_file + "/meta.json");
-  EXPECT_TRUE(meta_file.good());
-  meta_file.close();
-
-  std::ifstream index_file(test_file + "/test.index");
-  EXPECT_TRUE(index_file.good());
-  index_file.close();
-
-  std::ifstream docs_file(test_file + "/test.docs");
-  EXPECT_TRUE(docs_file.good());
-  docs_file.close();
-
-  // Cleanup
-  std::remove((test_file + "/meta.json").c_str());
-  std::remove((test_file + "/test.index").c_str());
-  std::remove((test_file + "/test.docs").c_str());
-  std::remove(test_file.c_str());  // Remove directory
-
-  close(sock);
-}
-
-/**
- * @brief Test LOAD command
- */
-TEST_F(TcpServerTest, LoadCommand) {
-  // Add and save some documents
-  index_->AddDocument(1, "test document");
-  index_->AddDocument(2, "another document");
-  doc_store_->AddDocument("1", {});
-  doc_store_->AddDocument("2", {});
-
-  // Create snapshot directory with new format
-  std::string test_dir = "/tmp/test_snapshot_load_" + std::to_string(std::time(nullptr));
-  mkdir(test_dir.c_str(), 0755);
-
-  ASSERT_TRUE(index_->SaveToFile(test_dir + "/test.index"));
-  ASSERT_TRUE(doc_store_->SaveToFile(test_dir + "/test.docs"));
-
-  // Create meta.json
-  std::ofstream meta_file(test_dir + "/meta.json");
-  meta_file << "{\"version\":\"1.0\",\"tables\":[\"test\"],\"timestamp\":\"2024-01-01T00:00:00Z\"}";
-  meta_file.close();
-
-  // Recreate index, doc_store, and table context
-  table_context_.index.reset(new mygramdb::index::Index(1, 0.18));
-  table_context_.doc_store.reset(new mygramdb::storage::DocumentStore());
-  index_ = table_context_.index.get();
-  doc_store_ = table_context_.doc_store.get();
-  table_context_.config.ngram_size = 1;
-  table_contexts_["test"] = &table_context_;
-  server_.reset(new mygramdb::server::TcpServer(config_, table_contexts_, "./snapshots", nullptr));
-
-  ASSERT_TRUE(server_->Start());
-  uint16_t port = server_->GetPort();
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  int sock = CreateClientSocket(port);
-  ASSERT_GE(sock, 0);
-
-  // Send LOAD command
-  std::string response = SendRequest(sock, "LOAD " + test_dir);
-
-  // Should return OK LOADED
-  EXPECT_TRUE(response.find("OK LOADED") == 0);
-  EXPECT_TRUE(response.find(test_dir) != std::string::npos);
-
-  // Verify data was loaded - check document count
-  EXPECT_EQ(doc_store_->Size(), 2);
-
-  // Cleanup
-  std::remove((test_dir + "/meta.json").c_str());
-  std::remove((test_dir + "/test.index").c_str());
-  std::remove((test_dir + "/test.docs").c_str());
-  std::remove(test_dir.c_str());
-
-  close(sock);
-}
-
-/**
- * @brief Test SAVE/LOAD round trip
- */
-TEST_F(TcpServerTest, SaveLoadRoundTrip) {
-  // Add documents with filters
-  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters1;
-  filters1["status"] = static_cast<int32_t>(1);
-  filters1["name"] = std::string("test");
-
-  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters2;
-  filters2["status"] = static_cast<int32_t>(2);
-  filters2["name"] = std::string("another");
-
-  index_->AddDocument(1, "test document with filters");
-  index_->AddDocument(2, "another document");
-  doc_store_->AddDocument("100", filters1);
-  doc_store_->AddDocument("200", filters2);
-
-  ASSERT_TRUE(server_->Start());
-  uint16_t port = server_->GetPort();
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  int sock = CreateClientSocket(port);
-  ASSERT_GE(sock, 0);
-
-  // Save
-  std::string test_file = "/tmp/test_roundtrip_" + std::to_string(std::time(nullptr));
-  std::string save_response = SendRequest(sock, "SAVE " + test_file);
-  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
-
-  // Get original document count
-  size_t original_count = doc_store_->Size();
-
-  // Load (should replace existing data)
-  std::string load_response = SendRequest(sock, "LOAD " + test_file);
-  EXPECT_TRUE(load_response.find("OK LOADED") == 0);
-
-  // Verify document count matches
-  EXPECT_EQ(doc_store_->Size(), original_count);
-
-  // Verify we can retrieve documents
-  auto doc1 = doc_store_->GetDocument(1);
-  ASSERT_TRUE(doc1.has_value());
-  EXPECT_EQ(doc1->primary_key, "100");
-  EXPECT_EQ(doc1->filters.size(), 2);
-
-  // Cleanup
-  std::remove((test_file + ".index").c_str());
-  std::remove((test_file + ".docs").c_str());
-
-  close(sock);
-}
-
-/**
- * @brief Test DEBUG ON command
- */
 TEST_F(TcpServerTest, DebugOn) {
   ASSERT_TRUE(server_->Start());
   uint16_t port = server_->GetPort();
@@ -1047,120 +887,6 @@ TEST_F(TcpServerTest, InfoCommandWithSingleTable) {
 /**
  * @brief Test that queries are blocked during LOAD
  */
-TEST_F(TcpServerTest, QueriesBlockedDuringLoad) {
-  // Add documents and save them
-  for (int i = 1; i <= 1000; i++) {
-    auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "test document " + std::to_string(i));
-  }
-
-  // Create snapshot directory with new format
-  std::string test_file = "/tmp/test_blocking_" + std::to_string(std::time(nullptr));
-  mkdir(test_file.c_str(), 0755);
-
-  ASSERT_TRUE(index_->SaveToFile(test_file + "/test.index"));
-  ASSERT_TRUE(doc_store_->SaveToFile(test_file + "/test.docs"));
-
-  // Create meta.json
-  std::ofstream meta_file(test_file + "/meta.json");
-  meta_file << "{\"version\":\"1.0\",\"tables\":[\"test\"],\"timestamp\":\"2024-01-01T00:00:00Z\"}";
-  meta_file.close();
-
-  ASSERT_TRUE(server_->Start());
-  uint16_t port = server_->GetPort();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  // Create two connections: one for LOAD, one for queries
-  int load_sock = CreateClientSocket(port);
-  ASSERT_GE(load_sock, 0);
-
-  int query_sock = CreateClientSocket(port);
-  ASSERT_GE(query_sock, 0);
-
-  std::atomic<bool> load_started{false};
-  std::atomic<bool> load_finished{false};
-  std::string load_response;
-
-  // Start LOAD in a separate thread
-  std::thread load_thread([this, load_sock, &test_file, &load_response, &load_started, &load_finished]() {
-    load_started = true;
-    load_response = SendRequest(load_sock, "LOAD " + test_file);
-    load_finished = true;
-  });
-
-  // Wait for LOAD to start
-  while (!load_started) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  // Give LOAD a moment to actually begin processing
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-  // Try queries while LOAD is in progress
-  bool found_loading_error = false;
-  for (int i = 0; i < 10 && !load_finished; i++) {
-    // Try SEARCH
-    std::string search_response = SendRequest(query_sock, "SEARCH test test");
-    if (search_response.find("Server is loading") != std::string::npos) {
-      found_loading_error = true;
-      break;
-    }
-
-    // Try COUNT
-    std::string count_response = SendRequest(query_sock, "COUNT test test");
-    if (count_response.find("Server is loading") != std::string::npos) {
-      found_loading_error = true;
-      break;
-    }
-
-    // Try GET
-    std::string get_response = SendRequest(query_sock, "GET test 1");
-    if (get_response.find("Server is loading") != std::string::npos) {
-      found_loading_error = true;
-      break;
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  // Wait for LOAD to complete
-  load_thread.join();
-
-  // Close sockets first
-  close(load_sock);
-  close(query_sock);
-
-  // LOAD should have succeeded
-  EXPECT_TRUE(load_response.find("OK LOADED") == 0);
-
-  // Note: We expect to find the loading error during the test
-  // If LOAD was too fast, this test might not catch it every time,
-  // but it should catch it in most cases with 1000 documents
-  if (found_loading_error) {
-    // This is the expected case - we caught queries being blocked
-    SUCCEED() << "Successfully verified queries were blocked during LOAD";
-  } else {
-    // LOAD was too fast, but the mechanism is still in place
-    // This is not a failure, just means we couldn't catch it in the act
-    GTEST_SKIP() << "LOAD completed too quickly to verify blocking behavior";
-  }
-
-  // Cleanup
-  std::remove((test_file + "/meta.json").c_str());
-  std::remove((test_file + "/test.index").c_str());
-  std::remove((test_file + "/test.docs").c_str());
-  std::remove(test_file.c_str());
-}
-
-/**
- * @brief Test hybrid n-gram search with kanji_ngram_size
- *
- * This test verifies that the server correctly uses kanji_ngram_size when
- * processing search queries. It ensures that:
- * - Single kanji characters can be searched (using unigram)
- * - Hiragana/Katakana use bigrams (ngram_size=2)
- * - Mixed text (kanji + hiragana + ASCII) is handled correctly
- */
 TEST_F(TcpServerTest, HybridNgramSearchWithKanjiNgramSize) {
   // Set up index with hybrid n-gram configuration
   // ngram_size = 2 (for ASCII, hiragana, katakana)
@@ -1407,7 +1133,7 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
   EXPECT_TRUE(response1.find("# DEBUG") != std::string::npos);
   EXPECT_TRUE(response1.find("order_by: id DESC (default)") != std::string::npos)
       << "Should show default ORDER BY with (default) marker";
-  EXPECT_TRUE(response1.find("limit: 1000 (default)") != std::string::npos)
+  EXPECT_TRUE(response1.find("limit: 100 (default)") != std::string::npos)
       << "Should show default LIMIT with (default) marker";
   // OFFSET should not be shown when it's 0
   EXPECT_TRUE(response1.find("offset:") == std::string::npos) << "OFFSET should not be shown when 0";
@@ -1431,7 +1157,7 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
       << "Explicit ORDER BY should NOT have (default) marker";
   EXPECT_TRUE(response3.find("order_by: id ASC (default)") == std::string::npos)
       << "Explicit ORDER BY should NOT have (default) marker";
-  EXPECT_TRUE(response3.find("limit: 1000 (default)") != std::string::npos)
+  EXPECT_TRUE(response3.find("limit: 100 (default)") != std::string::npos)
       << "Default LIMIT should have (default) marker";
 
   // Test 4: Search with explicit OFFSET
@@ -1492,8 +1218,7 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
   // Test 1: Small result set (10 docs) with small LIMIT (2 docs = 20%)
   // Expected: GetTopN optimization (ratio 20% < 50%)
   std::string response1 = SendRequest(sock, "SEARCH test small LIMIT 2");
-  EXPECT_TRUE(response1.find("OK RESULTS 10") == 0)
-      << "Should return total of 10 matching documents";
+  EXPECT_TRUE(response1.find("OK RESULTS 10") == 0) << "Should return total of 10 matching documents";
   EXPECT_TRUE(response1.find("optimization: Index GetTopN") != std::string::npos ||
               response1.find("optimization: reuse-fetch") != std::string::npos)
       << "Should use GetTopN or reuse-fetch optimization";
@@ -1509,24 +1234,21 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
   // Test 3: Large result set (1000 docs) with small LIMIT (10 docs = 1%)
   // Expected: GetTopN optimization (ratio 1% < 50%)
   std::string response3 = SendRequest(sock, "SEARCH test large LIMIT 10");
-  EXPECT_TRUE(response3.find("OK RESULTS 1000") == 0)
-      << "Should return total of 1000 matching documents";
+  EXPECT_TRUE(response3.find("OK RESULTS 1000") == 0) << "Should return total of 1000 matching documents";
   EXPECT_TRUE(response3.find("optimization: Index GetTopN") != std::string::npos)
       << "Should use GetTopN optimization for low LIMIT ratio (1% < 50%)";
 
   // Test 4: Large result set (1000 docs) with high LIMIT (600 docs = 60%)
   // Expected: reuse-fetch optimization (ratio 60% > 50%)
   std::string response4 = SendRequest(sock, "SEARCH test large LIMIT 600");
-  EXPECT_TRUE(response4.find("OK RESULTS 1000") == 0)
-      << "Should return total of 1000 matching documents";
+  EXPECT_TRUE(response4.find("OK RESULTS 1000") == 0) << "Should return total of 1000 matching documents";
   EXPECT_TRUE(response4.find("optimization: reuse-fetch") != std::string::npos)
       << "Should use reuse-fetch optimization for high LIMIT ratio (60% > 50%)";
 
   // Test 5: Verify total_results accuracy with optimization
   // Even when using GetTopN, total_results should be accurate (not limited)
   std::string response5 = SendRequest(sock, "SEARCH test large LIMIT 5");
-  EXPECT_TRUE(response5.find("OK RESULTS 1000") == 0)
-      << "Total results should be 1000 (accurate count), not 5 (LIMIT)";
+  EXPECT_TRUE(response5.find("OK RESULTS 1000") == 0) << "Total results should be 1000 (accurate count), not 5 (LIMIT)";
 
   // Count number of IDs in response (should be 5, not 1000)
   size_t id_count = 0;
@@ -1566,13 +1288,11 @@ TEST_F(TcpServerTest, CountSearchConsistency) {
 
   // Get COUNT
   std::string count_response = SendRequest(sock, "COUNT test test");
-  EXPECT_TRUE(count_response.find("OK COUNT 100") == 0)
-      << "COUNT should return 100";
+  EXPECT_TRUE(count_response.find("OK COUNT 100") == 0) << "COUNT should return 100";
 
   // Get SEARCH total (with small LIMIT)
   std::string search_response = SendRequest(sock, "SEARCH test test LIMIT 10");
-  EXPECT_TRUE(search_response.find("OK RESULTS 100") == 0)
-      << "SEARCH total_results should match COUNT (100)";
+  EXPECT_TRUE(search_response.find("OK RESULTS 100") == 0) << "SEARCH total_results should match COUNT (100)";
 
   // Get SEARCH total (with large LIMIT)
   std::string search_response2 = SendRequest(sock, "SEARCH test test LIMIT 90");

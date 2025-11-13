@@ -292,7 +292,7 @@ docker run --rm mygramdb:latest --help
 # Test configuration
 docker-compose exec mygramdb /usr/local/bin/entrypoint.sh test-config
 
-# Or test with environment variables
+# Or test with environment variables (uses defaults for unspecified values)
 docker run --rm -e MYSQL_HOST=testdb -e TABLE_NAME=test mygramdb:latest test-config
 
 # View generated configuration
@@ -340,8 +340,8 @@ Use nginx or HAProxy to load balance across multiple MygramDB instances:
 ```nginx
 upstream mygramdb_backend {
     server localhost:11016;
-    server localhost:11312;
-    server localhost:11313;
+    server localhost:11017;
+    server localhost:11018;
 }
 
 server {

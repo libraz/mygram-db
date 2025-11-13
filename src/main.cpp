@@ -14,7 +14,6 @@
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
-#include "storage/gtid_state.h"
 #endif
 
 #include <spdlog/spdlog.h>
@@ -327,17 +326,6 @@ int main(int argc, char* argv[]) {
       // Extract GTID from "gtid=<UUID:txn>" format
       start_gtid = start_from.substr(kGtidPrefixLength);
       spdlog::info("Replication will start from specified GTID: {}", start_gtid);
-    } else if (start_from == "state_file") {
-      // Read GTID from state file (single file for all tables)
-      mygramdb::storage::GTIDStateFile gtid_state(config.replication.state_file);
-      auto saved_gtid = gtid_state.Read();
-      if (saved_gtid) {
-        start_gtid = saved_gtid.value();
-        spdlog::info("Replication will start from state file GTID: {}", start_gtid);
-      } else {
-        spdlog::warn("Failed to read GTID from state file, starting from empty");
-        start_gtid = "";
-      }
     }
 
     // Prepare table_contexts map for BinlogReader
@@ -350,7 +338,6 @@ int main(int argc, char* argv[]) {
     mygramdb::mysql::BinlogReader::Config binlog_config;
     binlog_config.start_gtid = start_gtid;
     binlog_config.queue_size = config.replication.queue_size;
-    binlog_config.state_file_path = config.replication.state_file;
 
     binlog_reader = std::make_unique<mygramdb::mysql::BinlogReader>(*mysql_conn, table_contexts_ptrs, binlog_config);
 
@@ -382,7 +369,7 @@ int main(int argc, char* argv[]) {
   server_config.default_limit = config.api.default_limit;
 
 #ifdef USE_MYSQL
-  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir, &config,
+  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.dump.dir, &config,
                                          binlog_reader.get());
 
   // Set server statistics for binlog reader
@@ -390,7 +377,7 @@ int main(int argc, char* argv[]) {
     binlog_reader->SetServerStats(tcp_server.GetMutableStats());
   }
 #else
-  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.snapshot.dir, &config, nullptr);
+  mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.dump.dir, &config, nullptr);
 #endif
 
   if (!tcp_server.Start()) {

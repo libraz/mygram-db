@@ -35,25 +35,28 @@ target_link_libraries(document_store_serialization_test
 
 gtest_discover_tests(document_store_serialization_test)
 
-# GTID state tests (MySQL only)
+# Dump commands tests (DUMP SAVE/LOAD/VERIFY/INFO)
+add_executable(dump_commands_test
+  dump_commands_test.cpp
+)
+
+target_link_libraries(dump_commands_test
+  mygramdb_storage
+  mygramdb_index
+  mygramdb_config
+  GTest::gtest_main
+)
+
+gtest_discover_tests(dump_commands_test)
+
+# Dump save/load integration test (MySQL only)
 if(USE_MYSQL AND MYSQL_FOUND)
-  add_executable(gtid_state_test
-    gtid_state_test.cpp
+  # Dump save/load integration test
+  add_executable(dump_save_load_test
+    dump_save_load_test.cpp
   )
 
-  target_link_libraries(gtid_state_test
-    mygramdb_storage
-    GTest::gtest_main
-  )
-
-  gtest_discover_tests(gtid_state_test)
-
-  # Snapshot save/load integration test
-  add_executable(snapshot_save_load_test
-    snapshot_save_load_test.cpp
-  )
-
-  target_link_libraries(snapshot_save_load_test
+  target_link_libraries(dump_save_load_test
     mygramdb_query
     mygramdb_mysql
     mygramdb_config

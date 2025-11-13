@@ -312,11 +312,6 @@
           "description": "Replication start position",
           "default": "snapshot"
         },
-        "state_file": {
-          "type": "string",
-          "description": "GTID state persistence file",
-          "default": "./mygramdb_replication.state"
-        },
         "queue_size": {
           "type": "integer",
           "description": "Binlog event queue size",
@@ -411,26 +406,26 @@
         }
       }
     },
-    "snapshot": {
+    "dump": {
       "type": "object",
-      "description": "Snapshot persistence configuration",
+      "description": "Dump persistence configuration",
       "additionalProperties": false,
       "properties": {
         "dir": {
           "type": "string",
-          "description": "Snapshot directory path",
-          "default": "/var/lib/mygramdb/snapshots"
+          "description": "Dump directory path",
+          "default": "/var/lib/mygramdb/dumps"
         },
         "interval_sec": {
           "type": "integer",
-          "description": "Snapshot interval in seconds",
+          "description": "Dump interval in seconds",
           "default": 600,
           "minimum": 60,
           "maximum": 86400
         },
         "retain": {
           "type": "integer",
-          "description": "Number of snapshots to retain",
+          "description": "Number of dumps to retain",
           "default": 3,
           "minimum": 1,
           "maximum": 100
@@ -488,7 +483,7 @@
         "default_limit": {
           "type": "integer",
           "description": "Default LIMIT for SEARCH queries when not explicitly specified",
-          "default": 1000,
+          "default": 100,
           "minimum": 5,
           "maximum": 1000
         }

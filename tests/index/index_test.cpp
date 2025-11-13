@@ -919,3 +919,159 @@ TEST(IndexTest, ComplexEmoji) {
   EXPECT_EQ(results.size(), 1);
   EXPECT_EQ(results[0], 1);
 }
+
+/**
+ * @brief Test stream-based serialization with basic data
+ */
+TEST(IndexTest, StreamSerializationBasic) {
+  Index index1(2);  // Bigram index
+
+  // Add some documents
+  std::string text1 = NormalizeText("hello world", true, "keep", false);
+  std::string text2 = NormalizeText("world peace", true, "keep", false);
+  std::string text3 = NormalizeText("hello peace", true, "keep", false);
+
+  index1.AddDocument(1, text1);
+  index1.AddDocument(2, text2);
+  index1.AddDocument(3, text3);
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(2);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify term count
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+
+  // Verify search results are identical
+  auto results1 = index1.SearchAnd({"he", "ll"});
+  auto results2 = index2.SearchAnd({"he", "ll"});
+  EXPECT_EQ(results1, results2);
+
+  results1 = index1.SearchAnd({"wo", "rl"});
+  results2 = index2.SearchAnd({"wo", "rl"});
+  EXPECT_EQ(results1, results2);
+}
+
+/**
+ * @brief Test stream-based serialization with Japanese text
+ */
+TEST(IndexTest, StreamSerializationJapanese) {
+  Index index1(2, 1);  // Bigram for ASCII, Unigram for Kanji
+
+  // Add Japanese documents
+  std::string text1 = NormalizeText("東京タワー", true, "keep", false);
+  std::string text2 = NormalizeText("大阪城", true, "keep", false);
+  std::string text3 = NormalizeText("京都タワー", true, "keep", false);
+
+  index1.AddDocument(1, text1);
+  index1.AddDocument(2, text2);
+  index1.AddDocument(3, text3);
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(2, 1);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify term count
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+
+  // Verify search results
+  auto results1 = index1.SearchAnd({"京"});
+  auto results2 = index2.SearchAnd({"京"});
+  EXPECT_EQ(results1.size(), results2.size());
+  EXPECT_EQ(results1, results2);
+}
+
+/**
+ * @brief Test stream-based serialization with large dataset
+ */
+TEST(IndexTest, StreamSerializationLargeDataset) {
+  Index index1(2);
+
+  // Add 1000 documents
+  for (DocId i = 1; i <= 1000; ++i) {
+    std::string text = NormalizeText("document " + std::to_string(i), true, "keep", false);
+    index1.AddDocument(i, text);
+  }
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(2);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify term count
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+
+  // Verify search results
+  auto results1 = index1.SearchAnd({"do", "cu"});
+  auto results2 = index2.SearchAnd({"do", "cu"});
+  EXPECT_EQ(results1.size(), 1000);
+  EXPECT_EQ(results2.size(), 1000);
+  EXPECT_EQ(results1, results2);
+}
+
+/**
+ * @brief Test stream-based serialization with emoji
+ */
+TEST(IndexTest, StreamSerializationEmoji) {
+  Index index1(1);  // Unigram
+
+  // Add documents with emojis
+  index1.AddDocument(1, "Hello😀World");
+  index1.AddDocument(2, "😀🎉👍");
+  index1.AddDocument(3, "楽しい😀チュートリアル");
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(1);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify term count
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+
+  // Verify emoji search works
+  auto results1 = index1.SearchAnd({"😀"});
+  auto results2 = index2.SearchAnd({"😀"});
+  EXPECT_EQ(results1.size(), 3);
+  EXPECT_EQ(results2.size(), 3);
+  EXPECT_EQ(results1, results2);
+}
+
+/**
+ * @brief Test stream-based serialization preserves n-gram configuration
+ */
+TEST(IndexTest, StreamSerializationNgramConfig) {
+  Index index1(3, 2);  // Trigram for ASCII, Bigram for Kanji
+
+  // Add mixed content
+  std::string text = NormalizeText("abc日本語xyz", true, "keep", false);
+  index1.AddDocument(1, text);
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(3, 2);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify n-gram configuration is preserved
+  EXPECT_EQ(index1.GetNgramSize(), index2.GetNgramSize());
+  EXPECT_EQ(index1.GetKanjiNgramSize(), index2.GetKanjiNgramSize());
+
+  // Verify term count
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+}

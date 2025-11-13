@@ -1,12 +1,12 @@
 set(STORAGE_SOURCES
-  snapshot.cpp
+  dump_manager.cpp
   document_store.cpp
+  dump_format_v1.cpp
 )
 
-# Add snapshot_builder and gtid_state if MySQL is available
+# Add snapshot_builder if MySQL is available
 if(USE_MYSQL AND MYSQL_FOUND)
   list(APPEND STORAGE_SOURCES snapshot_builder.cpp)
-  list(APPEND STORAGE_SOURCES gtid_state.cpp)
 endif()
 
 add_library(mygramdb_storage STATIC
@@ -21,6 +21,7 @@ target_link_libraries(mygramdb_storage PUBLIC
   spdlog::spdlog
   mygramdb_utils
   mygramdb_index
+  ${ZLIB_LIBRARIES}
 )
 
 # Don't link MySQL here to avoid circular dependency

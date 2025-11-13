@@ -53,7 +53,6 @@ replication:
   enable: true
   server_id: 12345
   start_from: "snapshot"
-  state_file: "./mygramdb_replication.state"
   queue_size: 10000
   reconnect_backoff_min_ms: 500
   reconnect_backoff_max_ms: 10000
@@ -132,7 +131,6 @@ JSON 形式での同じ設定：
     "enable": true,
     "server_id": 12345,
     "start_from": "snapshot",
-    "state_file": "./mygramdb_replication.state",
     "queue_size": 10000,
     "reconnect_backoff_min_ms": 500,
     "reconnect_backoff_max_ms": 10000
@@ -324,8 +322,6 @@ MySQL binlog レプリケーション設定：
   - `snapshot`: スナップショット GTID から開始（推奨）
   - `latest`: 現在の GTID から開始
   - `gtid=<UUID:txn>`: 特定の GTID から開始（例: `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1`）
-  - `state_file`: 保存された状態ファイルから再開
-- **state_file**: GTID 状態永続化ファイルのパス（デフォルト: `./mygramdb_replication.state`）
 - **queue_size**: Binlog イベントキューサイズ（デフォルト: `10000`）
 - **reconnect_backoff_min_ms**: 最小再接続バックオフ遅延（デフォルト: `500`）
 - **reconnect_backoff_max_ms**: 最大再接続バックオフ遅延（デフォルト: `10000`）

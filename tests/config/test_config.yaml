@@ -52,8 +52,8 @@ memory:
     width: "narrow"
     lower: false
 
-snapshot:
-  dir: "/tmp/test_snapshots"
+dump:
+  dir: "/tmp/test_dumps"
   interval_sec: 300
   retain: 2
 

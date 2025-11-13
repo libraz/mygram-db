@@ -17,19 +17,35 @@ namespace mygramdb::query {
  * @brief Query command type
  */
 enum class QueryType : uint8_t {
-  SEARCH,              // Search with limit/offset
-  COUNT,               // Get total count
-  GET,                 // Get document by primary key
-  INFO,                // Get server info (memcached-style)
-  SAVE,                // Save snapshot to disk
-  LOAD,                // Load snapshot from disk
-  REPLICATION_STATUS,  // Get replication status
-  REPLICATION_STOP,    // Stop replication
-  REPLICATION_START,   // Start replication
-  CONFIG,              // Get current configuration
-  OPTIMIZE,            // Optimize index (convert to Roaring bitmaps)
-  DEBUG_ON,            // Enable debug mode for this connection
-  DEBUG_OFF,           // Disable debug mode for this connection
+  SEARCH,  // Search with limit/offset
+  COUNT,   // Get total count
+  GET,     // Get document by primary key
+  INFO,    // Get server info (memcached-style)
+
+  // Dump commands (hierarchical)
+  DUMP_SAVE,    // DUMP SAVE filepath [--compact] [--with-stats]
+  DUMP_LOAD,    // DUMP LOAD filepath
+  DUMP_VERIFY,  // DUMP VERIFY filepath
+  DUMP_INFO,    // DUMP INFO filepath
+
+  // Legacy dump commands (for backward compatibility)
+  SAVE,  // SAVE filepath (deprecated, use DUMP SAVE)
+  LOAD,  // LOAD filepath (deprecated, use DUMP LOAD)
+
+  // Replication commands
+  REPLICATION_STATUS,  // REPLICATION STATUS
+  REPLICATION_STOP,    // REPLICATION STOP
+  REPLICATION_START,   // REPLICATION START
+
+  // Config commands
+  CONFIG,         // CONFIG [SHOW]
+  CONFIG_VERIFY,  // CONFIG VERIFY
+
+  // Server commands
+  OPTIMIZE,   // OPTIMIZE [table]
+  DEBUG_ON,   // DEBUG ON
+  DEBUG_OFF,  // DEBUG OFF
+
   UNKNOWN
 };
 
@@ -111,12 +127,16 @@ struct Query {
   std::vector<FilterCondition> filters;
   std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  uint32_t limit = 1000;         // Initial value (overridden by config.api.default_limit if not explicit)
+  uint32_t limit = 100;          // Initial value (overridden by config.api.default_limit if not explicit)
   uint32_t offset = 0;           // Default offset
   bool limit_explicit = false;   // True if LIMIT was explicitly specified by user
   bool offset_explicit = false;  // True if OFFSET was explicitly specified by user
   std::string primary_key;       // For GET command
-  std::string filepath;          // For SAVE/LOAD command (optional)
+  std::string filepath;          // For DUMP SAVE/LOAD/VERIFY/INFO commands (optional)
+
+  // DUMP command options
+  bool dump_compact = false;     // --compact flag for DUMP SAVE
+  bool dump_with_stats = false;  // --with-stats flag for DUMP SAVE
 
   /**
    * @brief Check if query is valid
