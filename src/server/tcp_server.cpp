@@ -160,7 +160,9 @@ bool TcpServer::Start() {
   dispatcher_->RegisterHandler(query::QueryType::DUMP_VERIFY, dump_handler_.get());
   dispatcher_->RegisterHandler(query::QueryType::DUMP_INFO, dump_handler_.get());
   dispatcher_->RegisterHandler(query::QueryType::INFO, admin_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CONFIG, admin_handler_.get());
+  dispatcher_->RegisterHandler(query::QueryType::CONFIG_HELP, admin_handler_.get());
+  dispatcher_->RegisterHandler(query::QueryType::CONFIG_SHOW, admin_handler_.get());
+  dispatcher_->RegisterHandler(query::QueryType::CONFIG_VERIFY, admin_handler_.get());
   dispatcher_->RegisterHandler(query::QueryType::REPLICATION_STATUS, replication_handler_.get());
   dispatcher_->RegisterHandler(query::QueryType::REPLICATION_STOP, replication_handler_.get());
   dispatcher_->RegisterHandler(query::QueryType::REPLICATION_START, replication_handler_.get());

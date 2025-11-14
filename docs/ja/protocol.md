@@ -187,25 +187,206 @@ replication_deletes_applied: 5000
 
 ## CONFIG コマンド
 
-現在のサーバー設定（すべての設定）を取得します。
+CONFIGコマンドファミリーは、実行時の設定ヘルプ、検査、検証を提供します。
 
-### 構文
+### CONFIG HELP [path]
 
+設定オプションのヘルプを表示します。
+
+**構文:**
 ```
-CONFIG
+CONFIG HELP [path]
 ```
 
-### レスポンス
+**パラメータ:**
+- `path` (オプション): ドット区切りの設定パス（例: `mysql.port`）
 
-YAML形式の設定を返します：
-- MySQL接続設定
-- テーブル設定（name, primary_key, ngram_size, filters数）
-- APIサーバー設定（bindアドレスとポート）
-- レプリケーション設定（enable, server_id, start_from）
-- メモリ設定（制限、しきい値）
-- スナップショットディレクトリ
-- ログレベル
-- ランタイムステータス（接続数、稼働時間、read_onlyモード）
+**例:**
+
+すべてのトップレベル設定セクションを表示:
+```
+CONFIG HELP
+```
+
+レスポンス:
+```
++OK
+Available configuration sections:
+  mysql        - MySQL接続設定
+  tables       - テーブル設定（複数テーブル対応）
+  build        - インデックスビルド設定
+  replication  - レプリケーション設定
+  memory       - メモリ管理
+  dump         - ダンプ永続化（自動バックアップ）
+  api          - APIサーバー設定
+  network      - ネットワークセキュリティ（オプション）
+  logging      - ログ設定
+  cache        - クエリキャッシュ設定
+
+詳細情報は "CONFIG HELP <section>" を使用してください。
+```
+
+特定セクションのヘルプを表示:
+```
+CONFIG HELP mysql
+```
+
+レスポンス:
+```
++OK
+mysql - MySQL接続設定
+
+Properties:
+  host (string, default: "127.0.0.1")
+    MySQLサーバーのホスト名またはIP
+
+  port (integer, default: 3306, range: 1-65535)
+    MySQLサーバーのポート
+
+  user (string, 必須)
+    レプリケーション用のMySQLユーザー名
+
+  password (string)
+    MySQLユーザーのパスワード
+
+  database (string, 必須)
+    データベース名
+
+  use_gtid (boolean, default: true)
+    GTIDベースのレプリケーションを有効化
+
+  ...
+```
+
+特定プロパティのヘルプを表示:
+```
+CONFIG HELP mysql.port
+```
+
+レスポンス:
+```
++OK
+mysql.port
+
+Type: integer
+Default: 3306
+Range: 1 - 65535
+Description: MySQLサーバーのポート
+```
+
+---
+
+### CONFIG SHOW [path]
+
+現在の設定値を表示します。機密フィールド（パスワード、シークレット）は `***` でマスクされます。
+
+**構文:**
+```
+CONFIG SHOW [path]
+```
+
+**パラメータ:**
+- `path` (オプション): 特定セクションのみを表示するドット区切りの設定パス
+
+**例:**
+
+現在の設定全体を表示:
+```
+CONFIG SHOW
+```
+
+レスポンス:
+```
++OK
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "repl_user"
+  password: "***"
+  database: "mydb"
+  use_gtid: true
+  ...
+
+tables:
+  - name: "articles"
+    primary_key: "id"
+    ...
+
+replication:
+  enable: true
+  server_id: 12345
+  ...
+```
+
+特定セクションを表示:
+```
+CONFIG SHOW mysql
+```
+
+レスポンス:
+```
++OK
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "repl_user"
+  password: "***"
+  database: "mydb"
+  use_gtid: true
+  ...
+```
+
+特定プロパティを表示:
+```
+CONFIG SHOW mysql.port
+```
+
+レスポンス:
+```
++OK
+3306
+```
+
+---
+
+### CONFIG VERIFY <filepath>
+
+設定ファイルをロードせずに検証します。
+
+**構文:**
+```
+CONFIG VERIFY <filepath>
+```
+
+**パラメータ:**
+- `filepath` (必須): 設定ファイルのパス（YAMLまたはJSON）
+
+**例:**
+
+有効な設定を検証:
+```
+CONFIG VERIFY /etc/mygramdb/config.yaml
+```
+
+レスポンス（成功）:
+```
++OK
+Configuration is valid
+  Tables: 2 (articles, products)
+  MySQL: repl_user@127.0.0.1:3306
+```
+
+無効な設定を検証:
+```
+CONFIG VERIFY /tmp/invalid.yaml
+```
+
+レスポンス（エラー）:
+```
+-ERR Configuration validation failed:
+  - mysql.port: value 99999 exceeds maximum 65535
+  - tables[0].name: missing required field
+```
 
 ---
 

@@ -42,8 +42,9 @@ enum class QueryType : uint8_t {
   SYNC_STATUS,  // SYNC STATUS
 
   // Config commands
-  CONFIG,         // CONFIG [SHOW]
-  CONFIG_VERIFY,  // CONFIG VERIFY
+  CONFIG_HELP,    // CONFIG HELP [path]
+  CONFIG_SHOW,    // CONFIG SHOW [path]
+  CONFIG_VERIFY,  // CONFIG VERIFY <filepath>
 
   // Server commands
   OPTIMIZE,   // OPTIMIZE [table]

@@ -25,6 +25,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 
 add_library(mygramdb_config STATIC
   config.cpp
+  config_help.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_schema_embedded.h  # Add as source to track changes
 )
 

@@ -185,27 +185,208 @@ replication_deletes_applied: 5000
 
 ---
 
-## CONFIG Command
+## CONFIG Commands
 
-Get current server configuration (all settings).
+The CONFIG command family provides runtime configuration help, inspection, and verification.
 
-### Syntax
+### CONFIG HELP [path]
 
+Display help for configuration options.
+
+**Syntax:**
 ```
-CONFIG
+CONFIG HELP [path]
 ```
 
-### Response
+**Parameters:**
+- `path` (optional): Dot-separated configuration path (e.g., `mysql.port`)
 
-Returns a YAML-style formatted configuration showing:
-- MySQL connection settings
-- Table configurations (name, primary_key, ngram_size, filters count)
-- API server settings (bind address and port)
-- Replication settings (enable, server_id, start_from)
-- Memory configuration (limits, thresholds)
-- Snapshot directory
-- Logging level
-- Runtime status (connections, uptime, read_only mode)
+**Examples:**
+
+Show all top-level configuration sections:
+```
+CONFIG HELP
+```
+
+Response:
+```
++OK
+Available configuration sections:
+  mysql        - MySQL connection settings
+  tables       - Table configuration (supports multiple tables)
+  build        - Index build configuration
+  replication  - Replication configuration
+  memory       - Memory management
+  dump         - Dump persistence (automatic backup)
+  api          - API server configuration
+  network      - Network security (optional)
+  logging      - Logging configuration
+  cache        - Query cache configuration
+
+Use "CONFIG HELP <section>" for detailed information.
+```
+
+Show help for a specific section:
+```
+CONFIG HELP mysql
+```
+
+Response:
+```
++OK
+mysql - MySQL connection settings
+
+Properties:
+  host (string, default: "127.0.0.1")
+    MySQL server hostname or IP
+
+  port (integer, default: 3306, range: 1-65535)
+    MySQL server port
+
+  user (string, REQUIRED)
+    MySQL username for replication
+
+  password (string)
+    MySQL user password
+
+  database (string, REQUIRED)
+    Database name
+
+  use_gtid (boolean, default: true)
+    Enable GTID-based replication
+
+  ...
+```
+
+Show help for a specific property:
+```
+CONFIG HELP mysql.port
+```
+
+Response:
+```
++OK
+mysql.port
+
+Type: integer
+Default: 3306
+Range: 1 - 65535
+Description: MySQL server port
+```
+
+---
+
+### CONFIG SHOW [path]
+
+Display current configuration values. Sensitive fields (passwords, secrets) are masked with `***`.
+
+**Syntax:**
+```
+CONFIG SHOW [path]
+```
+
+**Parameters:**
+- `path` (optional): Dot-separated configuration path to show only specific section
+
+**Examples:**
+
+Show entire current configuration:
+```
+CONFIG SHOW
+```
+
+Response:
+```
++OK
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "repl_user"
+  password: "***"
+  database: "mydb"
+  use_gtid: true
+  ...
+
+tables:
+  - name: "articles"
+    primary_key: "id"
+    ...
+
+replication:
+  enable: true
+  server_id: 12345
+  ...
+```
+
+Show specific section:
+```
+CONFIG SHOW mysql
+```
+
+Response:
+```
++OK
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "repl_user"
+  password: "***"
+  database: "mydb"
+  use_gtid: true
+  ...
+```
+
+Show specific property:
+```
+CONFIG SHOW mysql.port
+```
+
+Response:
+```
++OK
+3306
+```
+
+---
+
+### CONFIG VERIFY <filepath>
+
+Verify a configuration file without loading it.
+
+**Syntax:**
+```
+CONFIG VERIFY <filepath>
+```
+
+**Parameters:**
+- `filepath` (required): Path to configuration file (YAML or JSON)
+
+**Examples:**
+
+Verify valid config:
+```
+CONFIG VERIFY /etc/mygramdb/config.yaml
+```
+
+Response (success):
+```
++OK
+Configuration is valid
+  Tables: 2 (articles, products)
+  MySQL: repl_user@127.0.0.1:3306
+```
+
+Verify invalid config:
+```
+CONFIG VERIFY /tmp/invalid.yaml
+```
+
+Response (error):
+```
+-ERR Configuration validation failed:
+  - mysql.port: value 99999 exceeds maximum 65535
+  - tables[0].name: missing required field
+```
 
 ---
 

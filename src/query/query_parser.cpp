@@ -35,13 +35,14 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_*, SYNC_STATUS, CONFIG, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
+  // INFO, SAVE, LOAD, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
-      type != QueryType::REPLICATION_START && type != QueryType::SYNC_STATUS && type != QueryType::CONFIG &&
-      type != QueryType::OPTIMIZE && type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF &&
-      type != QueryType::CACHE_CLEAR && type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE &&
-      type != QueryType::CACHE_DISABLE && table.empty()) {
+      type != QueryType::REPLICATION_START && type != QueryType::SYNC_STATUS && type != QueryType::CONFIG_HELP &&
+      type != QueryType::CONFIG_SHOW && type != QueryType::CONFIG_VERIFY && type != QueryType::OPTIMIZE &&
+      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && type != QueryType::CACHE_CLEAR &&
+      type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE && type != QueryType::CACHE_DISABLE &&
+      table.empty()) {
     return false;
   }
 
@@ -186,19 +187,41 @@ Query QueryParser::Parse(const std::string& query_str) {
     Query query;
     query.table = "";  // CONFIG doesn't need a table
 
-    // CONFIG [VERIFY]
+    // CONFIG HELP [path] | CONFIG SHOW [path] | CONFIG VERIFY <filepath>
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() > 1) {  // 1: CONFIG + subcommand
       std::string subcommand = ToUpper(tokens[1]);
-      if (subcommand == "VERIFY") {
+      if (subcommand == "HELP") {
+        query.type = QueryType::CONFIG_HELP;
+        // Optional path argument
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        if (tokens.size() > 2) {  // 2: CONFIG HELP + path
+          query.filepath = tokens[2];
+        }
+      } else if (subcommand == "SHOW") {
+        query.type = QueryType::CONFIG_SHOW;
+        // Optional path argument
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        if (tokens.size() > 2) {  // 2: CONFIG SHOW + path
+          query.filepath = tokens[2];
+        }
+      } else if (subcommand == "VERIFY") {
         query.type = QueryType::CONFIG_VERIFY;
+        // Required filepath argument
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        if (tokens.size() > 2) {  // 2: CONFIG VERIFY + filepath
+          query.filepath = tokens[2];
+        } else {
+          SetError("CONFIG VERIFY requires a filepath");
+          return Query{};
+        }
       } else {
-        SetError("Unknown CONFIG subcommand: " + subcommand);
+        SetError("Unknown CONFIG subcommand: " + subcommand + " (expected HELP, SHOW, or VERIFY)");
         return Query{};
       }
     } else {
-      // CONFIG without subcommand means CONFIG SHOW
-      query.type = QueryType::CONFIG;
+      // CONFIG without subcommand defaults to CONFIG SHOW
+      query.type = QueryType::CONFIG_SHOW;
     }
 
     return query;
@@ -249,13 +272,6 @@ Query QueryParser::Parse(const std::string& query_str) {
       return Query{};
     }
 
-    return query;
-  }
-  if (command == "CONFIG") {
-    // CONFIG - show current configuration
-    Query query;
-    query.type = QueryType::CONFIG;
-    query.table = "";  // CONFIG doesn't need a table
     return query;
   }
   if (command == "OPTIMIZE") {

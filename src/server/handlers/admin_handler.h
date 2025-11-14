@@ -19,6 +19,28 @@ class AdminHandler : public CommandHandler {
   explicit AdminHandler(HandlerContext& ctx) : CommandHandler(ctx) {}
 
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
+
+ private:
+  /**
+   * @brief Handle CONFIG HELP command
+   * @param path Configuration path (empty for root)
+   * @return Response string
+   */
+  std::string HandleConfigHelp(const std::string& path);
+
+  /**
+   * @brief Handle CONFIG SHOW command
+   * @param path Configuration path (empty for all)
+   * @return Response string
+   */
+  std::string HandleConfigShow(const std::string& path);
+
+  /**
+   * @brief Handle CONFIG VERIFY command
+   * @param filepath Path to configuration file
+   * @return Response string
+   */
+  std::string HandleConfigVerify(const std::string& filepath);
 };
 
 }  // namespace mygramdb::server

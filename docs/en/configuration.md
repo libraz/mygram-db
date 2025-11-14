@@ -522,6 +522,96 @@ MygramDB automatically validates all configuration files (YAML and JSON) using a
 
 If validation fails, MygramDB will display a detailed error message pointing to the exact problem.
 
+## Runtime Configuration Help
+
+MygramDB provides runtime commands to explore configuration options, view current settings, and verify configuration files without restarting the server.
+
+### Getting Configuration Help
+
+You can query configuration help at runtime using the `CONFIG HELP` command:
+
+```bash
+# Show all configuration sections
+echo "CONFIG HELP" | nc localhost 11016
+```
+
+**Example output:**
+```
++OK
+Available configuration sections:
+  mysql        - MySQL connection settings
+  tables       - Table configuration (supports multiple tables)
+  build        - Index build configuration
+  replication  - Replication configuration
+  memory       - Memory management
+  ...
+```
+
+### Viewing Detailed Help
+
+Get help for specific configuration options:
+
+```bash
+# Help for MySQL section
+echo "CONFIG HELP mysql" | nc localhost 11016
+
+# Help for a specific property
+echo "CONFIG HELP mysql.port" | nc localhost 11016
+```
+
+This displays:
+- Property type (string, integer, boolean, etc.)
+- Default value
+- Valid range or allowed values
+- Description
+- Whether the field is required
+
+### Viewing Current Configuration
+
+View the running configuration with sensitive fields masked:
+
+```bash
+# Show entire configuration
+echo "CONFIG SHOW" | nc localhost 11016
+
+# Show specific section
+echo "CONFIG SHOW mysql" | nc localhost 11016
+
+# Show specific property
+echo "CONFIG SHOW mysql.port" | nc localhost 11016
+```
+
+**Note**: Sensitive fields (passwords, secrets, keys, tokens) are automatically masked as `***` in the output.
+
+### Verifying Configuration Files
+
+Verify a configuration file before deploying it:
+
+```bash
+echo "CONFIG VERIFY /path/to/config.yaml" | nc localhost 11016
+```
+
+This validates the configuration without loading it into the running server. If the configuration is valid, you'll see a summary:
+
+```
++OK
+Configuration is valid
+  Tables: 2 (articles, products)
+  MySQL: repl_user@127.0.0.1:3306
+```
+
+If invalid, you'll see detailed error messages:
+
+```
+-ERR Configuration validation failed:
+  - mysql.port: value 99999 exceeds maximum 65535
+  - tables[0].name: missing required field
+```
+
+For complete CONFIG command syntax, see the [Protocol Reference](protocol.md#config-commands).
+
+---
+
 ## Testing Configuration
 
 Before starting the server, you can test your configuration file:

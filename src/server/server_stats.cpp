@@ -40,7 +40,9 @@ void ServerStats::IncrementCommand(query::QueryType type) {
     case query::QueryType::REPLICATION_START:
       cmd_replication_start_++;
       break;
-    case query::QueryType::CONFIG:
+    case query::QueryType::CONFIG_HELP:
+    case query::QueryType::CONFIG_SHOW:
+    case query::QueryType::CONFIG_VERIFY:
       cmd_config_++;
       break;
     case query::QueryType::OPTIMIZE:
@@ -164,7 +166,9 @@ uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
       return cmd_replication_stop_.load();
     case query::QueryType::REPLICATION_START:
       return cmd_replication_start_.load();
-    case query::QueryType::CONFIG:
+    case query::QueryType::CONFIG_HELP:
+    case query::QueryType::CONFIG_SHOW:
+    case query::QueryType::CONFIG_VERIFY:
       return cmd_config_.load();
     case query::QueryType::OPTIMIZE:
     case query::QueryType::DEBUG_ON:

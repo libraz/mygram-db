@@ -5,6 +5,9 @@
 
 #include "server/handlers/admin_handler.h"
 
+#include <spdlog/spdlog.h>
+
+#include "config/config_help.h"
 #include "server/statistics_service.h"
 
 namespace mygramdb::server {
@@ -25,13 +28,88 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
                                                    ctx_.cache_manager);
     }
 
-    case query::QueryType::CONFIG:
-      return ResponseFormatter::FormatConfigResponse(ctx_.full_config, ctx_.stats.GetActiveConnections(),
-                                                     0,  // max_connections (TODO: pass from server config)
-                                                     ctx_.read_only, ctx_.stats.GetUptimeSeconds());
+    case query::QueryType::CONFIG_HELP:
+      return HandleConfigHelp(query.filepath);
+
+    case query::QueryType::CONFIG_SHOW:
+      return HandleConfigShow(query.filepath);
+
+    case query::QueryType::CONFIG_VERIFY:
+      return HandleConfigVerify(query.filepath);
 
     default:
       return ResponseFormatter::FormatError("Invalid query type for AdminHandler");
+  }
+}
+
+std::string AdminHandler::HandleConfigHelp(const std::string& path) {
+  try {
+    config::ConfigSchemaExplorer explorer;
+
+    if (path.empty()) {
+      // Show top-level sections
+      auto paths = explorer.ListPaths("");
+      std::string result = explorer.FormatPathList(paths, "");
+      return "+OK\n" + result;
+    }
+
+    // Show help for specific path
+    auto help_info = explorer.GetHelp(path);
+    if (!help_info.has_value()) {
+      return ResponseFormatter::FormatError("Configuration path not found: " + path);
+    }
+
+    std::string result = explorer.FormatHelp(help_info.value());
+    return "+OK\n" + result;
+
+  } catch (const std::exception& e) {
+    spdlog::error("CONFIG HELP failed: {}", e.what());
+    return ResponseFormatter::FormatError(std::string("CONFIG HELP failed: ") + e.what());
+  }
+}
+
+std::string AdminHandler::HandleConfigShow(const std::string& path) {
+  try {
+    std::string result = config::FormatConfigForDisplay(*ctx_.full_config, path);
+    return "+OK\n" + result;
+  } catch (const std::exception& e) {
+    spdlog::error("CONFIG SHOW failed: {}", e.what());
+    return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + e.what());
+  }
+}
+
+std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
+  if (filepath.empty()) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
+  }
+
+  try {
+    // Try to load and validate the configuration file
+    config::Config test_config = config::LoadConfig(filepath);
+
+    // Build summary information
+    std::ostringstream summary;
+    summary << "Configuration is valid\n";
+    summary << "  Tables: " << test_config.tables.size();
+    if (!test_config.tables.empty()) {
+      summary << " (";
+      for (size_t i = 0; i < test_config.tables.size(); ++i) {
+        if (i > 0) {
+          summary << ", ";
+        }
+        summary << test_config.tables[i].name;
+      }
+      summary << ")";
+    }
+    summary << "\n";
+    summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":"
+            << test_config.mysql.port;
+
+    return "+OK\n" + summary.str();
+
+  } catch (const std::exception& e) {
+    spdlog::error("CONFIG VERIFY failed for file '{}': {}", filepath, e.what());
+    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\n  ") + e.what());
   }
 }
 

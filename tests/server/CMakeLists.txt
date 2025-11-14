@@ -139,3 +139,17 @@ target_link_libraries(sync_handler_test
 )
 
 gtest_discover_tests(sync_handler_test)
+
+# Config Handler tests
+
+add_executable(config_handler_test
+  config_handler_test.cpp
+)
+
+target_link_libraries(config_handler_test
+  mygramdb_server  # Includes all dependencies transitively
+  mygramdb_config
+  GTest::gtest_main
+)
+
+gtest_discover_tests(config_handler_test)

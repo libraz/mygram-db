@@ -507,6 +507,96 @@ MygramDB は起動時に組み込みの JSON Schema を使用して、すべて�
 
 検証が失敗した場合、MygramDB は問題の正確な位置を示す詳細なエラーメッセージを表示します。
 
+## 実行時設定ヘルプ
+
+MygramDB は、サーバーを再起動せずに設定オプションを探索し、現在の設定を表示し、設定ファイルを検証するための実行時コマンドを提供します。
+
+### 設定ヘルプの取得
+
+実行時に `CONFIG HELP` コマンドを使用して設定のヘルプを照会できます:
+
+```bash
+# すべての設定セクションを表示
+echo "CONFIG HELP" | nc localhost 11016
+```
+
+**出力例:**
+```
++OK
+Available configuration sections:
+  mysql        - MySQL接続設定
+  tables       - テーブル設定（複数テーブル対応）
+  build        - インデックスビルド設定
+  replication  - レプリケーション設定
+  memory       - メモリ管理
+  ...
+```
+
+### 詳細なヘルプの表示
+
+特定の設定オプションのヘルプを取得:
+
+```bash
+# MySQL セクションのヘルプ
+echo "CONFIG HELP mysql" | nc localhost 11016
+
+# 特定プロパティのヘルプ
+echo "CONFIG HELP mysql.port" | nc localhost 11016
+```
+
+これにより以下が表示されます:
+- プロパティの型（文字列、整数、ブール値など）
+- デフォルト値
+- 有効な範囲または許可される値
+- 説明
+- フィールドが必須かどうか
+
+### 現在の設定の表示
+
+機密フィールドをマスクした実行中の設定を表示:
+
+```bash
+# 設定全体を表示
+echo "CONFIG SHOW" | nc localhost 11016
+
+# 特定セクションを表示
+echo "CONFIG SHOW mysql" | nc localhost 11016
+
+# 特定プロパティを表示
+echo "CONFIG SHOW mysql.port" | nc localhost 11016
+```
+
+**注意**: 機密フィールド（パスワード、シークレット、キー、トークン）は出力で自動的に `***` としてマスクされます。
+
+### 設定ファイルの検証
+
+デプロイ前に設定ファイルを検証:
+
+```bash
+echo "CONFIG VERIFY /path/to/config.yaml" | nc localhost 11016
+```
+
+これにより、実行中のサーバーにロードすることなく設定を検証します。設定が有効な場合、サマリーが表示されます:
+
+```
++OK
+Configuration is valid
+  Tables: 2 (articles, products)
+  MySQL: repl_user@127.0.0.1:3306
+```
+
+無効な場合、詳細なエラーメッセージが表示されます:
+
+```
+-ERR Configuration validation failed:
+  - mysql.port: value 99999 exceeds maximum 65535
+  - tables[0].name: missing required field
+```
+
+完全な CONFIG コマンド構文については、[プロトコルリファレンス](protocol.md#config-コマンド)を参照してください。
+
+---
+
 ## 設定のテスト
 
 サーバーを起動する前に、設定ファイルをテストできます:
