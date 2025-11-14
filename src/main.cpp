@@ -189,6 +189,22 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // Config test mode: validate and exit
+  if (config_test_mode) {
+    std::cout << "Configuration file syntax is OK\n";
+    std::cout << "Configuration details:\n";
+    std::cout << "  MySQL: " << config.mysql.user << "@" << config.mysql.host << ":" << config.mysql.port << "\n";
+    std::cout << "  Tables: " << config.tables.size() << "\n";
+    for (const auto& table : config.tables) {
+      std::cout << "    - " << table.name << " (primary_key: " << table.primary_key
+                << ", ngram_size: " << table.ngram_size << ")\n";
+    }
+    std::cout << "  API TCP: " << config.api.tcp.bind << ":" << config.api.tcp.port << "\n";
+    std::cout << "  Replication: " << (config.replication.enable ? "enabled" : "disabled") << "\n";
+    std::cout << "  Logging level: " << config.logging.level << "\n";
+    return 0;
+  }
+
   // Verify dump directory permissions
   try {
     std::filesystem::path dump_dir(config.dump.dir);
@@ -214,22 +230,6 @@ int main(int argc, char* argv[]) {
   } catch (const std::exception& e) {
     spdlog::error("Failed to verify dump directory: {}", e.what());
     return 1;
-  }
-
-  // Config test mode: validate and exit
-  if (config_test_mode) {
-    std::cout << "Configuration file syntax is OK\n";
-    std::cout << "Configuration details:\n";
-    std::cout << "  MySQL: " << config.mysql.user << "@" << config.mysql.host << ":" << config.mysql.port << "\n";
-    std::cout << "  Tables: " << config.tables.size() << "\n";
-    for (const auto& table : config.tables) {
-      std::cout << "    - " << table.name << " (primary_key: " << table.primary_key
-                << ", ngram_size: " << table.ngram_size << ")\n";
-    }
-    std::cout << "  API TCP: " << config.api.tcp.bind << ":" << config.api.tcp.port << "\n";
-    std::cout << "  Replication: " << (config.replication.enable ? "enabled" : "disabled") << "\n";
-    std::cout << "  Logging level: " << config.logging.level << "\n";
-    return 0;
   }
 
   // Initialize table contexts for all configured tables
