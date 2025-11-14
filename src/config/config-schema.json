@@ -496,6 +496,13 @@
           "default": 100,
           "minimum": 5,
           "maximum": 1000
+        },
+        "max_query_length": {
+          "type": "integer",
+          "description": "Maximum character length allowed for search query expressions (text + conditions)",
+          "default": 128,
+          "minimum": 1,
+          "maximum": 4096
         }
       }
     },

@@ -49,6 +49,7 @@ constexpr int kHttpPort = 8080;
 constexpr int kDefaultLimit = 100;
 constexpr int kMinLimit = 5;
 constexpr int kMaxLimit = 1000;
+constexpr int kDefaultQueryLengthLimit = 128;
 
 }  // namespace defaults
 
@@ -207,6 +208,11 @@ struct ApiConfig {
    * Valid range: 5-1000 (enforced by validation)
    */
   int default_limit = defaults::kDefaultLimit;
+
+  /**
+   * @brief Maximum length (in characters) allowed for query expressions (search text + conditions)
+   */
+  int max_query_length = defaults::kDefaultQueryLengthLimit;
 };
 
 /**

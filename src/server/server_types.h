@@ -49,6 +49,7 @@ struct ServerConfig {
   int recv_buffer_size = kDefaultRecvBufferSize;
   int send_buffer_size = kDefaultSendBufferSize;
   int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
+  int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
 };
 
 /**

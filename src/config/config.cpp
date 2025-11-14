@@ -517,6 +517,9 @@ Config ParseConfigFromJson(const json& root) {
     if (api.contains("default_limit")) {
       config.api.default_limit = api["default_limit"].get<int>();
     }
+    if (api.contains("max_query_length")) {
+      config.api.max_query_length = api["max_query_length"].get<int>();
+    }
   }
 
   // Parse network config

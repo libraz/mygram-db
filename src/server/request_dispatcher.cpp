@@ -13,8 +13,10 @@
 
 namespace mygramdb::server {
 
-RequestDispatcher::RequestDispatcher(HandlerContext& ctx, ServerConfig config)
-    : ctx_(ctx), config_(std::move(config)) {}
+RequestDispatcher::RequestDispatcher(HandlerContext& ctx, ServerConfig config) : ctx_(ctx), config_(std::move(config)) {
+  const size_t limit = config_.max_query_length <= 0 ? 0 : static_cast<size_t>(config_.max_query_length);
+  parser_.SetMaxQueryLength(limit);
+}
 
 void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* handler) {
   handlers_[type] = handler;

@@ -407,6 +407,16 @@ SEARCH articles tech LIMIT 10 OFFSET 10
 SEARCH articles tech LIMIT 10 OFFSET 20
 ```
 
+### クエリ長の上限
+
+MygramDB は、検索語・AND/NOT 条件・FILTER 値を合計したクエリ式が設定された長さを超えると `ERROR` を返します。
+
+- **デフォルト:** 128文字
+- **設定:** `api.max_query_length`（`0` で無効化）
+- **エラー例:** `ERROR Query expression length (...) exceeds ...`
+
+複雑な条件が必要な場合は、`config.yaml` で上限を調整するか、複数のクエリに分割してください。
+
 ### すべてのオプションを含む完全な例
 
 ```

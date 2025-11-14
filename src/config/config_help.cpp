@@ -191,6 +191,7 @@ nlohmann::json ConfigToJson(const Config& config) {
            {"port", config.api.http.port},
        }},
       {"default_limit", config.api.default_limit},
+      {"max_query_length", config.api.max_query_length},
   };
 
   // Network configuration

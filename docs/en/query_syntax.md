@@ -407,6 +407,16 @@ SEARCH articles tech LIMIT 10 OFFSET 10
 SEARCH articles tech LIMIT 10 OFFSET 20
 ```
 
+### Maximum Query Length
+
+MygramDB rejects queries whose combined expression length (search text + AND/NOT terms + FILTER values) exceeds the configured limit.
+
+- **Default:** 128 characters
+- **Config:** `api.max_query_length` (`0` disables the guard)
+- **Error:** `ERROR Query expression length (...) exceeds maximum allowed length...`
+
+Keep boolean expressions compact or raise the limit in `config.yaml` if applications require longer filters.
+
 ### Complete Example with All Options
 
 ```

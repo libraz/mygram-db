@@ -83,6 +83,8 @@ api:
     enable: true
     bind: "127.0.0.1"
     port: 8080
+  default_limit: 100
+  max_query_length: 128
 
 network:
   allow_cidrs: []
@@ -168,7 +170,9 @@ The same configuration in JSON format:
       "enable": true,
       "bind": "127.0.0.1",
       "port": 8080
-    }
+    },
+    "default_limit": 100,
+    "max_query_length": 128
   },
   "network": {
     "allow_cidrs": []
@@ -398,6 +402,17 @@ api:
     enable: true                    # Default: true
     bind: "127.0.0.1"               # Default: 127.0.0.1 (localhost only)
     port: 8080                      # Default: 8080
+  default_limit: 100                # Default LIMIT when not specified (5-1000)
+  max_query_length: 128             # Max query expression length (0 = unlimited)
+
+### Query Defaults
+
+- **default_limit**: Used when a SEARCH query omits `LIMIT`. Keeps pagination predictable and prevents large responses.
+  - Range 5–1000, default 100.
+  - Applies to TCP/HTTP/CLI clients alike.
+- **max_query_length**: Rejects overly long boolean expressions to avoid resource exhaustion.
+  - Default 128 characters; set to `0` to disable the guard.
+  - The length includes search text, AND/NOT terms, and FILTER values.
 ```
 
 ## Network Section (Optional)

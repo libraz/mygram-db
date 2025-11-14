@@ -120,6 +120,37 @@ TEST(QueryParserTest, SearchWithMultipleKeywords) {
   EXPECT_TRUE(query.IsValid());
 }
 
+TEST(QueryParserTest, SearchExceedsDefaultQueryLengthLimit) {
+  QueryParser parser;
+  std::string long_term(200, 'a');
+  auto query = parser.Parse("SEARCH articles " + long_term);
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(parser.GetError().empty());
+  EXPECT_NE(parser.GetError().find("exceeds"), std::string::npos);
+}
+
+TEST(QueryParserTest, SearchRespectsFilterContributionToLength) {
+  QueryParser parser;
+  std::string filter_value(150, 'b');
+  auto query = parser.Parse("SEARCH articles short FILTER status = " + filter_value);
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(parser.GetError().empty());
+}
+
+TEST(QueryParserTest, SearchAllowsCustomQueryLengthLimit) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(256);
+
+  std::string long_term(200, 'a');
+  auto query = parser.Parse("SEARCH articles " + long_term);
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_TRUE(query.IsValid());
+  EXPECT_TRUE(parser.GetError().empty());
+}
+
 /**
  * @brief Test COUNT basic query
  */

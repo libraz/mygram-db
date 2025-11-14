@@ -11,7 +11,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <utility>
 
@@ -91,6 +93,22 @@ std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens, 
   }
 
   return info;
+}
+
+/**
+ * @brief Validate that a string does not contain ASCII control characters
+ */
+std::optional<std::string> ValidateNoControlCharacters(const std::string& value, const char* field_name) {
+  for (unsigned char character : value) {
+    if (std::iscntrl(character) != 0) {
+      std::ostringstream oss;
+      oss << "Input for " << field_name << " contains control character 0x" << std::uppercase << std::hex
+          << std::setw(2) << std::setfill('0') << static_cast<int>(character) << ", which is not allowed";
+      return oss.str();
+    }
+  }
+
+  return std::nullopt;
 }
 
 /**
@@ -235,6 +253,36 @@ class MygramClient::Impl {
                                              const std::vector<std::string>& not_terms,
                                              const std::vector<std::pair<std::string, std::string>>& filters,
                                              const std::string& sort_column, bool sort_desc) {
+    if (auto err = ValidateNoControlCharacters(table, "table name")) {
+      return Error(*err);
+    }
+    if (auto err = ValidateNoControlCharacters(query, "search query")) {
+      return Error(*err);
+    }
+    for (const auto& term : and_terms) {
+      if (auto err = ValidateNoControlCharacters(term, "AND term")) {
+        return Error(*err);
+      }
+    }
+    for (const auto& term : not_terms) {
+      if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
+        return Error(*err);
+      }
+    }
+    for (const auto& [key, value] : filters) {
+      if (auto err = ValidateNoControlCharacters(key, "filter key")) {
+        return Error(*err);
+      }
+      if (auto err = ValidateNoControlCharacters(value, "filter value")) {
+        return Error(*err);
+      }
+    }
+    if (!sort_column.empty()) {
+      if (auto err = ValidateNoControlCharacters(sort_column, "sort column")) {
+        return Error(*err);
+      }
+    }
+
     // Build command
     std::ostringstream cmd;
     cmd << "SEARCH " << table << " " << EscapeQueryString(query);
@@ -330,6 +378,31 @@ class MygramClient::Impl {
                                            const std::vector<std::string>& and_terms,
                                            const std::vector<std::string>& not_terms,
                                            const std::vector<std::pair<std::string, std::string>>& filters) {
+    if (auto err = ValidateNoControlCharacters(table, "table name")) {
+      return Error(*err);
+    }
+    if (auto err = ValidateNoControlCharacters(query, "search query")) {
+      return Error(*err);
+    }
+    for (const auto& term : and_terms) {
+      if (auto err = ValidateNoControlCharacters(term, "AND term")) {
+        return Error(*err);
+      }
+    }
+    for (const auto& term : not_terms) {
+      if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
+        return Error(*err);
+      }
+    }
+    for (const auto& [key, value] : filters) {
+      if (auto err = ValidateNoControlCharacters(key, "filter key")) {
+        return Error(*err);
+      }
+      if (auto err = ValidateNoControlCharacters(value, "filter value")) {
+        return Error(*err);
+      }
+    }
+
     // Build command
     std::ostringstream cmd;
     cmd << "COUNT " << table << " " << EscapeQueryString(query);
@@ -385,6 +458,13 @@ class MygramClient::Impl {
   }
 
   std::variant<Document, Error> Get(const std::string& table, const std::string& primary_key) {
+    if (auto err = ValidateNoControlCharacters(table, "table name")) {
+      return Error(*err);
+    }
+    if (auto err = ValidateNoControlCharacters(primary_key, "primary key")) {
+      return Error(*err);
+    }
+
     std::ostringstream cmd;
     cmd << "GET " << table << " " << primary_key;
 
@@ -505,6 +585,12 @@ class MygramClient::Impl {
   }
 
   std::variant<std::string, Error> Save(const std::string& filepath) {
+    if (!filepath.empty()) {
+      if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
+        return Error(*err);
+      }
+    }
+
     std::string cmd = filepath.empty() ? "SAVE" : "SAVE " + filepath;
 
     auto result = SendCommand(cmd);
@@ -526,6 +612,10 @@ class MygramClient::Impl {
   }
 
   std::variant<std::string, Error> Load(const std::string& filepath) {
+    if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
+      return Error(*err);
+    }
+
     auto result = SendCommand("LOAD " + filepath);
     if (auto* err = std::get_if<Error>(&result)) {
       return *err;

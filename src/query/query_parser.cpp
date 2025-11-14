@@ -18,6 +18,30 @@ namespace {
 // Maximum LIMIT value (1000)
 constexpr uint32_t kMaxLimit = 1000;
 
+size_t CalculateQueryExpressionLength(const Query& query) {
+  size_t length = query.search_text.size();
+
+  auto accumulate_terms = [&length](const std::vector<std::string>& terms) {
+    for (const auto& term : terms) {
+      length += term.size();
+    }
+  };
+
+  accumulate_terms(query.and_terms);
+  accumulate_terms(query.not_terms);
+
+  for (const auto& filter : query.filters) {
+    length += filter.column.size();
+    length += filter.value.size();
+  }
+
+  if (query.order_by.has_value()) {
+    length += query.order_by->column.size();
+  }
+
+  return length;
+}
+
 /**
  * @brief Convert string to uppercase
  */
@@ -544,6 +568,11 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     return query;
   }
 
+  if (!ValidateQueryLength(query)) {
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
+
   return query;
 }
 
@@ -732,6 +761,11 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     }
   }
 
+  if (!ValidateQueryLength(query)) {
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
+
   return query;
 }
 
@@ -750,6 +784,26 @@ Query QueryParser::ParseGet(const std::vector<std::string>& tokens) {
   query.primary_key = tokens[2];
 
   return query;
+}
+
+void QueryParser::SetMaxQueryLength(size_t max_length) {
+  max_query_length_ = max_length;
+}
+
+bool QueryParser::ValidateQueryLength(const Query& query) {
+  if (max_query_length_ == 0) {
+    return true;
+  }
+
+  const size_t expression_length = CalculateQueryExpressionLength(query);
+  if (expression_length > max_query_length_) {
+    SetError("Query expression length (" + std::to_string(expression_length) + ") exceeds maximum allowed length of " +
+             std::to_string(max_query_length_) +
+             " characters. Increase api.max_query_length to permit longer queries.");
+    return false;
+  }
+
+  return true;
 }
 
 bool QueryParser::ParseAnd(const std::vector<std::string>& tokens, size_t& pos, Query& query) {

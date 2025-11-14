@@ -402,6 +402,7 @@ int main(int argc, char* argv[]) {
   server_config.port = config.api.tcp.port;
   server_config.max_connections = kDefaultMaxConnections;
   server_config.default_limit = config.api.default_limit;
+  server_config.max_query_length = config.api.max_query_length;
 
 #ifdef USE_MYSQL
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.dump.dir, &config,

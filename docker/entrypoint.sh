@@ -118,8 +118,8 @@ memory:
     width: "${MEMORY_NORMALIZE_WIDTH}"
     lower: ${MEMORY_NORMALIZE_LOWER}
 
-# Snapshot Persistence
-snapshot:
+# Dump Persistence
+dump:
   dir: "${SNAPSHOT_DIR}"
   interval_sec: ${SNAPSHOT_INTERVAL_SEC}
   retain: ${SNAPSHOT_RETAIN}

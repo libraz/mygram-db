@@ -78,6 +78,12 @@ api:
   tcp:
     bind: "0.0.0.0"
     port: 11016
+  http:
+    enable: true
+    bind: "127.0.0.1"
+    port: 8080
+  default_limit: 100
+  max_query_length: 128
 
 network:
   allow_cidrs: []
@@ -158,6 +164,14 @@ JSON 形式での同じ設定：
     "tcp": {
       "bind": "0.0.0.0",
       "port": 11016
+    },
+    "http": {
+      "enable": true,
+      "bind": "127.0.0.1",
+      "port": 8080
+    },
+    "default_limit": 100,
+    "max_query_length": 128
     }
   },
   "network": {
@@ -383,6 +397,13 @@ api:
     enable: true                    # デフォルト: true
     bind: "127.0.0.1"               # デフォルト: 127.0.0.1（ローカルホストのみ）
     port: 8080                      # デフォルト: 8080
+  default_limit: 100                # LIMIT 省略時のデフォルト (5-1000)
+  max_query_length: 128             # クエリ式の最大長 (0 = 無制限)
+
+### クエリ関連のデフォルト
+
+- **default_limit**: SEARCH で `LIMIT` を指定しない場合に自動的に適用されます。レスポンス肥大化を防ぐため、5〜1000 の範囲で設定可能（既定 100）。
+- **max_query_length**: 検索語・AND/NOT 条件・FILTER 値を合計したクエリ式の長さ上限です。既定 128 文字、`0` を設定すると無制限。非常に長いクエリによるリソース消費を抑制します。
 ```
 
 ## Network セクション（オプション）

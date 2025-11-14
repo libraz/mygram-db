@@ -63,6 +63,12 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       full_config_(full_config),
       binlog_reader_(binlog_reader),
       cache_manager_(cache_manager) {
+  if (full_config_ != nullptr) {
+    const auto configured_limit = full_config_->api.max_query_length;
+    const size_t limit = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
+    query_parser_.SetMaxQueryLength(limit);
+  }
+
   server_ = std::make_unique<httplib::Server>();
 
   // Set timeouts

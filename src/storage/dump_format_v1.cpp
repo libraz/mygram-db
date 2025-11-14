@@ -604,6 +604,11 @@ bool SerializeConfig(std::ostream& output_stream, const config::Config& config) 
     return false;
   }
 
+  // Query limits
+  if (!WriteBinary(output_stream, config.api.max_query_length)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -763,6 +768,16 @@ bool DeserializeConfig(std::istream& input_stream, config::Config& config) {
     return false;
   }
   if (!ReadBinary(input_stream, config.logging.json)) {
+    return false;
+  }
+
+  // Query limits (added in newer dumps; optional for backward compatibility)
+  if (!ReadBinary(input_stream, config.api.max_query_length)) {
+    if (input_stream.eof()) {
+      input_stream.clear();
+      config.api.max_query_length = config::defaults::kDefaultQueryLengthLimit;
+      return true;
+    }
     return false;
   }
 

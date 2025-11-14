@@ -233,6 +233,27 @@ TEST_F(MygramClientTest, SearchWithFilters) {
   EXPECT_EQ(resp.total_count, 2);  // Both docs 1 and 2 are active
 }
 
+TEST_F(MygramClientTest, RejectsControlCharactersInQuery) {
+  ASSERT_FALSE(client_->Connect().has_value());
+
+  auto result = client_->Search("test", "hello\nworld", 100);
+
+  ASSERT_TRUE(std::holds_alternative<Error>(result));
+  const auto& err = std::get<Error>(result);
+  EXPECT_NE(err.message.find("control character"), std::string::npos);
+}
+
+TEST_F(MygramClientTest, RejectsControlCharactersInFilters) {
+  ASSERT_FALSE(client_->Connect().has_value());
+
+  std::vector<std::pair<std::string, std::string>> filters = {{"status", "active\r\n"}};
+  auto result = client_->Search("test", "hello", 100, 0, {}, {}, filters);
+
+  ASSERT_TRUE(std::holds_alternative<Error>(result));
+  const auto& err = std::get<Error>(result);
+  EXPECT_NE(err.message.find("filter value"), std::string::npos);
+}
+
 /**
  * @brief Test count query
  */

@@ -128,6 +128,7 @@ add_executable(sync_handler_test
 target_link_libraries(sync_handler_test
   mygramdb_server  # Includes all dependencies transitively
   GTest::gtest_main
+  GTest::gmock
 )
 
 gtest_discover_tests(sync_handler_test)

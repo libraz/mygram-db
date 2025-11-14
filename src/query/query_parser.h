@@ -5,11 +5,14 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "config/config.h"
 
 namespace mygramdb::query {
 
@@ -215,8 +218,19 @@ class QueryParser {
    */
   [[nodiscard]] const std::string& GetError() const { return error_; }
 
+  /**
+   * @brief Configure maximum allowed query expression length (0 = unlimited)
+   */
+  void SetMaxQueryLength(size_t max_length);
+
+  /**
+   * @brief Get configured maximum query expression length
+   */
+  [[nodiscard]] size_t GetMaxQueryLength() const { return max_query_length_; }
+
  private:
   std::string error_;
+  size_t max_query_length_ = config::defaults::kDefaultQueryLengthLimit;  // Default upper bound
 
   /**
    * @brief Parse SEARCH command
@@ -277,6 +291,11 @@ class QueryParser {
    * @brief Set error message
    */
   void SetError(const std::string& msg) { error_ = msg; }
+
+  /**
+   * @brief Validate query length against configured limit
+   */
+  bool ValidateQueryLength(const Query& query);
 };
 
 }  // namespace mygramdb::query
