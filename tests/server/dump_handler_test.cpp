@@ -52,7 +52,13 @@ class DumpHandlerTest : public ::testing::Test {
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
+#ifdef USE_MYSQL
         .binlog_reader = nullptr,
+        .syncing_tables = syncing_tables_,
+        .syncing_tables_mutex = syncing_tables_mutex_,
+#else
+        .binlog_reader = nullptr,
+#endif
     });
 
     // Create handler
@@ -91,6 +97,10 @@ class DumpHandlerTest : public ::testing::Test {
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
+#ifdef USE_MYSQL
+  std::unordered_set<std::string> syncing_tables_;
+  std::mutex syncing_tables_mutex_;
+#endif
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<DumpHandler> handler_;
   std::string test_filepath_;
@@ -441,7 +451,13 @@ TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
       .loading = loading_,
       .read_only = read_only_,
       .optimization_in_progress = optimization_in_progress_,
+#ifdef USE_MYSQL
       .binlog_reader = nullptr,
+      .syncing_tables = syncing_tables_,
+      .syncing_tables_mutex = syncing_tables_mutex_,
+#else
+      .binlog_reader = nullptr,
+#endif
   };
 
   DumpHandler null_config_handler(null_config_ctx);

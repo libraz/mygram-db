@@ -67,6 +67,21 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
 }
 
 std::string DumpHandler::HandleDumpSave(const query::Query& query) {
+#ifdef USE_MYSQL
+  // Warn if any table is currently syncing
+  {
+    std::lock_guard<std::mutex> lock(ctx_.syncing_tables_mutex);
+    if (!ctx_.syncing_tables.empty()) {
+      std::ostringstream oss;
+      oss << "Warning: DUMP SAVE executed while SYNC is in progress for tables:";
+      for (const auto& table : ctx_.syncing_tables) {
+        oss << " " << table;
+      }
+      spdlog::warn("{}", oss.str());
+    }
+  }
+#endif
+
   // Determine filepath
   std::string filepath;
   if (!query.filepath.empty()) {
@@ -124,6 +139,21 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 }
 
 std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
+#ifdef USE_MYSQL
+  // Check if any table is currently syncing (block DUMP LOAD)
+  {
+    std::lock_guard<std::mutex> lock(ctx_.syncing_tables_mutex);
+    if (!ctx_.syncing_tables.empty()) {
+      std::ostringstream oss;
+      oss << "Cannot load dump while SYNC is in progress for tables:";
+      for (const auto& table : ctx_.syncing_tables) {
+        oss << " " << table;
+      }
+      return ResponseFormatter::FormatError(oss.str());
+    }
+  }
+#endif
+
   std::string filepath;
   if (!query.filepath.empty()) {
     filepath = query.filepath;

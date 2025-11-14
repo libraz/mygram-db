@@ -68,10 +68,9 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
   mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
   // kern_return_t is standard Mach API naming; reinterpret_cast required by Mach API
   // NOLINTNEXTLINE(readability-identifier-length)
-  kern_return_t kern_ret = host_statistics64(
-      host_port, HOST_VM_INFO64,
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-      reinterpret_cast<host_info64_t>(&vm_stats), &count);
+  kern_return_t kern_ret = host_statistics64(host_port, HOST_VM_INFO64,
+                                             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                                             reinterpret_cast<host_info64_t>(&vm_stats), &count);
 
   if (kern_ret != KERN_SUCCESS) {
     spdlog::error("Failed to get VM statistics");

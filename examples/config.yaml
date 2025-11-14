@@ -110,6 +110,10 @@ build:
 # Replication Configuration
 replication:
   enable: true                      # Enable binlog replication (default: true)
+  auto_initial_snapshot: false      # Automatically build snapshot on startup (default: false)
+                                    # When false: Use SYNC command to manually trigger snapshot synchronization
+                                    # When true: Automatically build snapshot on startup (legacy behavior)
+                                    # Setting to false prevents unexpected MySQL load on startup
   server_id: 12345                  # MySQL server ID (REQUIRED, must be non-zero and unique in replication topology)
                                     # Generate a random number or use a unique value for your environment
 
@@ -166,3 +170,23 @@ network:
 logging:
   level: "info"                     # Log level: "debug", "info", "warn", "error" (default: info)
   json: true                        # JSON format output (default: true)
+
+# Query Result Cache Configuration (optional)
+cache:
+  enabled: true                     # Enable query result cache (default: true)
+  max_memory_mb: 32                 # Maximum cache memory in MB (default: 32)
+  min_query_cost_ms: 10.0           # Minimum query cost to cache in milliseconds (default: 10.0)
+                                    # Only cache queries that take longer than this threshold
+  ttl_seconds: 3600                 # Cache entry TTL in seconds (default: 3600 = 1 hour, 0 = no TTL)
+  invalidation_strategy: "ngram"    # Cache invalidation strategy (default: "ngram")
+                                    # - "ngram": Invalidate based on n-gram overlap (precise, efficient)
+                                    # - "table": Invalidate entire table cache on any change (simple, aggressive)
+
+  # Advanced tuning (optional)
+  compression_enabled: true         # Enable LZ4 compression for cached results (default: true)
+  eviction_batch_size: 10           # Number of entries to evict at once when memory is full (default: 10)
+
+  # Invalidation queue settings (optional)
+  invalidation:
+    batch_size: 1000                # Process invalidation after N unique (table, ngram) pairs (default: 1000)
+    max_delay_ms: 100               # Maximum delay before processing invalidation in milliseconds (default: 100)

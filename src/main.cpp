@@ -274,47 +274,53 @@ int main(int argc, char* argv[]) {
     ctx->doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
 
 #ifdef USE_MYSQL
-    // Build snapshot for this table
-    spdlog::info("Building snapshot from table: {}", table_config.name);
-    spdlog::info("This may take a while for large tables. Please wait...");
-    mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store, table_config,
-                                                        config.build);
+    // Build snapshot for this table (if auto_initial_snapshot is enabled)
+    if (config.replication.auto_initial_snapshot) {
+      spdlog::info("Building snapshot from table: {}", table_config.name);
+      spdlog::info("This may take a while for large tables. Please wait...");
+      mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store, table_config,
+                                                          config.build);
 
-    // Set global pointer for signal handler
-    g_snapshot_building = 1;
-    g_current_snapshot_builder = &snapshot_builder;
+      // Set global pointer for signal handler
+      g_snapshot_building = 1;
+      g_current_snapshot_builder = &snapshot_builder;
 
-    bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
-      if (progress.processed_rows % kProgressLogInterval == 0) {
-        spdlog::debug("table: {} - Progress: {} rows processed ({:.0f} rows/s)", table_config.name,
-                      progress.processed_rows, progress.rows_per_second);
+      bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
+        if (progress.processed_rows % kProgressLogInterval == 0) {
+          spdlog::debug("table: {} - Progress: {} rows processed ({:.0f} rows/s)", table_config.name,
+                        progress.processed_rows, progress.rows_per_second);
+        }
+      });
+
+      // Clear global pointer
+      g_snapshot_building = 0;
+      g_current_snapshot_builder = nullptr;
+
+      // Check if build was cancelled by signal
+      if (g_shutdown_requested != 0) {
+        spdlog::warn("Snapshot build cancelled by shutdown signal for table: {}", table_config.name);
+        return 1;
       }
-    });
 
-    // Clear global pointer
-    g_snapshot_building = 0;
-    g_current_snapshot_builder = nullptr;
-
-    // Check if build was cancelled by signal
-    if (g_shutdown_requested != 0) {
-      spdlog::warn("Snapshot build cancelled by shutdown signal for table: {}", table_config.name);
-      return 1;
-    }
-
-    if (!snapshot_success) {
-      spdlog::error("Failed to build snapshot for table: {} - {}", table_config.name, snapshot_builder.GetLastError());
-      return 1;
-    }
-
-    spdlog::info("Snapshot build completed - table: {}, documents: {}", table_config.name,
-                 snapshot_builder.GetProcessedRows());
-
-    // Capture GTID from first table's snapshot
-    if (snapshot_gtid.empty() && config.replication.enable) {
-      snapshot_gtid = snapshot_builder.GetSnapshotGTID();
-      if (!snapshot_gtid.empty()) {
-        spdlog::info("Captured snapshot GTID for replication: {}", snapshot_gtid);
+      if (!snapshot_success) {
+        spdlog::error("Failed to build snapshot for table: {} - {}", table_config.name,
+                      snapshot_builder.GetLastError());
+        return 1;
       }
+
+      spdlog::info("Snapshot build completed - table: {}, documents: {}", table_config.name,
+                   snapshot_builder.GetProcessedRows());
+
+      // Capture GTID from first table's snapshot
+      if (snapshot_gtid.empty() && config.replication.enable) {
+        snapshot_gtid = snapshot_builder.GetSnapshotGTID();
+        if (!snapshot_gtid.empty()) {
+          spdlog::info("Captured snapshot GTID for replication: {}", snapshot_gtid);
+        }
+      }
+    } else {
+      spdlog::info("Skipping automatic snapshot build for table: {} (auto_initial_snapshot=false)", table_config.name);
+      spdlog::info("Use SYNC command to manually trigger snapshot synchronization");
     }
 #endif
 

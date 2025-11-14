@@ -24,6 +24,7 @@
   },
   "replication": {
     "enable": true,
+    "auto_initial_snapshot": false,
     "server_id": 12345,
     "start_from": "snapshot"
   }

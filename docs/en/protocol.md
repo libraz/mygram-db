@@ -41,7 +41,7 @@ SEARCH articles hello
 
 With filters and pagination:
 ```
-SEARCH articles tech FILTER status=1 LIMIT 10
+SEARCH articles tech FILTER status = 1 LIMIT 10
 ```
 
 ### Response
@@ -67,7 +67,7 @@ COUNT <table> <text> [OPTIONS]
 ### Example
 
 ```
-COUNT articles tech AND AI FILTER status=1
+COUNT articles tech AND AI FILTER status = 1
 ```
 
 ### Response
@@ -209,40 +209,6 @@ Returns a YAML-style formatted configuration showing:
 
 ---
 
-## CONFIG VERIFY
-
-Validate current configuration and check system status.
-
-### Syntax
-
-```
-CONFIG VERIFY
-```
-
-### Response
-
-```
-OK CONFIG VERIFIED
-tables: <count>
-
-table: <table_name>
-  primary_key: <column>
-  text_source: <source>
-  ngram_size: <size>
-  filters: <count>
-  required_filters: <count>
-  status: loaded|not_loaded
-  documents: <count>
-  terms: <count>
-
-replication:
-  status: running|stopped
-  gtid: <gtid>
-
-END
-```
-
----
 
 ## DUMP Commands
 
@@ -254,12 +220,12 @@ Save complete snapshot to single binary file (`.dmp`).
 
 **Syntax:**
 ```
-DUMP SAVE [<filepath>] [WITH STATISTICS]
+DUMP SAVE [<filepath>] [--with-stats]
 ```
 
 **Example:**
 ```
-DUMP SAVE /backup/mygramdb.dmp WITH STATISTICS
+DUMP SAVE /backup/mygramdb.dmp --with-stats
 ```
 
 ### DUMP LOAD
@@ -364,6 +330,123 @@ REPLICATION START
 ```
 OK REPLICATION STARTED
 ```
+
+---
+
+## SYNC
+
+Manually trigger snapshot synchronization from MySQL to MygramDB for a specific table.
+
+### Syntax
+
+```
+SYNC <table_name>
+```
+
+### Parameters
+
+- **table_name**: Name of the table to synchronize (must be configured in config file)
+
+### Response (Success)
+
+```
+OK SYNC STARTED table=<table_name> job_id=1
+```
+
+### Response (Error)
+
+```
+ERROR SYNC already in progress for table '<table_name>'
+ERROR Memory critically low. Cannot start SYNC. Check system memory.
+ERROR Table '<table_name>' not found in configuration
+```
+
+### Behavior
+
+- Runs asynchronously in the background
+- Returns immediately after starting
+- Builds snapshot from MySQL using SELECT query
+- Captures GTID at snapshot time
+- Automatically starts binlog replication with captured GTID when complete
+
+### Conflicts
+
+- **DUMP LOAD**: Blocked during SYNC (prevents data corruption)
+- **REPLICATION START**: Blocked during SYNC (SYNC auto-starts replication)
+- **SYNC** (same table): Blocked if already in progress
+
+### Example
+
+```bash
+# Using CLI
+mygram-cli SYNC articles
+
+# Using telnet
+echo "SYNC articles" | nc localhost 11016
+```
+
+---
+
+## SYNC STATUS
+
+Check the progress and status of SYNC operations.
+
+### Syntax
+
+```
+SYNC STATUS
+```
+
+### Response Examples
+
+**In Progress:**
+```
+table=articles status=IN_PROGRESS progress=10000/25000 rows (40.0%) rate=5000 rows/s
+```
+
+**Completed:**
+```
+table=articles status=COMPLETED rows=25000 time=5.2s gtid=uuid:123 replication=STARTED
+```
+
+**Failed:**
+```
+table=articles status=FAILED rows=5000 error="MySQL connection lost"
+```
+
+**Idle:**
+```
+status=IDLE message="No sync operation performed"
+```
+
+### Status Fields
+
+| Field | Description |
+|-------|-------------|
+| `table` | Table name being synced |
+| `status` | `IN_PROGRESS`, `COMPLETED`, `FAILED`, `IDLE`, `CANCELLED` |
+| `progress` | Current/total rows processed |
+| `rate` | Processing rate (rows/s) |
+| `rows` | Total rows processed |
+| `time` | Total processing time |
+| `gtid` | Captured snapshot GTID |
+| `replication` | Replication status: `STARTED`, `ALREADY_RUNNING`, `DISABLED`, `FAILED` |
+| `error` | Error message (if failed) |
+
+### Example
+
+```bash
+# Using CLI
+mygram-cli SYNC STATUS
+
+# Using telnet
+echo "SYNC STATUS" | nc localhost 11016
+```
+
+### See Also
+
+- [SYNC Command Guide](sync_command.md) - Detailed usage guide
+- [Replication Guide](replication.md) - Manual snapshot synchronization setup
 
 ---
 
@@ -567,7 +650,7 @@ In interactive mode, type `help` to see available commands:
 > help
 Available commands:
   SEARCH, COUNT, GET              - Search and retrieval
-  INFO, CONFIG, CONFIG VERIFY     - Server information and validation
+  INFO, CONFIG                    - Server information and configuration
   DUMP SAVE/LOAD/VERIFY/INFO      - Snapshot management
   REPLICATION STATUS/STOP/START   - Replication control
   OPTIMIZE                        - Index optimization

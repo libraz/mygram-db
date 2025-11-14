@@ -301,6 +301,11 @@
           "description": "Enable binlog replication",
           "default": true
         },
+        "auto_initial_snapshot": {
+          "type": "boolean",
+          "description": "Automatically build snapshots on server startup (default: false)",
+          "default": false
+        },
         "server_id": {
           "type": "integer",
           "description": "MySQL server ID (REQUIRED, must be non-zero and unique)",
@@ -415,6 +420,11 @@
           "type": "string",
           "description": "Dump directory path",
           "default": "/var/lib/mygramdb/dumps"
+        },
+        "default_filename": {
+          "type": "string",
+          "description": "Default filename for manual DUMP SAVE",
+          "default": "mygramdb.dmp"
         },
         "interval_sec": {
           "type": "integer",

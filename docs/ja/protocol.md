@@ -41,7 +41,7 @@ SEARCH articles hello
 
 フィルタとページネーション付き：
 ```
-SEARCH articles tech FILTER status=1 LIMIT 10
+SEARCH articles tech FILTER status = 1 LIMIT 10
 ```
 
 ### レスポンス
@@ -67,7 +67,7 @@ COUNT <table> <text> [OPTIONS]
 ### 例
 
 ```
-COUNT articles tech AND AI FILTER status=1
+COUNT articles tech AND AI FILTER status = 1
 ```
 
 ### レスポンス
@@ -209,40 +209,6 @@ YAML形式の設定を返します：
 
 ---
 
-## CONFIG VERIFY
-
-現在の設定を検証し、システムステータスを確認します。
-
-### 構文
-
-```
-CONFIG VERIFY
-```
-
-### レスポンス
-
-```
-OK CONFIG VERIFIED
-tables: <count>
-
-table: <table_name>
-  primary_key: <column>
-  text_source: <source>
-  ngram_size: <size>
-  filters: <count>
-  required_filters: <count>
-  status: loaded|not_loaded
-  documents: <count>
-  terms: <count>
-
-replication:
-  status: running|stopped
-  gtid: <gtid>
-
-END
-```
-
----
 
 ## DUMP コマンド
 
@@ -254,12 +220,12 @@ DUMPコマンドファミリーは、整合性検証を備えた統一的なス�
 
 **構文:**
 ```
-DUMP SAVE [<filepath>] [WITH STATISTICS]
+DUMP SAVE [<filepath>] [--with-stats]
 ```
 
 **例:**
 ```
-DUMP SAVE /backup/mygramdb.dmp WITH STATISTICS
+DUMP SAVE /backup/mygramdb.dmp --with-stats
 ```
 
 ### DUMP LOAD
@@ -565,13 +531,13 @@ OK RESULTS 5 1 2 3 4 5
 
 ```
 > help
-Available commands:
+利用可能なコマンド:
   SEARCH, COUNT, GET              - 検索と取得
-  INFO, CONFIG, CONFIG VERIFY     - サーバー情報と検証
+  INFO, CONFIG                    - サーバー情報と設定
   DUMP SAVE/LOAD/VERIFY/INFO      - スナップショット管理
   REPLICATION STATUS/STOP/START   - レプリケーション制御
   OPTIMIZE                        - インデックス最適化
-  DEBUG ON/OFF                    - デバッグモードの有効/無効
+  DEBUG ON/OFF                    - デバッグモードの有効化/無効化
   quit, exit                      - クライアント終了
 ```
 

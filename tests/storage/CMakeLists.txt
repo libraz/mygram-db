@@ -41,8 +41,7 @@ add_executable(dump_commands_test
 )
 
 target_link_libraries(dump_commands_test
-  mygramdb_storage
-  mygramdb_index
+  mygramdb_storage  # Includes mygramdb_index transitively
   mygramdb_config
   GTest::gtest_main
 )
@@ -57,8 +56,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(dump_save_load_test
-    mygramdb_query
-    mygramdb_mysql
-    mygramdb_config
+    mygramdb_query  # Includes mygramdb_storage, mygramdb_index transitively
+    mygramdb_config # Includes mygramdb_mysql transitively
+    GTest::gtest_main
   )
 endif()

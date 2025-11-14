@@ -35,13 +35,13 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
+  // INFO, SAVE, LOAD, REPLICATION_*, SYNC_STATUS, CONFIG, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
-      type != QueryType::REPLICATION_START && type != QueryType::CONFIG && type != QueryType::OPTIMIZE &&
-      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && type != QueryType::CACHE_CLEAR &&
-      type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE && type != QueryType::CACHE_DISABLE &&
-      table.empty()) {
+      type != QueryType::REPLICATION_START && type != QueryType::SYNC_STATUS && type != QueryType::CONFIG &&
+      type != QueryType::OPTIMIZE && type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF &&
+      type != QueryType::CACHE_CLEAR && type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE &&
+      type != QueryType::CACHE_DISABLE && table.empty()) {
     return false;
   }
 
@@ -131,13 +131,11 @@ Query QueryParser::Parse(const std::string& query_str) {
 
     if (subcommand == "SAVE") {
       query.type = QueryType::DUMP_SAVE;
-      // DUMP SAVE [filepath] [--compact] [--with-stats]
+      // DUMP SAVE [filepath] [--with-stats]
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Start after DUMP SAVE
         const std::string& token = tokens[i];
-        if (token == "--compact") {
-          query.dump_compact = true;
-        } else if (token == "--with-stats") {
+        if (token == "--with-stats") {
           query.dump_with_stats = true;
         } else if (token[0] != '-') {
           // Filepath (not a flag)
@@ -225,6 +223,29 @@ Query QueryParser::Parse(const std::string& query_str) {
       query.type = QueryType::REPLICATION_START;
     } else {
       SetError("Unknown REPLICATION subcommand: " + subcommand);
+      return Query{};
+    }
+
+    return query;
+  }
+  if (command == "SYNC") {
+    // SYNC [table] | SYNC STATUS
+    Query query;
+
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() > 1) {  // 1: SYNC + subcommand or table
+      std::string second_token = ToUpper(tokens[1]);
+      if (second_token == "STATUS") {
+        query.type = QueryType::SYNC_STATUS;
+        query.table = "";  // SYNC STATUS doesn't need a table
+      } else {
+        // SYNC <table>
+        query.type = QueryType::SYNC;
+        query.table = tokens[1];  // Keep original case for table name
+      }
+    } else {
+      // SYNC without arguments (sync all tables or error)
+      SetError("SYNC requires a table name or STATUS subcommand");
       return Query{};
     }
 

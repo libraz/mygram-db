@@ -68,6 +68,7 @@
   },
   "replication": {
     "enable": true,
+    "auto_initial_snapshot": false,
     "server_id": 12345,
     "start_from": "snapshot",
     "queue_size": 10000,
@@ -104,5 +105,18 @@
   "logging": {
     "level": "info",
     "json": true
+  },
+  "cache": {
+    "enabled": true,
+    "max_memory_mb": 32,
+    "min_query_cost_ms": 10.0,
+    "ttl_seconds": 3600,
+    "invalidation_strategy": "ngram",
+    "compression_enabled": true,
+    "eviction_batch_size": 10,
+    "invalidation": {
+      "batch_size": 1000,
+      "max_delay_ms": 100
+    }
   }
 }

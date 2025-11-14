@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -66,6 +67,8 @@ struct HandlerContext {
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader;
+  std::unordered_set<std::string>& syncing_tables;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
+  std::mutex& syncing_tables_mutex;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
 #else
   void* binlog_reader;
 #endif

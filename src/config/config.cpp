@@ -357,6 +357,9 @@ Config ParseConfigFromJson(const json& root) {
     if (repl.contains("enable")) {
       config.replication.enable = repl["enable"].get<bool>();
     }
+    if (repl.contains("auto_initial_snapshot")) {
+      config.replication.auto_initial_snapshot = repl["auto_initial_snapshot"].get<bool>();
+    }
     if (repl.contains("server_id")) {
       config.replication.server_id = repl["server_id"].get<uint32_t>();
     }

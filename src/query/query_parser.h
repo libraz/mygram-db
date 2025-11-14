@@ -23,7 +23,7 @@ enum class QueryType : uint8_t {
   INFO,    // Get server info (memcached-style)
 
   // Dump commands (hierarchical)
-  DUMP_SAVE,    // DUMP SAVE filepath [--compact] [--with-stats]
+  DUMP_SAVE,    // DUMP SAVE filepath [--with-stats]
   DUMP_LOAD,    // DUMP LOAD filepath
   DUMP_VERIFY,  // DUMP VERIFY filepath
   DUMP_INFO,    // DUMP INFO filepath
@@ -36,6 +36,10 @@ enum class QueryType : uint8_t {
   REPLICATION_STATUS,  // REPLICATION STATUS
   REPLICATION_STOP,    // REPLICATION STOP
   REPLICATION_START,   // REPLICATION START
+
+  // Snapshot synchronization commands
+  SYNC,         // SYNC [table]
+  SYNC_STATUS,  // SYNC STATUS
 
   // Config commands
   CONFIG,         // CONFIG [SHOW]
@@ -155,7 +159,6 @@ struct Query {
   std::string filepath;          // For DUMP SAVE/LOAD/VERIFY/INFO commands (optional)
 
   // DUMP command options
-  bool dump_compact = false;     // --compact flag for DUMP SAVE
   bool dump_with_stats = false;  // --with-stats flag for DUMP SAVE
 
   /**

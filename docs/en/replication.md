@@ -55,6 +55,51 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
+## Manual Snapshot Synchronization
+
+Starting from version 1.X.X, MygramDB supports **manual snapshot synchronization** to prevent unexpected load on the MySQL master during startup.
+
+### Configuration
+
+By default, MygramDB **no longer automatically builds snapshots on startup**:
+
+```yaml
+replication:
+  enable: true
+  auto_initial_snapshot: false  # Default: false (safe by default)
+  server_id: 12345
+  start_from: "snapshot"
+```
+
+### Manual SYNC Command
+
+Use the `SYNC` command to manually trigger snapshot synchronization:
+
+```bash
+# Trigger snapshot sync for a table
+mygram-cli SYNC articles
+
+# Check sync progress
+mygram-cli SYNC STATUS
+```
+
+**See [SYNC Command Guide](sync_command.md) for detailed usage.**
+
+### Legacy Behavior
+
+To restore automatic snapshot building on startup:
+
+```yaml
+replication:
+  auto_initial_snapshot: true   # Restore legacy behavior
+```
+
+**Benefits of manual sync:**
+- Prevents unexpected MySQL load during server startup
+- Allows operators to control when synchronization occurs
+- Enables scheduled sync during off-peak hours
+- Provides progress monitoring and cancellation
+
 ## Replication Start Options
 
 Configure `replication.start_from` in your config file:
@@ -343,5 +388,6 @@ replication:
 
 ## See Also
 
+- [SYNC Command Guide](sync_command.md) - Manual snapshot synchronization
 - [Configuration Guide](configuration.md) - Full configuration reference
 - [Protocol Reference](protocol.md) - REPLICATION commands

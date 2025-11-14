@@ -10,7 +10,7 @@ MygramDBは、複雑なテキスト検索操作のための豊富なブール演
 - [演算子の優先順位](#演算子の優先順位)
 - [引用符によるフレーズ検索](#引用符によるフレーズ検索)
 - [フィルタ条件](#フィルタ条件)
-- [ソート (ORDER BY)](#ソート-order-by)
+- [ソート (SORT句)](#ソート-sort句)
 - [ページネーション (LIMIT/OFFSET)](#ページネーション-limitoffset)
 - [エラーハンドリング](#エラーハンドリング)
 - [パフォーマンスチップス](#パフォーマンスチップス)
@@ -22,7 +22,7 @@ MygramDBは、複雑なテキスト検索操作のための豊富なブール演
 ### コマンドフォーマット
 
 ```
-SEARCH <table> <query_expression> [FILTER ...] [ORDER BY ...] [LIMIT ...] [OFFSET ...]
+SEARCH <table> <query_expression> [FILTER ...] [SORT ...] [LIMIT ...] [OFFSET ...]
 COUNT <table> <query_expression> [FILTER ...]
 ```
 
@@ -228,26 +228,42 @@ SEARCH posts "machine learning" NOT "deep learning"
 ### 構文
 
 ```
-SEARCH <table> <query> FILTER <column>=<value> [FILTER <col>=<val> ...]
+SEARCH <table> <query> FILTER <column> <operator> <value> [FILTER <col> <op> <val> ...]
 ```
 
 複数のフィルタを指定できます（すべて一致する必要があります - AND論理）。
+
+### サポートされる演算子
+
+- `=` または `EQ` - 等しい
+- `!=` または `NE` - 等しくない
+- `>` または `GT` - より大きい
+- `>=` または `GTE` - 以上
+- `<` または `LT` - より小さい
+- `<=` または `LTE` - 以下
 
 ### 例
 
 **単一フィルタ:**
 ```
-SEARCH articles tech FILTER status=1
+SEARCH articles tech FILTER status = 1
 ```
 
 **複数フィルタ:**
 ```
-SEARCH articles tech FILTER status=1 FILTER category=ai
+SEARCH articles tech FILTER status = 1 FILTER category = ai
+```
+
+**比較演算子:**
+```
+SEARCH articles tech FILTER views > 1000
+SEARCH articles tech FILTER created_at >= 2024-01-01
+SEARCH articles tech FILTER priority != 0
 ```
 
 **ブール演算クエリと組み合わせ:**
 ```
-SEARCH threads (golang OR python) AND tutorial FILTER status=published
+SEARCH threads (golang OR python) AND tutorial FILTER status = published
 ```
 
 ### フィルタカラムの型
@@ -268,39 +284,39 @@ MygramDBは、インデックス化されたフィルタカラムでのフィル
 
 ---
 
-## ソート (ORDER BY)
+## ソート (SORT句)
 
-`ORDER BY`句を使用して検索結果をソートします。
+`SORT`句を使用して検索結果をソートします。
 
 ### 構文
 
 ```
-SEARCH <table> <query> ORDER BY <column> [ASC|DESC]
+SEARCH <table> <query> SORT <column> [ASC|DESC]
 ```
+
+**注意:** `ORDER BY`構文はサポートされていません。代わりに`SORT`を使用してください。
 
 ### デフォルトの動作
 
-`ORDER BY`が指定されていない場合、結果は**プライマリキーの降順**でソートされます（最新が最初）。
+`SORT`が指定されていない場合、結果は**プライマリキーの降順**でソートされます（最新が最初）。
 
 ```
 SEARCH threads golang
--- 以下と同等: SEARCH threads golang ORDER BY id DESC
+-- 以下と同等: SEARCH threads golang SORT id DESC
 ```
 
 ### プライマリキーでソート
 
 **完全な構文:**
 ```
-SEARCH threads golang ORDER BY id ASC
-SEARCH threads golang ORDER BY id DESC
+SEARCH threads golang SORT id ASC
+SEARCH threads golang SORT id DESC
 ```
 
 **省略記法（推奨）:**
 ```
-SEARCH threads golang ORDER BY ASC   -- プライマリキー昇順
-SEARCH threads golang ORDER BY DESC  -- プライマリキー降順
-SEARCH threads golang ORDER ASC      -- さらに短く（BYは省略可能）
-SEARCH threads golang ORDER DESC     -- さらに短く（BYは省略可能）
+SEARCH threads golang SORT ASC   -- プライマリキー昇順
+SEARCH threads golang SORT DESC  -- プライマリキー降順
 ```
 
 ### フィルタカラムでソート
@@ -308,15 +324,15 @@ SEARCH threads golang ORDER DESC     -- さらに短く（BYは省略可能）
 インデックス化された任意のフィルタカラムでソート：
 
 ```
-SEARCH threads golang ORDER BY created_at DESC LIMIT 10
-SEARCH posts database ORDER BY score ASC LIMIT 20
+SEARCH threads golang SORT created_at DESC LIMIT 10
+SEARCH posts database SORT score ASC LIMIT 20
 ```
 
 ### ブール演算クエリとの組み合わせ
 
 ```
-SEARCH threads (golang OR python) AND tutorial ORDER BY created_at DESC LIMIT 10
-SEARCH posts ((mysql OR postgresql) AND database) NOT sqlite ORDER BY score ASC
+SEARCH threads (golang OR python) AND tutorial SORT created_at DESC LIMIT 10
+SEARCH posts ((mysql OR postgresql) AND database) NOT sqlite SORT score ASC
 ```
 
 ### パフォーマンスの考慮事項
@@ -395,8 +411,8 @@ SEARCH articles tech LIMIT 10 OFFSET 20
 
 ```
 SEARCH threads (golang OR python) AND tutorial
-  FILTER status=published
-  ORDER BY created_at DESC
+  FILTER status = published
+  SORT created_at DESC
   LIMIT 10
   OFFSET 20
 ```
@@ -411,7 +427,7 @@ SEARCH threads (golang OR python) AND tutorial
 
 - **LIMIT最適化**: partial_sortを有効化（大規模結果セットで大幅に高速）
 - **OFFSETコスト**: O(N) ただし N = OFFSET（結果は生成されますが返されません）
-- **ベストプラクティス**: 一貫性のあるページネーションのため、ORDER BYと共にLIMITを使用
+- **ベストプラクティス**: 一貫性のあるページネーションのため、SORTと共にLIMITを使用
 - **深いページネーション**: 大きなOFFSET値（例：10000+）は遅くなる可能性があります
 
 ---
@@ -476,7 +492,7 @@ ERROR Filter column not found: invalid_column
 
 **存在しないカラム:**
 ```
-SEARCH articles tech ORDER BY nonexistent DESC
+SEARCH articles tech SORT nonexistent DESC
 WARNING Column 'nonexistent' not found in documents, treating as NULL
 ```
 
@@ -522,7 +538,7 @@ SEARCH articles NOT old
 
 ```
 -- 良い: フィルタで早期に結果を絞り込む
-SEARCH articles tech FILTER category=ai FILTER status=1
+SEARCH articles tech FILTER category = ai FILTER status = 1
 
 -- 動作するが効率は劣る
 SEARCH articles tech AND ai AND published
@@ -534,10 +550,10 @@ SEARCH articles tech AND ai AND published
 
 ```
 -- 良い: partial_sort最適化を使用
-SEARCH articles tech ORDER BY created_at DESC LIMIT 10
+SEARCH articles tech SORT created_at DESC LIMIT 10
 
 -- 遅い: すべての結果の完全ソート
-SEARCH articles tech ORDER BY created_at DESC
+SEARCH articles tech SORT created_at DESC
 ```
 
 ### 6. 深いページネーションを最小化
@@ -565,11 +581,11 @@ COUNT <table> <query_expression> [FILTER ...]
 例：
 ```
 COUNT threads (golang OR python) AND tutorial
-COUNT articles tech FILTER status=1 FILTER category=ai
+COUNT articles tech FILTER status = 1 FILTER category = ai
 COUNT posts database AND (mysql OR postgresql) NOT sqlite
 ```
 
-**注意:** COUNTはORDER BY、LIMIT、OFFSETをサポートしません（カウントには不要）。
+**注意:** COUNTはSORT、LIMIT、OFFSETをサポートしません（カウントには不要）。
 
 ---
 

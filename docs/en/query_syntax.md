@@ -22,7 +22,7 @@ MygramDB supports a rich boolean query syntax for complex text search operations
 ### Command Format
 
 ```
-SEARCH <table> <query_expression> [FILTER ...] [ORDER BY ...] [LIMIT ...] [OFFSET ...]
+SEARCH <table> <query_expression> [FILTER ...] [SORT ...] [LIMIT ...] [OFFSET ...]
 COUNT <table> <query_expression> [FILTER ...]
 ```
 
@@ -228,26 +228,42 @@ Filter results by column values using the `FILTER` clause.
 ### Syntax
 
 ```
-SEARCH <table> <query> FILTER <column>=<value> [FILTER <col>=<val> ...]
+SEARCH <table> <query> FILTER <column> <operator> <value> [FILTER <col> <op> <val> ...]
 ```
 
 Multiple filters can be specified (all must match - AND logic).
+
+### Supported Operators
+
+- `=` or `EQ` - Equal
+- `!=` or `NE` - Not equal
+- `>` or `GT` - Greater than
+- `>=` or `GTE` - Greater than or equal
+- `<` or `LT` - Less than
+- `<=` or `LTE` - Less than or equal
 
 ### Examples
 
 **Single filter:**
 ```
-SEARCH articles tech FILTER status=1
+SEARCH articles tech FILTER status = 1
 ```
 
 **Multiple filters:**
 ```
-SEARCH articles tech FILTER status=1 FILTER category=ai
+SEARCH articles tech FILTER status = 1 FILTER category = ai
+```
+
+**Comparison operators:**
+```
+SEARCH articles tech FILTER views > 1000
+SEARCH articles tech FILTER created_at >= 2024-01-01
+SEARCH articles tech FILTER priority != 0
 ```
 
 **With boolean queries:**
 ```
-SEARCH threads (golang OR python) AND tutorial FILTER status=published
+SEARCH threads (golang OR python) AND tutorial FILTER status = published
 ```
 
 ### Filter Column Types
@@ -268,39 +284,39 @@ MygramDB supports filtering on indexed filter columns:
 
 ---
 
-## Sorting (ORDER BY)
+## Sorting (SORT clause)
 
-Sort search results using the `ORDER BY` clause.
+Sort search results using the `SORT` clause.
 
 ### Syntax
 
 ```
-SEARCH <table> <query> ORDER BY <column> [ASC|DESC]
+SEARCH <table> <query> SORT <column> [ASC|DESC]
 ```
+
+**Note:** The `ORDER BY` syntax is not supported. Use `SORT` instead.
 
 ### Default Behavior
 
-If `ORDER BY` is not specified, results are sorted by **primary key in descending order** (newest first).
+If `SORT` is not specified, results are sorted by **primary key in descending order** (newest first).
 
 ```
 SEARCH threads golang
--- Equivalent to: SEARCH threads golang ORDER BY id DESC
+-- Equivalent to: SEARCH threads golang SORT id DESC
 ```
 
 ### Sorting by Primary Key
 
 **Full syntax:**
 ```
-SEARCH threads golang ORDER BY id ASC
-SEARCH threads golang ORDER BY id DESC
+SEARCH threads golang SORT id ASC
+SEARCH threads golang SORT id DESC
 ```
 
 **Shorthand syntax (recommended):**
 ```
-SEARCH threads golang ORDER BY ASC   -- Primary key ascending
-SEARCH threads golang ORDER BY DESC  -- Primary key descending
-SEARCH threads golang ORDER ASC      -- Even shorter (BY is optional)
-SEARCH threads golang ORDER DESC     -- Even shorter (BY is optional)
+SEARCH threads golang SORT ASC   -- Primary key ascending
+SEARCH threads golang SORT DESC  -- Primary key descending
 ```
 
 ### Sorting by Filter Column
@@ -308,15 +324,15 @@ SEARCH threads golang ORDER DESC     -- Even shorter (BY is optional)
 Sort by any indexed filter column:
 
 ```
-SEARCH threads golang ORDER BY created_at DESC LIMIT 10
-SEARCH posts database ORDER BY score ASC LIMIT 20
+SEARCH threads golang SORT created_at DESC LIMIT 10
+SEARCH posts database SORT score ASC LIMIT 20
 ```
 
 ### Combining with Boolean Queries
 
 ```
-SEARCH threads (golang OR python) AND tutorial ORDER BY created_at DESC LIMIT 10
-SEARCH posts ((mysql OR postgresql) AND database) NOT sqlite ORDER BY score ASC
+SEARCH threads (golang OR python) AND tutorial SORT created_at DESC LIMIT 10
+SEARCH posts ((mysql OR postgresql) AND database) NOT sqlite SORT score ASC
 ```
 
 ### Performance Considerations
@@ -395,8 +411,8 @@ SEARCH articles tech LIMIT 10 OFFSET 20
 
 ```
 SEARCH threads (golang OR python) AND tutorial
-  FILTER status=published
-  ORDER BY created_at DESC
+  FILTER status = published
+  SORT created_at DESC
   LIMIT 10
   OFFSET 20
 ```
@@ -522,7 +538,7 @@ Leading NOT requires scanning all documents before exclusion.
 
 ```
 -- Good: Filter narrows results early
-SEARCH articles tech FILTER category=ai FILTER status=1
+SEARCH articles tech FILTER category = ai FILTER status = 1
 
 -- Works but less efficient
 SEARCH articles tech AND ai AND published
@@ -534,10 +550,10 @@ Filters on indexed columns are faster than text search on those terms.
 
 ```
 -- Good: Uses partial_sort optimization
-SEARCH articles tech ORDER BY created_at DESC LIMIT 10
+SEARCH articles tech SORT created_at DESC LIMIT 10
 
 -- Slower: Full sort of all results
-SEARCH articles tech ORDER BY created_at DESC
+SEARCH articles tech SORT created_at DESC
 ```
 
 ### 6. Minimize Deep Pagination
@@ -565,11 +581,11 @@ COUNT <table> <query_expression> [FILTER ...]
 Examples:
 ```
 COUNT threads (golang OR python) AND tutorial
-COUNT articles tech FILTER status=1 FILTER category=ai
+COUNT articles tech FILTER status = 1 FILTER category = ai
 COUNT posts database AND (mysql OR postgresql) NOT sqlite
 ```
 
-**Note:** COUNT does not support ORDER BY, LIMIT, or OFFSET (not needed for counting).
+**Note:** COUNT does not support SORT, LIMIT, or OFFSET (not needed for counting).
 
 ---
 
@@ -604,8 +620,57 @@ MygramDB uses n-gram tokenization for indexing and search:
 
 ---
 
+## Snapshot Synchronization Commands
+
+### SYNC Command
+
+Manually trigger snapshot synchronization from MySQL to MygramDB.
+
+**Syntax:**
+```
+SYNC <table_name>
+```
+
+**Example:**
+```
+SYNC articles
+```
+
+**Response:**
+```
+OK SYNC STARTED table=articles job_id=1
+```
+
+**See [SYNC Command Guide](sync_command.md) for detailed usage.**
+
+### SYNC STATUS Command
+
+Check the progress and status of SYNC operations.
+
+**Syntax:**
+```
+SYNC STATUS
+```
+
+**Example:**
+```
+SYNC STATUS
+```
+
+**Response Examples:**
+```
+table=articles status=IN_PROGRESS progress=10000/25000 rows (40.0%) rate=5000 rows/s
+table=articles status=COMPLETED rows=25000 time=5.2s gtid=uuid:123 replication=STARTED
+status=IDLE message="No sync operation performed"
+```
+
+**See [SYNC Command Guide](sync_command.md) for detailed field descriptions.**
+
+---
+
 ## See Also
 
+- [SYNC Command Guide](sync_command.md) - Manual snapshot synchronization
 - [Protocol Reference](protocol.md) - All commands and protocol details
 - [Configuration Guide](configuration.md) - Configure filters, n-gram sizes, and limits
 - [Performance Tuning](performance.md) - Advanced optimization techniques

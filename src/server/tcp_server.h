@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -28,6 +29,12 @@ class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
+#ifdef USE_MYSQL
+namespace mygramdb::storage {
+class SnapshotBuilder;
+}  // namespace mygramdb::storage
+#endif
+
 namespace mygramdb::server {
 
 // Forward declaration
@@ -38,6 +45,21 @@ constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
 constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
 constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
 constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queries (range: 5-1000)
+
+/**
+ * @brief State of a SYNC operation
+ */
+struct SyncState {
+  std::atomic<bool> is_running{false};
+  std::string table_name;
+  uint64_t total_rows = 0;
+  std::atomic<uint64_t> processed_rows{0};
+  std::chrono::steady_clock::time_point start_time;
+  std::string status;  // "IDLE", "STARTING", "IN_PROGRESS", "COMPLETED", "FAILED", "CANCELLED"
+  std::string error_message;
+  std::string gtid;
+  std::string replication_status;  // "STARTED", "ALREADY_RUNNING", "DISABLED", "FAILED"
+};
 
 /**
  * @brief TCP server configuration
@@ -137,7 +159,23 @@ class TcpServer {
    */
   ServerStats* GetMutableStats() { return &stats_; }
 
+#ifdef USE_MYSQL
+  /**
+   * @brief Start SYNC operation for a table
+   * @param table_name Table to synchronize
+   * @return Response string (OK or ERROR)
+   */
+  std::string StartSync(const std::string& table_name);
+
+  /**
+   * @brief Get SYNC status for all tables
+   * @return Response string with sync status
+   */
+  std::string GetSyncStatus();
+#endif
+
  private:
+  friend class SyncHandler;
   ServerConfig config_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   query::QueryParser query_parser_;
@@ -185,6 +223,26 @@ class TcpServer {
   std::unique_ptr<CommandHandler> replication_handler_;
   std::unique_ptr<CommandHandler> debug_handler_;
   std::unique_ptr<CommandHandler> cache_handler_;
+#ifdef USE_MYSQL
+  std::unique_ptr<CommandHandler> sync_handler_;
+#endif
+
+#ifdef USE_MYSQL
+  // SYNC operation state management
+  std::unordered_map<std::string, SyncState> sync_states_;
+  mutable std::mutex sync_mutex_;
+
+  // Track which tables are currently syncing (for conflict detection)
+  std::unordered_set<std::string> syncing_tables_;
+  mutable std::mutex syncing_tables_mutex_;
+
+  // Active snapshot builders (for shutdown cancellation)
+  std::unordered_map<std::string, storage::SnapshotBuilder*> active_snapshot_builders_;
+  mutable std::mutex snapshot_builders_mutex_;
+
+  // Shutdown flag for SYNC operations
+  std::atomic<bool> shutdown_requested_{false};
+#endif
 
   /**
    * @brief Accept thread function
@@ -233,6 +291,14 @@ class TcpServer {
    * @brief Remove connection from active list
    */
   void RemoveConnection(int socket_fd);
+
+#ifdef USE_MYSQL
+  /**
+   * @brief Build snapshot asynchronously for a table
+   * @param table_name Table to synchronize
+   */
+  void BuildSnapshotAsync(const std::string& table_name);
+#endif
 };
 
 }  // namespace mygramdb::server

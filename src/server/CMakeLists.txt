@@ -12,6 +12,7 @@ add_library(mygramdb_server STATIC
   handlers/replication_handler.cpp
   handlers/debug_handler.cpp
   handlers/cache_handler.cpp
+  handlers/sync_handler.cpp
 )
 
 target_include_directories(mygramdb_server PUBLIC
@@ -19,8 +20,7 @@ target_include_directories(mygramdb_server PUBLIC
 )
 
 target_link_libraries(mygramdb_server PUBLIC
-  mygramdb_query
-  mygramdb_cache
+  mygramdb_cache      # Includes mygramdb_query transitively
   httplib::httplib
   nlohmann_json::nlohmann_json
   Threads::Threads

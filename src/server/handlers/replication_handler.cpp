@@ -39,6 +39,16 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 
     case query::QueryType::REPLICATION_START: {
 #ifdef USE_MYSQL
+      // Check if any table is currently syncing
+      {
+        std::lock_guard<std::mutex> lock(ctx_.syncing_tables_mutex);
+        if (!ctx_.syncing_tables.empty()) {
+          return ResponseFormatter::FormatError(
+              "Cannot start replication while SYNC is in progress. "
+              "SYNC will automatically start replication when complete.");
+        }
+      }
+
       if (ctx_.binlog_reader != nullptr) {
         auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
         if (!reader->IsRunning()) {

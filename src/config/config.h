@@ -152,6 +152,7 @@ struct BuildConfig {
  */
 struct ReplicationConfig {
   bool enable = true;
+  bool auto_initial_snapshot = false;   // Automatically build snapshots on server startup (default: false)
   uint32_t server_id = 0;               // MySQL server ID for replication (must be unique, 0 = disabled)
   std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest"
   int queue_size = defaults::kReplicationQueueSize;
@@ -227,8 +228,8 @@ struct LoggingConfig {
  * @brief Query cache configuration
  */
 struct CacheConfig {
-  bool enabled = false;                         ///< Enable/disable cache (default: false)
-  int max_memory_mb = 200;                      ///< Maximum cache memory in MB (default: 200)  // NOLINT
+  bool enabled = true;                          ///< Enable/disable cache (default: true)
+  int max_memory_mb = 32;                       ///< Maximum cache memory in MB (default: 32)  // NOLINT
   double min_query_cost_ms = 10.0;              ///< Minimum query cost to cache (default: 10ms)  // NOLINT
   int ttl_seconds = 3600;                       ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
   std::string invalidation_strategy = "ngram";  ///< Invalidation strategy: "ngram", "table"

@@ -33,5 +33,6 @@ api:
 # Replication
 replication:
   enable: true
+  auto_initial_snapshot: false      # Manual SYNC mode (recommended, safe by default)
   server_id: 12345                  # REQUIRED: Set a unique non-zero value
   start_from: "snapshot"

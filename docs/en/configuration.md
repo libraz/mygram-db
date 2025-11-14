@@ -51,6 +51,7 @@ build:
 
 replication:
   enable: true
+  auto_initial_snapshot: false
   server_id: 12345
   start_from: "snapshot"
   queue_size: 10000
@@ -326,6 +327,11 @@ Index build configuration:
 MySQL binlog replication settings:
 
 - **enable**: Enable binlog replication (default: `true`)
+- **auto_initial_snapshot**: Automatically build snapshot on startup (default: `false`)
+  - `false`: Manual snapshot synchronization using `SYNC` command (recommended, safe by default)
+  - `true`: Legacy behavior - automatically build snapshot on startup
+  - Setting to `false` prevents unexpected MySQL load on startup
+  - See [SYNC Command Guide](sync_command.md) for manual synchronization
 - **server_id**: MySQL server ID (required, must be non-zero and unique in replication topology)
   - Generate a random number or use a unique value for your environment
   - Example: `12345`
