@@ -215,7 +215,7 @@ TEST_F(TcpServerTest, SearchWithDocuments) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test hello");
-  // Default ORDER BY: PRIMARY KEY DESC (descending order: 2, 1)
+  // Default SORT: PRIMARY KEY DESC (descending order: 2, 1)
   EXPECT_EQ(response, "OK RESULTS 2 2 1");
 
   close(sock);
@@ -290,7 +290,7 @@ TEST_F(TcpServerTest, SearchWithLimit) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test test LIMIT 3");
-  // Default ORDER BY: PRIMARY KEY DESC (descending order: 5, 4, 3)
+  // Default SORT: PRIMARY KEY DESC (descending order: 5, 4, 3)
   EXPECT_EQ(response, "OK RESULTS 5 5 4 3");
 
   close(sock);
@@ -315,7 +315,7 @@ TEST_F(TcpServerTest, SearchWithOffset) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "SEARCH test test OFFSET 2");
-  // Default ORDER BY: PRIMARY KEY DESC (descending order: 5, 4, 3, 2, 1)
+  // Default SORT: PRIMARY KEY DESC (descending order: 5, 4, 3, 2, 1)
   // OFFSET 2 skips first 2 results (5, 4), returns: 3, 2, 1
   EXPECT_EQ(response, "OK RESULTS 5 3 2 1");
 
@@ -1126,37 +1126,37 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
   std::string debug_on = SendRequest(sock, "DEBUG ON");
   EXPECT_EQ(debug_on, "OK DEBUG_ON");
 
-  // Test 1: Search without explicit LIMIT, OFFSET, or ORDER BY
+  // Test 1: Search without explicit LIMIT, OFFSET, or SORT
   // Should show all as (default)
   std::string response1 = SendRequest(sock, "SEARCH test hello");
   EXPECT_TRUE(response1.find("OK RESULTS") == 0);
   EXPECT_TRUE(response1.find("# DEBUG") != std::string::npos);
-  EXPECT_TRUE(response1.find("order_by: id DESC (default)") != std::string::npos)
-      << "Should show default ORDER BY with (default) marker";
+  EXPECT_TRUE(response1.find("sort: id DESC (default)") != std::string::npos)
+      << "Should show default SORT with (default) marker";
   EXPECT_TRUE(response1.find("limit: 100 (default)") != std::string::npos)
       << "Should show default LIMIT with (default) marker";
   // OFFSET should not be shown when it's 0
   EXPECT_TRUE(response1.find("offset:") == std::string::npos) << "OFFSET should not be shown when 0";
 
   // Test 2: Search with explicit LIMIT
-  // LIMIT should NOT have (default), but ORDER BY should
+  // LIMIT should NOT have (default), but SORT should
   std::string response2 = SendRequest(sock, "SEARCH test hello LIMIT 50");
   EXPECT_TRUE(response2.find("OK RESULTS") == 0);
-  EXPECT_TRUE(response2.find("order_by: id DESC (default)") != std::string::npos)
-      << "ORDER BY should still have (default) marker";
+  EXPECT_TRUE(response2.find("sort: id DESC (default)") != std::string::npos)
+      << "SORT should still have (default) marker";
   EXPECT_TRUE(response2.find("limit: 50\r\n") != std::string::npos)
       << "Explicit LIMIT should NOT have (default) marker";
   EXPECT_TRUE(response2.find("limit: 50 (default)") == std::string::npos)
       << "Explicit LIMIT should NOT have (default) marker";
 
-  // Test 3: Search with explicit ORDER BY
-  // ORDER BY should NOT have (default), but LIMIT should
-  std::string response3 = SendRequest(sock, "SEARCH test hello ORDER BY id ASC");
+  // Test 3: Search with explicit SORT
+  // SORT should NOT have (default), but LIMIT should
+  std::string response3 = SendRequest(sock, "SEARCH test hello SORT id ASC");
   EXPECT_TRUE(response3.find("OK RESULTS") == 0);
-  EXPECT_TRUE(response3.find("order_by: id ASC\r\n") != std::string::npos)
-      << "Explicit ORDER BY should NOT have (default) marker";
-  EXPECT_TRUE(response3.find("order_by: id ASC (default)") == std::string::npos)
-      << "Explicit ORDER BY should NOT have (default) marker";
+  EXPECT_TRUE(response3.find("sort: id ASC\r\n") != std::string::npos)
+      << "Explicit SORT should NOT have (default) marker";
+  EXPECT_TRUE(response3.find("sort: id ASC (default)") == std::string::npos)
+      << "Explicit SORT should NOT have (default) marker";
   EXPECT_TRUE(response3.find("limit: 100 (default)") != std::string::npos)
       << "Default LIMIT should have (default) marker";
 
@@ -1171,9 +1171,9 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
 
   // Test 5: Search with all explicit parameters
   // Nothing should have (default)
-  std::string response5 = SendRequest(sock, "SEARCH test hello ORDER BY id DESC LIMIT 25 OFFSET 5");
+  std::string response5 = SendRequest(sock, "SEARCH test hello SORT id DESC LIMIT 25 OFFSET 5");
   EXPECT_TRUE(response5.find("OK RESULTS") == 0);
-  EXPECT_TRUE(response5.find("order_by: id DESC\r\n") != std::string::npos);
+  EXPECT_TRUE(response5.find("sort: id DESC\r\n") != std::string::npos);
   EXPECT_TRUE(response5.find("(default)") == std::string::npos)
       << "No parameters should have (default) when all are explicit";
   EXPECT_TRUE(response5.find("limit: 25\r\n") != std::string::npos);

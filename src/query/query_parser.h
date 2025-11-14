@@ -71,7 +71,7 @@ struct FilterCondition {
 };
 
 /**
- * @brief Sort order for ORDER BY clause
+ * @brief Sort order for SORT clause
  */
 enum class SortOrder : uint8_t {
   ASC,  // Ascending
@@ -79,7 +79,7 @@ enum class SortOrder : uint8_t {
 };
 
 /**
- * @brief ORDER BY clause specification
+ * @brief SORT clause specification (formerly ORDER BY)
  */
 struct OrderByClause {
   std::string column;                 // Column name (empty = primary key)
@@ -125,7 +125,7 @@ struct Query {
   std::vector<std::string> and_terms;  // Additional terms for AND search
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
-  std::optional<OrderByClause> order_by;  // ORDER BY clause (default: primary key DESC)
+  std::optional<OrderByClause> order_by;  // SORT clause (default: primary key DESC)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   uint32_t limit = 100;          // Initial value (overridden by config.api.default_limit if not explicit)
   uint32_t offset = 0;           // Default offset
@@ -148,8 +148,8 @@ struct Query {
  * @brief Query parser
  *
  * Parses text protocol commands:
- * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [ORDER BY <col>
- * ASC|DESC] [LIMIT <n>] [OFFSET <n>]
+ * - SEARCH <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [SORT <col>
+ * ASC|DESC] [LIMIT <n>|<offset>,<count>] [OFFSET <n>]
  * - COUNT <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
  * - INFO
@@ -163,8 +163,9 @@ struct Query {
  * - Use quotes for phrases: SEARCH threads "hello world" will search for the exact phrase
  * - AND operator: SEARCH threads term1 AND term2 AND term3
  * - NOT operator: SEARCH threads term1 NOT excluded
- * - ORDER BY: SEARCH threads golang ORDER BY created_at DESC LIMIT 10
- * - Default order: primary key DESC (if ORDER BY not specified)
+ * - SORT: SEARCH threads golang SORT created_at DESC LIMIT 10
+ * - LIMIT formats: LIMIT 100 or LIMIT 10,100 (offset,count)
+ * - Default order: primary key DESC (if SORT not specified)
  */
 class QueryParser {
  public:
@@ -234,9 +235,9 @@ class QueryParser {
   bool ParseOffset(const std::vector<std::string>& tokens, size_t& pos, Query& query);
 
   /**
-   * @brief Parse ORDER BY clause
+   * @brief Parse SORT clause
    */
-  bool ParseOrderBy(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  bool ParseSort(const std::vector<std::string>& tokens, size_t& pos, Query& query);
 
   /**
    * @brief Tokenize query string

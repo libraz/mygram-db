@@ -22,7 +22,7 @@ Tested on 1.7M rows (real production data):
 
 | Query Type | MySQL (Cold/Warm) | MygramDB | Speedup |
 |------------|-------------------|----------|---------|
-| **ORDER BY id LIMIT 100** (typical use) | 900-3,700ms | 24-56ms | **25-68x** |
+| **SORT id LIMIT 100** (typical use) | 900-3,700ms | 24-56ms | **25-68x** |
 | Medium-freq term (4.6% match) | 906ms / 592ms | 24ms | **38x / 25x** |
 | High-freq term (47.5% match) | 2,495ms / 2,017ms | 42ms | **59x / 48x** |
 | Ultra high-freq (74.9% match) | 3,753ms / 3,228ms | 56ms | **68x / 58x** |
@@ -31,7 +31,7 @@ Tested on 1.7M rows (real production data):
 
 **Key advantages:**
 - **No cache warmup needed** - Always fast, even on cold starts
-- **ORDER BY optimization** - Uses primary key index (no external sort)
+- **SORT optimization** - Uses primary key index (no external sort)
 - **Scales with result size** - Larger result sets show bigger speedups
 - **Consistent performance** - MySQL varies 600ms-3.7s, MygramDB stays under 60ms
 - **High concurrency** - Handles heavy load effortlessly; MySQL FULLTEXT often stalls under concurrent traffic
@@ -83,7 +83,13 @@ Includes MySQL 8.4 with sample data for instant testing.
 
 ```bash
 # Search with pagination
-SEARCH articles "hello world" ORDER BY id LIMIT 100
+SEARCH articles "hello world" SORT id LIMIT 100
+
+# Sort by custom column
+SEARCH articles "hello" SORT created_at DESC LIMIT 50
+
+# LIMIT with offset (MySQL-style)
+SEARCH articles "tech" LIMIT 10,100  # offset=10, count=100
 
 # Count matches
 COUNT articles "hello world"

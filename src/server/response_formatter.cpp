@@ -57,9 +57,9 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
     if (!debug_info->optimization_used.empty()) {
       oss << "optimization: " << debug_info->optimization_used << "\r\n";
     }
-    // Show applied ORDER BY, LIMIT, OFFSET
+    // Show applied SORT, LIMIT, OFFSET
     if (!debug_info->order_by_applied.empty()) {
-      oss << "order_by: " << debug_info->order_by_applied << "\r\n";
+      oss << "sort: " << debug_info->order_by_applied << "\r\n";
     }
     // Always show LIMIT (it has a default value of 100)
     oss << "limit: " << debug_info->limit_applied;

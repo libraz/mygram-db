@@ -283,6 +283,15 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
 
   query.table = tokens[1];
 
+  // Check for comma-separated table names (SQL-style multi-table syntax)
+  if (query.table.find(',') != std::string::npos || (tokens.size() > 2 && tokens[2] == ",")) {
+    SetError(
+        "Multiple tables not supported. Hint: MygramDB searches a single table at a time. Use separate queries "
+        "for multiple tables.");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
+
   // Helper lambda to count parentheses in a token, respecting quotes
   auto count_parens = [](const std::string& token) -> std::pair<int, int> {
     int open = 0;
@@ -358,8 +367,15 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     // Check if this is a keyword (only when not inside parentheses)
     if (paren_depth == 0 &&
         (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
-         upper_token == "ORDER" || upper_token == "LIMIT" || upper_token == "OFFSET")) {
+         upper_token == "SORT" || upper_token == "LIMIT" || upper_token == "OFFSET")) {
       break;  // Stop consuming search text
+    }
+
+    // Special check for deprecated ORDER keyword - provide helpful error
+    if (paren_depth == 0 && upper_token == "ORDER") {
+      SetError("ORDER BY is not supported. Use SORT instead. Example: SEARCH table text SORT column DESC");
+      query.type = QueryType::UNKNOWN;
+      return query;
     }
 
     search_tokens.push_back(token);
@@ -424,7 +440,12 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
         return query;
       }
     } else if (keyword == "ORDER") {
-      if (!ParseOrderBy(tokens, pos, query)) {
+      // ORDER BY is deprecated, guide users to use SORT
+      SetError("ORDER BY is not supported. Use SORT instead. Example: SEARCH table text SORT column DESC");
+      query.type = QueryType::UNKNOWN;
+      return query;
+    } else if (keyword == "SORT") {
+      if (!ParseSort(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
         return query;
       }
@@ -467,6 +488,15 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   }
 
   query.table = tokens[1];
+
+  // Check for comma-separated table names (SQL-style multi-table syntax)
+  if (query.table.find(',') != std::string::npos || (tokens.size() > 2 && tokens[2] == ",")) {
+    SetError(
+        "Multiple tables not supported. Hint: MygramDB searches a single table at a time. Use separate queries "
+        "for multiple tables.");
+    query.type = QueryType::UNKNOWN;
+    return query;
+  }
 
   // Helper lambda to count parentheses in a token, respecting quotes
   auto count_parens = [](const std::string& token) -> std::pair<int, int> {
@@ -541,11 +571,18 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)
-    // Include LIMIT/OFFSET/ORDER so they stop token consumption and get rejected below
+    // Include LIMIT/OFFSET so they stop token consumption and get rejected below
     if (paren_depth == 0 &&
         (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
-         upper_token == "LIMIT" || upper_token == "OFFSET" || upper_token == "ORDER")) {
+         upper_token == "LIMIT" || upper_token == "OFFSET" || upper_token == "SORT")) {
       break;  // Stop consuming search text
+    }
+
+    // Special check for deprecated ORDER keyword - provide helpful error
+    if (paren_depth == 0 && upper_token == "ORDER") {
+      SetError("ORDER BY is not supported. Use SORT instead.");
+      query.type = QueryType::UNKNOWN;
+      return query;
     }
 
     search_tokens.push_back(token);
@@ -609,6 +646,14 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
         query.type = QueryType::UNKNOWN;
         return query;
       }
+    } else if (keyword == "ORDER") {
+      SetError("ORDER BY is not supported. Use SORT instead (note: COUNT does not support sorting).");
+      query.type = QueryType::UNKNOWN;
+      return query;
+    } else if (keyword == "SORT") {
+      SetError("COUNT does not support SORT clause. Use SEARCH if you need sorted results.");
+      query.type = QueryType::UNKNOWN;
+      return query;
     } else {
       SetError("COUNT only supports AND, NOT and FILTER clauses");
       query.type = QueryType::UNKNOWN;
@@ -689,25 +734,58 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
 }
 
 bool QueryParser::ParseLimit(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
-  // LIMIT <n>
+  // LIMIT <n> or LIMIT <offset>,<count>
   pos++;  // Skip "LIMIT"
 
   if (pos >= tokens.size()) {
-    SetError("LIMIT requires a number");
+    SetError("LIMIT requires a number or offset,count");
     return false;
   }
 
-  try {
-    int limit = std::stoi(tokens[pos++]);
-    if (limit <= 0) {
-      SetError("LIMIT must be positive");
+  std::string limit_str = tokens[pos++];
+
+  // Check for comma-separated format: LIMIT offset,count
+  size_t comma_pos = limit_str.find(',');
+  if (comma_pos != std::string::npos) {
+    // Parse LIMIT offset,count
+    std::string offset_str = limit_str.substr(0, comma_pos);
+    std::string count_str = limit_str.substr(comma_pos + 1);
+
+    try {
+      int offset = std::stoi(offset_str);
+      int count = std::stoi(count_str);
+
+      if (offset < 0) {
+        SetError("LIMIT offset must be non-negative");
+        return false;
+      }
+      if (count <= 0) {
+        SetError("LIMIT count must be positive");
+        return false;
+      }
+
+      query.offset = static_cast<uint32_t>(offset);
+      query.limit = static_cast<uint32_t>(count);
+      query.offset_explicit = true;
+      query.limit_explicit = true;
+    } catch (const std::exception& e) {
+      SetError("Invalid LIMIT offset,count format: " + limit_str);
       return false;
     }
-    query.limit = static_cast<uint32_t>(limit);
-    query.limit_explicit = true;  // Mark as explicitly specified
-  } catch (const std::exception& e) {
-    SetError("Invalid LIMIT value: " + tokens[pos - 1]);
-    return false;
+  } else {
+    // Parse LIMIT <n>
+    try {
+      int limit = std::stoi(limit_str);
+      if (limit <= 0) {
+        SetError("LIMIT must be positive");
+        return false;
+      }
+      query.limit = static_cast<uint32_t>(limit);
+      query.limit_explicit = true;  // Mark as explicitly specified
+    } catch (const std::exception& e) {
+      SetError("Invalid LIMIT value: " + limit_str);
+      return false;
+    }
   }
 
   return true;
@@ -738,21 +816,20 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens, size_t& po
   return true;
 }
 
-bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
-  // ORDER BY <column> [ASC|DESC]
-  // ORDER BY ASC/DESC (shorthand for primary key)
-  // ORDER ASC/DESC (shorthand, BY is optional)
-  pos++;  // Skip "ORDER"
+bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
+  // SORT <column> [ASC|DESC]
+  // SORT ASC/DESC (shorthand for primary key)
+  pos++;  // Skip "SORT"
 
   if (pos >= tokens.size()) {
-    SetError("ORDER requires BY or ASC/DESC");
+    SetError("SORT requires a column name or ASC/DESC");
     return false;
   }
 
   OrderByClause order_by;
   std::string next_token = ToUpper(tokens[pos]);
 
-  // Check for shorthand: ORDER ASC/DESC (without BY)
+  // Check for shorthand: SORT ASC/DESC (primary key ordering)
   if (next_token == "ASC" || next_token == "DESC") {
     // Shorthand for primary key ordering
     order_by.column = "";  // Empty = primary key
@@ -762,31 +839,14 @@ bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens, size_t& p
     return true;
   }
 
-  // Expect BY keyword
-  if (next_token != "BY") {
-    SetError("Expected BY or ASC/DESC after ORDER, got: " + next_token);
-    return false;
-  }
-  pos++;  // Skip "BY"
-
-  if (pos >= tokens.size()) {
-    SetError("ORDER BY requires a column name or ASC/DESC");
-    return false;
-  }
-
-  // Check if next token is ASC/DESC (shorthand for primary key)
-  next_token = ToUpper(tokens[pos]);
-  if (next_token == "ASC" || next_token == "DESC") {
-    // ORDER BY ASC/DESC (shorthand for primary key)
-    order_by.column = "";  // Empty = primary key
-    order_by.order = (next_token == "ASC") ? SortOrder::ASC : SortOrder::DESC;
-    pos++;
-    query.order_by = order_by;
-    return true;
-  }
-
-  // Normal case: ORDER BY <column> [ASC|DESC]
+  // Normal case: SORT <column> [ASC|DESC]
   order_by.column = tokens[pos++];
+
+  // Check for comma in column name (multi-column sort attempt)
+  if (order_by.column.find(',') != std::string::npos) {
+    SetError("Multiple column sorting is not supported. Sort by a single column only.");
+    return false;
+  }
 
   // Check for ASC/DESC (optional, default is DESC)
   if (pos < tokens.size()) {
@@ -799,6 +859,22 @@ bool QueryParser::ParseOrderBy(const std::vector<std::string>& tokens, size_t& p
       pos++;
     }
     // If not ASC or DESC, leave it for next clause to handle
+  }
+
+  // Check for multiple columns: SORT col1 ASC col2 DESC
+  // After consuming column and optional ASC/DESC, if next token looks like a column name
+  // (not a known keyword), it's likely a multi-column sort attempt
+  if (pos < tokens.size()) {
+    std::string peek_token = ToUpper(tokens[pos]);
+    // Check if next token is not a known keyword
+    if (peek_token != "LIMIT" && peek_token != "OFFSET" && peek_token != "FILTER" && peek_token != "AND" &&
+        peek_token != "NOT") {
+      // Next token might be a second column name
+      SetError(
+          "Multiple column sorting is not supported. Hint: Sort by a single column only. Use application-level "
+          "sorting for complex requirements.");
+      return false;
+    }
   }
 
   query.order_by = order_by;

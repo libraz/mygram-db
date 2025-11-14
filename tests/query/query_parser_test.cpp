@@ -757,10 +757,10 @@ TEST(QueryParserTest, DebugInvalidMode) {
   EXPECT_FALSE(parser.GetError().empty());
 }
 
-// ORDER BY Tests
-TEST(QueryParserTest, SearchWithOrderByDesc) {
+// SORT Tests (formerly ORDER BY)
+TEST(QueryParserTest, SearchWithSortDesc) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at DESC LIMIT 10");
+  auto query = parser.Parse("SEARCH articles hello SORT created_at DESC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "articles");
@@ -772,9 +772,9 @@ TEST(QueryParserTest, SearchWithOrderByDesc) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchWithOrderByAsc) {
+TEST(QueryParserTest, SearchWithSortAsc) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at ASC LIMIT 10");
+  auto query = parser.Parse("SEARCH articles hello SORT created_at ASC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_TRUE(query.order_by.has_value());
@@ -783,9 +783,9 @@ TEST(QueryParserTest, SearchWithOrderByAsc) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchWithOrderByDefaultDesc) {
+TEST(QueryParserTest, SearchWithSortDefaultDesc) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at");
+  auto query = parser.Parse("SEARCH articles hello SORT created_at");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_TRUE(query.order_by.has_value());
@@ -794,9 +794,9 @@ TEST(QueryParserTest, SearchWithOrderByDefaultDesc) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchWithOrderByPrimaryKey) {
+TEST(QueryParserTest, SearchWithSortPrimaryKey) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY id DESC");
+  auto query = parser.Parse("SEARCH articles hello SORT id DESC");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_TRUE(query.order_by.has_value());
@@ -805,10 +805,10 @@ TEST(QueryParserTest, SearchWithOrderByPrimaryKey) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchWithOrderByCaseInsensitive) {
+TEST(QueryParserTest, SearchWithSortCaseInsensitive) {
   QueryParser parser;
-  auto query1 = parser.Parse("SEARCH articles hello order by created_at asc");
-  auto query2 = parser.Parse("SEARCH articles hello OrDeR By score DeSc");
+  auto query1 = parser.Parse("SEARCH articles hello sort created_at asc");
+  auto query2 = parser.Parse("SEARCH articles hello SoRt score DeSc");
 
   EXPECT_EQ(query1.type, QueryType::SEARCH);
   EXPECT_TRUE(query1.order_by.has_value());
@@ -819,9 +819,9 @@ TEST(QueryParserTest, SearchWithOrderByCaseInsensitive) {
   EXPECT_EQ(query2.order_by->order, SortOrder::DESC);
 }
 
-TEST(QueryParserTest, SearchWithOrderByAndFilter) {
+TEST(QueryParserTest, SearchWithSortAndFilter) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello FILTER status = published ORDER BY created_at DESC LIMIT 20");
+  auto query = parser.Parse("SEARCH articles hello FILTER status = published SORT created_at DESC LIMIT 20");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.filters.size(), 1);
@@ -832,10 +832,10 @@ TEST(QueryParserTest, SearchWithOrderByAndFilter) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchComplexWithOrderBy) {
+TEST(QueryParserTest, SearchComplexWithSort) {
   QueryParser parser;
   auto query = parser.Parse(
-      "SEARCH articles golang AND tutorial NOT beginner FILTER status = 1 ORDER BY score DESC "
+      "SEARCH articles golang AND tutorial NOT beginner FILTER status = 1 SORT score DESC "
       "LIMIT 10 OFFSET 20");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
@@ -851,18 +851,9 @@ TEST(QueryParserTest, SearchComplexWithOrderBy) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, OrderByWithoutBy) {
+TEST(QueryParserTest, SortWithoutColumn) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER created_at");
-
-  EXPECT_EQ(query.type, QueryType::UNKNOWN);
-  EXPECT_FALSE(query.IsValid());
-  EXPECT_NE(parser.GetError().find("BY"), std::string::npos);
-}
-
-TEST(QueryParserTest, OrderByWithoutColumn) {
-  QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY");
+  auto query = parser.Parse("SEARCH articles hello SORT");
 
   EXPECT_EQ(query.type, QueryType::UNKNOWN);
   EXPECT_FALSE(query.IsValid());
@@ -870,11 +861,11 @@ TEST(QueryParserTest, OrderByWithoutColumn) {
 }
 
 /**
- * @brief Test ORDER BY ASC shorthand (primary key)
+ * @brief Test SORT ASC shorthand (primary key)
  */
-TEST(QueryParserTest, SearchWithOrderByAscShorthand) {
+TEST(QueryParserTest, SearchWithSortAscShorthand) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY ASC LIMIT 10");
+  auto query = parser.Parse("SEARCH articles hello SORT ASC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "articles");
@@ -888,11 +879,11 @@ TEST(QueryParserTest, SearchWithOrderByAscShorthand) {
 }
 
 /**
- * @brief Test ORDER BY DESC shorthand (primary key)
+ * @brief Test SORT DESC shorthand (primary key)
  */
-TEST(QueryParserTest, SearchWithOrderByDescShorthand) {
+TEST(QueryParserTest, SearchWithSortDescShorthand) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER BY DESC LIMIT 10");
+  auto query = parser.Parse("SEARCH articles hello SORT DESC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_TRUE(query.order_by.has_value());
@@ -903,41 +894,11 @@ TEST(QueryParserTest, SearchWithOrderByDescShorthand) {
 }
 
 /**
- * @brief Test ORDER ASC shorthand (without BY)
+ * @brief Test SORT DESC shorthand with filters
  */
-TEST(QueryParserTest, SearchWithOrderAscShorthand) {
+TEST(QueryParserTest, SearchWithSortDescShorthandAndFilter) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER ASC LIMIT 10");
-
-  EXPECT_EQ(query.type, QueryType::SEARCH);
-  EXPECT_TRUE(query.order_by.has_value());
-  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
-  EXPECT_TRUE(query.order_by->IsPrimaryKey());
-  EXPECT_EQ(query.order_by->order, SortOrder::ASC);
-  EXPECT_TRUE(query.IsValid());
-}
-
-/**
- * @brief Test ORDER DESC shorthand (without BY)
- */
-TEST(QueryParserTest, SearchWithOrderDescShorthand) {
-  QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello ORDER DESC LIMIT 10");
-
-  EXPECT_EQ(query.type, QueryType::SEARCH);
-  EXPECT_TRUE(query.order_by.has_value());
-  EXPECT_EQ(query.order_by->column, "");  // Empty = primary key
-  EXPECT_TRUE(query.order_by->IsPrimaryKey());
-  EXPECT_EQ(query.order_by->order, SortOrder::DESC);
-  EXPECT_TRUE(query.IsValid());
-}
-
-/**
- * @brief Test ORDER DESC shorthand with filters
- */
-TEST(QueryParserTest, SearchWithOrderDescShorthandAndFilter) {
-  QueryParser parser;
-  auto query = parser.Parse("SEARCH articles hello FILTER status = 1 ORDER DESC LIMIT 10");
+  auto query = parser.Parse("SEARCH articles hello FILTER status = 1 SORT DESC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.filters.size(), 1);
@@ -947,24 +908,24 @@ TEST(QueryParserTest, SearchWithOrderDescShorthandAndFilter) {
   EXPECT_TRUE(query.IsValid());
 }
 
-TEST(QueryParserTest, SearchWithoutOrderBy) {
+TEST(QueryParserTest, SearchWithoutSort) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles hello LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
-  EXPECT_FALSE(query.order_by.has_value());  // No ORDER BY specified
+  EXPECT_FALSE(query.order_by.has_value());  // No SORT specified
   EXPECT_TRUE(query.IsValid());
 }
 
 /**
- * @brief Test ORDER BY with parenthesized search expression (no quotes needed!)
+ * @brief Test SORT with parenthesized search expression (no quotes needed!)
  *
  * The parser now tracks parentheses depth, so OR inside parentheses
  * is not interpreted as a keyword
  */
-TEST(QueryParserTest, SearchWithParenthesesAndOrderBy) {
+TEST(QueryParserTest, SearchWithParenthesesAndSort) {
   QueryParser parser;
-  auto query = parser.Parse("SEARCH threads (golang OR python) AND tutorial ORDER DESC LIMIT 10");
+  auto query = parser.Parse("SEARCH threads (golang OR python) AND tutorial SORT DESC LIMIT 10");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "threads");
@@ -981,12 +942,12 @@ TEST(QueryParserTest, SearchWithParenthesesAndOrderBy) {
 }
 
 /**
- * @brief Test ORDER BY with nested parentheses and quoted phrase
+ * @brief Test SORT with nested parentheses and quoted phrase
  */
-TEST(QueryParserTest, SearchWithComplexExpressionAndOrderBy) {
+TEST(QueryParserTest, SearchWithComplexExpressionAndSort) {
   QueryParser parser;
   auto query =
-      parser.Parse(R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite ORDER BY score ASC LIMIT 20)");
+      parser.Parse(R"(SEARCH posts ((mysql OR postgresql) AND "hello world") NOT sqlite SORT score ASC LIMIT 20)");
 
   EXPECT_EQ(query.type, QueryType::SEARCH);
   EXPECT_EQ(query.table, "posts");
@@ -999,6 +960,224 @@ TEST(QueryParserTest, SearchWithComplexExpressionAndOrderBy) {
   EXPECT_EQ(query.order_by->order, SortOrder::ASC);
   EXPECT_EQ(query.limit, 20);
   EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test ORDER BY is rejected with helpful error message
+ */
+TEST(QueryParserTest, OrderByRejectedWithHelpfulError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello ORDER BY created_at DESC");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("ORDER BY is not supported"), std::string::npos);
+  EXPECT_NE(parser.GetError().find("Use SORT instead"), std::string::npos);
+}
+
+// LIMIT offset,count Tests
+/**
+ * @brief Test LIMIT with offset,count format
+ */
+TEST(QueryParserTest, LimitWithOffsetCountFormat) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,50");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.offset, 10);
+  EXPECT_EQ(query.limit, 50);
+  EXPECT_TRUE(query.offset_explicit);
+  EXPECT_TRUE(query.limit_explicit);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test LIMIT 0,100 (offset 0)
+ */
+TEST(QueryParserTest, LimitWithZeroOffset) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 0,100");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.offset, 0);
+  EXPECT_EQ(query.limit, 100);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test LIMIT 100,1000 (maximum)
+ */
+TEST(QueryParserTest, LimitWithLargeOffsetAndMax) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 100,1000");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.offset, 100);
+  EXPECT_EQ(query.limit, 1000);
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test LIMIT with invalid offset,count (negative offset)
+ */
+TEST(QueryParserTest, LimitWithNegativeOffset) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT -10,50");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("offset must be non-negative"), std::string::npos);
+}
+
+/**
+ * @brief Test LIMIT with invalid offset,count (zero count)
+ */
+TEST(QueryParserTest, LimitWithZeroCount) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,0");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("count must be positive"), std::string::npos);
+}
+
+/**
+ * @brief Test LIMIT with invalid offset,count format
+ */
+TEST(QueryParserTest, LimitWithInvalidOffsetCountFormat) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT abc,def");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Invalid LIMIT offset,count format"), std::string::npos);
+}
+
+/**
+ * @brief Test LIMIT offset,count exceeding maximum
+ */
+TEST(QueryParserTest, LimitOffsetCountExceedingMax) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,1001");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("maximum"), std::string::npos);
+}
+
+/**
+ * @brief Test LIMIT offset,count with SORT
+ */
+TEST(QueryParserTest, LimitOffsetCountWithSort) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT created_at DESC LIMIT 50,100");
+
+  EXPECT_EQ(query.type, QueryType::SEARCH);
+  EXPECT_EQ(query.offset, 50);
+  EXPECT_EQ(query.limit, 100);
+  EXPECT_TRUE(query.order_by.has_value());
+  EXPECT_EQ(query.order_by->column, "created_at");
+  EXPECT_TRUE(query.IsValid());
+}
+
+// SQL Error Hint Tests
+/**
+ * @brief Test comma-separated tables error
+ */
+TEST(QueryParserTest, CommaSeparatedTablesError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles,posts hello");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple tables not supported"), std::string::npos);
+  EXPECT_NE(parser.GetError().find("single table"), std::string::npos);
+}
+
+/**
+ * @brief Test comma after table name error
+ */
+TEST(QueryParserTest, CommaAfterTableNameError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles , posts hello");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple tables not supported"), std::string::npos);
+}
+
+/**
+ * @brief Test COUNT with comma-separated tables
+ */
+TEST(QueryParserTest, CountCommaSeparatedTablesError) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT articles,posts hello");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple tables not supported"), std::string::npos);
+}
+
+/**
+ * @brief Test COUNT with ORDER BY (should suggest SORT)
+ */
+TEST(QueryParserTest, CountWithOrderByError) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT articles hello ORDER BY created_at");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("ORDER BY is not supported"), std::string::npos);
+  EXPECT_NE(parser.GetError().find("Use SORT instead"), std::string::npos);
+}
+
+/**
+ * @brief Test COUNT with SORT (should clarify not supported)
+ */
+TEST(QueryParserTest, CountWithSortError) {
+  QueryParser parser;
+  auto query = parser.Parse("COUNT articles hello SORT created_at");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("COUNT does not support SORT"), std::string::npos);
+  EXPECT_NE(parser.GetError().find("Use SEARCH"), std::string::npos);
+}
+
+/**
+ * @brief Test SORT with comma-separated columns
+ */
+TEST(QueryParserTest, SortMultipleColumnsCommaError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT created_at,updated_at");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple column sorting is not supported"), std::string::npos);
+}
+
+/**
+ * @brief Test SORT with multiple columns (SORT col1 ASC col2 DESC)
+ */
+TEST(QueryParserTest, SortMultipleColumnsSpacedError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT created_at ASC updated_at DESC");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple column sorting is not supported"), std::string::npos);
+}
+
+/**
+ * @brief Test SORT with multiple columns without order
+ */
+TEST(QueryParserTest, SortMultipleColumnsNoOrderError) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT created_at updated_at");
+
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+  EXPECT_NE(parser.GetError().find("Multiple column sorting is not supported"), std::string::npos);
 }
 
 /**

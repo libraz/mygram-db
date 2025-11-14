@@ -22,7 +22,7 @@ MySQL の FULLTEXT は非常に遅く、ディスク上の B-tree ページを�
 
 | クエリタイプ | MySQL (コールド/ウォーム) | MygramDB | 高速化 |
 |------------|-------------------|----------|---------|
-| **ORDER BY id LIMIT 100** (典型例) | 900-3,700ms | 24-56ms | **25-68倍** |
+| **SORT id LIMIT 100** (典型例) | 900-3,700ms | 24-56ms | **25-68倍** |
 | 中頻度語句 (4.6%マッチ) | 906ms / 592ms | 24ms | **38倍 / 25倍** |
 | 高頻度語句 (47.5%マッチ) | 2,495ms / 2,017ms | 42ms | **59倍 / 48倍** |
 | 超高頻度語句 (74.9%マッチ) | 3,753ms / 3,228ms | 56ms | **68倍 / 58倍** |
@@ -31,7 +31,7 @@ MySQL の FULLTEXT は非常に遅く、ディスク上の B-tree ページを�
 
 **主な利点:**
 - **キャッシュウォームアップ不要** - コールドスタートでも常に高速
-- **ORDER BY 最適化** - プライマリキーインデックスを使用（外部ソート不要）
+- **SORT 最適化** - プライマリキーインデックスを使用（外部ソート不要）
 - **結果セットに応じてスケール** - 大きな結果セットほど高速化率が高い
 - **一貫したパフォーマンス** - MySQLは600ms〜3.7秒と変動、MygramDBは60ms以内
 - **高並行性** - 高負荷を余裕で処理；MySQL FULLTEXTは並行トラフィックで停滞
@@ -83,7 +83,13 @@ docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにち�
 
 ```bash
 # ページネーション付き検索
-SEARCH articles "こんにちは" ORDER BY id LIMIT 100
+SEARCH articles "こんにちは" SORT id LIMIT 100
+
+# カスタムカラムでソート
+SEARCH articles "こんにちは" SORT created_at DESC LIMIT 50
+
+# LIMIT でオフセット指定（MySQL形式）
+SEARCH articles "技術" LIMIT 10,100  # offset=10, count=100
 
 # マッチ数をカウント
 COUNT articles "こんにちは"
