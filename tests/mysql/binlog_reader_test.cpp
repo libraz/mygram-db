@@ -3,17 +3,342 @@
  * @brief Unit tests for binlog reader
  */
 
-#include "mysql/binlog_reader.h"
+#include <atomic>
+#include <chrono>
+#include <thread>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+
+#define private public
+#define protected public
+#include "mysql/binlog_reader.h"
+#undef private
+#undef protected
 
 #ifdef USE_MYSQL
 
 #include "server/server_stats.h"
-#include "server/tcp_server.h"
+#include "server/server_types.h"
+#include "mock_connection.h"
 
 using namespace mygramdb::mysql;
 using namespace mygramdb;
+
+namespace {
+
+/**
+ * @brief Helper that creates a default table configuration for tests
+ */
+config::TableConfig MakeDefaultTableConfig() {
+  config::TableConfig table_config;
+  table_config.name = "articles";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config.required_filters.push_back(required_filter);
+
+  config::FilterConfig optional_filter;
+  optional_filter.name = "category";
+  optional_filter.type = "string";
+  table_config.filters.push_back(optional_filter);
+
+  return table_config;
+}
+
+/**
+ * @brief BinlogReader test fixture providing in-memory dependencies
+ */
+class BinlogReaderFixture : public ::testing::Test {
+ protected:
+  BinlogReaderFixture() : connection_(connection_config_), index_(2) {}
+
+  void SetUp() override {
+    table_config_ = MakeDefaultTableConfig();
+    reader_config_.start_gtid = "uuid:1";
+    reader_config_.queue_size = 2;
+    reader_config_.reconnect_delay_ms = 10;
+
+    index_.Clear();
+    doc_store_.Clear();
+    ResetReader();
+  }
+
+  void TearDown() override {
+    reader_.reset();
+    doc_store_.Clear();
+    index_.Clear();
+  }
+
+  /**
+   * @brief Recreate BinlogReader with current configuration
+   */
+  void ResetReader() {
+    reader_ = std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, reader_config_);
+  }
+
+  /**
+   * @brief Utility to build a fully populated event for tests
+   */
+  BinlogEvent MakeEvent(BinlogEventType type, const std::string& pk, int status, const std::string& text = "hello") {
+    BinlogEvent event;
+    event.type = type;
+    event.table_name = table_config_.name;
+    event.primary_key = pk;
+    event.text = text;
+    event.gtid = "uuid:" + pk;
+    event.filters["status"] = static_cast<int64_t>(status);
+    event.filters["category"] = std::string("news");
+    return event;
+  }
+
+  Connection::Config connection_config_;
+  Connection connection_;
+  index::Index index_;
+  storage::DocumentStore doc_store_;
+  config::TableConfig table_config_;
+  BinlogReader::Config reader_config_;
+  std::unique_ptr<BinlogReader> reader_;
+};
+
+}  // namespace
+
+/**
+ * @brief Validate Start/Stop lifecycle without a real MySQL connection
+ */
+TEST_F(BinlogReaderFixture, StartStopLifecycleWithoutConnection) {
+  EXPECT_FALSE(reader_->IsRunning());
+  EXPECT_FALSE(reader_->Start());
+  EXPECT_FALSE(reader_->IsRunning());
+  EXPECT_NE(reader_->GetLastError().find("connection not established"), std::string::npos);
+
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+
+  // Calling Stop multiple times should be safe
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+}
+
+/**
+ * @brief Ensure Start reports an error when the reader is already running
+ */
+TEST_F(BinlogReaderFixture, RejectsDoubleStart) {
+  reader_->running_ = true;
+  EXPECT_FALSE(reader_->Start());
+  EXPECT_NE(reader_->GetLastError().find("already running"), std::string::npos);
+}
+
+/**
+ * @brief Exercise queue push/pop helpers without worker threads
+ */
+TEST_F(BinlogReaderFixture, PushAndPopEvents) {
+  BinlogEvent first = MakeEvent(BinlogEventType::INSERT, "1", 1);
+  reader_->PushEvent(first);
+  EXPECT_EQ(reader_->GetQueueSize(), 1);
+
+  BinlogEvent popped;
+  ASSERT_TRUE(reader_->PopEvent(popped));
+  EXPECT_EQ(popped.primary_key, "1");
+  EXPECT_EQ(reader_->GetQueueSize(), 0);
+}
+
+/**
+ * @brief Verify PushEvent blocks when queue is full until space becomes available
+ */
+TEST_F(BinlogReaderFixture, PushBlocksWhenQueueFull) {
+  reader_->config_.queue_size = 1;
+  BinlogEvent first = MakeEvent(BinlogEventType::INSERT, "1", 1);
+  reader_->PushEvent(first);
+
+  std::atomic<bool> second_pushed{false};
+  std::thread producer([&] {
+    BinlogEvent second = MakeEvent(BinlogEventType::INSERT, "2", 1);
+    reader_->PushEvent(second);
+    second_pushed.store(true);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(second_pushed.load());
+
+  BinlogEvent popped;
+  ASSERT_TRUE(reader_->PopEvent(popped));
+  producer.join();
+  EXPECT_TRUE(second_pushed.load());
+
+  // Drain queue for subsequent tests
+  ASSERT_TRUE(reader_->PopEvent(popped));
+  EXPECT_EQ(reader_->GetQueueSize(), 0);
+}
+
+/**
+ * @brief Ensure PopEvent blocks until a producer pushes data
+ */
+TEST_F(BinlogReaderFixture, PopBlocksUntilEventArrives) {
+  std::atomic<bool> pop_completed{false};
+  std::thread consumer([&] {
+    BinlogEvent event;
+    bool ok = reader_->PopEvent(event);
+    pop_completed.store(ok);
+    EXPECT_EQ(event.primary_key, "7");
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(pop_completed.load());
+
+  reader_->PushEvent(MakeEvent(BinlogEventType::INSERT, "7", 1));
+  consumer.join();
+  EXPECT_TRUE(pop_completed.load());
+  EXPECT_EQ(reader_->GetQueueSize(), 0);
+}
+
+/**
+ * @brief Confirm PopEvent unblocks and returns false when reader is stopped
+ */
+TEST_F(BinlogReaderFixture, PopReturnsFalseWhenStopping) {
+  std::atomic<bool> pop_result{true};
+  std::thread consumer([&] {
+    BinlogEvent event;
+    bool ok = reader_->PopEvent(event);
+    pop_result.store(ok);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  reader_->should_stop_ = true;
+  reader_->queue_cv_.notify_all();
+
+  consumer.join();
+  EXPECT_FALSE(pop_result.load());
+  reader_->should_stop_ = false;
+}
+
+/**
+ * @brief Validate INSERT events create documents when filters match
+ */
+TEST_F(BinlogReaderFixture, ProcessInsertAddsDocument) {
+  BinlogEvent insert_event = MakeEvent(BinlogEventType::INSERT, "42", 1, "Breaking news");
+  ASSERT_TRUE(reader_->ProcessEvent(insert_event));
+
+  auto doc_id = doc_store_.GetDocId("42");
+  ASSERT_TRUE(doc_id.has_value());
+  auto stored_doc = doc_store_.GetDocument(doc_id.value());
+  ASSERT_TRUE(stored_doc.has_value());
+  EXPECT_EQ(std::get<std::string>(stored_doc->filters["category"]), "news");
+}
+
+/**
+ * @brief Ensure UPDATE removes rows when they no longer satisfy required filters
+ */
+TEST_F(BinlogReaderFixture, ProcessUpdateRemovesWhenFiltersFail) {
+  ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "90", 1, "Initial")));
+
+  BinlogEvent update_event = MakeEvent(BinlogEventType::UPDATE, "90", 0, "Updated text");
+  ASSERT_TRUE(reader_->ProcessEvent(update_event));
+  EXPECT_FALSE(doc_store_.GetDocId("90").has_value());
+}
+
+/**
+ * @brief Verify DELETE events remove documents and index entries
+ */
+TEST_F(BinlogReaderFixture, ProcessDeleteRemovesDocument) {
+  ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "77", 1, "Row")));
+
+  BinlogEvent delete_event = MakeEvent(BinlogEventType::DELETE, "77", 1, "Row");
+  ASSERT_TRUE(reader_->ProcessEvent(delete_event));
+  EXPECT_FALSE(doc_store_.GetDocId("77").has_value());
+}
+
+/**
+ * @brief Validate DDL TRUNCATE clears index and store
+ */
+TEST_F(BinlogReaderFixture, ProcessDdlTruncateClearsState) {
+  ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "5", 1, "Body")));
+  EXPECT_EQ(doc_store_.Size(), 1);
+
+  BinlogEvent ddl_event;
+  ddl_event.type = BinlogEventType::DDL;
+  ddl_event.table_name = table_config_.name;
+  ddl_event.text = "TRUNCATE TABLE articles";
+  ASSERT_TRUE(reader_->ProcessEvent(ddl_event));
+  EXPECT_EQ(doc_store_.Size(), 0);
+}
+
+/**
+ * @brief Confirm events missing required filters are skipped
+ */
+TEST_F(BinlogReaderFixture, SkipsEventsMissingRequiredFilters) {
+  BinlogEvent insert_event = MakeEvent(BinlogEventType::INSERT, "21", 1, "Text");
+  insert_event.filters.erase("status");
+  ASSERT_TRUE(reader_->ProcessEvent(insert_event));
+  EXPECT_FALSE(doc_store_.GetDocId("21").has_value());
+}
+
+/**
+ * @brief Exercise GTID setters/getters
+ */
+TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
+  reader_->SetCurrentGTID("uuid:10");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
+  reader_->UpdateCurrentGTID("uuid:11");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:11");
+}
+
+/**
+ * @brief Ensure events are routed to correct TableContext in multi-table mode
+ */
+TEST_F(BinlogReaderFixture, MultiTableProcessesCorrectTable) {
+  server::TableContext articles_ctx;
+  articles_ctx.name = "articles";
+  articles_ctx.config = table_config_;
+  articles_ctx.index = std::make_unique<index::Index>();
+  articles_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  server::TableContext comments_ctx;
+  comments_ctx.name = "comments";
+  comments_ctx.config = table_config_;
+  comments_ctx.config.name = "comments";
+  comments_ctx.index = std::make_unique<index::Index>();
+  comments_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, server::TableContext*> contexts = {
+      {articles_ctx.name, &articles_ctx},
+      {comments_ctx.name, &comments_ctx},
+  };
+
+  BinlogReader multi_reader(connection_, contexts, reader_config_);
+
+  BinlogEvent comment_event = MakeEvent(BinlogEventType::INSERT, "300", 1, "Comment");
+  comment_event.table_name = "comments";
+  ASSERT_TRUE(multi_reader.ProcessEvent(comment_event));
+  EXPECT_TRUE(comments_ctx.doc_store->GetDocId("300").has_value());
+  EXPECT_FALSE(articles_ctx.doc_store->GetDocId("300").has_value());
+}
+
+/**
+ * @brief Multi-table mode should ignore tables that are not tracked
+ */
+TEST_F(BinlogReaderFixture, MultiTableSkipsUnknownTable) {
+  server::TableContext articles_ctx;
+  articles_ctx.name = "articles";
+  articles_ctx.config = table_config_;
+  articles_ctx.index = std::make_unique<index::Index>();
+  articles_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, server::TableContext*> contexts = {
+      {articles_ctx.name, &articles_ctx},
+  };
+
+  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  BinlogEvent other_event = MakeEvent(BinlogEventType::INSERT, "400", 1, "Ignored");
+  other_event.table_name = "not_tracked";
+  ASSERT_TRUE(multi_reader.ProcessEvent(other_event));
+  EXPECT_EQ(articles_ctx.doc_store->Size(), 0);
+}
 
 /**
  * @brief Test BinlogEvent structure

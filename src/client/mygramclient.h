@@ -197,8 +197,8 @@ class MygramClient {
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms
    * @param filters Filter conditions (key=value pairs)
-   * @param order_by Column name for ORDER BY (empty for default)
-   * @param order_desc Sort descending (default: false = ascending)
+   * @param sort_column Column name for SORT clause (empty for primary key)
+   * @param sort_desc Sort descending (default: true = descending)
    * @return SearchResponse on success, Error on failure
    */
   std::variant<SearchResponse, Error> Search(
@@ -207,8 +207,8 @@ class MygramClient {
                               // - Default result limit
       uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
-      const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& order_by = "",
-      bool order_desc = false);
+      const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
+      bool sort_desc = true);
 
   /**
    * @brief Count matching documents

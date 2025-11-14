@@ -120,13 +120,13 @@ int mygramclient_is_connected(const MygramClient_C* client) {
 int mygramclient_search(MygramClient_C* client, const char* table, const char* query, uint32_t limit, uint32_t offset,
                         MygramSearchResult_C** result) {
   return mygramclient_search_advanced(client, table, query, limit, offset, nullptr, 0, nullptr, 0, nullptr, nullptr, 0,
-                                      nullptr, 0, result);
+                                      nullptr, 1, result);  // Default sort_desc = 1 (descending)
 }
 
 int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
                                  uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
                                  size_t not_count, const char** filter_keys, const char** filter_values,
-                                 size_t filter_count, const char* order_by, int order_desc,
+                                 size_t filter_count, const char* sort_column, int sort_desc,
                                  MygramSearchResult_C** result) {
   if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || result == nullptr) {
     return -1;
@@ -154,10 +154,10 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
     }
   }
 
-  std::string order_by_str = order_by != nullptr ? order_by : "";
+  std::string sort_column_str = sort_column != nullptr ? sort_column : "";
 
   auto search_result = client->client->Search(table, query, limit, offset, and_terms_vec, not_terms_vec, filters_vec,
-                                              order_by_str, order_desc != 0);
+                                              sort_column_str, sort_desc != 0);
 
   if (auto* err = std::get_if<Error>(&search_result)) {
     client->last_error = err->message;

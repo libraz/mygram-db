@@ -138,15 +138,15 @@ int mygramclient_search(MygramClient_C* client, const char* table, const char* q
  * @param filter_keys Array of filter keys (can be NULL)
  * @param filter_values Array of filter values (can be NULL)
  * @param filter_count Number of filters
- * @param order_by Column name for ORDER BY (can be NULL)
- * @param order_desc Sort descending (0 = ascending, 1 = descending)
+ * @param sort_column Column name for SORT clause (can be NULL for primary key)
+ * @param sort_desc Sort descending (0 = ascending, 1 = descending, default 1)
  * @param result Output search results (caller must free with mygramclient_free_search_result)
  * @return 0 on success, -1 on error
  */
 int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
                                  uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
                                  size_t not_count, const char** filter_keys, const char** filter_values,
-                                 size_t filter_count, const char* order_by, int order_desc,
+                                 size_t filter_count, const char* sort_column, int sort_desc,
                                  MygramSearchResult_C** result);
 
 /**

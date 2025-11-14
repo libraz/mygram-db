@@ -234,7 +234,7 @@ class MygramClient::Impl {
                                              uint32_t offset, const std::vector<std::string>& and_terms,
                                              const std::vector<std::string>& not_terms,
                                              const std::vector<std::pair<std::string, std::string>>& filters,
-                                             const std::string& order_by, bool order_desc) {
+                                             const std::string& sort_column, bool sort_desc) {
     // Build command
     std::ostringstream cmd;
     cmd << "SEARCH " << table << " " << EscapeQueryString(query);
@@ -251,19 +251,28 @@ class MygramClient::Impl {
       cmd << " FILTER " << key << " = " << EscapeQueryString(value);
     }
 
-    if (!order_by.empty()) {
-      cmd << " ORDER BY " << order_by << (order_desc ? " DESC" : " ASC");
-    } else if (order_desc) {
-      cmd << " ORDER DESC";
+    // SORT clause (replaces ORDER BY)
+    if (!sort_column.empty()) {
+      cmd << " SORT " << sort_column << (sort_desc ? " DESC" : " ASC");
+    } else if (!sort_desc) {
+      // Only add SORT ASC if explicitly requesting ascending order for primary key
+      cmd << " SORT ASC";
     }
+    // Default is SORT DESC (primary key descending), so no need to add it explicitly
 
-    if (limit > 0) {
+    // LIMIT clause - support MySQL-style offset,count format when both are specified
+    if (limit > 0 && offset > 0) {
+      cmd << " LIMIT " << offset << "," << limit;
+    } else if (limit > 0) {
       cmd << " LIMIT " << limit;
     }
 
-    if (offset > 0) {
-      cmd << " OFFSET " << offset;
-    }
+    // OFFSET clause - only needed if LIMIT didn't use offset,count format
+    // (This is redundant if we used LIMIT offset,count above, but kept for clarity)
+    // Note: The LIMIT offset,count format above already handles offset, so we skip this
+    // if (offset > 0 && limit == 0) {
+    //   cmd << " OFFSET " << offset;
+    // }
 
     auto result = SendCommand(cmd.str());
     if (auto* err = std::get_if<Error>(&result)) {
@@ -653,8 +662,8 @@ bool MygramClient::IsConnected() const {
 std::variant<SearchResponse, Error> MygramClient::Search(
     const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
     const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& order_by, bool order_desc) {
-  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, order_by, order_desc);
+    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column, bool sort_desc) {
+  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, sort_column, sort_desc);
 }
 
 std::variant<CountResponse, Error> MygramClient::Count(
