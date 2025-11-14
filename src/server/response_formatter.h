@@ -128,6 +128,22 @@ class ResponseFormatter {
                                           int max_connections, bool read_only, uint64_t uptime_seconds);
 
   /**
+   * @brief Format Prometheus metrics response
+   * @param table_contexts Map of table contexts
+   * @param stats Server statistics
+   * @param binlog_reader Optional binlog reader for replication info
+   * @return Prometheus exposition format response
+   */
+  static std::string FormatPrometheusMetrics(const std::unordered_map<std::string, TableContext*>& table_contexts,
+                                             ServerStats& stats,
+#ifdef USE_MYSQL
+                                             mysql::BinlogReader* binlog_reader = nullptr
+#else
+                                             void* binlog_reader = nullptr
+#endif
+  );
+
+  /**
    * @brief Format error response
    * @param message Error message
    * @return Formatted response

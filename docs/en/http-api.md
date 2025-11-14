@@ -252,7 +252,100 @@ GET /info HTTP/1.1
 - `CRITICAL`: <10% system memory available (OPTIMIZE will be rejected)
 - `UNKNOWN`: Unable to determine status
 
-This endpoint is suitable for integration with Prometheus and other monitoring tools.
+This endpoint is suitable for integration with monitoring tools that support JSON format.
+
+### GET /metrics
+
+Prometheus metrics endpoint in Prometheus Exposition Format for monitoring and alerting.
+
+**Request:**
+
+```http
+GET /metrics HTTP/1.1
+```
+
+**Response (200 OK):**
+
+```prometheus
+# HELP mygramdb_server_info MygramDB server information
+# TYPE mygramdb_server_info gauge
+mygramdb_server_info{version="1.0.0"} 1
+
+# HELP mygramdb_server_uptime_seconds Server uptime in seconds
+# TYPE mygramdb_server_uptime_seconds counter
+mygramdb_server_uptime_seconds 3600
+
+# HELP mygramdb_memory_used_bytes Current memory usage in bytes
+# TYPE mygramdb_memory_used_bytes gauge
+mygramdb_memory_used_bytes{type="index"} 419430400
+mygramdb_memory_used_bytes{type="documents"} 104857600
+mygramdb_memory_used_bytes{type="total"} 524288000
+
+# HELP mygramdb_memory_health_status Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)
+# TYPE mygramdb_memory_health_status gauge
+mygramdb_memory_health_status 1
+
+# HELP mygramdb_index_documents_total Total number of documents in the index
+# TYPE mygramdb_index_documents_total gauge
+mygramdb_index_documents_total{table="products"} 500000
+mygramdb_index_documents_total{table="users"} 500000
+
+# HELP mygramdb_command_total Total number of commands executed by type
+# TYPE mygramdb_command_total counter
+mygramdb_command_total{command="search"} 10000
+mygramdb_command_total{command="count"} 2000
+mygramdb_command_total{command="get"} 3000
+```
+
+**Content-Type**: `text/plain; version=0.0.4; charset=utf-8`
+
+**Metric Categories:**
+
+| Category | Description |
+|----------|-------------|
+| **Server Metrics** | Server version, uptime, commands processed |
+| **Command Statistics** | Command execution counters by type (search, count, get, info, etc.) |
+| **Memory Metrics** | Application memory (index/documents), system memory, process RSS, health status |
+| **Index Metrics** | Documents, terms, postings, optimization status (per-table with `table` label) |
+| **Client Metrics** | Current connections, total connections |
+| **Replication Metrics** | Replication status, events processed, operation counters (MySQL build only) |
+
+**Metric Types:**
+
+- **Counter**: Monotonically increasing values (e.g., `mygramdb_command_total`)
+- **Gauge**: Values that can increase or decrease (e.g., `mygramdb_memory_used_bytes`)
+
+**Prometheus Scrape Configuration:**
+
+```yaml
+scrape_configs:
+  - job_name: 'mygramdb'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:8080']
+        labels:
+          environment: 'production'
+```
+
+**Key Features:**
+
+- **Standard Prometheus format**: Compatible with all Prometheus-based monitoring stacks
+- **Multi-dimensional metrics**: Uses labels for grouping (e.g., `table`, `command`, `status`)
+- **Memory health tracking**: Numeric status values for alerting (1=HEALTHY, 2=WARNING, 3=CRITICAL)
+- **Per-table metrics**: Index statistics broken down by table name
+- **Backward compatible**: Existing `/info` endpoint remains unchanged
+
+**Comparison with /info:**
+
+| Feature | `/info` | `/metrics` |
+|---------|---------|------------|
+| Format | JSON | Prometheus text |
+| Use case | General monitoring, debugging | Prometheus/Grafana integration |
+| Metric types | Generic values | Typed metrics (Counter/Gauge) |
+| Multi-dimensional | Limited | Full label support |
+| Compatibility | Any HTTP client | Prometheus ecosystem |
+
+Both endpoints provide the same underlying data but in different formats. Use `/metrics` for Prometheus integration and `/info` for general-purpose monitoring or human-readable output.
 
 ### GET /health
 
@@ -448,8 +541,23 @@ All error responses follow this format:
 
 ## Monitoring
 
-The HTTP API is suitable for monitoring tools:
+The HTTP API provides multiple endpoints for monitoring and observability:
 
-- **Health Check**: `GET /health` for load balancer health checks
-- **Metrics**: `GET /info` for Prometheus/monitoring integration
-- **Replication Status**: `GET /replication/status` for replication monitoring
+- **Health Check**: `GET /health` - Simple health check for load balancers
+- **JSON Metrics**: `GET /info` - Detailed statistics in JSON format for general monitoring tools
+- **Prometheus Metrics**: `GET /metrics` - Prometheus-compatible metrics for time-series monitoring and alerting
+- **Replication Status**: `GET /replication/status` - MySQL replication status
+
+### Monitoring Stack Integration
+
+**Prometheus + Grafana:**
+
+1. Configure Prometheus to scrape `/metrics` endpoint
+2. Import Grafana dashboards for MygramDB visualization
+3. Set up alerts based on memory health, query latency, and replication lag
+
+**Other Monitoring Tools:**
+
+- **Datadog/New Relic**: Parse `/info` JSON endpoint
+- **Zabbix**: HTTP agent checks on `/health` and `/info`
+- **Nagios/Icinga**: Check scripts using `/health` endpoint

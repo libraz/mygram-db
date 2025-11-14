@@ -426,6 +426,297 @@ std::string ResponseFormatter::FormatConfigResponse(const config::Config* full_c
   return oss.str();
 }
 
+std::string ResponseFormatter::FormatPrometheusMetrics(
+    const std::unordered_map<std::string, TableContext*>& table_contexts, ServerStats& stats,
+#ifdef USE_MYSQL
+    mysql::BinlogReader* binlog_reader
+#else
+    void* binlog_reader
+#endif
+) {
+  std::ostringstream oss;
+
+  // Aggregate metrics across all tables
+  size_t total_index_memory = 0;
+  size_t total_doc_memory = 0;
+  size_t total_documents = 0;
+  size_t total_terms = 0;
+  size_t total_postings = 0;
+  size_t total_delta_encoded = 0;
+  size_t total_roaring_bitmap = 0;
+
+  for (const auto& [table_name, ctx] : table_contexts) {
+    total_index_memory += ctx->index->MemoryUsage();
+    total_doc_memory += ctx->doc_store->MemoryUsage();
+    total_documents += ctx->doc_store->Size();
+    auto idx_stats = ctx->index->GetStatistics();
+    total_terms += idx_stats.total_terms;
+    total_postings += idx_stats.total_postings;
+    total_delta_encoded += idx_stats.delta_encoded_lists;
+    total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
+  }
+
+  size_t total_memory = total_index_memory + total_doc_memory;
+  stats.UpdateMemoryUsage(total_memory);
+
+  // Server info (version as label)
+  oss << "# HELP mygramdb_server_info MygramDB server information\n";
+  oss << "# TYPE mygramdb_server_info gauge\n";
+  oss << "mygramdb_server_info{version=\"" << mygramdb::Version::String() << "\"} 1\n";
+  oss << "\n";
+
+  // Server uptime
+  oss << "# HELP mygramdb_server_uptime_seconds Server uptime in seconds\n";
+  oss << "# TYPE mygramdb_server_uptime_seconds counter\n";
+  oss << "mygramdb_server_uptime_seconds " << stats.GetUptimeSeconds() << "\n";
+  oss << "\n";
+
+  // Total commands processed
+  auto cmd_stats = stats.GetStatistics();
+  oss << "# HELP mygramdb_server_commands_total Total number of commands processed\n";
+  oss << "# TYPE mygramdb_server_commands_total counter\n";
+  oss << "mygramdb_server_commands_total " << stats.GetTotalCommands() << "\n";
+  oss << "\n";
+
+  // Command counters by type
+  oss << "# HELP mygramdb_command_total Total number of commands executed by type\n";
+  oss << "# TYPE mygramdb_command_total counter\n";
+  if (cmd_stats.cmd_search > 0) {
+    oss << "mygramdb_command_total{command=\"search\"} " << cmd_stats.cmd_search << "\n";
+  }
+  if (cmd_stats.cmd_count > 0) {
+    oss << "mygramdb_command_total{command=\"count\"} " << cmd_stats.cmd_count << "\n";
+  }
+  if (cmd_stats.cmd_get > 0) {
+    oss << "mygramdb_command_total{command=\"get\"} " << cmd_stats.cmd_get << "\n";
+  }
+  if (cmd_stats.cmd_info > 0) {
+    oss << "mygramdb_command_total{command=\"info\"} " << cmd_stats.cmd_info << "\n";
+  }
+  if (cmd_stats.cmd_save > 0) {
+    oss << "mygramdb_command_total{command=\"save\"} " << cmd_stats.cmd_save << "\n";
+  }
+  if (cmd_stats.cmd_load > 0) {
+    oss << "mygramdb_command_total{command=\"load\"} " << cmd_stats.cmd_load << "\n";
+  }
+  if (cmd_stats.cmd_replication_status > 0) {
+    oss << "mygramdb_command_total{command=\"replication_status\"} " << cmd_stats.cmd_replication_status << "\n";
+  }
+  if (cmd_stats.cmd_replication_stop > 0) {
+    oss << "mygramdb_command_total{command=\"replication_stop\"} " << cmd_stats.cmd_replication_stop << "\n";
+  }
+  if (cmd_stats.cmd_replication_start > 0) {
+    oss << "mygramdb_command_total{command=\"replication_start\"} " << cmd_stats.cmd_replication_start << "\n";
+  }
+  if (cmd_stats.cmd_config > 0) {
+    oss << "mygramdb_command_total{command=\"config\"} " << cmd_stats.cmd_config << "\n";
+  }
+  oss << "\n";
+
+  // Memory usage by type
+  oss << "# HELP mygramdb_memory_used_bytes Current memory usage in bytes\n";
+  oss << "# TYPE mygramdb_memory_used_bytes gauge\n";
+  oss << "mygramdb_memory_used_bytes{type=\"index\"} " << total_index_memory << "\n";
+  oss << "mygramdb_memory_used_bytes{type=\"documents\"} " << total_doc_memory << "\n";
+  oss << "mygramdb_memory_used_bytes{type=\"total\"} " << total_memory << "\n";
+  oss << "\n";
+
+  // Peak memory
+  oss << "# HELP mygramdb_memory_peak_bytes Peak memory usage since server start\n";
+  oss << "# TYPE mygramdb_memory_peak_bytes gauge\n";
+  oss << "mygramdb_memory_peak_bytes " << stats.GetPeakMemoryUsage() << "\n";
+  oss << "\n";
+
+  // Memory fragmentation ratio
+  if (total_memory > 0) {
+    size_t peak = stats.GetPeakMemoryUsage();
+    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
+    oss << "# HELP mygramdb_memory_fragmentation_ratio Memory fragmentation ratio\n";
+    oss << "# TYPE mygramdb_memory_fragmentation_ratio gauge\n";
+    oss << "mygramdb_memory_fragmentation_ratio " << std::fixed << std::setprecision(2) << fragmentation << "\n";
+    oss << "\n";
+  }
+
+  // System memory information
+  auto sys_info = utils::GetSystemMemoryInfo();
+  if (sys_info) {
+    oss << "# HELP mygramdb_memory_system_total_bytes Total system physical memory\n";
+    oss << "# TYPE mygramdb_memory_system_total_bytes gauge\n";
+    oss << "mygramdb_memory_system_total_bytes " << sys_info->total_physical_bytes << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_memory_system_available_bytes Available system physical memory\n";
+    oss << "# TYPE mygramdb_memory_system_available_bytes gauge\n";
+    oss << "mygramdb_memory_system_available_bytes " << sys_info->available_physical_bytes << "\n";
+    oss << "\n";
+
+    if (sys_info->total_physical_bytes > 0) {
+      double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
+                                     static_cast<double>(sys_info->total_physical_bytes);
+      oss << "# HELP mygramdb_memory_system_usage_ratio System memory usage ratio\n";
+      oss << "# TYPE mygramdb_memory_system_usage_ratio gauge\n";
+      oss << "mygramdb_memory_system_usage_ratio " << std::fixed << std::setprecision(2) << usage_ratio << "\n";
+      oss << "\n";
+    }
+  }
+
+  // Process memory information
+  auto proc_info = utils::GetProcessMemoryInfo();
+  if (proc_info) {
+    oss << "# HELP mygramdb_memory_process_rss_bytes Process resident set size\n";
+    oss << "# TYPE mygramdb_memory_process_rss_bytes gauge\n";
+    oss << "mygramdb_memory_process_rss_bytes " << proc_info->rss_bytes << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_memory_process_rss_peak_bytes Peak process RSS since start\n";
+    oss << "# TYPE mygramdb_memory_process_rss_peak_bytes gauge\n";
+    oss << "mygramdb_memory_process_rss_peak_bytes " << proc_info->peak_rss_bytes << "\n";
+    oss << "\n";
+  }
+
+  // Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)
+  auto health = utils::GetMemoryHealthStatus();
+  int health_value = 0;
+  switch (health) {
+    case utils::MemoryHealthStatus::HEALTHY:
+      health_value = 1;
+      break;
+    case utils::MemoryHealthStatus::WARNING:
+      health_value = 2;
+      break;
+    case utils::MemoryHealthStatus::CRITICAL:
+      health_value = 3;
+      break;
+    case utils::MemoryHealthStatus::UNKNOWN:
+    default:
+      health_value = 0;
+      break;
+  }
+  oss << "# HELP mygramdb_memory_health_status Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)\n";
+  oss << "# TYPE mygramdb_memory_health_status gauge\n";
+  oss << "mygramdb_memory_health_status " << health_value << "\n";
+  oss << "\n";
+
+  // Aggregated index statistics
+  oss << "# HELP mygramdb_index_documents_total Total number of documents in the index\n";
+  oss << "# TYPE mygramdb_index_documents_total gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    oss << "mygramdb_index_documents_total{table=\"" << table_name << "\"} " << ctx->doc_store->Size() << "\n";
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_terms_total Total number of unique terms\n";
+  oss << "# TYPE mygramdb_index_terms_total gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    auto idx_stats = ctx->index->GetStatistics();
+    oss << "mygramdb_index_terms_total{table=\"" << table_name << "\"} " << idx_stats.total_terms << "\n";
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_postings_total Total number of postings\n";
+  oss << "# TYPE mygramdb_index_postings_total gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    auto idx_stats = ctx->index->GetStatistics();
+    oss << "mygramdb_index_postings_total{table=\"" << table_name << "\"} " << idx_stats.total_postings << "\n";
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_postings_per_term_avg Average postings per term\n";
+  oss << "# TYPE mygramdb_index_postings_per_term_avg gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    auto idx_stats = ctx->index->GetStatistics();
+    if (idx_stats.total_terms > 0) {
+      double avg = static_cast<double>(idx_stats.total_postings) / static_cast<double>(idx_stats.total_terms);
+      oss << "mygramdb_index_postings_per_term_avg{table=\"" << table_name << "\"} " << std::fixed
+          << std::setprecision(2) << avg << "\n";
+    }
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_delta_encoded_lists Delta-encoded posting lists count\n";
+  oss << "# TYPE mygramdb_index_delta_encoded_lists gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    auto idx_stats = ctx->index->GetStatistics();
+    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_name << "\"} " << idx_stats.delta_encoded_lists
+        << "\n";
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_roaring_bitmap_lists Roaring bitmap posting lists count\n";
+  oss << "# TYPE mygramdb_index_roaring_bitmap_lists gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    auto idx_stats = ctx->index->GetStatistics();
+    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_name << "\"} " << idx_stats.roaring_bitmap_lists
+        << "\n";
+  }
+  oss << "\n";
+
+  oss << "# HELP mygramdb_index_optimization_in_progress Index optimization in progress (0=idle, 1=running)\n";
+  oss << "# TYPE mygramdb_index_optimization_in_progress gauge\n";
+  for (const auto& [table_name, ctx] : table_contexts) {
+    int optimizing = ctx->index->IsOptimizing() ? 1 : 0;
+    oss << "mygramdb_index_optimization_in_progress{table=\"" << table_name << "\"} " << optimizing << "\n";
+  }
+  oss << "\n";
+
+  // Client connections
+  oss << "# HELP mygramdb_clients_connected Current number of connected clients\n";
+  oss << "# TYPE mygramdb_clients_connected gauge\n";
+  oss << "mygramdb_clients_connected " << stats.GetActiveConnections() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_clients_total Total number of client connections received\n";
+  oss << "# TYPE mygramdb_clients_total counter\n";
+  oss << "mygramdb_clients_total " << cmd_stats.total_connections_received << "\n";
+  oss << "\n";
+
+  // Replication statistics
+#ifdef USE_MYSQL
+  if (binlog_reader != nullptr) {
+    oss << "# HELP mygramdb_replication_running Replication status (0=stopped, 1=running)\n";
+    oss << "# TYPE mygramdb_replication_running gauge\n";
+    oss << "mygramdb_replication_running " << (binlog_reader->IsRunning() ? 1 : 0) << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_events_processed Total number of binlog events processed\n";
+    oss << "# TYPE mygramdb_replication_events_processed counter\n";
+    oss << "mygramdb_replication_events_processed " << binlog_reader->GetProcessedEvents() << "\n";
+    oss << "\n";
+  }
+
+  // Replication operation counters
+  oss << "# HELP mygramdb_replication_inserts_total Total number of INSERT operations\n";
+  oss << "# TYPE mygramdb_replication_inserts_total counter\n";
+  oss << "mygramdb_replication_inserts_total{status=\"applied\"} " << stats.GetReplInsertsApplied() << "\n";
+  oss << "mygramdb_replication_inserts_total{status=\"skipped\"} " << stats.GetReplInsertsSkipped() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_replication_updates_total Total number of UPDATE operations\n";
+  oss << "# TYPE mygramdb_replication_updates_total counter\n";
+  oss << "mygramdb_replication_updates_total{status=\"applied\"} " << stats.GetReplUpdatesApplied() << "\n";
+  oss << "mygramdb_replication_updates_total{status=\"added\"} " << stats.GetReplUpdatesAdded() << "\n";
+  oss << "mygramdb_replication_updates_total{status=\"removed\"} " << stats.GetReplUpdatesRemoved() << "\n";
+  oss << "mygramdb_replication_updates_total{status=\"modified\"} " << stats.GetReplUpdatesModified() << "\n";
+  oss << "mygramdb_replication_updates_total{status=\"skipped\"} " << stats.GetReplUpdatesSkipped() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_replication_deletes_total Total number of DELETE operations\n";
+  oss << "# TYPE mygramdb_replication_deletes_total counter\n";
+  oss << "mygramdb_replication_deletes_total{status=\"applied\"} " << stats.GetReplDeletesApplied() << "\n";
+  oss << "mygramdb_replication_deletes_total{status=\"skipped\"} " << stats.GetReplDeletesSkipped() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_replication_ddl_total Total number of DDL operations executed\n";
+  oss << "# TYPE mygramdb_replication_ddl_total counter\n";
+  oss << "mygramdb_replication_ddl_total " << stats.GetReplDdlExecuted() << "\n";
+  oss << "\n";
+#else
+  (void)binlog_reader;  // Suppress unused parameter warning
+#endif
+
+  return oss.str();
+}
+
 std::string ResponseFormatter::FormatError(const std::string& message) {
   return "ERROR " + message;
 }

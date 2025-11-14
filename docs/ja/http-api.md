@@ -252,7 +252,100 @@ GET /info HTTP/1.1
 - `CRITICAL`: システムメモリの10%未満が利用可能（OPTIMIZEは拒否されます）
 - `UNKNOWN`: ステータスを判定できない
 
-このエンドポイントはPrometheusやその他の監視ツールとの統合に適しています。
+このエンドポイントはJSON形式をサポートする監視ツールとの統合に適しています。
+
+### GET /metrics
+
+監視とアラーティングのためのPrometheus Exposition Format形式のメトリクスエンドポイント。
+
+**リクエスト:**
+
+```http
+GET /metrics HTTP/1.1
+```
+
+**レスポンス (200 OK):**
+
+```prometheus
+# HELP mygramdb_server_info MygramDB server information
+# TYPE mygramdb_server_info gauge
+mygramdb_server_info{version="1.0.0"} 1
+
+# HELP mygramdb_server_uptime_seconds Server uptime in seconds
+# TYPE mygramdb_server_uptime_seconds counter
+mygramdb_server_uptime_seconds 3600
+
+# HELP mygramdb_memory_used_bytes Current memory usage in bytes
+# TYPE mygramdb_memory_used_bytes gauge
+mygramdb_memory_used_bytes{type="index"} 419430400
+mygramdb_memory_used_bytes{type="documents"} 104857600
+mygramdb_memory_used_bytes{type="total"} 524288000
+
+# HELP mygramdb_memory_health_status Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)
+# TYPE mygramdb_memory_health_status gauge
+mygramdb_memory_health_status 1
+
+# HELP mygramdb_index_documents_total Total number of documents in the index
+# TYPE mygramdb_index_documents_total gauge
+mygramdb_index_documents_total{table="products"} 500000
+mygramdb_index_documents_total{table="users"} 500000
+
+# HELP mygramdb_command_total Total number of commands executed by type
+# TYPE mygramdb_command_total counter
+mygramdb_command_total{command="search"} 10000
+mygramdb_command_total{command="count"} 2000
+mygramdb_command_total{command="get"} 3000
+```
+
+**Content-Type**: `text/plain; version=0.0.4; charset=utf-8`
+
+**メトリクスカテゴリ:**
+
+| カテゴリ | 説明 |
+|----------|------|
+| **サーバーメトリクス** | サーバーバージョン、稼働時間、処理されたコマンド数 |
+| **コマンド統計** | コマンドタイプ別の実行回数（search、count、get、infoなど） |
+| **メモリメトリクス** | アプリケーションメモリ（index/documents）、システムメモリ、プロセスRSS、ヘルスステータス |
+| **インデックスメトリクス** | ドキュメント数、term数、posting数、最適化ステータス（`table`ラベル付きテーブル別） |
+| **クライアントメトリクス** | 現在の接続数、累計接続数 |
+| **レプリケーションメトリクス** | レプリケーションステータス、処理イベント数、操作別カウンタ（MySQLビルドのみ） |
+
+**メトリクスタイプ:**
+
+- **Counter**: 単調増加する値（例: `mygramdb_command_total`）
+- **Gauge**: 増減する値（例: `mygramdb_memory_used_bytes`）
+
+**Prometheusスクレイプ設定:**
+
+```yaml
+scrape_configs:
+  - job_name: 'mygramdb'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:8080']
+        labels:
+          environment: 'production'
+```
+
+**主要機能:**
+
+- **標準Prometheus形式**: すべてのPrometheusベースの監視スタックと互換性あり
+- **多次元メトリクス**: ラベルによるグルーピング（例: `table`、`command`、`status`）
+- **メモリヘルストラッキング**: アラーティング用の数値ステータス値（1=HEALTHY、2=WARNING、3=CRITICAL）
+- **テーブル別メトリクス**: テーブル名ごとに分類されたインデックス統計
+- **後方互換性**: 既存の`/info`エンドポイントは変更なし
+
+**/infoとの比較:**
+
+| 機能 | `/info` | `/metrics` |
+|------|---------|------------|
+| フォーマット | JSON | Prometheusテキスト |
+| 用途 | 一般的な監視、デバッグ | Prometheus/Grafana統合 |
+| メトリクスタイプ | 汎用的な値 | 型付きメトリクス（Counter/Gauge） |
+| 多次元対応 | 限定的 | 完全なラベルサポート |
+| 互換性 | 任意のHTTPクライアント | Prometheusエコシステム |
+
+両方のエンドポイントは同じ基礎データを提供しますが、異なる形式です。Prometheus統合には`/metrics`を使用し、一般的な監視や人間が読みやすい出力には`/info`を使用してください。
 
 ### GET /health
 
@@ -448,8 +541,23 @@ for doc in data['results']:
 
 ## 監視
 
-HTTP APIは監視ツールに適しています：
+HTTP APIは監視と可観測性のための複数のエンドポイントを提供します：
 
-- **ヘルスチェック**: ロードバランサーのヘルスチェック用に `GET /health`
-- **メトリクス**: Prometheus/監視統合用に `GET /info`
-- **レプリケーションステータス**: レプリケーション監視用に `GET /replication/status`
+- **ヘルスチェック**: `GET /health` - ロードバランサー用のシンプルなヘルスチェック
+- **JSONメトリクス**: `GET /info` - 一般的な監視ツール用のJSON形式の詳細統計
+- **Prometheusメトリクス**: `GET /metrics` - 時系列監視とアラーティング用のPrometheus互換メトリクス
+- **レプリケーションステータス**: `GET /replication/status` - MySQLレプリケーションステータス
+
+### 監視スタック統合
+
+**Prometheus + Grafana:**
+
+1. Prometheusで`/metrics`エンドポイントをスクレイプするよう設定
+2. MygramDB用のGrafanaダッシュボードをインポート
+3. メモリヘルス、クエリレイテンシ、レプリケーション遅延に基づくアラートを設定
+
+**その他の監視ツール:**
+
+- **Datadog/New Relic**: `/info`のJSONエンドポイントをパース
+- **Zabbix**: `/health`と`/info`へのHTTPエージェントチェック
+- **Nagios/Icinga**: `/health`エンドポイントを使用したチェックスクリプト

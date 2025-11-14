@@ -593,6 +593,51 @@ TEST_F(HttpServerMultiTableTest, InvalidTableName) {
   EXPECT_TRUE(body["error"].get<std::string>().find("Table not found") != std::string::npos);
 }
 
+TEST_F(HttpServerTest, PrometheusMetricsEndpoint) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+  auto res = client.Get("/metrics");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+  EXPECT_EQ(res->get_header_value("Content-Type"), "text/plain; version=0.0.4; charset=utf-8");
+
+  // Verify Prometheus format
+  std::string body = res->body;
+
+  // Check for basic server metrics
+  EXPECT_TRUE(body.find("# HELP mygramdb_server_info") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_server_info gauge") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_server_info{version=\"") != std::string::npos);
+
+  // Check for uptime
+  EXPECT_TRUE(body.find("# HELP mygramdb_server_uptime_seconds") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_server_uptime_seconds counter") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_server_uptime_seconds") != std::string::npos);
+
+  // Check for memory metrics
+  EXPECT_TRUE(body.find("# HELP mygramdb_memory_used_bytes") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_memory_used_bytes gauge") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_memory_used_bytes{type=\"total\"}") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_memory_used_bytes{type=\"index\"}") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_memory_used_bytes{type=\"documents\"}") != std::string::npos);
+
+  // Check for memory health status
+  EXPECT_TRUE(body.find("# HELP mygramdb_memory_health_status") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_memory_health_status gauge") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_memory_health_status") != std::string::npos);
+
+  // Check for index metrics with table label
+  EXPECT_TRUE(body.find("# HELP mygramdb_index_documents_total") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_index_documents_total gauge") != std::string::npos);
+  EXPECT_TRUE(body.find("mygramdb_index_documents_total{table=\"test\"}") != std::string::npos);
+
+  // Check for client metrics
+  EXPECT_TRUE(body.find("# HELP mygramdb_clients_connected") != std::string::npos);
+  EXPECT_TRUE(body.find("# TYPE mygramdb_clients_connected gauge") != std::string::npos);
+}
+
 TEST_F(HttpServerMultiTableTest, DifferentNgramSizes) {
   // This test is now handled by other tests since both tables use ngram_size=1
   // Testing different ngram sizes would require creating separate table contexts

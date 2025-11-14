@@ -13,6 +13,7 @@
 #include <sstream>
 #include <variant>
 
+#include "server/response_formatter.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "utils/memory_utils.h"
@@ -98,6 +99,9 @@ void HttpServer::SetupRoutes() {
   // GET /replication/status - Replication status
   server_->Get("/replication/status",
                [this](const httplib::Request& req, httplib::Response& res) { HandleReplicationStatus(req, res); });
+
+  // GET /metrics - Prometheus metrics
+  server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
 }
 
 void HttpServer::SetupCors() {
@@ -680,6 +684,18 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 #else
   SendError(res, kHttpServiceUnavailable, "MySQL replication not compiled");
 #endif
+}
+
+void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Response& res) {
+  stats_.IncrementRequests();
+
+  try {
+    std::string metrics = ResponseFormatter::FormatPrometheusMetrics(table_contexts_, stats_, binlog_reader_);
+    res.status = kHttpOk;
+    res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
+  } catch (const std::exception& e) {
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+  }
 }
 
 void HttpServer::SendJson(httplib::Response& res, int status_code, const nlohmann::json& body) {

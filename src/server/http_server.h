@@ -182,6 +182,11 @@ class HttpServer {
   void HandleReplicationStatus(const httplib::Request& req, httplib::Response& res);
 
   /**
+   * @brief Handle GET /metrics (Prometheus format)
+   */
+  void HandleMetrics(const httplib::Request& req, httplib::Response& res);
+
+  /**
    * @brief Send JSON response
    */
   static void SendJson(httplib::Response& res, int status_code, const nlohmann::json& body);
