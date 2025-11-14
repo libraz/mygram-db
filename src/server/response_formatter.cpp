@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "cache/cache_manager.h"
 #include "server/tcp_server.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
@@ -76,6 +77,34 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
       }
       oss << "\r\n";
     }
+
+    // Cache debug information
+    switch (debug_info->cache_info.status) {
+      case query::CacheDebugInfo::Status::HIT:
+        oss << "cache: hit\r\n";
+        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
+        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
+            << "\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+        oss << "cache: miss\r\n";
+        oss << "cache_reason: not_found\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
+            << "\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+        oss << "cache: miss\r\n";
+        oss << "cache_reason: invalidated\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
+            << "\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_DISABLED:
+        oss << "cache: disabled\r\n";
+        break;
+    }
+    if (!debug_info->cache_info.cache_key.empty()) {
+      oss << "cache_key: " << debug_info->cache_info.cache_key << "\r\n";
+    }
   }
 
   return oss.str();
@@ -121,11 +150,11 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
 std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::string, TableContext*>& table_contexts,
                                                   ServerStats& stats,
 #ifdef USE_MYSQL
-                                                  mysql::BinlogReader* binlog_reader
+                                                  mysql::BinlogReader* binlog_reader,
 #else
-                                                  void* binlog_reader
+                                                  void* binlog_reader,
 #endif
-) {
+                                                  cache::CacheManager* cache_manager) {
   std::ostringstream oss;
   oss << "OK INFO\r\n\r\n";
 
@@ -311,6 +340,35 @@ std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::
   oss << "replication_events_skipped_other_tables: " << stats.GetReplEventsSkippedOtherTables() << "\r\n";
   oss << "\r\n";
 #endif
+
+  // Cache statistics
+  oss << "# Cache\r\n";
+  if (cache_manager != nullptr && cache_manager->IsEnabled()) {
+    auto cache_stats = cache_manager->GetStatistics();
+    oss << "cache_enabled: 1\r\n";
+    oss << "cache_hits: " << cache_stats.cache_hits << "\r\n";
+    oss << "cache_misses: " << cache_stats.cache_misses << "\r\n";
+    oss << "cache_misses_not_found: " << cache_stats.cache_misses_not_found << "\r\n";
+    oss << "cache_misses_invalidated: " << cache_stats.cache_misses_invalidated << "\r\n";
+    oss << "cache_total_queries: " << cache_stats.total_queries << "\r\n";
+    oss << "cache_hit_rate: " << std::fixed << std::setprecision(4) << cache_stats.HitRate() << "\r\n";
+    oss << "cache_current_entries: " << cache_stats.current_entries << "\r\n";
+    oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
+    oss << "cache_memory_human: " << utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
+    oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
+    oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
+    oss << "cache_invalidations_deferred: " << cache_stats.invalidations_deferred << "\r\n";
+    oss << "cache_invalidations_batches: " << cache_stats.invalidations_batches << "\r\n";
+    oss << "cache_avg_hit_latency_ms: " << std::fixed << std::setprecision(3) << cache_stats.AverageCacheHitLatency()
+        << "\r\n";
+    oss << "cache_avg_miss_latency_ms: " << std::fixed << std::setprecision(3) << cache_stats.AverageCacheMissLatency()
+        << "\r\n";
+    oss << "cache_total_time_saved_ms: " << std::fixed << std::setprecision(2) << cache_stats.TotalTimeSaved()
+        << "\r\n";
+  } else {
+    oss << "cache_enabled: 0\r\n";
+  }
+  oss << "\r\n";
 
   oss << "END";
   return oss.str();

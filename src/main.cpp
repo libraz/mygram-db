@@ -424,10 +424,11 @@ int main(int argc, char* argv[]) {
     http_config.port = config.api.http.port;
 
 #ifdef USE_MYSQL
-    http_server =
-        std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config, binlog_reader.get());
+    http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config,
+                                                                 binlog_reader.get(), nullptr);
 #else
-    http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config, nullptr);
+    http_server =
+        std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config, nullptr, nullptr);
 #endif
 
     if (!http_server->Start()) {

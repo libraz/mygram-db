@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -239,8 +240,10 @@ class Index {
   // Term -> Posting list mapping
   std::unordered_map<std::string, std::unique_ptr<PostingList>> term_postings_;
 
-  // Mutex for protecting term_postings_ during batch optimization
-  mutable std::mutex postings_mutex_;
+  // Shared mutex for read/write protection
+  // - Readers (Search): shared_lock (multiple concurrent readers allowed)
+  // - Writers (Add/Update/Remove/Optimize): unique_lock (exclusive access)
+  mutable std::shared_mutex postings_mutex_;
 
   // Flag to prevent concurrent optimization
   std::atomic<bool> is_optimizing_{false};

@@ -1,0 +1,350 @@
+/**
+ * @file invalidation_queue_test.cpp
+ * @brief Unit tests for InvalidationQueue - async batch processing
+ */
+
+#include "cache/invalidation_queue.h"
+
+#include <gtest/gtest.h>
+
+#include <thread>
+
+#include "cache/cache_key.h"
+#include "cache/invalidation_manager.h"
+#include "cache/query_cache.h"
+
+namespace mygramdb::cache {
+
+/**
+ * @brief Test basic enqueue and processing
+ */
+TEST(InvalidationQueueTest, BasicEnqueueProcess) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Register a cache entry
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  // Start worker
+  queue.Start();
+
+  // Enqueue invalidation
+  queue.Enqueue("posts", "", "golang tutorial");
+
+  // Give worker time to process
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Stop worker
+  queue.Stop();
+
+  // Entry should be erased (not just invalidated)
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
+/**
+ * @brief Test batch size threshold
+ */
+TEST(InvalidationQueueTest, BatchSizeThreshold) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Set small batch size
+  queue.SetBatchSize(5);
+  queue.SetMaxDelay(10000);  // Long delay so only batch size triggers
+
+  // Register multiple cache entries
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"tes", "est"};
+
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    cache.Insert(key, result, meta, 15.0);
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  queue.Start();
+
+  // Enqueue many invalidations
+  for (int i = 0; i < 10; ++i) {
+    queue.Enqueue("posts", "", "test" + std::to_string(i));
+  }
+
+  // Give worker time to process batch
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  queue.Stop();
+
+  // All entries should be erased
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    EXPECT_FALSE(cache.Lookup(key).has_value());
+  }
+}
+
+/**
+ * @brief Test max delay threshold
+ */
+TEST(InvalidationQueueTest, MaxDelayThreshold) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Set large batch size but short delay
+  queue.SetBatchSize(1000);
+  queue.SetMaxDelay(50);  // 50ms delay
+
+  // Register cache entry
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  queue.Start();
+
+  // Enqueue single invalidation
+  queue.Enqueue("posts", "", "golang");
+
+  // Wait for max delay to trigger processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+  queue.Stop();
+
+  // Entry should be erased due to max delay timeout
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
+/**
+ * @brief Test deduplication - multiple events with same ngrams
+ */
+TEST(InvalidationQueueTest, Deduplication) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Register cache entry
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  queue.SetBatchSize(100);  // Large batch, won't trigger by size
+  queue.SetMaxDelay(100);   // Will trigger by delay
+
+  queue.Start();
+
+  // Enqueue same invalidation multiple times (should deduplicate)
+  for (int i = 0; i < 50; ++i) {
+    queue.Enqueue("posts", "", "golang tips");
+  }
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  queue.Stop();
+
+  // Entry should be erased once (deduplication worked)
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
+/**
+ * @brief Test UPDATE invalidation (old_text and new_text)
+ */
+TEST(InvalidationQueueTest, UpdateInvalidation) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Query for "rust"
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"rus", "ust"};
+  cache.Insert(key1, {1, 2}, meta1, 15.0);
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Query for "golang"
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"gol", "ola", "lan", "ang"};
+  cache.Insert(key2, {3, 4}, meta2, 15.0);
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  queue.Start();
+
+  // UPDATE: change "rust" to "golang"
+  queue.Enqueue("posts", "rust programming", "golang programming");
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  queue.Stop();
+
+  // Both should be invalidated
+  EXPECT_FALSE(cache.Lookup(key1).has_value());
+  EXPECT_FALSE(cache.Lookup(key2).has_value());
+}
+
+/**
+ * @brief Test table isolation
+ */
+TEST(InvalidationQueueTest, TableIsolation) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Query for "posts" table
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"gol", "ola", "lan", "ang"};
+  cache.Insert(key1, {1, 2}, meta1, 15.0);
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Query for "comments" table with same ngrams
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  CacheMetadata meta2;
+  meta2.table = "comments";
+  meta2.ngrams = {"gol", "ola", "lan", "ang"};
+  cache.Insert(key2, {3, 4}, meta2, 15.0);
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  queue.Start();
+
+  // Invalidate only "posts" table
+  queue.Enqueue("posts", "", "golang tips");
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  queue.Stop();
+
+  // Only posts query should be invalidated
+  EXPECT_FALSE(cache.Lookup(key1).has_value());
+  EXPECT_TRUE(cache.Lookup(key2).has_value());
+}
+
+/**
+ * @brief Test stop without start (should not crash)
+ */
+TEST(InvalidationQueueTest, StopWithoutStart) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Should not crash
+  queue.Stop();
+
+  EXPECT_FALSE(queue.IsRunning());
+}
+
+/**
+ * @brief Test multiple start/stop cycles
+ */
+TEST(InvalidationQueueTest, MultipleStartStop) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Start and stop multiple times
+  queue.Start();
+  EXPECT_TRUE(queue.IsRunning());
+
+  queue.Stop();
+  EXPECT_FALSE(queue.IsRunning());
+
+  queue.Start();
+  EXPECT_TRUE(queue.IsRunning());
+
+  queue.Stop();
+  EXPECT_FALSE(queue.IsRunning());
+}
+
+/**
+ * @brief Test enqueue while worker is stopped (should buffer)
+ */
+TEST(InvalidationQueueTest, EnqueueWhileStopped) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Register cache entry
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+  cache.Insert(key, {1, 2, 3}, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  // Enqueue while stopped (should buffer)
+  queue.Enqueue("posts", "", "golang");
+
+  // Now start worker
+  queue.Start();
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  queue.Stop();
+
+  // Entry should be erased (buffered events processed on start)
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
+/**
+ * @brief Test high-frequency enqueuing (stress test)
+ */
+TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Register many cache entries
+  for (int i = 0; i < 100; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"tes", "est"};
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 15.0);
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  queue.Start();
+
+  // Rapid-fire enqueuing
+  for (int i = 0; i < 1000; ++i) {
+    queue.Enqueue("posts", "", "test" + std::to_string(i % 10));
+  }
+
+  // Wait for all processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  queue.Stop();
+
+  // All entries should be invalidated
+  for (int i = 0; i < 100; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    EXPECT_FALSE(cache.Lookup(key).has_value());
+  }
+}
+
+}  // namespace mygramdb::cache

@@ -435,6 +435,75 @@ logging:
   json: true
 ```
 
+## Cache Section
+
+Query result cache configuration:
+
+```yaml
+cache:
+  enabled: true                       # Default: true (enabled)
+  max_memory_mb: 32                   # Default: 32MB
+  min_query_cost_ms: 10.0             # Default: 10.0ms
+  ttl_seconds: 3600                   # Default: 3600 (1 hour)
+  invalidation_strategy: "ngram"      # Default: "ngram"
+  compression_enabled: true           # Default: true (LZ4)
+  eviction_batch_size: 10             # Default: 10
+  invalidation:
+    batch_size: 1000                  # Default: 1000
+    max_delay_ms: 100                 # Default: 100ms
+```
+
+**Settings:**
+
+- **enabled**: Enable/disable query cache (default: `true`)
+- **max_memory_mb**: Maximum cache memory in MB (default: `32`)
+  - Cache automatically evicts old entries when memory limit is reached
+- **min_query_cost_ms**: Minimum query execution time to cache (default: `10.0`)
+  - Only queries taking longer than this threshold are cached
+  - Prevents caching very fast queries that don't benefit from caching
+- **ttl_seconds**: Time-to-live for cache entries in seconds (default: `3600`, 0 = no TTL)
+  - Entries are automatically expired after this duration
+- **invalidation_strategy**: How to invalidate cache on data changes (default: `"ngram"`)
+  - `"ngram"`: Invalidate entries matching affected n-grams (precise, recommended)
+  - `"table"`: Invalidate all entries for the table (simple, less efficient)
+- **compression_enabled**: Enable LZ4 compression for cached results (default: `true`)
+  - Reduces memory usage for large result sets
+  - Small CPU overhead for compression/decompression
+- **eviction_batch_size**: Number of entries to evict at once when memory is full (default: `10`)
+
+**Invalidation Queue Settings:**
+
+- **invalidation.batch_size**: Process invalidations after N unique (table, ngram) pairs (default: `1000`)
+- **invalidation.max_delay_ms**: Maximum delay before processing invalidations (default: `100`)
+
+**How it works:**
+
+1. Query results are cached after first execution if query time exceeds `min_query_cost_ms`
+2. Subsequent identical queries return cached results instantly (sub-millisecond)
+3. When data changes via binlog replication:
+   - Affected n-grams are identified
+   - Cache entries matching those n-grams are invalidated
+   - Next query will rebuild the cache entry
+4. Entries expire after `ttl_seconds` even if data hasn't changed
+
+**Performance impact:**
+
+- Cache hit: < 1ms (memory lookup + optional decompression)
+- Cache miss: Normal query time + small caching overhead
+- Memory usage: Controlled by `max_memory_mb` with automatic eviction
+
+**When to use:**
+
+- Frequently repeated queries (search suggestions, popular searches)
+- High query cost queries (complex filters, large result sets)
+- Read-heavy workloads with some repeated patterns
+
+**When to disable:**
+
+- Highly unique query patterns (little repetition)
+- Very fast queries (< 10ms consistently)
+- Tight memory constraints
+
 ## Automatic Validation
 
 MygramDB automatically validates all configuration files (YAML and JSON) using a built-in JSON Schema at startup. This validation ensures:

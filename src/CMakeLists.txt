@@ -18,6 +18,7 @@ add_subdirectory(storage)
 add_subdirectory(server)
 add_subdirectory(utils)
 add_subdirectory(query)
+add_subdirectory(cache)
 add_subdirectory(cli)
 add_subdirectory(client)
 

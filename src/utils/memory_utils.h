@@ -34,7 +34,7 @@ struct ProcessMemoryInfo {
 /**
  * @brief Memory health status
  */
-enum class MemoryHealthStatus {
+enum class MemoryHealthStatus : std::uint8_t {
   HEALTHY,   ///< Sufficient memory available (>20%)
   WARNING,   ///< Memory running low (10-20%)
   CRITICAL,  ///< Memory critically low (<10%)
@@ -55,6 +55,9 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo();
  */
 std::optional<ProcessMemoryInfo> GetProcessMemoryInfo();
 
+// Default safety margin for memory availability checks (10%)
+inline constexpr double kDefaultMemorySafetyMargin = 0.1;
+
 /**
  * @brief Check if specified amount of memory is likely available
  *
@@ -65,7 +68,7 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo();
  * @param safety_margin_ratio Safety margin ratio (default: 0.1 = 10%)
  * @return true if memory is likely available, false otherwise
  */
-bool CheckMemoryAvailability(uint64_t required_bytes, double safety_margin_ratio = 0.1);
+bool CheckMemoryAvailability(uint64_t required_bytes, double safety_margin_ratio = kDefaultMemorySafetyMargin);
 
 /**
  * @brief Get current memory health status

@@ -31,6 +31,10 @@ class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
+
 namespace mygramdb::server {
 
 // HTTP server configuration defaults
@@ -70,15 +74,16 @@ class HttpServer {
    * @param table_contexts Map of table name to TableContext pointer
    * @param full_config Full application configuration
    * @param binlog_reader Optional BinlogReader for replication status
+   * @param cache_manager Optional CacheManager for cache statistics
    */
   HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr,
 #ifdef USE_MYSQL
-             mysql::BinlogReader* binlog_reader = nullptr
+             mysql::BinlogReader* binlog_reader = nullptr,
 #else
-             void* binlog_reader = nullptr
+             void* binlog_reader = nullptr,
 #endif
-  );
+             cache::CacheManager* cache_manager = nullptr);
 
   ~HttpServer();
 
@@ -145,6 +150,8 @@ class HttpServer {
 #else
   void* binlog_reader_;
 #endif
+
+  cache::CacheManager* cache_manager_;
 
   /**
    * @brief Setup routes

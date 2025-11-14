@@ -46,6 +46,12 @@ enum class QueryType : uint8_t {
   DEBUG_ON,   // DEBUG ON
   DEBUG_OFF,  // DEBUG OFF
 
+  // Cache commands
+  CACHE_CLEAR,    // CACHE CLEAR [table]
+  CACHE_STATS,    // CACHE STATS
+  CACHE_ENABLE,   // CACHE ENABLE
+  CACHE_DISABLE,  // CACHE DISABLE
+
   UNKNOWN
 };
 
@@ -92,6 +98,19 @@ struct OrderByClause {
 };
 
 /**
+ * @brief Cache debug information
+ */
+struct CacheDebugInfo {
+  enum class Status : std::uint8_t { HIT, MISS_NOT_FOUND, MISS_INVALIDATED, MISS_DISABLED };
+
+  Status status = Status::MISS_DISABLED;
+  double cache_age_ms = 0.0;    // Age of cached result (HIT only)
+  double cache_saved_ms = 0.0;  // Time saved by cache (HIT only)
+  double query_cost_ms = 0.0;   // Actual query execution time (MISS only)
+  std::string cache_key;        // Cache key used (optional, for debugging)
+};
+
+/**
  * @brief Debug information for query execution
  */
 struct DebugInfo {
@@ -113,6 +132,7 @@ struct DebugInfo {
   uint32_t offset_applied = 0;             // OFFSET value applied
   bool limit_explicit = false;             // True if LIMIT was explicitly specified
   bool offset_explicit = false;            // True if OFFSET was explicitly specified
+  CacheDebugInfo cache_info;               // Cache debug information
 };
 
 /**

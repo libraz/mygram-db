@@ -181,6 +181,10 @@ TEST_F(HttpServerTest, InfoEndpoint) {
   EXPECT_TRUE(body["tables"].contains("test"));
   EXPECT_EQ(body["tables"]["test"]["ngram_size"], 1);
   EXPECT_EQ(body["tables"]["test"]["documents"], 3);
+
+  // Cache object (should show cache disabled when no cache manager)
+  EXPECT_TRUE(body.contains("cache"));
+  EXPECT_EQ(body["cache"]["enabled"], false);
 }
 
 TEST_F(HttpServerTest, ConfigEndpoint) {

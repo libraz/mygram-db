@@ -24,6 +24,10 @@ class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
+
 namespace mygramdb::server {
 
 /**
@@ -65,16 +69,17 @@ class ResponseFormatter {
    * @param table_contexts Map of table contexts
    * @param stats Server statistics
    * @param binlog_reader Optional binlog reader for replication info
+   * @param cache_manager Optional cache manager for cache statistics
    * @return Formatted response
    */
   static std::string FormatInfoResponse(const std::unordered_map<std::string, TableContext*>& table_contexts,
                                         ServerStats& stats,
 #ifdef USE_MYSQL
-                                        mysql::BinlogReader* binlog_reader = nullptr
+                                        mysql::BinlogReader* binlog_reader = nullptr,
 #else
-                                        void* binlog_reader = nullptr
+                                        void* binlog_reader = nullptr,
 #endif
-  );
+                                        cache::CacheManager* cache_manager = nullptr);
 
   /**
    * @brief Format SAVE response

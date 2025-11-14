@@ -184,6 +184,7 @@ class TcpServer {
   std::unique_ptr<CommandHandler> admin_handler_;
   std::unique_ptr<CommandHandler> replication_handler_;
   std::unique_ptr<CommandHandler> debug_handler_;
+  std::unique_ptr<CommandHandler> cache_handler_;
 
   /**
    * @brief Accept thread function

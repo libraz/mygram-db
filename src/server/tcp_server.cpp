@@ -27,6 +27,7 @@
 
 #include "query/result_sorter.h"
 #include "server/handlers/admin_handler.h"
+#include "server/handlers/cache_handler.h"
 #include "server/handlers/debug_handler.h"
 #include "server/handlers/document_handler.h"
 #include "server/handlers/dump_handler.h"
@@ -113,6 +114,7 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
   admin_handler_ = std::make_unique<AdminHandler>(*handler_context_);
   replication_handler_ = std::make_unique<ReplicationHandler>(*handler_context_);
   debug_handler_ = std::make_unique<DebugHandler>(*handler_context_);
+  cache_handler_ = std::make_unique<CacheHandler>(*handler_context_);
 }
 
 TcpServer::~TcpServer() {
@@ -445,6 +447,13 @@ std::string TcpServer::ProcessRequest(const std::string& request, ConnectionCont
       case query::QueryType::DEBUG_OFF:
       case query::QueryType::OPTIMIZE:
         return debug_handler_->Handle(query, ctx);
+
+      // Cache commands
+      case query::QueryType::CACHE_CLEAR:
+      case query::QueryType::CACHE_STATS:
+      case query::QueryType::CACHE_ENABLE:
+      case query::QueryType::CACHE_DISABLE:
+        return cache_handler_->Handle(query, ctx);
 
       default:
         return ResponseFormatter::FormatError("Unknown query type");

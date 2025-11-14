@@ -12,7 +12,8 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
 
   switch (query.type) {
     case query::QueryType::INFO:
-      return ResponseFormatter::FormatInfoResponse(ctx_.table_contexts, ctx_.stats, ctx_.binlog_reader);
+      return ResponseFormatter::FormatInfoResponse(ctx_.table_contexts, ctx_.stats, ctx_.binlog_reader,
+                                                   ctx_.cache_manager);
 
     case query::QueryType::CONFIG:
       return ResponseFormatter::FormatConfigResponse(ctx_.full_config, ctx_.stats.GetActiveConnections(),

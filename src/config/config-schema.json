@@ -538,6 +538,72 @@
           "default": true
         }
       }
+    },
+    "cache": {
+      "type": "object",
+      "description": "Query cache configuration",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable/disable cache",
+          "default": true
+        },
+        "max_memory_mb": {
+          "type": "integer",
+          "description": "Maximum cache memory in MB",
+          "default": 32,
+          "minimum": 1
+        },
+        "min_query_cost_ms": {
+          "type": "number",
+          "description": "Minimum query cost to cache (ms)",
+          "default": 10.0,
+          "minimum": 0.0
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "description": "Cache entry TTL (seconds, 0 = no TTL)",
+          "default": 3600,
+          "minimum": 0
+        },
+        "invalidation_strategy": {
+          "type": "string",
+          "description": "Invalidation strategy",
+          "default": "ngram",
+          "enum": ["ngram", "table"]
+        },
+        "compression_enabled": {
+          "type": "boolean",
+          "description": "Enable LZ4 compression",
+          "default": true
+        },
+        "eviction_batch_size": {
+          "type": "integer",
+          "description": "Number of entries to evict at once",
+          "default": 10,
+          "minimum": 1
+        },
+        "invalidation": {
+          "type": "object",
+          "description": "Invalidation queue settings",
+          "additionalProperties": false,
+          "properties": {
+            "batch_size": {
+              "type": "integer",
+              "description": "Process after N unique pairs",
+              "default": 1000,
+              "minimum": 1
+            },
+            "max_delay_ms": {
+              "type": "integer",
+              "description": "Max delay before processing (ms)",
+              "default": 100,
+              "minimum": 0
+            }
+          }
+        }
+      }
     }
   }
 }

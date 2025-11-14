@@ -224,6 +224,27 @@ struct LoggingConfig {
 };
 
 /**
+ * @brief Query cache configuration
+ */
+struct CacheConfig {
+  bool enabled = false;                         ///< Enable/disable cache (default: false)
+  int max_memory_mb = 200;                      ///< Maximum cache memory in MB (default: 200)  // NOLINT
+  double min_query_cost_ms = 10.0;              ///< Minimum query cost to cache (default: 10ms)  // NOLINT
+  int ttl_seconds = 3600;                       ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
+  std::string invalidation_strategy = "ngram";  ///< Invalidation strategy: "ngram", "table"
+
+  // Advanced tuning
+  bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)
+  int eviction_batch_size = 10;     ///< Number of entries to evict at once (default: 10)  // NOLINT
+
+  // Invalidation queue settings
+  struct {
+    int batch_size = 1000;   ///< Process after N unique (table, ngram) pairs  // NOLINT
+    int max_delay_ms = 100;  ///< Max delay before processing (ms)  // NOLINT
+  } invalidation;
+};
+
+/**
  * @brief Root configuration
  */
 struct Config {
@@ -236,6 +257,7 @@ struct Config {
   ApiConfig api;
   NetworkConfig network;
   LoggingConfig logging;
+  CacheConfig cache;
 };
 
 /**

@@ -13,6 +13,7 @@
 #include <sstream>
 #include <variant>
 
+#include "cache/cache_manager.h"
 #include "server/response_formatter.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
@@ -51,15 +52,16 @@ using storage::DocId;
 HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                        const config::Config* full_config,
 #ifdef USE_MYSQL
-                       mysql::BinlogReader* binlog_reader
+                       mysql::BinlogReader* binlog_reader,
 #else
-                       void* binlog_reader
+                       void* binlog_reader,
 #endif
-                       )
+                       cache::CacheManager* cache_manager)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
-      binlog_reader_(binlog_reader) {
+      binlog_reader_(binlog_reader),
+      cache_manager_(cache_manager) {
   server_ = std::make_unique<httplib::Server>();
 
   // Set timeouts
@@ -602,6 +604,32 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     // Per-table breakdown
     response["tables"] = tables_obj;
+
+    // Cache statistics
+    json cache_obj;
+    if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
+      auto cache_stats = cache_manager_->GetStatistics();
+      cache_obj["enabled"] = true;
+      cache_obj["hits"] = cache_stats.cache_hits;
+      cache_obj["misses"] = cache_stats.cache_misses;
+      cache_obj["misses_not_found"] = cache_stats.cache_misses_not_found;
+      cache_obj["misses_invalidated"] = cache_stats.cache_misses_invalidated;
+      cache_obj["total_queries"] = cache_stats.total_queries;
+      cache_obj["hit_rate"] = cache_stats.HitRate();
+      cache_obj["current_entries"] = cache_stats.current_entries;
+      cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
+      cache_obj["memory_human"] = utils::FormatBytes(cache_stats.current_memory_bytes);
+      cache_obj["evictions"] = cache_stats.evictions;
+      cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
+      cache_obj["invalidations_deferred"] = cache_stats.invalidations_deferred;
+      cache_obj["invalidations_batches"] = cache_stats.invalidations_batches;
+      cache_obj["avg_hit_latency_ms"] = cache_stats.AverageCacheHitLatency();
+      cache_obj["avg_miss_latency_ms"] = cache_stats.AverageCacheMissLatency();
+      cache_obj["total_time_saved_ms"] = cache_stats.TotalTimeSaved();
+    } else {
+      cache_obj["enabled"] = false;
+    }
+    response["cache"] = cache_obj;
 
     SendJson(res, kHttpOk, response);
 

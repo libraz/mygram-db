@@ -334,6 +334,15 @@ TEST(IndexConcurrentTest, ConcurrentOptimizeExclusion) {
 
 /**
  * @brief Test OPTIMIZE with concurrent document additions
+ *
+ * This test verifies that OptimizeInBatches properly blocks concurrent writes
+ * using exclusive locking. The optimization acquires an exclusive lock that
+ * blocks all Add/Update/Remove operations during the optimization process,
+ * ensuring thread safety.
+ *
+ * NOTE: Due to the exclusive lock, additions will be blocked during optimization
+ * and will only complete after optimization finishes. This is the intended behavior
+ * to prevent race conditions.
  */
 TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
   Index index(1);
@@ -376,11 +385,13 @@ TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
   EXPECT_EQ(results_abc.size(), 5000);
 
   auto results_xyz = index.SearchAnd({"x"});
-  // Due to concurrent execution timing, some additions might not complete
-  // but most should succeed
-  EXPECT_GE(results_xyz.size(), 195);  // At least 195 out of 200
-  EXPECT_LE(results_xyz.size(), 200);  // At most 200
+  // With exclusive locking, all 200 additions complete after optimization finishes
+  // (2 threads * 100 additions each = 200 total)
+  EXPECT_EQ(results_xyz.size(), 200);
 
-  // At least some additions should have occurred during optimization
-  EXPECT_GT(additions_during_optimize, 0);
+  // Note: additions_during_optimize may vary depending on optimization speed.
+  // With exclusive locking, AddDocument calls are properly synchronized and
+  // no race conditions occur. The counter just tracks timing of thread execution.
+  // What matters is that all 200 documents are safely added without crashes.
+  (void)additions_during_optimize;  // Timing-dependent, not critical for correctness
 }

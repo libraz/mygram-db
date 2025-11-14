@@ -84,7 +84,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       uint64_t estimated_memory = utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize);
 
       // Check if estimated memory is available (with 10% safety margin)
-      if (!utils::CheckMemoryAvailability(estimated_memory, 0.1)) {
+      if (!utils::CheckMemoryAvailability(estimated_memory, utils::kDefaultMemorySafetyMargin)) {
         auto sys_info = utils::GetSystemMemoryInfo();
         std::ostringstream oss;
         oss << "Insufficient memory: estimated=" << utils::FormatBytes(estimated_memory);

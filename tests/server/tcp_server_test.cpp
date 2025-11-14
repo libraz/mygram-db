@@ -642,6 +642,10 @@ TEST_F(TcpServerTest, InfoCommand) {
   EXPECT_TRUE(response.find("# Clients") != std::string::npos);
   EXPECT_TRUE(response.find("connected_clients:") != std::string::npos);
 
+  // Cache section (should show cache disabled when no cache manager)
+  EXPECT_TRUE(response.find("# Cache") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_enabled: 0") != std::string::npos);
+
   EXPECT_TRUE(response.find("END") != std::string::npos);
 
   close(sock);

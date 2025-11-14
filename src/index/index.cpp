@@ -24,11 +24,14 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
       roaring_threshold_(roaring_threshold) {}
 
 void Index::AddDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams using hybrid mode
+  // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
   // Remove duplicates while preserving uniqueness
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+
+  // Acquire exclusive lock for modifying posting lists
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Add document to posting list for each unique n-gram
   for (const auto& ngram : unique_ngrams) {
@@ -68,9 +71,9 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     std::sort(doc_ids.begin(), doc_ids.end());
   }
 
-  // Phase 3: Add to posting lists (with locking, minimal lock time)
+  // Phase 3: Add to posting lists (with exclusive lock, minimal lock time)
   // Use PostingList::AddBatch() for better performance
-  std::scoped_lock<std::mutex> lock(postings_mutex_);
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   for (const auto& [term, doc_ids] : term_to_docs) {
     auto* posting = GetOrCreatePostingList(term);
@@ -79,12 +82,15 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 }
 
 void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text) {
-  // Generate n-grams for both texts
+  // Generate n-grams for both texts (no lock needed for CPU-intensive operation)
   std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
   std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
 
   std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
   std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
+
+  // Acquire exclusive lock for modifying posting lists
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove doc from n-grams that are no longer present
   for (const auto& ngram : old_set) {
@@ -106,9 +112,12 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
 }
 
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
-  // Generate n-grams
+  // Generate n-grams (no lock needed for CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
   std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+
+  // Acquire exclusive lock for modifying posting lists
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove document from posting list for each n-gram
   for (const auto& ngram : unique_ngrams) {
@@ -120,7 +129,8 @@ void Index::RemoveDocument(DocId doc_id, const std::string& text) {
 }
 
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_t limit, bool reverse) const {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
 
   if (terms.empty()) {
     return {};
@@ -351,7 +361,8 @@ std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms
 }
 
 std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   return SearchOrInternal(terms);
 }
 
@@ -360,7 +371,8 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
     return all_docs;
   }
 
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Get union of all documents containing any of the NOT terms
   std::vector<DocId> excluded_docs = SearchOrInternal(terms);
@@ -374,13 +386,15 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
 }
 
 uint64_t Index::Count(const std::string& term) const {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   const auto* posting = GetPostingList(term);
   return (posting != nullptr) ? posting->Size() : 0;
 }
 
 size_t Index::MemoryUsage() const {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   size_t total = 0;
   for (const auto& [term, posting] : term_postings_) {
     total += term.size();             // Term string
@@ -390,7 +404,8 @@ size_t Index::MemoryUsage() const {
 }
 
 Index::IndexStatistics Index::GetStatistics() const {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire shared lock for read-only access (allows concurrent readers)
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   IndexStatistics stats;
   stats.total_terms = term_postings_.size();
   stats.total_postings = 0;
@@ -451,6 +466,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 
   auto start_time = std::chrono::steady_clock::now();
 
+  // Acquire exclusive lock for the entire optimization operation
+  // This blocks all concurrent writes (Add/Update/Remove) during optimization
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+
   // Collect all term names to iterate over
   std::vector<std::string> terms;
   terms.reserve(term_postings_.size());
@@ -472,10 +491,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     for (size_t j = i; j < batch_end; ++j) {
       const auto& term = terms[j];
 
-      // Find the posting list (check if still exists)
+      // Find the posting list
       auto iterator = term_postings_.find(term);
       if (iterator == term_postings_.end()) {
-        continue;  // Term was removed during optimization
+        continue;  // Term was removed
       }
 
       const auto& posting = iterator->second;
@@ -492,15 +511,11 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       optimized_batch[term] = std::move(optimized);
     }
 
-    // Swap in the optimized batch (short lock duration)
-    {
-      std::scoped_lock lock(postings_mutex_);
-      for (auto& [term, optimized] : optimized_batch) {
-        // Check if term still exists before replacing
-        auto iterator = term_postings_.find(term);
-        if (iterator != term_postings_.end()) {
-          iterator->second = std::move(optimized);
-        }
+    // Swap in the optimized batch
+    for (auto& [term, optimized] : optimized_batch) {
+      auto iterator = term_postings_.find(term);
+      if (iterator != term_postings_.end()) {
+        iterator->second = std::move(optimized);
       }
     }
 
@@ -529,7 +544,8 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 }
 
 void Index::Clear() {
-  std::scoped_lock lock(postings_mutex_);
+  // Acquire exclusive lock for modifying posting lists
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
   term_postings_.clear();
   spdlog::info("Cleared index");
 }

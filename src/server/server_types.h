@@ -21,6 +21,10 @@ class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
+
 namespace mygramdb::server {
 
 /**
@@ -65,6 +69,7 @@ struct HandlerContext {
 #else
   void* binlog_reader;
 #endif
+  cache::CacheManager* cache_manager = nullptr;
 };
 
 }  // namespace mygramdb::server

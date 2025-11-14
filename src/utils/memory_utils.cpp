@@ -47,9 +47,12 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
 
 #ifdef __APPLE__
   // Get total physical memory
-  int mib[2] = {CTL_HW, HW_MEMSIZE};
+  // C-style array required by macOS sysctl() API
+  int mib[2] = {CTL_HW, HW_MEMSIZE};  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
   uint64_t physical_memory = 0;
   size_t length = sizeof(physical_memory);
+  // Array decay required by macOS sysctl() system call
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   if (sysctl(mib, 2, &physical_memory, &length, nullptr, 0) != 0) {
     spdlog::error("Failed to get total physical memory (sysctl)");
     return std::nullopt;
@@ -63,9 +66,14 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
 
   vm_statistics64_data_t vm_stats{};
   mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-  kern_return_t kr = host_statistics64(host_port, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm_stats), &count);
+  // kern_return_t is standard Mach API naming; reinterpret_cast required by Mach API
+  // NOLINTNEXTLINE(readability-identifier-length)
+  kern_return_t kern_ret = host_statistics64(
+      host_port, HOST_VM_INFO64,
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      reinterpret_cast<host_info64_t>(&vm_stats), &count);
 
-  if (kr != KERN_SUCCESS) {
+  if (kern_ret != KERN_SUCCESS) {
     spdlog::error("Failed to get VM statistics");
     return std::nullopt;
   }
@@ -78,7 +86,10 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
   // macOS swap info (from swapusage sysctl)
   struct xsw_usage swap_info {};
   size_t swap_size = sizeof(swap_info);
-  int swap_mib[2] = {CTL_VM, VM_SWAPUSAGE};
+  // C-style array required by macOS sysctl() API
+  int swap_mib[2] = {CTL_VM, VM_SWAPUSAGE};  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+  // Array decay required by macOS sysctl() system call
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   if (sysctl(swap_mib, 2, &swap_info, &swap_size, nullptr, 0) == 0) {
     info.total_swap_bytes = swap_info.xsu_total;
     info.available_swap_bytes = swap_info.xsu_avail;
@@ -139,10 +150,14 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
   // Get task info for current process
   struct task_basic_info_64 task_basic_info {};
   mach_msg_type_number_t count = TASK_BASIC_INFO_64_COUNT;
-  kern_return_t kr =
-      task_info(mach_task_self(), TASK_BASIC_INFO_64, reinterpret_cast<task_info_t>(&task_basic_info), &count);
+  // kern_return_t is standard Mach API naming; reinterpret_cast required by Mach task_info() API
+  // NOLINTNEXTLINE(readability-identifier-length,cppcoreguidelines-pro-type-reinterpret-cast)
+  kern_return_t kern_ret =
+      task_info(mach_task_self(), TASK_BASIC_INFO_64,
+                reinterpret_cast<task_info_t>(&task_basic_info),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                &count);
 
-  if (kr != KERN_SUCCESS) {
+  if (kern_ret != KERN_SUCCESS) {
     spdlog::error("Failed to get task info");
     return std::nullopt;
   }
@@ -293,11 +308,11 @@ uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_si
 
   // Estimate batch represents 5% of index (conservative)
   constexpr double kBatchRatio = 0.05;
-  uint64_t batch_memory = static_cast<uint64_t>(static_cast<double>(index_memory_usage) * kBatchRatio);
+  auto batch_memory = static_cast<uint64_t>(static_cast<double>(index_memory_usage) * kBatchRatio);
 
   // Add 10% overhead for temporary structures
   constexpr double kOverheadRatio = 0.10;
-  uint64_t overhead = static_cast<uint64_t>(static_cast<double>(batch_memory) * kOverheadRatio);
+  auto overhead = static_cast<uint64_t>(static_cast<double>(batch_memory) * kOverheadRatio);
 
   // Total peak = original + batch + overhead
   return index_memory_usage + batch_memory + overhead;

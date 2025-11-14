@@ -35,11 +35,13 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_* commands don't require a table
+  // INFO, SAVE, LOAD, REPLICATION_*, CONFIG, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
       type != QueryType::REPLICATION_START && type != QueryType::CONFIG && type != QueryType::OPTIMIZE &&
-      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && table.empty()) {
+      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && type != QueryType::CACHE_CLEAR &&
+      type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE && type != QueryType::CACHE_DISABLE &&
+      table.empty()) {
     return false;
   }
 
@@ -260,6 +262,38 @@ Query QueryParser::Parse(const std::string& query_str) {
       query.type = QueryType::DEBUG_OFF;
     } else {
       SetError("DEBUG requires ON or OFF, got: " + mode);
+      return Query{};
+    }
+
+    return query;
+  }
+  if (command == "CACHE") {
+    // CACHE CLEAR [table] | STATS | ENABLE | DISABLE
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() < 2) {  // 2: CACHE + subcommand
+      SetError("CACHE requires a subcommand (CLEAR, STATS, ENABLE, DISABLE)");
+      return Query{};
+    }
+
+    std::string subcommand = ToUpper(tokens[1]);
+    Query query;
+    query.table = "";  // CACHE doesn't need a table by default
+
+    if (subcommand == "CLEAR") {
+      query.type = QueryType::CACHE_CLEAR;
+      // CACHE CLEAR [table] - optional table name
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (tokens.size() > 2) {  // 2: CACHE CLEAR + table
+        query.table = tokens[2];
+      }
+    } else if (subcommand == "STATS") {
+      query.type = QueryType::CACHE_STATS;
+    } else if (subcommand == "ENABLE") {
+      query.type = QueryType::CACHE_ENABLE;
+    } else if (subcommand == "DISABLE") {
+      query.type = QueryType::CACHE_DISABLE;
+    } else {
+      SetError("Unknown CACHE subcommand: " + subcommand);
       return Query{};
     }
 
@@ -742,7 +776,7 @@ bool QueryParser::ParseLimit(const std::vector<std::string>& tokens, size_t& pos
     return false;
   }
 
-  std::string limit_str = tokens[pos++];
+  const std::string& limit_str = tokens[pos++];
 
   // Check for comma-separated format: LIMIT offset,count
   size_t comma_pos = limit_str.find(',');

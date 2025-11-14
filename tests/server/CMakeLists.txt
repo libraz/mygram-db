@@ -11,6 +11,24 @@ target_link_libraries(server_stats_test
 
 gtest_discover_tests(server_stats_test)
 
+# ResponseFormatter tests
+
+add_executable(response_formatter_test
+  response_formatter_test.cpp
+)
+
+target_link_libraries(response_formatter_test
+  mygramdb_server
+  mygramdb_cache
+  mygramdb_mysql
+  mygramdb_storage
+  mygramdb_index
+  mygramdb_query
+  GTest::gtest_main
+)
+
+gtest_discover_tests(response_formatter_test)
+
 # TCP Server tests
 
 add_executable(tcp_server_test

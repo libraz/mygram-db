@@ -535,6 +535,41 @@ Config ParseConfigFromJson(const json& root) {
     }
   }
 
+  // Parse cache config
+  if (root.contains("cache")) {
+    const auto& cache = root["cache"];
+    if (cache.contains("enabled")) {
+      config.cache.enabled = cache["enabled"].get<bool>();
+    }
+    if (cache.contains("max_memory_mb")) {
+      config.cache.max_memory_mb = cache["max_memory_mb"].get<int>();
+    }
+    if (cache.contains("min_query_cost_ms")) {
+      config.cache.min_query_cost_ms = cache["min_query_cost_ms"].get<double>();
+    }
+    if (cache.contains("ttl_seconds")) {
+      config.cache.ttl_seconds = cache["ttl_seconds"].get<int>();
+    }
+    if (cache.contains("invalidation_strategy")) {
+      config.cache.invalidation_strategy = cache["invalidation_strategy"].get<std::string>();
+    }
+    if (cache.contains("compression_enabled")) {
+      config.cache.compression_enabled = cache["compression_enabled"].get<bool>();
+    }
+    if (cache.contains("eviction_batch_size")) {
+      config.cache.eviction_batch_size = cache["eviction_batch_size"].get<int>();
+    }
+    if (cache.contains("invalidation")) {
+      const auto& invalidation = cache["invalidation"];
+      if (invalidation.contains("batch_size")) {
+        config.cache.invalidation.batch_size = invalidation["batch_size"].get<int>();
+      }
+      if (invalidation.contains("max_delay_ms")) {
+        config.cache.invalidation.max_delay_ms = invalidation["max_delay_ms"].get<int>();
+      }
+    }
+  }
+
   return config;
 }
 

@@ -3,10 +3,9 @@
  * @brief Tests for dump auto-save functionality
  */
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
-
-#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
 

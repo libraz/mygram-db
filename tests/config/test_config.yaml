@@ -73,3 +73,15 @@ network:
 logging:
   level: "debug"
   json: false
+
+cache:
+  enabled: true
+  max_memory_mb: 200
+  min_query_cost_ms: 10.0
+  ttl_seconds: 3600
+  invalidation_strategy: "ngram"
+  compression_enabled: true
+  eviction_batch_size: 10
+  invalidation:
+    batch_size: 1000
+    max_delay_ms: 100
