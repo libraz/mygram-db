@@ -157,11 +157,21 @@ GET /info HTTP/1.1
   "total_commands_processed": 15000,
   "memory": {
     "used_memory_bytes": 524288000,
-    "used_memory_human": "500MB",
+    "used_memory_human": "500.00 MB",
     "peak_memory_bytes": 629145600,
-    "peak_memory_human": "600MB",
-    "used_memory_index": "400MB",
-    "used_memory_documents": "100MB"
+    "peak_memory_human": "600.00 MB",
+    "used_memory_index": "400.00 MB",
+    "used_memory_documents": "100.00 MB",
+    "total_system_memory": 17179869184,
+    "total_system_memory_human": "16.00 GB",
+    "available_system_memory": 9126805504,
+    "available_system_memory_human": "8.50 GB",
+    "system_memory_usage_ratio": 0.47,
+    "process_rss": 545259520,
+    "process_rss_human": "520.00 MB",
+    "process_rss_peak": 629145600,
+    "process_rss_peak_human": "600.00 MB",
+    "memory_health": "HEALTHY"
   },
   "index": {
     "total_documents": 1000000,
@@ -169,8 +179,25 @@ GET /info HTTP/1.1
     "total_postings": 5000000,
     "avg_postings_per_term": 3.33,
     "delta_encoded_lists": 1200000,
-    "roaring_bitmap_lists": 300000,
-    "ngram_size": 1
+    "roaring_bitmap_lists": 300000
+  },
+  "tables": {
+    "products": {
+      "documents": 500000,
+      "terms": 800000,
+      "postings": 2500000,
+      "ngram_size": 2,
+      "memory_bytes": 262144000,
+      "memory_human": "250.00 MB"
+    },
+    "users": {
+      "documents": 500000,
+      "terms": 700000,
+      "postings": 2500000,
+      "ngram_size": 1,
+      "memory_bytes": 262144000,
+      "memory_human": "250.00 MB"
+    }
   }
 }
 ```
@@ -184,19 +211,46 @@ GET /info HTTP/1.1
 | `uptime_seconds` | サーバー稼働時間（秒） |
 | `total_requests` | 処理されたリクエストの総数 |
 | `total_commands_processed` | 処理されたコマンドの総数 |
-| `memory.used_memory_bytes` | 現在のメモリ使用量（バイト） |
-| `memory.used_memory_human` | 人間が読みやすい形式のメモリ使用量 |
+| **メモリ（アプリケーション）** | |
+| `memory.used_memory_bytes` | 現在のメモリ使用量（バイト）（インデックス + ドキュメント） |
+| `memory.used_memory_human` | 人間が読みやすい形式の現在のメモリ使用量 |
 | `memory.peak_memory_bytes` | ピーク時のメモリ使用量（バイト） |
 | `memory.peak_memory_human` | 人間が読みやすい形式のピークメモリ使用量 |
 | `memory.used_memory_index` | インデックスが使用しているメモリ |
 | `memory.used_memory_documents` | ドキュメントストアが使用しているメモリ |
-| `index.total_documents` | インデックス内のドキュメント総数 |
-| `index.total_terms` | インデックス内のユニーク語句総数 |
-| `index.total_postings` | インデックス内のポスティング総数 |
+| **メモリ（システム）** | |
+| `memory.total_system_memory` | 物理RAM総容量（バイト） |
+| `memory.total_system_memory_human` | 人間が読みやすい形式のシステムメモリ総容量 |
+| `memory.available_system_memory` | 利用可能な物理RAM（バイト） |
+| `memory.available_system_memory_human` | 人間が読みやすい形式の利用可能メモリ |
+| `memory.system_memory_usage_ratio` | システム全体のメモリ使用率（0.0-1.0） |
+| **メモリ（プロセス）** | |
+| `memory.process_rss` | プロセスRSS（使用中の物理メモリ）（バイト） |
+| `memory.process_rss_human` | 人間が読みやすい形式のプロセスRSS |
+| `memory.process_rss_peak` | プロセス開始以降のRSSピーク値（バイト） |
+| `memory.process_rss_peak_human` | 人間が読みやすい形式のRSSピーク値 |
+| **メモリ（ヘルス）** | |
+| `memory.memory_health` | メモリヘルスステータス（HEALTHY/WARNING/CRITICAL/UNKNOWN） |
+| **インデックス（集計）** | |
+| `index.total_documents` | 全テーブルのドキュメント総数 |
+| `index.total_terms` | ユニーク語句の総数 |
+| `index.total_postings` | ポスティングの総数 |
 | `index.avg_postings_per_term` | 語句あたりの平均ポスティング数 |
 | `index.delta_encoded_lists` | Delta圧縮を使用しているポスティングリスト数 |
 | `index.roaring_bitmap_lists` | Roaring Bitmapを使用しているポスティングリスト数 |
-| `index.ngram_size` | N-gramサイズ（0はハイブリッドモード） |
+| **テーブル（テーブルごと）** | |
+| `tables.<name>.documents` | テーブル内のドキュメント数 |
+| `tables.<name>.terms` | テーブル内の語句数 |
+| `tables.<name>.postings` | テーブル内のポスティング数 |
+| `tables.<name>.ngram_size` | テーブルのN-gramサイズ |
+| `tables.<name>.memory_bytes` | テーブルのメモリ使用量（バイト） |
+| `tables.<name>.memory_human` | 人間が読みやすい形式のテーブルメモリ使用量 |
+
+**メモリヘルスステータス:**
+- `HEALTHY`: システムメモリの20%以上が利用可能
+- `WARNING`: システムメモリの10-20%が利用可能
+- `CRITICAL`: システムメモリの10%未満が利用可能（OPTIMIZEは拒否されます）
+- `UNKNOWN`: ステータスを判定できない
 
 このエンドポイントはPrometheusやその他の監視ツールとの統合に適しています。
 

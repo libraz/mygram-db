@@ -51,6 +51,7 @@ class DumpHandlerTest : public ::testing::Test {
         .dump_dir = "/tmp",
         .loading = loading_,
         .read_only = read_only_,
+        .optimization_in_progress = optimization_in_progress_,
         .binlog_reader = nullptr,
     });
 
@@ -89,6 +90,7 @@ class DumpHandlerTest : public ::testing::Test {
   std::unique_ptr<ServerStats> stats_;
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
+  std::atomic<bool> optimization_in_progress_{false};
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<DumpHandler> handler_;
   std::string test_filepath_;

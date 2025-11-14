@@ -157,11 +157,21 @@ GET /info HTTP/1.1
   "total_commands_processed": 15000,
   "memory": {
     "used_memory_bytes": 524288000,
-    "used_memory_human": "500MB",
+    "used_memory_human": "500.00 MB",
     "peak_memory_bytes": 629145600,
-    "peak_memory_human": "600MB",
-    "used_memory_index": "400MB",
-    "used_memory_documents": "100MB"
+    "peak_memory_human": "600.00 MB",
+    "used_memory_index": "400.00 MB",
+    "used_memory_documents": "100.00 MB",
+    "total_system_memory": 17179869184,
+    "total_system_memory_human": "16.00 GB",
+    "available_system_memory": 9126805504,
+    "available_system_memory_human": "8.50 GB",
+    "system_memory_usage_ratio": 0.47,
+    "process_rss": 545259520,
+    "process_rss_human": "520.00 MB",
+    "process_rss_peak": 629145600,
+    "process_rss_peak_human": "600.00 MB",
+    "memory_health": "HEALTHY"
   },
   "index": {
     "total_documents": 1000000,
@@ -169,8 +179,25 @@ GET /info HTTP/1.1
     "total_postings": 5000000,
     "avg_postings_per_term": 3.33,
     "delta_encoded_lists": 1200000,
-    "roaring_bitmap_lists": 300000,
-    "ngram_size": 1
+    "roaring_bitmap_lists": 300000
+  },
+  "tables": {
+    "products": {
+      "documents": 500000,
+      "terms": 800000,
+      "postings": 2500000,
+      "ngram_size": 2,
+      "memory_bytes": 262144000,
+      "memory_human": "250.00 MB"
+    },
+    "users": {
+      "documents": 500000,
+      "terms": 700000,
+      "postings": 2500000,
+      "ngram_size": 1,
+      "memory_bytes": 262144000,
+      "memory_human": "250.00 MB"
+    }
   }
 }
 ```
@@ -184,19 +211,46 @@ GET /info HTTP/1.1
 | `uptime_seconds` | Server uptime in seconds |
 | `total_requests` | Total number of requests processed |
 | `total_commands_processed` | Total number of commands processed |
-| `memory.used_memory_bytes` | Current memory usage in bytes |
+| **Memory (Application)** | |
+| `memory.used_memory_bytes` | Current memory usage in bytes (index + documents) |
 | `memory.used_memory_human` | Human-readable current memory usage |
 | `memory.peak_memory_bytes` | Peak memory usage in bytes |
 | `memory.peak_memory_human` | Human-readable peak memory usage |
 | `memory.used_memory_index` | Memory used by index |
 | `memory.used_memory_documents` | Memory used by document store |
-| `index.total_documents` | Total number of documents in index |
-| `index.total_terms` | Total number of unique terms in index |
-| `index.total_postings` | Total number of postings in index |
+| **Memory (System)** | |
+| `memory.total_system_memory` | Total physical RAM in bytes |
+| `memory.total_system_memory_human` | Human-readable total system memory |
+| `memory.available_system_memory` | Available physical RAM in bytes |
+| `memory.available_system_memory_human` | Human-readable available memory |
+| `memory.system_memory_usage_ratio` | System-wide memory usage (0.0-1.0) |
+| **Memory (Process)** | |
+| `memory.process_rss` | Process RSS (physical memory used) in bytes |
+| `memory.process_rss_human` | Human-readable process RSS |
+| `memory.process_rss_peak` | Peak RSS since process start in bytes |
+| `memory.process_rss_peak_human` | Human-readable peak RSS |
+| **Memory (Health)** | |
+| `memory.memory_health` | Memory health status (HEALTHY/WARNING/CRITICAL/UNKNOWN) |
+| **Index (Aggregated)** | |
+| `index.total_documents` | Total number of documents across all tables |
+| `index.total_terms` | Total number of unique terms |
+| `index.total_postings` | Total number of postings |
 | `index.avg_postings_per_term` | Average postings per term |
 | `index.delta_encoded_lists` | Number of posting lists using delta encoding |
 | `index.roaring_bitmap_lists` | Number of posting lists using Roaring Bitmaps |
-| `index.ngram_size` | N-gram size (0 for hybrid mode) |
+| **Tables (Per-table)** | |
+| `tables.<name>.documents` | Number of documents in table |
+| `tables.<name>.terms` | Number of terms in table |
+| `tables.<name>.postings` | Number of postings in table |
+| `tables.<name>.ngram_size` | N-gram size for table |
+| `tables.<name>.memory_bytes` | Memory usage for table in bytes |
+| `tables.<name>.memory_human` | Human-readable memory usage for table |
+
+**Memory Health Status:**
+- `HEALTHY`: >20% system memory available
+- `WARNING`: 10-20% system memory available
+- `CRITICAL`: <10% system memory available (OPTIMIZE will be rejected)
+- `UNKNOWN`: Unable to determine status
 
 This endpoint is suitable for integration with Prometheus and other monitoring tools.
 

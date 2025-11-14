@@ -15,6 +15,7 @@
 
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
 
@@ -553,6 +554,34 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     memory_obj["peak_memory_human"] = utils::FormatBytes(stats_.GetPeakMemoryUsage());
     memory_obj["used_memory_index"] = utils::FormatBytes(total_index_memory);
     memory_obj["used_memory_documents"] = utils::FormatBytes(total_doc_memory);
+
+    // System memory information
+    auto sys_info = utils::GetSystemMemoryInfo();
+    if (sys_info) {
+      memory_obj["total_system_memory"] = sys_info->total_physical_bytes;
+      memory_obj["total_system_memory_human"] = utils::FormatBytes(sys_info->total_physical_bytes);
+      memory_obj["available_system_memory"] = sys_info->available_physical_bytes;
+      memory_obj["available_system_memory_human"] = utils::FormatBytes(sys_info->available_physical_bytes);
+      if (sys_info->total_physical_bytes > 0) {
+        double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
+                                       static_cast<double>(sys_info->total_physical_bytes);
+        memory_obj["system_memory_usage_ratio"] = usage_ratio;
+      }
+    }
+
+    // Process memory information
+    auto proc_info = utils::GetProcessMemoryInfo();
+    if (proc_info) {
+      memory_obj["process_rss"] = proc_info->rss_bytes;
+      memory_obj["process_rss_human"] = utils::FormatBytes(proc_info->rss_bytes);
+      memory_obj["process_rss_peak"] = proc_info->peak_rss_bytes;
+      memory_obj["process_rss_peak_human"] = utils::FormatBytes(proc_info->peak_rss_bytes);
+    }
+
+    // Memory health status
+    auto health = utils::GetMemoryHealthStatus();
+    memory_obj["memory_health"] = utils::MemoryHealthStatusToString(health);
+
     response["memory"] = memory_obj;
 
     // Aggregated index statistics

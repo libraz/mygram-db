@@ -9,6 +9,8 @@
 
 #include <sstream>
 
+#include "utils/memory_utils.h"
+
 namespace mygramdb::server {
 
 std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
@@ -26,6 +28,24 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
     }
 
     case query::QueryType::OPTIMIZE: {
+      // Check if another OPTIMIZE is already running globally
+      bool expected = false;
+      if (!ctx_.optimization_in_progress.compare_exchange_strong(expected, true)) {
+        return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress");
+      }
+
+      // RAII guard to ensure flag is cleared even if exception occurs
+      struct OptimizationGuard {
+        std::atomic<bool>& flag;
+        explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
+        OptimizationGuard(const OptimizationGuard&) = delete;
+        OptimizationGuard& operator=(const OptimizationGuard&) = delete;
+        OptimizationGuard(OptimizationGuard&&) = delete;
+        OptimizationGuard& operator=(OptimizationGuard&&) = delete;
+        ~OptimizationGuard() { flag.store(false); }
+      };
+      OptimizationGuard guard(ctx_.optimization_in_progress);
+
       // Get table context
       index::Index* current_index = nullptr;
       storage::DocumentStore* current_doc_store = nullptr;
@@ -43,22 +63,50 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         return ResponseFormatter::FormatError("Index not available");
       }
 
-      // Check if optimization is already running
-      if (current_index->IsOptimizing()) {
-        return ResponseFormatter::FormatError("Optimization already in progress");
+      // Check memory health before optimization
+      auto memory_health = utils::GetMemoryHealthStatus();
+      if (memory_health == utils::MemoryHealthStatus::CRITICAL) {
+        auto sys_info = utils::GetSystemMemoryInfo();
+        std::ostringstream oss;
+        oss << "Memory critically low: ";
+        if (sys_info) {
+          oss << "available=" << utils::FormatBytes(sys_info->available_physical_bytes)
+              << " total=" << utils::FormatBytes(sys_info->total_physical_bytes);
+        }
+        spdlog::warn("OPTIMIZE rejected due to critical memory status: {}", oss.str());
+        return ResponseFormatter::FormatError("Memory critically low. Cannot start optimization: " + oss.str());
       }
 
-      spdlog::info("Starting index optimization by user request");
+      // Estimate memory required for optimization
+      uint64_t index_memory = current_index->MemoryUsage();
       uint64_t total_docs = current_doc_store->Size();
+      constexpr size_t kDefaultBatchSize = 1000;
+      uint64_t estimated_memory = utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize);
+
+      // Check if estimated memory is available (with 10% safety margin)
+      if (!utils::CheckMemoryAvailability(estimated_memory, 0.1)) {
+        auto sys_info = utils::GetSystemMemoryInfo();
+        std::ostringstream oss;
+        oss << "Insufficient memory: estimated=" << utils::FormatBytes(estimated_memory);
+        if (sys_info) {
+          oss << " available=" << utils::FormatBytes(sys_info->available_physical_bytes);
+        }
+        spdlog::warn("OPTIMIZE rejected due to insufficient memory: {}", oss.str());
+        return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str());
+      }
+
+      spdlog::info("Starting index optimization: memory_health={} estimated={} index_size={} docs={}",
+                   utils::MemoryHealthStatusToString(memory_health), utils::FormatBytes(estimated_memory),
+                   utils::FormatBytes(index_memory), total_docs);
 
       // Run optimization (this will block, but it's intentional for now)
-      bool started = current_index->OptimizeInBatches(total_docs);
+      bool started = current_index->OptimizeInBatches(total_docs, kDefaultBatchSize);
 
       if (started) {
         auto stats = current_index->GetStatistics();
         std::ostringstream oss;
         oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-            << " roaring=" << stats.roaring_bitmap_lists;
+            << " roaring=" << stats.roaring_bitmap_lists << " memory=" << utils::FormatBytes(stats.memory_usage_bytes);
         return oss.str();
       }
       return ResponseFormatter::FormatError("Failed to start optimization");

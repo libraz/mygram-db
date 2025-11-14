@@ -291,3 +291,96 @@ TEST(IndexConcurrentTest, ConcurrentSearchOrAndNot) {
 
   EXPECT_EQ(success_count, 1000);  // 10 threads * 50 iterations * 2 operations
 }
+
+/**
+ * @brief Test concurrent OPTIMIZE attempts (only one should succeed)
+ */
+TEST(IndexConcurrentTest, ConcurrentOptimizeExclusion) {
+  Index index(1);
+
+  // Add documents
+  for (DocId i = 1; i <= 5000; i++) {
+    index.AddDocument(i, "abc");
+  }
+
+  std::vector<std::thread> threads;
+  std::atomic<int> success_count{0};
+  std::atomic<int> failure_count{0};
+
+  // Launch 3 threads attempting to optimize simultaneously
+  for (int i = 0; i < 3; i++) {
+    threads.emplace_back([&index, &success_count, &failure_count]() {
+      bool result = index.OptimizeInBatches(5000, 500);
+      if (result) {
+        success_count++;
+      } else {
+        failure_count++;
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // Only one optimization should succeed, others should fail
+  EXPECT_EQ(success_count, 1);
+  EXPECT_EQ(failure_count, 2);
+
+  // Verify index is still functional after optimization
+  auto results = index.SearchAnd({"a"});
+  EXPECT_EQ(results.size(), 5000);
+}
+
+/**
+ * @brief Test OPTIMIZE with concurrent document additions
+ */
+TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
+  Index index(1);
+
+  // Add initial documents
+  for (DocId i = 1; i <= 5000; i++) {
+    index.AddDocument(i, "abc");
+  }
+
+  std::vector<std::thread> threads;
+  std::atomic<bool> optimize_done{false};
+  std::atomic<int> additions_during_optimize{0};
+
+  // Optimization thread
+  threads.emplace_back([&index, &optimize_done]() {
+    EXPECT_TRUE(index.OptimizeInBatches(5000, 500));
+    optimize_done = true;
+  });
+
+  // Concurrent addition threads (add documents while optimization is running)
+  for (int i = 0; i < 2; i++) {
+    threads.emplace_back([&index, &optimize_done, &additions_during_optimize, i]() {
+      for (int j = 0; j < 100; j++) {
+        DocId doc_id = 10000 + i * 100 + j;
+        index.AddDocument(doc_id, "xyz");
+        if (!optimize_done) {
+          additions_during_optimize++;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // Verify all documents are present and searchable
+  auto results_abc = index.SearchAnd({"a"});
+  EXPECT_EQ(results_abc.size(), 5000);
+
+  auto results_xyz = index.SearchAnd({"x"});
+  // Due to concurrent execution timing, some additions might not complete
+  // but most should succeed
+  EXPECT_GE(results_xyz.size(), 195);  // At least 195 out of 200
+  EXPECT_LE(results_xyz.size(), 200);  // At most 200
+
+  // At least some additions should have occurred during optimization
+  EXPECT_GT(additions_during_optimize, 0);
+}

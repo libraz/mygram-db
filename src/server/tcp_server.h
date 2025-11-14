@@ -158,10 +158,11 @@ class TcpServer {
   mutable std::mutex contexts_mutex_;
 
   std::string last_error_;
-  std::string dump_dir_;                // Dump directory
-  std::atomic<bool> read_only_{false};  // Read-only mode flag
-  std::atomic<bool> loading_{false};    // Loading mode flag (blocks queries during LOAD)
-  const config::Config* full_config_;   // Full configuration for CONFIG command
+  std::string dump_dir_;                               // Dump directory
+  std::atomic<bool> read_only_{false};                 // Read-only mode flag
+  std::atomic<bool> loading_{false};                   // Loading mode flag (blocks queries during LOAD)
+  std::atomic<bool> optimization_in_progress_{false};  // Global OPTIMIZE operation flag
+  const config::Config* full_config_;                  // Full configuration for CONFIG command
 
   // Auto-save functionality
   std::unique_ptr<std::thread> auto_save_thread_;

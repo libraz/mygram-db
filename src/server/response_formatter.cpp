@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "server/tcp_server.h"
+#include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
 
@@ -221,6 +222,30 @@ std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::
     double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
     oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2) << fragmentation << "\r\n";
   }
+
+  // System memory information
+  auto sys_info = utils::GetSystemMemoryInfo();
+  if (sys_info) {
+    oss << "total_system_memory: " << utils::FormatBytes(sys_info->total_physical_bytes) << "\r\n";
+    oss << "available_system_memory: " << utils::FormatBytes(sys_info->available_physical_bytes) << "\r\n";
+    if (sys_info->total_physical_bytes > 0) {
+      double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
+                                     static_cast<double>(sys_info->total_physical_bytes);
+      oss << "system_memory_usage_ratio: " << std::fixed << std::setprecision(2) << usage_ratio << "\r\n";
+    }
+  }
+
+  // Process memory information
+  auto proc_info = utils::GetProcessMemoryInfo();
+  if (proc_info) {
+    oss << "process_rss: " << utils::FormatBytes(proc_info->rss_bytes) << "\r\n";
+    oss << "process_rss_peak: " << utils::FormatBytes(proc_info->peak_rss_bytes) << "\r\n";
+  }
+
+  // Memory health status
+  auto health = utils::GetMemoryHealthStatus();
+  oss << "memory_health: " << utils::MemoryHealthStatusToString(health) << "\r\n";
+
   oss << "\r\n";
 
   // Index statistics (aggregated)

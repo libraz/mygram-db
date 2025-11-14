@@ -152,6 +152,22 @@ TEST_F(HttpServerTest, InfoEndpoint) {
   EXPECT_TRUE(body["memory"].contains("used_memory_index"));
   EXPECT_TRUE(body["memory"].contains("used_memory_documents"));
 
+  // System memory information
+  EXPECT_TRUE(body["memory"].contains("total_system_memory"));
+  EXPECT_TRUE(body["memory"].contains("total_system_memory_human"));
+  EXPECT_TRUE(body["memory"].contains("available_system_memory"));
+  EXPECT_TRUE(body["memory"].contains("available_system_memory_human"));
+  EXPECT_TRUE(body["memory"].contains("system_memory_usage_ratio"));
+
+  // Process memory information
+  EXPECT_TRUE(body["memory"].contains("process_rss"));
+  EXPECT_TRUE(body["memory"].contains("process_rss_human"));
+  EXPECT_TRUE(body["memory"].contains("process_rss_peak"));
+  EXPECT_TRUE(body["memory"].contains("process_rss_peak_human"));
+
+  // Memory health status
+  EXPECT_TRUE(body["memory"].contains("memory_health"));
+
   // Index object (aggregated across all tables)
   EXPECT_TRUE(body.contains("index"));
   EXPECT_EQ(body["index"]["total_documents"], 3);

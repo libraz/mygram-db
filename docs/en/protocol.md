@@ -111,7 +111,7 @@ OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 
 ## INFO Command
 
-Get server information and statistics.
+Get comprehensive server information and statistics (Redis-style format).
 
 ### Syntax
 
@@ -121,14 +121,67 @@ INFO
 
 ### Response
 
+Returns server information in Redis-style key-value format with multiple sections:
+
 ```
-OK INFO version=<version> uptime=<seconds> total_requests=<count> connections=<count> index_size=<bytes> doc_count=<count>
+OK INFO
+
+# Server
+version: 1.0.0
+uptime_seconds: 3600
+
+# Stats
+total_commands_processed: 10000
+total_connections_received: 150
+total_requests: 10000
+
+# Commandstats
+cmd_search: 8500
+cmd_count: 1000
+cmd_get: 500
+
+# Memory
+used_memory_bytes: 524288000
+used_memory_human: 500.00 MB
+used_memory_peak_bytes: 629145600
+used_memory_peak_human: 600.00 MB
+used_memory_index: 400.00 MB
+used_memory_documents: 100.00 MB
+memory_fragmentation_ratio: 1.20
+total_system_memory: 16.00 GB
+available_system_memory: 8.50 GB
+system_memory_usage_ratio: 0.47
+process_rss: 520.00 MB
+process_rss_peak: 600.00 MB
+memory_health: HEALTHY
+
+# Index
+total_documents: 1000000
+total_terms: 1500000
+total_postings: 5000000
+avg_postings_per_term: 3.33
+delta_encoded_lists: 1200000
+roaring_bitmap_lists: 300000
+optimization_status: idle
+
+# Tables
+tables: products, users, articles
+
+# Clients
+connected_clients: 5
+
+# Replication
+replication_inserts_applied: 50000
+replication_updates_applied: 10000
+replication_deletes_applied: 5000
 ```
 
-Example:
-```
-OK INFO version=1.0.0 uptime=3600 total_requests=10000 connections=5 index_size=1048576 doc_count=1000000
-```
+### Memory Health Status
+
+- **HEALTHY**: >20% system memory available
+- **WARNING**: 10-20% system memory available
+- **CRITICAL**: <10% system memory available (OPTIMIZE will be rejected)
+- **UNKNOWN**: Unable to determine status
 
 ---
 
@@ -326,38 +379,67 @@ OPTIMIZE
 
 ### How it works
 
+- **Pre-execution checks**: Memory health and availability verification
 - Temporarily stops binlog replication
 - Copies and optimizes posting lists in batches
 - Query processing continues (using old index)
 - Atomically switches after optimization completes
 - Resumes binlog replication
 
-### Memory Usage
+### Memory Safety
 
+**Pre-execution Memory Checks:**
+- Rejects execution if system memory health is **CRITICAL** (<10% available)
+- Estimates required memory based on index size and batch size
+- Requires: `available_memory >= estimated_memory + 10% safety margin`
+- Typical memory overhead: ~5-15% of index size during optimization
+
+**Memory Usage Pattern:**
 - **Index portion only** temporarily doubles (document store unchanged)
-- Overall memory usage increases by approximately 1.05-1.1x
+- Overall memory usage increases by approximately 1.05-1.15x
 - Memory is freed gradually through batch processing
 
-### Notes
+### Global Exclusion
 
+- **Only one OPTIMIZE operation** can run at a time across all tables
 - New OPTIMIZE commands are rejected while optimization is in progress
 - Check `optimization_status` via `INFO` command
-- May take several seconds to tens of seconds for large indexes
+
+### Performance
+
+- Small indexes (<10K terms): <1 second
+- Medium indexes (10K-100K terms): 1-10 seconds
+- Large indexes (>100K terms): 10+ seconds
+- Concurrent searches: minimal impact (short lock durations)
+- Concurrent updates: safe but may see brief contention
 
 ### Response
 
+**Success:**
 ```
-OK OPTIMIZED terms=<total> delta=<count> roaring=<count>
+OK OPTIMIZED terms=<total> delta=<count> roaring=<count> memory=<size>
 ```
 
 Example:
 ```
-OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000
+OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000 memory=450.00 MB
 ```
 
-Error (if already optimizing):
+**Errors:**
+
+Already optimizing:
 ```
-ERROR Optimization already in progress
+ERROR Another OPTIMIZE operation is already in progress
+```
+
+Memory critically low:
+```
+ERROR Memory critically low. Cannot start optimization: available=1.50 GB total=8.00 GB
+```
+
+Insufficient memory:
+```
+ERROR Insufficient memory for optimization: estimated=2.50 GB available=1.80 GB
 ```
 
 ---

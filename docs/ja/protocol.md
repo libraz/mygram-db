@@ -111,7 +111,7 @@ OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 
 ## INFO コマンド
 
-サーバー情報と統計を取得します。
+包括的なサーバー情報と統計を取得します（Redis形式）。
 
 ### 構文
 
@@ -121,14 +121,67 @@ INFO
 
 ### レスポンス
 
+Redis形式のキー・バリュー形式で複数のセクションを返します：
+
 ```
-OK INFO version=<version> uptime=<seconds> total_requests=<count> connections=<count> index_size=<bytes> doc_count=<count>
+OK INFO
+
+# Server
+version: 1.0.0
+uptime_seconds: 3600
+
+# Stats
+total_commands_processed: 10000
+total_connections_received: 150
+total_requests: 10000
+
+# Commandstats
+cmd_search: 8500
+cmd_count: 1000
+cmd_get: 500
+
+# Memory
+used_memory_bytes: 524288000
+used_memory_human: 500.00 MB
+used_memory_peak_bytes: 629145600
+used_memory_peak_human: 600.00 MB
+used_memory_index: 400.00 MB
+used_memory_documents: 100.00 MB
+memory_fragmentation_ratio: 1.20
+total_system_memory: 16.00 GB
+available_system_memory: 8.50 GB
+system_memory_usage_ratio: 0.47
+process_rss: 520.00 MB
+process_rss_peak: 600.00 MB
+memory_health: HEALTHY
+
+# Index
+total_documents: 1000000
+total_terms: 1500000
+total_postings: 5000000
+avg_postings_per_term: 3.33
+delta_encoded_lists: 1200000
+roaring_bitmap_lists: 300000
+optimization_status: idle
+
+# Tables
+tables: products, users, articles
+
+# Clients
+connected_clients: 5
+
+# Replication
+replication_inserts_applied: 50000
+replication_updates_applied: 10000
+replication_deletes_applied: 5000
 ```
 
-例：
-```
-OK INFO version=1.0.0 uptime=3600 total_requests=10000 connections=5 index_size=1048576 doc_count=1000000
-```
+### メモリヘルスステータス
+
+- **HEALTHY**: システムメモリの20%以上が利用可能
+- **WARNING**: システムメモリの10-20%が利用可能
+- **CRITICAL**: システムメモリの10%未満が利用可能（OPTIMIZEは拒否されます）
+- **UNKNOWN**: ステータスを判定できない
 
 ---
 
@@ -326,38 +379,67 @@ OPTIMIZE
 
 ### 動作
 
+- **実行前チェック**: メモリヘルスと可用性の検証
 - binlogレプリケーションを一時停止
 - ポスティングリストをバッチでコピーして最適化
 - クエリ処理は継続（古いインデックスを使用）
 - 最適化完了後にアトミックに切り替え
 - binlogレプリケーションを再開
 
-### メモリ使用量
+### メモリ安全性
 
+**実行前メモリチェック：**
+- システムメモリヘルスが **CRITICAL**（利用可能メモリ<10%）の場合は実行を拒否
+- インデックスサイズとバッチサイズに基づいて必要メモリを推定
+- 要件：`利用可能メモリ >= 推定メモリ + 10%の安全マージン`
+- 典型的なメモリオーバーヘッド：最適化中にインデックスサイズの約5〜15%
+
+**メモリ使用パターン：**
 - **インデックス部分のみ**が一時的に2倍になる（ドキュメントストアは変更なし）
-- 全体的なメモリ使用量は約1.05〜1.1倍に増加
+- 全体的なメモリ使用量は約1.05〜1.15倍に増加
 - メモリはバッチ処理で段階的に解放
 
-### 注意
+### グローバル排他制御
 
+- **全テーブルを通じて同時に1つのOPTIMIZE操作**のみ実行可能
 - 最適化中は新しいOPTIMIZEコマンドは拒否されます
 - `optimization_status`は`INFO`コマンドで確認できます
-- 大規模インデックスでは数秒〜数十秒かかる場合があります
+
+### パフォーマンス
+
+- 小規模インデックス（<10K terms）：<1秒
+- 中規模インデックス（10K-100K terms）：1-10秒
+- 大規模インデックス（>100K terms）：10秒以上
+- 並行検索：最小限の影響（短いロック時間）
+- 並行更新：安全だが短時間の競合が発生する可能性あり
 
 ### レスポンス
 
+**成功時：**
 ```
-OK OPTIMIZED terms=<total> delta=<count> roaring=<count>
+OK OPTIMIZED terms=<total> delta=<count> roaring=<count> memory=<size>
 ```
 
 例：
 ```
-OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000
+OK OPTIMIZED terms=1500000 delta=1200000 roaring=300000 memory=450.00 MB
 ```
 
-エラー（すでに最適化中の場合）：
+**エラー：**
+
+すでに最適化中の場合：
 ```
-ERROR Optimization already in progress
+ERROR Another OPTIMIZE operation is already in progress
+```
+
+メモリが危機的に低い場合：
+```
+ERROR Memory critically low. Cannot start optimization: available=1.50 GB total=8.00 GB
+```
+
+メモリ不足の場合：
+```
+ERROR Insufficient memory for optimization: estimated=2.50 GB available=1.80 GB
 ```
 
 ---

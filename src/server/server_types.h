@@ -58,6 +58,7 @@ struct HandlerContext {
   std::string dump_dir;
   std::atomic<bool>& loading;
   std::atomic<bool>& read_only;
+  std::atomic<bool>& optimization_in_progress;
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader;

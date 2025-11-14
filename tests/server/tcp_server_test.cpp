@@ -619,6 +619,18 @@ TEST_F(TcpServerTest, InfoCommand) {
   EXPECT_TRUE(response.find("used_memory_bytes:") != std::string::npos);
   EXPECT_TRUE(response.find("used_memory_human:") != std::string::npos);
 
+  // System memory information
+  EXPECT_TRUE(response.find("total_system_memory:") != std::string::npos);
+  EXPECT_TRUE(response.find("available_system_memory:") != std::string::npos);
+  EXPECT_TRUE(response.find("system_memory_usage_ratio:") != std::string::npos);
+
+  // Process memory information
+  EXPECT_TRUE(response.find("process_rss:") != std::string::npos);
+  EXPECT_TRUE(response.find("process_rss_peak:") != std::string::npos);
+
+  // Memory health status
+  EXPECT_TRUE(response.find("memory_health:") != std::string::npos);
+
   // Index section
   EXPECT_TRUE(response.find("# Index") != std::string::npos);
   EXPECT_TRUE(response.find("total_documents:") != std::string::npos);

@@ -102,6 +102,7 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
       .dump_dir = dump_dir_,
       .loading = loading_,
       .read_only = read_only_,
+      .optimization_in_progress = optimization_in_progress_,
       .binlog_reader = binlog_reader_,
   });
 
