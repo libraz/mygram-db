@@ -19,7 +19,6 @@ add_executable(response_formatter_test
 
 target_link_libraries(response_formatter_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -33,7 +32,6 @@ add_executable(tcp_server_test
 
 target_link_libraries(tcp_server_test
   mygramdb_server
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -47,7 +45,6 @@ add_executable(tcp_server_multi_table_test
 
 target_link_libraries(tcp_server_multi_table_test
   mygramdb_server
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -74,7 +71,6 @@ add_executable(http_server_test
 
 target_link_libraries(http_server_test
   mygramdb_server
-  mygramdb_mysql
   httplib::httplib
   nlohmann_json::nlohmann_json
   GTest::gtest_main
@@ -92,7 +88,6 @@ add_executable(dump_handler_test
 
 target_link_libraries(dump_handler_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -106,7 +101,6 @@ add_executable(gtid_dump_integration_test
 
 target_link_libraries(gtid_dump_integration_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -120,7 +114,6 @@ add_executable(dump_auto_save_test
 
 target_link_libraries(dump_auto_save_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -134,7 +127,6 @@ add_executable(sync_handler_test
 
 target_link_libraries(sync_handler_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_mysql
   GTest::gtest_main
 )
 
@@ -148,7 +140,6 @@ add_executable(config_handler_test
 
 target_link_libraries(config_handler_test
   mygramdb_server  # Includes all dependencies transitively
-  mygramdb_config
   GTest::gtest_main
 )
 

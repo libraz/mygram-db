@@ -14,6 +14,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include "utils/string_utils.h"
+
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -34,12 +36,6 @@ namespace {
 constexpr double kHealthyThreshold = 0.2;  // 20% available = healthy
 constexpr double kWarningThreshold = 0.1;  // 10% available = warning
 // Below 10% = critical
-
-// Bytes conversion constants
-constexpr uint64_t kBytesPerKB = 1024;
-constexpr uint64_t kBytesPerMB = 1024 * 1024;
-constexpr uint64_t kBytesPerGB = 1024 * 1024 * 1024;
-
 }  // namespace
 
 std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
@@ -99,6 +95,7 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
 
 #elif __linux__
   // Read /proc/meminfo for detailed memory information
+  constexpr uint64_t kBytesPerKB = 1024ULL;
   std::ifstream meminfo("/proc/meminfo");
   if (!meminfo) {
     spdlog::error("Failed to open /proc/meminfo");
@@ -175,6 +172,7 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
 
 #elif __linux__
   // Read /proc/self/status for memory info
+  constexpr uint64_t kBytesPerKB = 1024ULL;
   std::ifstream status("/proc/self/status");
   if (!status) {
     spdlog::error("Failed to open /proc/self/status");
@@ -267,23 +265,6 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status) {
       return "UNKNOWN";
   }
   return "UNKNOWN";
-}
-
-std::string FormatBytes(uint64_t bytes) {
-  std::ostringstream oss;
-  oss << std::fixed << std::setprecision(2);
-
-  if (bytes >= kBytesPerGB) {
-    oss << static_cast<double>(bytes) / static_cast<double>(kBytesPerGB) << " GB";
-  } else if (bytes >= kBytesPerMB) {
-    oss << static_cast<double>(bytes) / static_cast<double>(kBytesPerMB) << " MB";
-  } else if (bytes >= kBytesPerKB) {
-    oss << static_cast<double>(bytes) / static_cast<double>(kBytesPerKB) << " KB";
-  } else {
-    oss << bytes << " B";
-  }
-
-  return oss.str();
 }
 
 uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size) {

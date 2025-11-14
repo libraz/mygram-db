@@ -16,7 +16,6 @@ add_executable(required_filters_test
 
 target_link_libraries(required_filters_test PRIVATE
   mygramdb_config
-  mygramdb_storage
   GTest::gtest_main
 )
 

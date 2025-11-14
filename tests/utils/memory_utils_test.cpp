@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include "utils/string_utils.h"
+
 using namespace mygramdb::utils;
 
 /**
@@ -81,14 +83,15 @@ TEST(MemoryUtilsTest, MemoryHealthStatusToString) {
  * @brief Test bytes formatting
  */
 TEST(MemoryUtilsTest, FormatBytes) {
-  // Note: FormatBytes uses setprecision(2), but values < 1KB don't have decimal places
-  EXPECT_EQ(FormatBytes(0), "0 B");
-  EXPECT_EQ(FormatBytes(512), "512 B");
-  EXPECT_EQ(FormatBytes(1024), "1.00 KB");
-  EXPECT_EQ(FormatBytes(1536), "1.50 KB");
-  EXPECT_EQ(FormatBytes(1024 * 1024), "1.00 MB");
-  EXPECT_EQ(FormatBytes(1024ULL * 1024 * 1024), "1.00 GB");
-  EXPECT_EQ(FormatBytes(2560ULL * 1024 * 1024), "2.50 GB");
+  // FormatBytes from string_utils formats without spaces
+  // Precision varies: >=100 uses 0 decimals, >=10 uses 1 decimal, <10 uses 2 decimals
+  EXPECT_EQ(FormatBytes(0), "0B");
+  EXPECT_EQ(FormatBytes(512), "512B");  // >= 100, so no decimals
+  EXPECT_EQ(FormatBytes(1024), "1.00KB");
+  EXPECT_EQ(FormatBytes(1536), "1.50KB");
+  EXPECT_EQ(FormatBytes(1024 * 1024), "1.00MB");
+  EXPECT_EQ(FormatBytes(1024ULL * 1024 * 1024), "1.00GB");
+  EXPECT_EQ(FormatBytes(2560ULL * 1024 * 1024), "2.50GB");
 }
 
 /**

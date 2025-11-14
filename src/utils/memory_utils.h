@@ -86,14 +86,6 @@ MemoryHealthStatus GetMemoryHealthStatus();
 std::string MemoryHealthStatusToString(MemoryHealthStatus status);
 
 /**
- * @brief Format bytes to human-readable string (KB, MB, GB, etc.)
- *
- * @param bytes Number of bytes
- * @return Human-readable string (e.g., "1.5 GB", "512 MB")
- */
-std::string FormatBytes(uint64_t bytes);
-
-/**
  * @brief Estimate memory required for index optimization
  *
  * This estimates the peak memory usage during OptimizeInBatches operation.

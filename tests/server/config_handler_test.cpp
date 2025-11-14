@@ -32,7 +32,8 @@ class ConfigHandlerTest : public ::testing::Test {
             .binlog_reader = nullptr,
 #endif
             .cache_manager = nullptr,
-        } {}
+        } {
+  }
 
   void SetUp() override {
     // Create a minimal valid config

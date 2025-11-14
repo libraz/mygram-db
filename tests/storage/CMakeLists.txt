@@ -42,7 +42,6 @@ add_executable(dump_commands_test
 
 target_link_libraries(dump_commands_test
   mygramdb_storage  # Includes mygramdb_index transitively
-  mygramdb_config
   GTest::gtest_main
 )
 

@@ -26,13 +26,7 @@ add_subdirectory(client)
 add_executable(mygramdb main.cpp)
 
 target_link_libraries(mygramdb PRIVATE
-  mygramdb_config
-  mygramdb_server     # Includes mygramdb_cache, mygramdb_query, mygramdb_index, mygramdb_storage transitively
+  mygramdb_server     # Includes config, cache, query, index, storage transitively
 )
-
-# Link MySQL library if available
-if(USE_MYSQL AND MYSQL_FOUND)
-  target_link_libraries(mygramdb PRIVATE mygramdb_mysql)
-endif()
 
 target_include_directories(mygramdb PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

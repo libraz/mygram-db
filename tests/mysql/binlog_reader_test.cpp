@@ -3,7 +3,6 @@
  * @brief Unit tests for binlog reader
  */
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <atomic>

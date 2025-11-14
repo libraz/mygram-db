@@ -26,7 +26,7 @@ class AdminHandler : public CommandHandler {
    * @param path Configuration path (empty for root)
    * @return Response string
    */
-  std::string HandleConfigHelp(const std::string& path);
+  static std::string HandleConfigHelp(const std::string& path);
 
   /**
    * @brief Handle CONFIG SHOW command
@@ -40,7 +40,7 @@ class AdminHandler : public CommandHandler {
    * @param filepath Path to configuration file
    * @return Response string
    */
-  std::string HandleConfigVerify(const std::string& filepath);
+  static std::string HandleConfigVerify(const std::string& filepath);
 };
 
 }  // namespace mygramdb::server

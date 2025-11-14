@@ -30,6 +30,7 @@ class MygramClientTest : public ::testing::Test {
 
     // Create table context
     table_context_.name = "test";
+    table_context_.config.name = table_context_.name;
     table_context_.config.ngram_size = 1;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
@@ -40,12 +41,20 @@ class MygramClientTest : public ::testing::Test {
 
     table_contexts_["test"] = &table_context_;
 
+    // Prepare config used by CONFIG SHOW responses
+    full_config_.tables.clear();
+    full_config_.tables.push_back(table_context_.config);
+    full_config_.dump.interval_sec = 0;  // Disable snapshot scheduler in tests
+
     // Start server on random port
     server::ServerConfig server_config;
     server_config.port = 0;  // Let OS assign port
     server_config.host = "127.0.0.1";
 
-    server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_);
+    full_config_.api.tcp.bind = server_config.host;
+    full_config_.api.tcp.port = server_config.port;
+
+    server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_, "./dumps", &full_config_);
     ASSERT_TRUE(server_->Start());
 
     // Wait for server to be ready
@@ -101,6 +110,7 @@ class MygramClientTest : public ::testing::Test {
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
   std::unique_ptr<server::TcpServer> server_;
   std::unique_ptr<MygramClient> client_;
+  config::Config full_config_;
 };
 
 /**

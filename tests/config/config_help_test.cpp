@@ -112,7 +112,7 @@ TEST_F(ConfigSchemaExplorerTest, FormatHelp) {
   auto help = explorer_.GetHelp("mysql.port");
   ASSERT_TRUE(help.has_value());
 
-  std::string formatted = explorer_.FormatHelp(help.value());
+  std::string formatted = ConfigSchemaExplorer::FormatHelp(help.value());
 
   EXPECT_FALSE(formatted.empty());
   EXPECT_NE(formatted.find("mysql.port"), std::string::npos);
@@ -124,7 +124,7 @@ TEST_F(ConfigSchemaExplorerTest, FormatHelp) {
 // Test FormatPathList
 TEST_F(ConfigSchemaExplorerTest, FormatPathList) {
   auto paths = explorer_.ListPaths("mysql");
-  std::string formatted = explorer_.FormatPathList(paths, "mysql");
+  std::string formatted = ConfigSchemaExplorer::FormatPathList(paths, "mysql");
 
   EXPECT_FALSE(formatted.empty());
   EXPECT_NE(formatted.find("host"), std::string::npos);

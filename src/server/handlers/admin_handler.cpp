@@ -49,7 +49,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     if (path.empty()) {
       // Show top-level sections
       auto paths = explorer.ListPaths("");
-      std::string result = explorer.FormatPathList(paths, "");
+      std::string result = config::ConfigSchemaExplorer::FormatPathList(paths, "");
       return "+OK\n" + result;
     }
 
@@ -59,7 +59,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
       return ResponseFormatter::FormatError("Configuration path not found: " + path);
     }
 
-    std::string result = explorer.FormatHelp(help_info.value());
+    std::string result = config::ConfigSchemaExplorer::FormatHelp(help_info.value());
     return "+OK\n" + result;
 
   } catch (const std::exception& e) {
@@ -70,6 +70,11 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
 
 std::string AdminHandler::HandleConfigShow(const std::string& path) {
   try {
+    if (ctx_.full_config == nullptr) {
+      spdlog::warn("CONFIG SHOW requested but full configuration is not available");
+      return ResponseFormatter::FormatError("Server configuration is not available");
+    }
+
     std::string result = config::FormatConfigForDisplay(*ctx_.full_config, path);
     return "+OK\n" + result;
   } catch (const std::exception& e) {
@@ -102,8 +107,7 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
       summary << ")";
     }
     summary << "\n";
-    summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":"
-            << test_config.mysql.port;
+    summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port;
 
     return "+OK\n" + summary.str();
 

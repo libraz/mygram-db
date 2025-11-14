@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "utils/memory_utils.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::server {
 

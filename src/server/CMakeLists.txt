@@ -31,3 +31,7 @@ target_link_libraries(mygramdb_server PUBLIC
   nlohmann_json::nlohmann_json
   Threads::Threads
 )
+
+if(USE_MYSQL AND MYSQL_FOUND)
+  target_link_libraries(mygramdb_server PUBLIC mygramdb_mysql)
+endif()

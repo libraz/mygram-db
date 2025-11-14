@@ -7,11 +7,10 @@
 
 #include <cstdint>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "config/config.h"
 
@@ -21,16 +20,16 @@ namespace mygramdb::config {
  * @brief Configuration help information
  */
 struct ConfigHelpInfo {
-  std::string path;                            // e.g., "mysql.port"
-  std::string type;                            // e.g., "integer"
-  std::string description;                     // From schema
-  std::optional<std::string> default_value;    // If specified
-  std::vector<std::string> allowed_values;     // For enums
-  std::optional<int64_t> minimum;              // For numbers
-  std::optional<int64_t> maximum;              // For numbers
-  std::optional<double> minimum_number;        // For floating point numbers
-  std::optional<double> maximum_number;        // For floating point numbers
-  bool required = false;                       // If required in parent
+  std::string path;                          // e.g., "mysql.port"
+  std::string type;                          // e.g., "integer"
+  std::string description;                   // From schema
+  std::optional<std::string> default_value;  // If specified
+  std::vector<std::string> allowed_values;   // For enums
+  std::optional<int64_t> minimum;            // For numbers
+  std::optional<int64_t> maximum;            // For numbers
+  std::optional<double> minimum_number;      // For floating point numbers
+  std::optional<double> maximum_number;      // For floating point numbers
+  bool required = false;                     // If required in parent
 };
 
 /**
@@ -69,7 +68,7 @@ class ConfigSchemaExplorer {
    * @param info Help information
    * @return Formatted help text
    */
-  std::string FormatHelp(const ConfigHelpInfo& info) const;
+  static std::string FormatHelp(const ConfigHelpInfo& info);
 
   /**
    * @brief Format path listing as human-readable text
@@ -78,8 +77,8 @@ class ConfigSchemaExplorer {
    * @param parent_path Parent path for context (optional)
    * @return Formatted path list
    */
-  std::string FormatPathList(const std::map<std::string, std::string>& paths,
-                              const std::string& parent_path = "") const;
+  static std::string FormatPathList(const std::map<std::string, std::string>& paths,
+                                    const std::string& parent_path = "");
 
  private:
   nlohmann::json schema_;  // Parsed schema
@@ -99,7 +98,7 @@ class ConfigSchemaExplorer {
    * @param node Schema node
    * @return Help information
    */
-  ConfigHelpInfo ExtractHelpInfo(const std::string& path, const nlohmann::json& node) const;
+  static ConfigHelpInfo ExtractHelpInfo(const std::string& path, const nlohmann::json& node);
 
   /**
    * @brief Split path into components

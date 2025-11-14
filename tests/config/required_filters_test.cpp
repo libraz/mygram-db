@@ -10,8 +10,6 @@
 #include <variant>
 
 #include "config/config.h"
-#include "storage/document_store.h"
-
 using namespace mygramdb;
 
 /**

@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     git \
     pkg-config \
     libmysqlclient-dev \
+    liblz4-dev \
     libicu-dev \
     libreadline-dev \
     ca-certificates \
@@ -42,6 +43,7 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
     libstdc++6 \
     libmysqlclient21 \
+    liblz4-1 \
     libicu70 \
     libreadline8 \
     ca-certificates \

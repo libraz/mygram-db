@@ -10,6 +10,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <vector>
 
 namespace mygramdb::storage::dump_v1 {

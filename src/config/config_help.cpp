@@ -25,7 +25,7 @@ namespace {
 std::string ToLower(const std::string& str) {
   std::string result = str;
   std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
+                 [](unsigned char ch_value) { return std::tolower(ch_value); });
   return result;
 }
 
@@ -38,15 +38,17 @@ std::string ToLower(const std::string& str) {
 std::string JsonValueToString(const nlohmann::json& value) {
   if (value.is_string()) {
     return "\"" + value.get<std::string>() + "\"";
-  } else if (value.is_boolean()) {
+  }
+  if (value.is_boolean()) {
     return value.get<bool>() ? "true" : "false";
-  } else if (value.is_number()) {
-    return value.dump();
-  } else if (value.is_null()) {
-    return "null";
-  } else {
+  }
+  if (value.is_number()) {
     return value.dump();
   }
+  if (value.is_null()) {
+    return "null";
+  }
+  return value.dump();
 }
 
 /**
@@ -286,17 +288,25 @@ std::optional<nlohmann::json> NavigateJsonPath(const nlohmann::json& json, const
  */
 void MaskSensitiveFieldsRecursive(nlohmann::json& json, const std::string& path) {
   if (json.is_object()) {
-    for (auto it = json.begin(); it != json.end(); ++it) {
-      std::string child_path = path.empty() ? it.key() : path + "." + it.key();
+    for (const auto& [key, child] : json.items()) {
+      std::string child_path;
+      if (path.empty()) {
+        child_path = key;
+      } else {
+        child_path.reserve(path.size() + 1 + key.size());
+        child_path.assign(path);
+        child_path.push_back('.');
+        child_path.append(key);
+      }
       if (IsSensitiveField(child_path)) {
-        it.value() = "***";
-      } else if (it.value().is_object() || it.value().is_array()) {
-        MaskSensitiveFieldsRecursive(it.value(), child_path);
+        json[key] = "***";
+      } else if (child.is_object() || child.is_array()) {
+        MaskSensitiveFieldsRecursive(json[key], child_path);
       }
     }
   } else if (json.is_array()) {
-    for (size_t i = 0; i < json.size(); ++i) {
-      MaskSensitiveFieldsRecursive(json[i], path);
+    for (auto& child : json) {
+      MaskSensitiveFieldsRecursive(child, path);
     }
   }
 }
@@ -313,12 +323,12 @@ std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
   std::string indent_str(indent * 2, ' ');
 
   if (json.is_object()) {
-    for (auto it = json.begin(); it != json.end(); ++it) {
-      oss << indent_str << it.key() << ":";
-      if (it.value().is_object() || it.value().is_array()) {
-        oss << "\n" << JsonToYaml(it.value(), indent + 1);
+    for (const auto& [key, child] : json.items()) {
+      oss << indent_str << key << ":";
+      if (child.is_object() || child.is_array()) {
+        oss << "\n" << JsonToYaml(child, indent + 1);
       } else {
-        oss << " " << JsonValueToString(it.value()) << "\n";
+        oss << " " << JsonValueToString(child) << "\n";
       }
     }
   } else if (json.is_array()) {
@@ -327,21 +337,21 @@ std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
       if (item.is_object()) {
         // First property on same line, rest indented
         bool first = true;
-        for (auto it = item.begin(); it != item.end(); ++it) {
+        for (const auto& [key, value] : item.items()) {
           if (first) {
-            oss << " " << it.key() << ":";
-            if (it.value().is_object() || it.value().is_array()) {
-              oss << "\n" << JsonToYaml(it.value(), indent + 2);
+            oss << " " << key << ":";
+            if (value.is_object() || value.is_array()) {
+              oss << "\n" << JsonToYaml(value, indent + 2);
             } else {
-              oss << " " << JsonValueToString(it.value()) << "\n";
+              oss << " " << JsonValueToString(value) << "\n";
             }
             first = false;
           } else {
-            oss << std::string((indent + 1) * 2, ' ') << it.key() << ":";
-            if (it.value().is_object() || it.value().is_array()) {
-              oss << "\n" << JsonToYaml(it.value(), indent + 2);
+            oss << std::string((indent + 1) * 2, ' ') << key << ":";
+            if (value.is_object() || value.is_array()) {
+              oss << "\n" << JsonToYaml(value, indent + 2);
             } else {
-              oss << " " << JsonValueToString(it.value()) << "\n";
+              oss << " " << JsonValueToString(value) << "\n";
             }
           }
         }
@@ -395,19 +405,19 @@ std::map<std::string, std::string> ConfigSchemaExplorer::ListPaths(const std::st
   // List properties
   if (current.contains("properties")) {
     const auto& properties = current["properties"];
-    for (auto it = properties.begin(); it != properties.end(); ++it) {
+    for (const auto& [key, property] : properties.items()) {
       std::string description;
-      if (it.value().contains("description")) {
-        description = it.value()["description"].get<std::string>();
+      if (property.contains("description")) {
+        description = property["description"].get<std::string>();
       }
-      result[it.key()] = description;
+      result[key] = description;
     }
   }
 
   return result;
 }
 
-std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) const {
+std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) {
   std::ostringstream oss;
 
   oss << info.path << "\n\n";
@@ -477,7 +487,7 @@ std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) const {
 }
 
 std::string ConfigSchemaExplorer::FormatPathList(const std::map<std::string, std::string>& paths,
-                                                  const std::string& parent_path) const {
+                                                 const std::string& parent_path) {
   std::ostringstream oss;
 
   if (parent_path.empty()) {
@@ -538,8 +548,7 @@ std::optional<nlohmann::json> ConfigSchemaExplorer::FindSchemaNode(const std::st
   return current;
 }
 
-ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path,
-                                                      const nlohmann::json& node) const {
+ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path, const nlohmann::json& node) {
   ConfigHelpInfo info;
   info.path = path;
 
@@ -552,7 +561,9 @@ ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path,
       std::ostringstream oss;
       bool first = true;
       for (const auto& type : node["type"]) {
-        if (!first) oss << " | ";
+        if (!first) {
+          oss << " | ";
+        }
         oss << type.get<std::string>();
         first = false;
       }
@@ -621,9 +632,8 @@ std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path
 
 bool IsSensitiveField(const std::string& path) {
   std::string lower_path = ToLower(path);
-  return lower_path.find("password") != std::string::npos ||
-         lower_path.find("secret") != std::string::npos || lower_path.find("key") != std::string::npos ||
-         lower_path.find("token") != std::string::npos;
+  return lower_path.find("password") != std::string::npos || lower_path.find("secret") != std::string::npos ||
+         lower_path.find("key") != std::string::npos || lower_path.find("token") != std::string::npos;
 }
 
 std::string MaskSensitiveValue(const std::string& path, const std::string& value) {

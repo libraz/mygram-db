@@ -66,8 +66,22 @@ bool ConnectionAcceptor::Start() {
   struct sockaddr_in address = {};
   std::memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = INADDR_ANY;
   address.sin_port = htons(config_.port);
+
+  // Determine bind address (default to 0.0.0.0 for backward compatibility)
+  in_addr bind_addr{};
+  if (config_.host.empty() || config_.host == "0.0.0.0") {
+    bind_addr.s_addr = INADDR_ANY;
+  } else {
+    if (inet_pton(AF_INET, config_.host.c_str(), &bind_addr) != 1) {
+      last_error_ = "Invalid bind address: " + config_.host;
+      spdlog::error("{}", last_error_);
+      close(server_fd_);
+      server_fd_ = -1;
+      return false;
+    }
+  }
+  address.sin_addr = bind_addr;
 
   if (bind(server_fd_, ToSockaddr(&address), sizeof(address)) < 0) {
     last_error_ = "Failed to bind to port " + std::to_string(config_.port) + ": " + std::string(strerror(errno));

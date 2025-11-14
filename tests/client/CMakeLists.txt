@@ -7,7 +7,6 @@ add_executable(mygramclient_test
 target_link_libraries(mygramclient_test
   mygramclient_static
   mygramdb_server
-  mygramdb_mysql
   GTest::gtest_main
 )
 
