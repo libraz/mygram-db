@@ -25,6 +25,28 @@ namespace mygramdb::server {
 namespace {
 constexpr int kIpAddressBufferSize = 256;
 constexpr size_t kGtidPrefixLength = 7;  // Length of "gtid":"
+
+/**
+ * @brief RAII guard for atomic boolean flags
+ *
+ * Automatically sets flag to true on construction and resets to false on destruction.
+ * Exception-safe: ensures flag is always reset even if exceptions are thrown.
+ */
+class FlagGuard {
+ public:
+  explicit FlagGuard(std::atomic<bool>& flag) : flag_(flag) { flag_ = true; }
+  ~FlagGuard() { flag_ = false; }
+
+  // Non-copyable and non-movable
+  FlagGuard(const FlagGuard&) = delete;
+  FlagGuard& operator=(const FlagGuard&) = delete;
+  FlagGuard(FlagGuard&&) = delete;
+  FlagGuard& operator=(FlagGuard&&) = delete;
+
+ private:
+  std::atomic<bool>& flag_;
+};
+
 }  // namespace
 
 std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
@@ -54,12 +76,21 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     }
   } else {
     auto now = std::time(nullptr);
+    std::tm tm_buf{};
+    localtime_r(&now, &tm_buf);  // Thread-safe version of localtime
     std::array<char, kIpAddressBufferSize> buf{};
-    std::strftime(buf.data(), buf.size(), "dump_%Y%m%d_%H%M%S.dmp", std::localtime(&now));
+    std::strftime(buf.data(), buf.size(), "dump_%Y%m%d_%H%M%S.dmp", &tm_buf);
     filepath = ctx_.dump_dir + "/" + std::string(buf.data());
   }
 
   spdlog::info("Attempting to save dump to: {}", filepath);
+
+  // Check if full_config is available
+  if (ctx_.full_config == nullptr) {
+    std::string error_msg = "Cannot save dump: server configuration is not available";
+    spdlog::error("{}", error_msg);
+    return ResponseFormatter::FormatError(error_msg);
+  }
 
   // Get current GTID
   std::string gtid;
@@ -70,8 +101,8 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   }
 #endif
 
-  // Set read-only mode
-  ctx_.read_only = true;
+  // Set read-only mode (RAII guard ensures it's cleared even on exceptions)
+  FlagGuard read_only_guard(ctx_.read_only);
 
   // Convert table_contexts to format expected by dump_v1::WriteDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
@@ -81,9 +112,6 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 
   // Call dump_v1 API
   bool success = storage::dump_v1::WriteDumpV1(filepath, gtid, *ctx_.full_config, converted_contexts);
-
-  // Clear read-only mode
-  ctx_.read_only = false;
 
   if (success) {
     spdlog::info("Successfully saved dump to: {}", filepath);
@@ -108,8 +136,8 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   spdlog::info("Attempting to load dump from: {}", filepath);
 
-  // Set loading mode
-  ctx_.loading = true;
+  // Set loading mode (RAII guard ensures it's cleared even on exceptions)
+  FlagGuard loading_guard(ctx_.loading);
 
   // Convert table_contexts to format expected by dump_v1::ReadDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
@@ -125,9 +153,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Call dump_v1 API
   bool success = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
                                               &integrity_error);
-
-  // Clear loading mode
-  ctx_.loading = false;
 
   if (success) {
     spdlog::info("Successfully loaded dump from: {} (GTID: {})", filepath, gtid);

@@ -531,8 +531,10 @@ void TcpServer::AutoSaveThread() {
       try {
         // Generate timestamp-based filename
         auto timestamp = std::time(nullptr);
+        std::tm tm_buf{};
+        localtime_r(&timestamp, &tm_buf);  // Thread-safe version of localtime
         std::ostringstream filename;
-        filename << "auto_" << std::put_time(std::localtime(&timestamp), "%Y%m%d_%H%M%S") << ".dmp";
+        filename << "auto_" << std::put_time(&tm_buf, "%Y%m%d_%H%M%S") << ".dmp";
 
         std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
 

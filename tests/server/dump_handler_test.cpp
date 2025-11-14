@@ -427,4 +427,112 @@ TEST_F(DumpHandlerTest, SaveLoadRoundTripPreservesAllData) {
   }
 }
 
+// ============================================================================
+// Null Config Tests
+// ============================================================================
+
+TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
+  // Create handler context with null config
+  HandlerContext null_config_ctx{
+      .table_contexts = table_contexts_,
+      .stats = *stats_,
+      .full_config = nullptr,  // Null config
+      .dump_dir = "/tmp",
+      .loading = loading_,
+      .read_only = read_only_,
+      .optimization_in_progress = optimization_in_progress_,
+      .binlog_reader = nullptr,
+  };
+
+  DumpHandler null_config_handler(null_config_ctx);
+
+  // Try to save dump
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  query.filepath = test_filepath_;
+
+  std::string response = null_config_handler.Handle(query, conn_ctx_);
+
+  // Should return error
+  EXPECT_TRUE(response.find("ERROR") == 0);
+  EXPECT_TRUE(response.find("configuration is not available") != std::string::npos);
+}
+
+// ============================================================================
+// Exception Safety Tests
+// ============================================================================
+
+TEST_F(DumpHandlerTest, ReadOnlyFlagResetOnException) {
+  // Save a valid dump first
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
+
+  // Verify read_only is false after successful save
+  EXPECT_FALSE(read_only_);
+
+  // Try to save to an invalid path (should trigger exception or error)
+  query::Query invalid_query;
+  invalid_query.type = query::QueryType::DUMP_SAVE;
+  invalid_query.filepath = "/invalid/path/that/does/not/exist/test.dmp";
+
+  std::string error_response = handler_->Handle(invalid_query, conn_ctx_);
+
+  // Even if error occurs, read_only should be reset to false
+  EXPECT_FALSE(read_only_) << "read_only flag should be reset even on error";
+  EXPECT_TRUE(error_response.find("ERROR") == 0 || error_response.find("Failed") != std::string::npos);
+}
+
+TEST_F(DumpHandlerTest, LoadingFlagResetOnException) {
+  // Verify loading is false initially
+  EXPECT_FALSE(loading_);
+
+  // Try to load from non-existent file
+  query::Query invalid_query;
+  invalid_query.type = query::QueryType::DUMP_LOAD;
+  invalid_query.filepath = "/tmp/nonexistent_file_that_does_not_exist.dmp";
+
+  std::string error_response = handler_->Handle(invalid_query, conn_ctx_);
+
+  // Even if error occurs, loading should be reset to false
+  EXPECT_FALSE(loading_) << "loading flag should be reset even on error";
+  EXPECT_TRUE(error_response.find("ERROR") == 0 || error_response.find("Failed") != std::string::npos);
+}
+
+TEST_F(DumpHandlerTest, ConcurrentFlagsNotAffected) {
+  // This test verifies that read_only and loading flags work correctly
+  // when set by different operations
+
+  // Set loading flag externally (simulating another operation)
+  loading_ = true;
+
+  // Try to save dump (should work independently)
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
+
+  // read_only should be reset, but loading should remain true
+  EXPECT_FALSE(read_only_);
+  EXPECT_TRUE(loading_) << "loading flag should not be affected by save operation";
+
+  // Reset for next test
+  loading_ = false;
+  read_only_ = true;
+
+  // Load dump (should work independently)
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0);
+
+  // loading should be reset, but read_only should remain true
+  EXPECT_FALSE(loading_);
+  EXPECT_TRUE(read_only_) << "read_only flag should not be affected by load operation";
+}
+
 }  // namespace mygramdb::server
