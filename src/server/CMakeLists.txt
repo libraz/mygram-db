@@ -4,6 +4,11 @@ add_library(mygramdb_server STATIC
   thread_pool.cpp
   server_stats.cpp
   response_formatter.cpp
+  statistics_service.cpp
+  table_catalog.cpp
+  connection_acceptor.cpp
+  request_dispatcher.cpp
+  snapshot_scheduler.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
   handlers/document_handler.cpp

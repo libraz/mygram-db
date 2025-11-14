@@ -7,9 +7,13 @@
 
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <thread>
 
 #include "index/index.h"
 #include "query/query_parser.h"
@@ -67,8 +71,11 @@ class DumpHandlerTest : public ::testing::Test {
     // Setup test data
     AddTestData();
 
-    // Setup test file path
-    test_filepath_ = "/tmp/test_snapshot_" + std::to_string(std::time(nullptr)) + ".dmp";
+    // Create unique test file path for parallel test execution
+    std::stringstream ss;
+    ss << "/tmp/test_snapshot_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+       << std::chrono::steady_clock::now().time_since_epoch().count() << ".dmp";
+    test_filepath_ = ss.str();
   }
 
   void TearDown() override {

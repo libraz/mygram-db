@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "server/statistics_service.h"
 #include "server/tcp_server.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
@@ -147,8 +148,8 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   return oss.str();
 }
 
-std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                                  ServerStats& stats,
+std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
+                                                  const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
                                                   mysql::BinlogReader* binlog_reader,
 #else
@@ -206,49 +207,19 @@ std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::
   }
   oss << "\r\n";
 
-  // Aggregate memory and index statistics across all tables
-  size_t total_index_memory = 0;
-  size_t total_doc_memory = 0;
-  size_t total_documents = 0;
-  size_t total_terms = 0;
-  size_t total_postings = 0;
-  size_t total_delta_encoded = 0;
-  size_t total_roaring_bitmap = 0;
-  bool any_optimizing = false;
-
-  for (const auto& [table_name, ctx] : table_contexts) {
-    total_index_memory += ctx->index->MemoryUsage();
-    total_doc_memory += ctx->doc_store->MemoryUsage();
-    total_documents += ctx->doc_store->Size();
-    auto idx_stats = ctx->index->GetStatistics();
-    total_terms += idx_stats.total_terms;
-    total_postings += idx_stats.total_postings;
-    total_delta_encoded += idx_stats.delta_encoded_lists;
-    total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
-    if (ctx->index->IsOptimizing()) {
-      any_optimizing = true;
-    }
-  }
-
-  size_t total_memory = total_index_memory + total_doc_memory;
-
-  // Memory statistics
+  // Memory statistics (using pre-computed metrics)
   oss << "# Memory\r\n";
-
-  // Update memory stats in real-time
-  stats.UpdateMemoryUsage(total_memory);
-
-  oss << "used_memory_bytes: " << total_memory << "\r\n";
-  oss << "used_memory_human: " << utils::FormatBytes(total_memory) << "\r\n";
+  oss << "used_memory_bytes: " << metrics.total_memory << "\r\n";
+  oss << "used_memory_human: " << utils::FormatBytes(metrics.total_memory) << "\r\n";
   oss << "used_memory_peak_bytes: " << stats.GetPeakMemoryUsage() << "\r\n";
   oss << "used_memory_peak_human: " << utils::FormatBytes(stats.GetPeakMemoryUsage()) << "\r\n";
-  oss << "used_memory_index: " << utils::FormatBytes(total_index_memory) << "\r\n";
-  oss << "used_memory_documents: " << utils::FormatBytes(total_doc_memory) << "\r\n";
+  oss << "used_memory_index: " << utils::FormatBytes(metrics.total_index_memory) << "\r\n";
+  oss << "used_memory_documents: " << utils::FormatBytes(metrics.total_doc_memory) << "\r\n";
 
   // Memory fragmentation estimate
-  if (total_memory > 0) {
+  if (metrics.total_memory > 0) {
     size_t peak = stats.GetPeakMemoryUsage();
-    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
+    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(metrics.total_memory) : 1.0;
     oss << "memory_fragmentation_ratio: " << std::fixed << std::setprecision(2) << fragmentation << "\r\n";
   }
 
@@ -277,20 +248,20 @@ std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::
 
   oss << "\r\n";
 
-  // Index statistics (aggregated)
+  // Index statistics (using pre-computed metrics)
   oss << "# Index\r\n";
-  oss << "total_documents: " << total_documents << "\r\n";
-  oss << "total_terms: " << total_terms << "\r\n";
-  oss << "total_postings: " << total_postings << "\r\n";
-  if (total_terms > 0) {
-    double avg_postings = static_cast<double>(total_postings) / static_cast<double>(total_terms);
+  oss << "total_documents: " << metrics.total_documents << "\r\n";
+  oss << "total_terms: " << metrics.total_terms << "\r\n";
+  oss << "total_postings: " << metrics.total_postings << "\r\n";
+  if (metrics.total_terms > 0) {
+    double avg_postings = static_cast<double>(metrics.total_postings) / static_cast<double>(metrics.total_terms);
     oss << "avg_postings_per_term: " << std::fixed << std::setprecision(2) << avg_postings << "\r\n";
   }
-  oss << "delta_encoded_lists: " << total_delta_encoded << "\r\n";
-  oss << "roaring_bitmap_lists: " << total_roaring_bitmap << "\r\n";
+  oss << "delta_encoded_lists: " << metrics.total_delta_encoded << "\r\n";
+  oss << "roaring_bitmap_lists: " << metrics.total_roaring_bitmap << "\r\n";
 
   // Optimization status
-  if (any_optimizing) {
+  if (metrics.any_table_optimizing) {
     oss << "optimization_status: in_progress\r\n";
   } else {
     oss << "optimization_status: idle\r\n";
@@ -326,7 +297,7 @@ std::string ResponseFormatter::FormatInfoResponse(const std::unordered_map<std::
     oss << "replication_status: disabled\r\n";
   }
 
-  // Event statistics (always shown, even when binlog_reader is null)
+  // Event statistics
   oss << "replication_inserts_applied: " << stats.GetReplInsertsApplied() << "\r\n";
   oss << "replication_inserts_skipped: " << stats.GetReplInsertsSkipped() << "\r\n";
   oss << "replication_updates_applied: " << stats.GetReplUpdatesApplied() << "\r\n";
@@ -485,7 +456,8 @@ std::string ResponseFormatter::FormatConfigResponse(const config::Config* full_c
 }
 
 std::string ResponseFormatter::FormatPrometheusMetrics(
-    const std::unordered_map<std::string, TableContext*>& table_contexts, ServerStats& stats,
+    const AggregatedMetrics& metrics, const ServerStats& stats,
+    const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
     mysql::BinlogReader* binlog_reader
 #else
@@ -493,29 +465,6 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 #endif
 ) {
   std::ostringstream oss;
-
-  // Aggregate metrics across all tables
-  size_t total_index_memory = 0;
-  size_t total_doc_memory = 0;
-  size_t total_documents = 0;
-  size_t total_terms = 0;
-  size_t total_postings = 0;
-  size_t total_delta_encoded = 0;
-  size_t total_roaring_bitmap = 0;
-
-  for (const auto& [table_name, ctx] : table_contexts) {
-    total_index_memory += ctx->index->MemoryUsage();
-    total_doc_memory += ctx->doc_store->MemoryUsage();
-    total_documents += ctx->doc_store->Size();
-    auto idx_stats = ctx->index->GetStatistics();
-    total_terms += idx_stats.total_terms;
-    total_postings += idx_stats.total_postings;
-    total_delta_encoded += idx_stats.delta_encoded_lists;
-    total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
-  }
-
-  size_t total_memory = total_index_memory + total_doc_memory;
-  stats.UpdateMemoryUsage(total_memory);
 
   // Server info (version as label)
   oss << "# HELP mygramdb_server_info MygramDB server information\n";
@@ -574,9 +523,9 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   // Memory usage by type
   oss << "# HELP mygramdb_memory_used_bytes Current memory usage in bytes\n";
   oss << "# TYPE mygramdb_memory_used_bytes gauge\n";
-  oss << "mygramdb_memory_used_bytes{type=\"index\"} " << total_index_memory << "\n";
-  oss << "mygramdb_memory_used_bytes{type=\"documents\"} " << total_doc_memory << "\n";
-  oss << "mygramdb_memory_used_bytes{type=\"total\"} " << total_memory << "\n";
+  oss << "mygramdb_memory_used_bytes{type=\"index\"} " << metrics.total_index_memory << "\n";
+  oss << "mygramdb_memory_used_bytes{type=\"documents\"} " << metrics.total_doc_memory << "\n";
+  oss << "mygramdb_memory_used_bytes{type=\"total\"} " << metrics.total_memory << "\n";
   oss << "\n";
 
   // Peak memory
@@ -586,9 +535,9 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "\n";
 
   // Memory fragmentation ratio
-  if (total_memory > 0) {
+  if (metrics.total_memory > 0) {
     size_t peak = stats.GetPeakMemoryUsage();
-    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(total_memory) : 1.0;
+    double fragmentation = peak > 0 ? static_cast<double>(peak) / static_cast<double>(metrics.total_memory) : 1.0;
     oss << "# HELP mygramdb_memory_fragmentation_ratio Memory fragmentation ratio\n";
     oss << "# TYPE mygramdb_memory_fragmentation_ratio gauge\n";
     oss << "mygramdb_memory_fragmentation_ratio " << std::fixed << std::setprecision(2) << fragmentation << "\n";

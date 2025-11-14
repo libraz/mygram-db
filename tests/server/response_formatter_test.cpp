@@ -11,6 +11,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "server/server_stats.h"
+#include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext
 #include "storage/document_store.h"
 
@@ -42,7 +43,10 @@ class ResponseFormatterTest : public ::testing::Test {
 TEST_F(ResponseFormatterTest, FormatInfoResponseNoCacheManager) {
   ServerStats stats;
 
-  std::string response = ResponseFormatter::FormatInfoResponse(table_contexts_, stats, nullptr, nullptr);
+  // Aggregate metrics
+  auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  std::string response = ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr);
 
   // Should contain cache section with disabled status
   EXPECT_TRUE(response.find("# Cache") != std::string::npos);
@@ -67,7 +71,11 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
 
   cache::CacheManager cache_manager(cache_config, 1, 0);
 
-  std::string response = ResponseFormatter::FormatInfoResponse(table_contexts_, stats, nullptr, &cache_manager);
+  // Aggregate metrics
+  auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  std::string response =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, &cache_manager);
 
   // Should contain cache section with enabled status
   EXPECT_TRUE(response.find("# Cache") != std::string::npos);
@@ -106,7 +114,11 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManagerDisabled) {
   cache::CacheManager cache_manager(cache_config, 1, 0);
   cache_manager.Disable();
 
-  std::string response = ResponseFormatter::FormatInfoResponse(table_contexts_, stats, nullptr, &cache_manager);
+  // Aggregate metrics
+  auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  std::string response =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, &cache_manager);
 
   // Should contain cache section with disabled status
   EXPECT_TRUE(response.find("# Cache") != std::string::npos);

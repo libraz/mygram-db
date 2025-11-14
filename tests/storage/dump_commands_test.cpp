@@ -5,10 +5,14 @@
 
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <thread>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -70,7 +74,12 @@ class DumpCommandsTest : public ::testing::Test {
     index2_->AddDocument(1, "breaking news");
 
     test_gtid_ = "00000000-0000-0000-0000-000000000000:1-100";
-    test_filepath_ = "/tmp/mygramdb_dump_test.dmp";
+
+    // Create unique test filepath for parallel test execution
+    std::stringstream ss;
+    ss << "/tmp/mygramdb_dump_test_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id())
+       << "_" << std::chrono::steady_clock::now().time_since_epoch().count() << ".dmp";
+    test_filepath_ = ss.str();
   }
 
   void TearDown() override {

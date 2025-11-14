@@ -28,6 +28,29 @@ class CacheManager;
 
 namespace mygramdb::server {
 
+// Forward declarations
+class TableCatalog;
+
+// Default constants
+constexpr uint16_t kDefaultPort = 11016;       // memcached default port
+constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
+constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
+constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
+constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queries (range: 5-1000)
+
+/**
+ * @brief TCP server configuration
+ */
+struct ServerConfig {
+  std::string host = "0.0.0.0";
+  uint16_t port = kDefaultPort;
+  int max_connections = kDefaultMaxConnections;
+  int worker_threads = 0;  // Number of worker threads (0 = CPU count)
+  int recv_buffer_size = kDefaultRecvBufferSize;
+  int send_buffer_size = kDefaultSendBufferSize;
+  int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
+};
+
 /**
  * @brief Per-connection context
  */
@@ -57,7 +80,14 @@ struct TableContext {
 struct HandlerContext {
   // NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members) - Intentional design: context references external
   // state
+
+  // NEW: Service-based access (preferred)
+  TableCatalog* table_catalog = nullptr;
+
+  // LEGACY: Direct table access (for backward compatibility during migration)
+  // TODO: Remove after all handlers are migrated to use table_catalog
   std::unordered_map<std::string, TableContext*>& table_contexts;
+
   ServerStats& stats;
   const config::Config* full_config;
   std::string dump_dir;
@@ -67,8 +97,10 @@ struct HandlerContext {
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader;
-  std::unordered_set<std::string>& syncing_tables;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
-  std::mutex& syncing_tables_mutex;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
+  std::unordered_set<std::string>&
+      syncing_tables;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
+  std::mutex&
+      syncing_tables_mutex;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
 #else
   void* binlog_reader;
 #endif

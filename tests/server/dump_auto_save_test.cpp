@@ -15,6 +15,7 @@
 #include <fstream>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <thread>
 
 #include "config/config.h"
@@ -36,8 +37,12 @@ class DumpAutoSaveTest : public ::testing::Test {
     // Set log level to error to reduce test noise
     spdlog::set_level(spdlog::level::err);
 
-    // Create temporary test directory
-    test_dir_ = std::filesystem::temp_directory_path() / "mygramdb_dump_test";
+    // Create unique temporary test directory for parallel test execution
+    // Include PID, thread ID, and timestamp to ensure uniqueness
+    std::stringstream ss;
+    ss << "mygramdb_dump_test_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+       << std::chrono::steady_clock::now().time_since_epoch().count();
+    test_dir_ = std::filesystem::temp_directory_path() / ss.str();
     std::filesystem::create_directories(test_dir_);
 
     // Create test table context

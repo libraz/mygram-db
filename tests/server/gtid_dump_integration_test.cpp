@@ -11,9 +11,12 @@
 
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <sstream>
 #include <thread>
 
 #include "index/index.h"
@@ -59,8 +62,11 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
 
     stats_ = std::make_unique<ServerStats>();
 
-    // Test directory
-    test_dir_ = "/tmp/gtid_test_" + std::to_string(std::time(nullptr));
+    // Create unique test directory for parallel test execution
+    std::stringstream ss;
+    ss << "/tmp/gtid_test_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+       << std::chrono::steady_clock::now().time_since_epoch().count();
+    test_dir_ = ss.str();
     std::filesystem::create_directories(test_dir_);
   }
 

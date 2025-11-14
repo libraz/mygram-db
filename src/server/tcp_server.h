@@ -18,8 +18,12 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "server/connection_acceptor.h"
+#include "server/request_dispatcher.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
+#include "server/snapshot_scheduler.h"
+#include "server/table_catalog.h"
 #include "server/thread_pool.h"
 #include "storage/document_store.h"
 
@@ -40,12 +44,6 @@ namespace mygramdb::server {
 // Forward declaration
 class CommandHandler;
 
-constexpr uint16_t kDefaultPort = 11016;       // memcached default port
-constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
-constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
-constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
-constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queries (range: 5-1000)
-
 /**
  * @brief State of a SYNC operation
  */
@@ -59,19 +57,6 @@ struct SyncState {
   std::string error_message;
   std::string gtid;
   std::string replication_status;  // "STARTED", "ALREADY_RUNNING", "DISABLED", "FAILED"
-};
-
-/**
- * @brief TCP server configuration
- */
-struct ServerConfig {
-  std::string host = "0.0.0.0";
-  uint16_t port = kDefaultPort;
-  int max_connections = kDefaultMaxConnections;
-  int worker_threads = 0;  // Number of worker threads (0 = CPU count)
-  int recv_buffer_size = kDefaultRecvBufferSize;
-  int send_buffer_size = kDefaultSendBufferSize;
-  int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
 };
 
 /**
@@ -122,12 +107,12 @@ class TcpServer {
   /**
    * @brief Check if server is running
    */
-  bool IsRunning() const { return running_; }
+  bool IsRunning() const { return acceptor_ && acceptor_->IsRunning(); }
 
   /**
    * @brief Get server port
    */
-  uint16_t GetPort() const { return actual_port_; }
+  uint16_t GetPort() const { return acceptor_ ? acceptor_->GetPort() : 0; }
 
   /**
    * @brief Get active connection count
@@ -176,35 +161,30 @@ class TcpServer {
 
  private:
   friend class SyncHandler;
+
+  // Configuration
   ServerConfig config_;
-  std::unordered_map<std::string, TableContext*> table_contexts_;
-  query::QueryParser query_parser_;
-
-  std::atomic<bool> running_{false};
-  std::atomic<bool> should_stop_{false};
-
-  // Statistics
-  ServerStats stats_;
-
-  int server_fd_ = -1;
-  uint16_t actual_port_ = 0;
-  std::unique_ptr<std::thread> accept_thread_;
-  std::unique_ptr<ThreadPool> thread_pool_;
-  std::set<int> connection_fds_;  // Active connection file descriptors
-  mutable std::mutex connections_mutex_;
-  std::unordered_map<int, ConnectionContext> connection_contexts_;  // Connection contexts
-  mutable std::mutex contexts_mutex_;
-
+  const config::Config* full_config_;
+  std::string dump_dir_;
   std::string last_error_;
-  std::string dump_dir_;                               // Dump directory
-  std::atomic<bool> read_only_{false};                 // Read-only mode flag
-  std::atomic<bool> loading_{false};                   // Loading mode flag (blocks queries during LOAD)
-  std::atomic<bool> optimization_in_progress_{false};  // Global OPTIMIZE operation flag
-  const config::Config* full_config_;                  // Full configuration for CONFIG command
 
-  // Auto-save functionality
-  std::unique_ptr<std::thread> auto_save_thread_;
-  std::atomic<bool> auto_save_running_{false};
+  // State
+  ServerStats stats_;
+  std::atomic<bool> read_only_{false};
+  std::atomic<bool> loading_{false};
+  std::atomic<bool> optimization_in_progress_{false};
+
+  // Services (composition) - NEW
+  std::unique_ptr<TableCatalog> table_catalog_;
+  std::unique_ptr<ThreadPool> thread_pool_;
+  std::unique_ptr<ConnectionAcceptor> acceptor_;
+  std::unique_ptr<RequestDispatcher> dispatcher_;
+  std::unique_ptr<SnapshotScheduler> scheduler_;
+
+  // Legacy fields (for backward compatibility during migration)
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unordered_map<int, ConnectionContext> connection_contexts_;
+  mutable std::mutex contexts_mutex_;
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;
@@ -245,52 +225,9 @@ class TcpServer {
 #endif
 
   /**
-   * @brief Accept thread function
+   * @brief Handle client connection (callback for ConnectionAcceptor)
    */
-  void AcceptThreadFunc();
-
-  /**
-   * @brief Handle client connection
-   */
-  void HandleClient(int client_fd);
-
-  /**
-   * @brief Process single request
-   * @param request Request string
-   * @param ctx Connection context (for debug mode, etc.)
-   * @return Response string
-   */
-  std::string ProcessRequest(const std::string& request, ConnectionContext& ctx);
-
-  /**
-   * @brief Set socket options
-   */
-  bool SetSocketOptions(int socket_fd);
-
-  /**
-   * @brief Start auto-save thread
-   */
-  void StartAutoSave();
-
-  /**
-   * @brief Stop auto-save thread
-   */
-  void StopAutoSave();
-
-  /**
-   * @brief Auto-save thread function
-   */
-  void AutoSaveThread();
-
-  /**
-   * @brief Clean up old dump files based on retention policy
-   */
-  void CleanupOldDumps();
-
-  /**
-   * @brief Remove connection from active list
-   */
-  void RemoveConnection(int socket_fd);
+  void HandleConnection(int client_fd);
 
 #ifdef USE_MYSQL
   /**

@@ -4,9 +4,13 @@
  */
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <sstream>
+#include <thread>
 
 #include "storage/document_store.h"
 
@@ -17,7 +21,13 @@ using namespace mygramdb::storage;
  */
 class DocumentStoreSerializationTest : public ::testing::Test {
  protected:
-  void SetUp() override { test_file_ = "/tmp/test_docstore_" + std::to_string(std::time(nullptr)); }
+  void SetUp() override {
+    // Create unique test file path for parallel test execution
+    std::stringstream ss;
+    ss << "/tmp/test_docstore_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+       << std::chrono::steady_clock::now().time_since_epoch().count();
+    test_file_ = ss.str();
+  }
 
   void TearDown() override { std::remove((test_file_ + ".docs").c_str()); }
 

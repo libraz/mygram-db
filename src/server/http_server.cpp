@@ -15,6 +15,7 @@
 
 #include "cache/cache_manager.h"
 #include "server/response_formatter.h"
+#include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "utils/memory_utils.h"
@@ -718,7 +719,15 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
   stats_.IncrementRequests();
 
   try {
-    std::string metrics = ResponseFormatter::FormatPrometheusMetrics(table_contexts_, stats_, binlog_reader_);
+    // Aggregate metrics
+    auto aggregated_metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+    // Update server statistics
+    StatisticsService::UpdateServerStatistics(stats_, aggregated_metrics);
+
+    // Format response
+    std::string metrics =
+        ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, stats_, table_contexts_, binlog_reader_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

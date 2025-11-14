@@ -3,12 +3,12 @@
  * @brief Unit tests for binlog reader
  */
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <thread>
-
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
 
 #define private public
 #define protected public
@@ -18,9 +18,9 @@
 
 #ifdef USE_MYSQL
 
+#include "mock_connection.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
-#include "mock_connection.h"
 
 using namespace mygramdb::mysql;
 using namespace mygramdb;

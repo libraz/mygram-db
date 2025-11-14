@@ -5,10 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
-#include "mysql/binlog_event_types.h"
 
 #ifdef USE_MYSQL
 
@@ -77,7 +77,7 @@ TEST(BinlogParsingTest, ExtractGTIDFromRealEvent) {
   gtid_event.push_back(0x62);
 
   // GNO (8 bytes, little-endian): 100
-  gtid_event.push_back(0x64); // 100 in little-endian
+  gtid_event.push_back(0x64);  // 100 in little-endian
   gtid_event.push_back(0x00);
   gtid_event.push_back(0x00);
   gtid_event.push_back(0x00);
@@ -135,25 +135,25 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
   std::string db_name = "testdb";
   table_map_event.push_back(static_cast<uint8_t>(db_name.length()));
   table_map_event.insert(table_map_event.end(), db_name.begin(), db_name.end());
-  table_map_event.push_back(0x00); // null terminator
+  table_map_event.push_back(0x00);  // null terminator
 
   // table name (1 byte length + string + null terminator)
   std::string table_name = "articles";
   table_map_event.push_back(static_cast<uint8_t>(table_name.length()));
   table_map_event.insert(table_map_event.end(), table_name.begin(), table_name.end());
-  table_map_event.push_back(0x00); // null terminator
+  table_map_event.push_back(0x00);  // null terminator
 
   // column count (packed integer, single byte for small numbers)
   uint8_t column_count = 3;
   table_map_event.push_back(column_count);
 
   // column types (1 byte per column)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::LONG));      // id (INT)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::VARCHAR));   // title (VARCHAR)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::BLOB));      // content (TEXT)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::LONG));     // id (INT)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::VARCHAR));  // title (VARCHAR)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::BLOB));     // content (TEXT)
 
   // metadata length (packed integer)
-  table_map_event.push_back(0x05); // 5 bytes of metadata
+  table_map_event.push_back(0x05);  // 5 bytes of metadata
 
   // type-specific metadata
   // VARCHAR metadata (2 bytes): max length 255
@@ -164,10 +164,10 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
   table_map_event.push_back(0x02);
 
   // NULL bitmap (ceil(3/8) = 1 byte)
-  table_map_event.push_back(0x06); // columns 1 and 2 can be NULL (bits 1 and 2 set)
+  table_map_event.push_back(0x06);  // columns 1 and 2 can be NULL (bits 1 and 2 set)
 
   // Now verify the buffer is correctly structured
-  ASSERT_EQ(table_map_event[0], 0x00); // OK packet
+  ASSERT_EQ(table_map_event[0], 0x00);  // OK packet
   ASSERT_EQ(table_map_event[5], static_cast<uint8_t>(MySQLBinlogEventType::TABLE_MAP_EVENT));
 
   // Verify table_id
@@ -204,27 +204,27 @@ TEST(BinlogParsingTest, WriteRowsEventStructure) {
 
   // extra_row_info_len (packed integer) - 2 bytes total (1 for length, 1 for data)
   write_rows_event.push_back(0x02);
-  write_rows_event.push_back(0xFF); // dummy data
+  write_rows_event.push_back(0xFF);  // dummy data
 
   // column count (packed integer)
-  write_rows_event.push_back(0x02); // 2 columns
+  write_rows_event.push_back(0x02);  // 2 columns
 
   // columns_present bitmap (ceil(2/8) = 1 byte)
-  write_rows_event.push_back(0x03); // both columns present (bits 0 and 1)
+  write_rows_event.push_back(0x03);  // both columns present (bits 0 and 1)
 
   // Verify structure
-  ASSERT_EQ(write_rows_event[0], 0x00); // OK byte
+  ASSERT_EQ(write_rows_event[0], 0x00);  // OK byte
   ASSERT_EQ(write_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::WRITE_ROWS_EVENT));
 
   // Verify flags indicate ROWS_EVENT_V2
   uint16_t flags = write_rows_event[26] | (write_rows_event[27] << 8);
-  EXPECT_EQ(flags & 0x01, 0x01); // Bit 0 set for V2 with extra_row_info
+  EXPECT_EQ(flags & 0x01, 0x01);  // Bit 0 set for V2 with extra_row_info
 
   // Verify extra_row_info_len position (after table_id + flags)
-  EXPECT_EQ(write_rows_event[28], 0x02); // extra_row_info_len
+  EXPECT_EQ(write_rows_event[28], 0x02);  // extra_row_info_len
 
   // Verify column_count position (after extra_row_info)
-  EXPECT_EQ(write_rows_event[30], 0x02); // column_count
+  EXPECT_EQ(write_rows_event[30], 0x02);  // column_count
 }
 
 /**
@@ -247,30 +247,30 @@ TEST(BinlogParsingTest, UpdateRowsEventStructure) {
   }
 
   // flags (2 bytes)
-  update_rows_event.push_back(0x01); // V2 with extra_row_info
+  update_rows_event.push_back(0x01);  // V2 with extra_row_info
   update_rows_event.push_back(0x00);
 
   // extra_row_info
-  update_rows_event.push_back(0x02); // len
-  update_rows_event.push_back(0xAA); // data
+  update_rows_event.push_back(0x02);  // len
+  update_rows_event.push_back(0xAA);  // data
 
   // column count
-  update_rows_event.push_back(0x03); // 3 columns
+  update_rows_event.push_back(0x03);  // 3 columns
 
   // columns_before bitmap (for before image)
-  update_rows_event.push_back(0x07); // all 3 columns (bits 0,1,2)
+  update_rows_event.push_back(0x07);  // all 3 columns (bits 0,1,2)
 
   // columns_after bitmap (for after image)
-  update_rows_event.push_back(0x07); // all 3 columns
+  update_rows_event.push_back(0x07);  // all 3 columns
 
   // Verify structure
   ASSERT_EQ(update_rows_event[0], 0x00);
   ASSERT_EQ(update_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::UPDATE_ROWS_EVENT));
 
   // UPDATE events have both before and after bitmaps
-  EXPECT_EQ(update_rows_event[30], 0x03); // column_count
-  EXPECT_EQ(update_rows_event[31], 0x07); // columns_before
-  EXPECT_EQ(update_rows_event[32], 0x07); // columns_after
+  EXPECT_EQ(update_rows_event[30], 0x03);  // column_count
+  EXPECT_EQ(update_rows_event[31], 0x07);  // columns_before
+  EXPECT_EQ(update_rows_event[32], 0x07);  // columns_after
 }
 
 /**
@@ -309,7 +309,7 @@ TEST(BinlogParsingTest, DeleteRowsEventStructure) {
   // Verify structure
   ASSERT_EQ(delete_rows_event[0], 0x00);
   ASSERT_EQ(delete_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::DELETE_ROWS_EVENT));
-  EXPECT_EQ(delete_rows_event[30], 0x02); // column_count
+  EXPECT_EQ(delete_rows_event[30], 0x02);  // column_count
 }
 
 /**
@@ -479,7 +479,7 @@ TEST(BinlogParsingTest, PackedIntegerReading) {
 TEST(BinlogParsingTest, TruncatedBufferHandling) {
   // Create a truncated GTID event (should be at least 42 bytes but only give 20)
   std::vector<uint8_t> truncated_event;
-  truncated_event.push_back(0x00); // OK byte
+  truncated_event.push_back(0x00);  // OK byte
 
   auto header = CreateBinlogHeader(MySQLBinlogEventType::GTID_LOG_EVENT, 42);
   truncated_event.insert(truncated_event.end(), header.begin(), header.end());
@@ -488,11 +488,8 @@ TEST(BinlogParsingTest, TruncatedBufferHandling) {
   ASSERT_EQ(truncated_event.size(), 20);
 
   // Parser should detect this and return nullopt (tested via minimum length checks)
-  const unsigned char* buffer = truncated_event.data() + 1;
-  unsigned long length = truncated_event.size() - 1;
-
   // A proper GTID event needs at least 42 bytes
-  EXPECT_LT(length, 42);
+  EXPECT_LT(truncated_event.size() - 1, 42);
 }
 
 #endif  // USE_MYSQL

@@ -30,6 +30,9 @@ class CacheManager;
 
 namespace mygramdb::server {
 
+// Forward declaration
+struct AggregatedMetrics;
+
 /**
  * @brief Utility class for formatting server responses
  *
@@ -66,14 +69,15 @@ class ResponseFormatter {
 
   /**
    * @brief Format INFO response
-   * @param table_contexts Map of table contexts
-   * @param stats Server statistics
+   * @param metrics Pre-computed aggregated metrics
+   * @param stats Server statistics (const reference, no mutation)
+   * @param table_contexts Map of table contexts (for table names only)
    * @param binlog_reader Optional binlog reader for replication info
    * @param cache_manager Optional cache manager for cache statistics
    * @return Formatted response
    */
-  static std::string FormatInfoResponse(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                        ServerStats& stats,
+  static std::string FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
+                                        const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
                                         mysql::BinlogReader* binlog_reader = nullptr,
 #else
@@ -134,13 +138,14 @@ class ResponseFormatter {
 
   /**
    * @brief Format Prometheus metrics response
-   * @param table_contexts Map of table contexts
-   * @param stats Server statistics
+   * @param metrics Pre-computed aggregated metrics
+   * @param stats Server statistics (const reference, no mutation)
+   * @param table_contexts Map of table contexts (for per-table metrics)
    * @param binlog_reader Optional binlog reader for replication info
    * @return Prometheus exposition format response
    */
-  static std::string FormatPrometheusMetrics(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                             ServerStats& stats,
+  static std::string FormatPrometheusMetrics(const AggregatedMetrics& metrics, const ServerStats& stats,
+                                             const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
                                              mysql::BinlogReader* binlog_reader = nullptr
 #else
