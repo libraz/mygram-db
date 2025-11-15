@@ -132,6 +132,7 @@ void ConnectionAcceptor::Stop() {
 
   // Close server socket to unblock accept()
   if (server_fd_ >= 0) {
+    shutdown(server_fd_, SHUT_RDWR);
     close(server_fd_);
     server_fd_ = -1;
   }
@@ -145,6 +146,8 @@ void ConnectionAcceptor::Stop() {
   {
     std::lock_guard<std::mutex> lock(fds_mutex_);
     for (int socket_fd : active_fds_) {
+      // Shutdown socket to unblock recv/send calls in other threads
+      shutdown(socket_fd, SHUT_RDWR);
       close(socket_fd);
     }
     active_fds_.clear();
@@ -168,6 +171,8 @@ void ConnectionAcceptor::AcceptLoop() {
     if (client_fd < 0) {
       if (!should_stop_) {
         spdlog::error("Accept failed: {}", strerror(errno));
+      } else {
+        spdlog::debug("Accept interrupted (shutdown in progress)");
       }
       continue;
     }
@@ -186,6 +191,14 @@ void ConnectionAcceptor::AcceptLoop() {
       spdlog::warn("Rejected TCP connection from {} (not in network.allow_cidrs)", client_ip.empty() ? "<unknown>" : client_ip);
       close(client_fd);
       continue;
+    }
+
+    // Set receive timeout to avoid blocking indefinitely
+    struct timeval timeout {};
+    timeout.tv_sec = 1;  // 1 second timeout (short for quick shutdown)
+    timeout.tv_usec = 0;
+    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+      spdlog::warn("Failed to set SO_RCVTIMEO: {}", strerror(errno));
     }
 
     // Track connection

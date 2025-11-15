@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace mygramdb::index {
 
@@ -104,11 +105,12 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
 
 void PostingList::Add(DocId doc_id) {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    // Get current docs, add new one, re-encode
+    // For delta-compressed strategy, decode, modify, and re-encode
+    // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
-    auto iterator = std::lower_bound(docs.begin(), docs.end(), doc_id);
-    if (iterator == docs.end() || *iterator != doc_id) {
-      docs.insert(iterator, doc_id);
+    auto it = std::lower_bound(docs.begin(), docs.end(), doc_id);
+    if (it == docs.end() || *it != doc_id) {
+      docs.insert(it, doc_id);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -135,10 +137,12 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 
 void PostingList::Remove(DocId doc_id) {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    // For delta-compressed strategy, decode, modify, and re-encode
+    // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
-    auto iterator = std::find(docs.begin(), docs.end(), doc_id);
-    if (iterator != docs.end()) {
-      docs.erase(iterator);
+    auto it = std::find(docs.begin(), docs.end(), doc_id);
+    if (it != docs.end()) {
+      docs.erase(it);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -148,8 +152,58 @@ void PostingList::Remove(DocId doc_id) {
 
 bool PostingList::Contains(DocId doc_id) const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    auto docs = DecodeDelta(delta_compressed_);
-    return std::binary_search(docs.begin(), docs.end(), doc_id);
+    if (delta_compressed_.empty()) {
+      return false;
+    }
+    
+    // Quick check for first element
+    if (delta_compressed_[0] == doc_id) {
+      return true;
+    }
+    if (delta_compressed_[0] > doc_id) {
+      return false;
+    }
+    
+    // For small arrays, linear search is faster than repeated accumulation
+    if (delta_compressed_.size() <= 16) {
+      DocId current = 0;
+      for (const auto& delta : delta_compressed_) {
+        current += delta;
+        if (current == doc_id) {
+          return true;
+        }
+        if (current > doc_id) {
+          return false;
+        }
+      }
+      return false;
+    }
+    
+    // Binary search for larger arrays
+    // Cache accumulated values during search to avoid redundant computation
+    size_t left = 0;
+    size_t right = delta_compressed_.size();
+    
+    while (left < right) {
+      size_t mid = left + (right - left) / 2;
+      
+      // Reconstruct value at mid position
+      DocId mid_value = 0;
+      for (size_t i = 0; i <= mid; ++i) {
+        mid_value += delta_compressed_[i];
+      }
+      
+      if (mid_value == doc_id) {
+        return true;
+      }
+      if (mid_value < doc_id) {
+        left = mid + 1;
+      } else {
+        right = mid;
+      }
+    }
+    
+    return false;
   }
   return roaring_bitmap_contains(roaring_bitmap_, doc_id);
 }
@@ -203,14 +257,18 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   result.reserve(actual_limit);
 
   if (reverse) {
-    // For reverse order: get all and return last N in reverse
-    // TODO: Optimize with roaring_iterator_create_last() + roaring_uint32_iterator_previous()
-    std::vector<DocId> all_docs(total_size);
-    roaring_bitmap_to_uint32_array(roaring_bitmap_, all_docs.data());
-
-    auto start_it = all_docs.rbegin();
-    auto end_it = all_docs.rbegin() + static_cast<std::vector<DocId>::difference_type>(actual_limit);
-    result.assign(start_it, end_it);
+    // For reverse order: use reverse iterator to get last N elements efficiently
+    roaring_uint32_iterator_t* iter = (roaring_uint32_iterator_t*)malloc(sizeof(roaring_uint32_iterator_t));
+    if (iter != nullptr) {
+      roaring_iterator_init_last(roaring_bitmap_, iter);
+      size_t count = 0;
+      while (count < actual_limit && iter->has_value) {
+        result.push_back(iter->current_value);
+        roaring_uint32_iterator_previous(iter);
+        count++;
+      }
+      free(iter);
+    }
   } else {
     // For forward order: use iterator to get first N
     roaring_uint32_iterator_t* iter = roaring_iterator_create(roaring_bitmap_);
@@ -230,7 +288,7 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
 
 uint64_t PostingList::Size() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    return DecodeDelta(delta_compressed_).size();
+    return delta_compressed_.size();
   }
   return roaring_bitmap_get_cardinality(roaring_bitmap_);
 }

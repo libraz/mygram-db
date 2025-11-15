@@ -12,7 +12,6 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <unordered_set>
 
 #include "utils/string_utils.h"
 
@@ -27,20 +26,21 @@ void Index::AddDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
-  // Remove duplicates while preserving uniqueness
-  std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+  // Remove duplicates by sorting and using unique (more efficient than unordered_set)
+  std::sort(ngrams.begin(), ngrams.end());
+  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Add document to posting list for each unique n-gram
-  for (const auto& ngram : unique_ngrams) {
+  for (const auto& ngram : ngrams) {
     auto* posting = GetOrCreatePostingList(ngram);
     posting->Add(doc_id);
   }
 
   const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
-  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, unique_ngrams.size(), ngram_size_, mode);
+  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, ngrams.size(), ngram_size_, mode);
 }
 
 void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
@@ -57,11 +57,12 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     std::vector<std::string> ngrams;
     ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_);
 
-    // Remove duplicates
-    std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+    // Remove duplicates by sorting and using unique (more efficient than unordered_set)
+    std::sort(ngrams.begin(), ngrams.end());
+    ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
 
     // Build term->docs mapping
-    for (const auto& ngram : unique_ngrams) {
+    for (const auto& ngram : ngrams) {
       term_to_docs[ngram].push_back(doc.doc_id);
     }
   }
@@ -86,26 +87,36 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
   std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
   std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
 
-  std::unordered_set<std::string> old_set(old_ngrams.begin(), old_ngrams.end());
-  std::unordered_set<std::string> new_set(new_ngrams.begin(), new_ngrams.end());
+  // Sort and remove duplicates (more efficient than unordered_set)
+  std::sort(old_ngrams.begin(), old_ngrams.end());
+  old_ngrams.erase(std::unique(old_ngrams.begin(), old_ngrams.end()), old_ngrams.end());
+  
+  std::sort(new_ngrams.begin(), new_ngrams.end());
+  new_ngrams.erase(std::unique(new_ngrams.begin(), new_ngrams.end()), new_ngrams.end());
+
+  // Calculate set differences using sorted arrays
+  std::vector<std::string> to_remove;
+  std::vector<std::string> to_add;
+  std::set_difference(old_ngrams.begin(), old_ngrams.end(), 
+                      new_ngrams.begin(), new_ngrams.end(),
+                      std::back_inserter(to_remove));
+  std::set_difference(new_ngrams.begin(), new_ngrams.end(),
+                      old_ngrams.begin(), old_ngrams.end(),
+                      std::back_inserter(to_add));
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove doc from n-grams that are no longer present
-  for (const auto& ngram : old_set) {
-    if (new_set.find(ngram) == new_set.end()) {
-      auto* posting = GetOrCreatePostingList(ngram);
-      posting->Remove(doc_id);
-    }
+  for (const auto& ngram : to_remove) {
+    auto* posting = GetOrCreatePostingList(ngram);
+    posting->Remove(doc_id);
   }
 
   // Add doc to new n-grams
-  for (const auto& ngram : new_set) {
-    if (old_set.find(ngram) == old_set.end()) {
-      auto* posting = GetOrCreatePostingList(ngram);
-      posting->Add(doc_id);
-    }
+  for (const auto& ngram : to_add) {
+    auto* posting = GetOrCreatePostingList(ngram);
+    posting->Add(doc_id);
   }
 
   spdlog::debug("Updated document {}", doc_id);
@@ -114,13 +125,16 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
-  std::unordered_set<std::string> unique_ngrams(ngrams.begin(), ngrams.end());
+  
+  // Remove duplicates by sorting and using unique (more efficient than unordered_set)
+  std::sort(ngrams.begin(), ngrams.end());
+  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove document from posting list for each n-gram
-  for (const auto& ngram : unique_ngrams) {
+  for (const auto& ngram : ngrams) {
     auto* posting = GetOrCreatePostingList(ngram);
     posting->Remove(doc_id);
   }

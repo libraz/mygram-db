@@ -76,7 +76,7 @@ class HttpServerTest : public ::testing::Test {
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
     config_->api.http.port = 18080;  // Use different port for testing
-    config_->api.http.enable_cors = true;
+    config_->api.http.enable_cors = false;
     config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
     config_->replication.server_id = 12345;
@@ -86,7 +86,7 @@ class HttpServerTest : public ::testing::Test {
     http_config.bind = "127.0.0.1";
     http_config.port = 18080;
 
-    http_config.enable_cors = true;
+    http_config.enable_cors = false;
     http_config.cors_allow_origin = "*";
 
     http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
@@ -417,26 +417,48 @@ TEST_F(HttpServerTest, GetDocumentInvalidID) {
 }
 
 TEST_F(HttpServerTest, CORSHeaders) {
-  ASSERT_TRUE(http_server_->Start());
+  // Create a separate server with CORS enabled
+  HttpServerConfig cors_config;
+  cors_config.bind = "127.0.0.1";
+  cors_config.port = 18081;
+  cors_config.enable_cors = true;
+  cors_config.cors_allow_origin = "*";
+  
+  auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(cors_server->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("http://127.0.0.1:18081");
   auto res = client.Get("/health");
 
   ASSERT_TRUE(res);
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Origin"));
   EXPECT_EQ(res->get_header_value("Access-Control-Allow-Origin"), "*");
+  
+  cors_server->Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
 
 TEST_F(HttpServerTest, CORSPreflight) {
-  ASSERT_TRUE(http_server_->Start());
+  // Create a separate server with CORS enabled
+  HttpServerConfig cors_config;
+  cors_config.bind = "127.0.0.1";
+  cors_config.port = 18081;
+  cors_config.enable_cors = true;
+  cors_config.cors_allow_origin = "*";
+  
+  auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(cors_server->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("http://127.0.0.1:18081");
   auto res = client.Options("/test/search");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 204);
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Origin"));
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Methods"));
+  
+  cors_server->Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
 
 TEST_F(HttpServerTest, MultipleRequests) {

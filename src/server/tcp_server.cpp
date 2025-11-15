@@ -217,9 +217,11 @@ bool TcpServer::Start() {
 void TcpServer::Stop() {
   spdlog::info("Stopping TCP server...");
 
+  // Signal shutdown to all connection handlers
+  shutdown_requested_ = true;
+
 #ifdef USE_MYSQL
   // Cancel all active SYNC operations
-  shutdown_requested_ = true;
   {
     std::lock_guard<std::mutex> lock(snapshot_builders_mutex_);
     for (auto& [table_name, builder] : active_snapshot_builders_) {
@@ -280,11 +282,16 @@ void TcpServer::HandleConnection(int client_fd) {
   // Increment active connection count
   stats_.IncrementConnections();
 
-  while (true) {
+  while (!shutdown_requested_) {
     ssize_t bytes_received = recv(client_fd, buffer.data(), buffer.size() - 1, 0);
 
     if (bytes_received <= 0) {
       if (bytes_received < 0) {
+        // EAGAIN/EWOULDBLOCK means timeout (SO_RCVTIMEO), which is normal
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          // Check if we should continue (no data, but connection still alive)
+          continue;
+        }
         spdlog::debug("recv error: {}", strerror(errno));
       }
       break;

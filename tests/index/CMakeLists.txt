@@ -34,3 +34,15 @@ target_link_libraries(index_gettopn_test
 )
 
 gtest_discover_tests(index_gettopn_test)
+
+# PostingList unit tests
+add_executable(posting_list_test
+  posting_list_test.cpp
+)
+
+target_link_libraries(posting_list_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(posting_list_test)

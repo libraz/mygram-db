@@ -138,11 +138,22 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   // Add filters
   for (const auto& [name, value] : doc->filters) {
     oss << " " << name << "=";
-    if (std::holds_alternative<int64_t>(value)) {
-      oss << std::get<int64_t>(value);
-    } else if (std::holds_alternative<std::string>(value)) {
-      oss << std::get<std::string>(value);
-    }
+    std::visit(
+        [&oss](auto&& v) {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            oss << "NULL";
+          } else if constexpr (std::is_same_v<T, bool>) {
+            oss << (v ? "true" : "false");
+          } else if constexpr (std::is_same_v<T, std::string>) {
+            oss << v;
+          } else if constexpr (std::is_same_v<T, double>) {
+            oss << std::fixed << std::setprecision(6) << v;
+          } else {
+            oss << v;
+          }
+        },
+        value);
   }
 
   return oss.str();
