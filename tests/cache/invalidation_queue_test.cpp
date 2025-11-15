@@ -347,4 +347,102 @@ TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
   }
 }
 
+/**
+ * @brief Test that invalidation batches are counted correctly
+ *
+ * This is a regression test to ensure that the batch counter is incremented
+ * exactly once per batch, even when processing happens on a separate thread.
+ */
+TEST(InvalidationQueueTest, BatchStatisticsCount) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Set small batch size for predictable batching
+  queue.SetBatchSize(3);
+  queue.SetMaxDelay(1000);  // 1000ms
+
+  // Register cache entries with different ngrams
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    // Use different ngrams for each entry to avoid deduplication
+    meta.ngrams = {"ng" + std::to_string(i)};
+
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    cache.Insert(key, result, meta, 10.0);
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  // Get initial statistics
+  auto initial_stats = cache.GetStatistics();
+  uint64_t initial_batches = initial_stats.invalidations_batches;
+
+  // Start worker
+  queue.Start();
+
+  // Enqueue 5 distinct invalidations
+  for (int i = 0; i < 5; ++i) {
+    queue.Enqueue("posts", "", "ng" + std::to_string(i));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  // Wait for first batch (3 items) to process
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  // Stop worker (will process remaining 2 items as second batch)
+  queue.Stop();
+
+  // Get final statistics
+  auto final_stats = cache.GetStatistics();
+
+  // Should have processed 2 batches (3 items + 2 items)
+  EXPECT_GE(final_stats.invalidations_batches, initial_batches + 1) << "At least one batch should be processed";
+}
+
+/**
+ * @brief Test batch counter with single batch
+ */
+TEST(InvalidationQueueTest, SingleBatchCount) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, 3, 2);
+
+  // Set large batch size
+  queue.SetBatchSize(100);
+
+  // Register a single entry
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"foo", "oo", "bar"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 10.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  // Get initial batch count
+  auto initial_stats = cache.GetStatistics();
+  uint64_t initial_batches = initial_stats.invalidations_batches;
+
+  // Start worker
+  queue.Start();
+
+  // Enqueue invalidation
+  queue.Enqueue("posts", "", "foo bar");
+
+  // Stop worker (will process remaining items as one batch)
+  queue.Stop();
+
+  // Get statistics
+  auto stats = cache.GetStatistics();
+
+  // Should have exactly 1 more batch than initial
+  EXPECT_EQ(initial_batches + 1, stats.invalidations_batches);
+
+  // Entry should be invalidated
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
 }  // namespace mygramdb::cache

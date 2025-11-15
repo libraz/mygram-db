@@ -103,7 +103,13 @@ std::string CacheHandler::HandleEnable() {
     return ResponseFormatter::FormatError("Cache not configured");
   }
 
-  ctx_.cache_manager->Enable();
+  // Attempt to enable cache
+  if (!ctx_.cache_manager->Enable()) {
+    return ResponseFormatter::FormatError(
+        "Cache cannot be enabled: server was started with cache disabled. "
+        "Please restart the server with cache.enabled = true in configuration.");
+  }
+
   return "OK CACHE_ENABLED";
 }
 

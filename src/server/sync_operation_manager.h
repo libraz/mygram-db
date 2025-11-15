@@ -55,10 +55,8 @@ struct SyncState {
  */
 class SyncOperationManager {
  public:
-  SyncOperationManager(
-      const std::unordered_map<std::string, TableContext*>& table_contexts,
-      const config::Config* full_config,
-      mysql::BinlogReader* binlog_reader);
+  SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
+                       const config::Config* full_config, mysql::BinlogReader* binlog_reader);
 
   ~SyncOperationManager();
 

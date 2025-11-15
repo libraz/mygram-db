@@ -8,6 +8,12 @@ if(POLICY CMP0048)
   cmake_policy(SET CMP0048 NEW)
 endif()
 
+# Set policy for FetchContent to allow FetchContent_Populate for lz4
+# lz4 requires manual target creation, so we need to use the old method
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 # yaml-cpp for YAML parsing (using master for latest CMake compatibility)
 FetchContent_Declare(
   yaml-cpp
@@ -68,6 +74,8 @@ if(SPDLOG_IID)
 endif()
 
 # LZ4 for result compression
+# Note: lz4 doesn't provide a standard CMake target in its repository
+# We need to build it manually by fetching the source and creating our own target
 FetchContent_Declare(
   lz4
   GIT_REPOSITORY https://github.com/lz4/lz4.git
@@ -76,15 +84,16 @@ FetchContent_Declare(
 FetchContent_GetProperties(lz4)
 if(NOT lz4_POPULATED)
   FetchContent_Populate(lz4)
-endif()
-if(NOT TARGET lz4)
-  add_library(lz4 STATIC
-    ${lz4_SOURCE_DIR}/lib/lz4.c
-    ${lz4_SOURCE_DIR}/lib/lz4hc.c
-    ${lz4_SOURCE_DIR}/lib/lz4frame.c
-    ${lz4_SOURCE_DIR}/lib/xxhash.c)
-  target_include_directories(lz4 PUBLIC ${lz4_SOURCE_DIR}/lib)
-  set_target_properties(lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  # Build the static library we need (not using lz4's CMake in build/cmake)
+  if(NOT TARGET lz4)
+    add_library(lz4 STATIC
+      ${lz4_SOURCE_DIR}/lib/lz4.c
+      ${lz4_SOURCE_DIR}/lib/lz4hc.c
+      ${lz4_SOURCE_DIR}/lib/lz4frame.c
+      ${lz4_SOURCE_DIR}/lib/xxhash.c)
+    target_include_directories(lz4 PUBLIC ${lz4_SOURCE_DIR}/lib)
+    set_target_properties(lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  endif()
 endif()
 
 get_target_property(LZ4_IID lz4 INTERFACE_INCLUDE_DIRECTORIES)

@@ -139,13 +139,20 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
   return query_cache_->GetStatistics();
 }
 
-void CacheManager::Enable() {
+bool CacheManager::Enable() {
+  // Cache can only be enabled if it was initialized at startup
+  if (!query_cache_ || !invalidation_mgr_ || !invalidation_queue_) {
+    return false;
+  }
+
   enabled_ = true;
 
   // Start invalidation queue if not already running
-  if (invalidation_queue_ && !invalidation_queue_->IsRunning()) {
+  if (!invalidation_queue_->IsRunning()) {
     invalidation_queue_->Start();
   }
+
+  return true;
 }
 
 void CacheManager::Disable() {

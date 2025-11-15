@@ -47,15 +47,13 @@ struct InitResult {
  */
 class ServerLifecycleManager {
  public:
-  ServerLifecycleManager(
-      const ServerConfig& config,
-      const std::unordered_map<std::string, TableContext*>& table_contexts,
-      const std::string& dump_dir,
-      const config::Config* full_config,
+  ServerLifecycleManager(const ServerConfig& config,
+                         const std::unordered_map<std::string, TableContext*>& table_contexts,
+                         const std::string& dump_dir, const config::Config* full_config,
 #ifdef USE_MYSQL
-      mysql::BinlogReader* binlog_reader
+                         mysql::BinlogReader* binlog_reader
 #else
-      void* binlog_reader
+                         void* binlog_reader
 #endif
   );
 
@@ -103,7 +101,7 @@ class ServerLifecycleManager {
   std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<HandlerContext> handler_context_;
-  
+
   // Command handlers
   std::unique_ptr<CommandHandler> search_handler_;
   std::unique_ptr<CommandHandler> document_handler_;
@@ -115,7 +113,7 @@ class ServerLifecycleManager {
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler_;
 #endif
-  
+
   std::unique_ptr<RequestDispatcher> dispatcher_;
   std::unique_ptr<ConnectionAcceptor> acceptor_;
   std::unique_ptr<SnapshotScheduler> scheduler_;

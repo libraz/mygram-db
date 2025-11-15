@@ -42,7 +42,7 @@ class RequestDispatcher {
    * @param ctx Handler context (contains dependencies)
    * @param config Server configuration
    */
-  RequestDispatcher(HandlerContext& ctx, ServerConfig config);
+  RequestDispatcher(HandlerContext& ctx, const ServerConfig& config);
 
   // Disable copy and move
   RequestDispatcher(const RequestDispatcher&) = delete;
@@ -70,7 +70,7 @@ class RequestDispatcher {
  private:
   HandlerContext& ctx_;
   ServerConfig config_;
-  query::QueryParser parser_;
+  size_t max_query_length_;
   std::unordered_map<query::QueryType, CommandHandler*> handlers_;
 };
 

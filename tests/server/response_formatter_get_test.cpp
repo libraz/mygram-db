@@ -57,7 +57,7 @@ TEST(ResponseFormatterGetTest, MultipleFilterTypes) {
   doc.filters["score"] = 98.75;
 
   auto response = ResponseFormatter::FormatGetResponse(doc);
-  
+
   // Response should contain all filters (order may vary)
   EXPECT_TRUE(response.find("OK DOC pk4") != std::string::npos);
   EXPECT_TRUE(response.find("status=1") != std::string::npos);
@@ -75,7 +75,7 @@ TEST(ResponseFormatterGetTest, BoolFilter) {
   doc.filters["deleted"] = false;
 
   auto response = ResponseFormatter::FormatGetResponse(doc);
-  
+
   EXPECT_TRUE(response.find("OK DOC pk5") != std::string::npos);
   EXPECT_TRUE(response.find("active=true") != std::string::npos);
   EXPECT_TRUE(response.find("deleted=false") != std::string::npos);
@@ -108,7 +108,7 @@ TEST(ResponseFormatterGetTest, VariousIntegerTypes) {
   doc.filters["uint32"] = static_cast<uint32_t>(4294967295);
 
   auto response = ResponseFormatter::FormatGetResponse(doc);
-  
+
   EXPECT_TRUE(response.find("OK DOC pk7") != std::string::npos);
   EXPECT_TRUE(response.find("int8=127") != std::string::npos);
   EXPECT_TRUE(response.find("uint8=255") != std::string::npos);
@@ -150,7 +150,7 @@ TEST(ResponseFormatterGetTest, FloatingPointEdgeCases) {
   doc.filters["small"] = 0.000001;
 
   auto response = ResponseFormatter::FormatGetResponse(doc);
-  
+
   EXPECT_TRUE(response.find("OK DOC pk9") != std::string::npos);
   EXPECT_TRUE(response.find("zero=0.000000") != std::string::npos);
   EXPECT_TRUE(response.find("negative=-123.456000") != std::string::npos);

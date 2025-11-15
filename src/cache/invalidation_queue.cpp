@@ -179,10 +179,9 @@ void InvalidationQueue::ProcessBatch() {
     }
   }
 
-  // Update statistics
+  // Update batch statistics
   if (cache_ != nullptr) {
-    auto stats = cache_->GetStatistics();
-    stats.invalidations_batches++;
+    cache_->IncrementInvalidationBatches();
   }
 }
 

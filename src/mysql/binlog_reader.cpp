@@ -84,9 +84,12 @@ bool BinlogReader::Start() {
   if (multi_table_mode_) {
     for (const auto& [table_name, ctx] : table_contexts_) {
       std::string validation_error;
-      if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name,
-                                            ctx->config.primary_key, validation_error)) {
-        last_error_ = "Primary key validation failed for table '" + table_name + "': " + validation_error;
+      if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key,
+                                            validation_error)) {
+        last_error_ = "Primary key validation failed for table '";
+        last_error_ += table_name;
+        last_error_ += "': ";
+        last_error_ += validation_error;
         spdlog::error("Cannot start binlog reader: {}", last_error_);
         return false;
       }

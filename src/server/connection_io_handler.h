@@ -10,17 +10,25 @@
 #include <string>
 #include <vector>
 
+// Forward declare to avoid circular dependency
+namespace mygramdb::server {
+struct ConnectionContext;
+}
+
 namespace mygramdb::server {
 
-struct ConnectionContext;
+// Constants for I/O configuration defaults
+inline constexpr size_t kDefaultIORecvBufferSize = 4096;  // Separate from server_types.h to avoid conflicts
+inline constexpr size_t kDefaultMaxQueryLength = 1024 * 1024;  // 1MB
+inline constexpr int kDefaultRecvTimeoutSec = 60;
 
 /**
  * @brief Configuration for connection I/O handling
  */
 struct IOConfig {
-  size_t recv_buffer_size = 4096;
-  size_t max_query_length = 1024 * 1024;  // 1MB
-  int recv_timeout_sec = 60;
+  size_t recv_buffer_size = kDefaultIORecvBufferSize;
+  size_t max_query_length = kDefaultMaxQueryLength;
+  int recv_timeout_sec = kDefaultRecvTimeoutSec;
 };
 
 /**
@@ -49,10 +57,7 @@ class ConnectionIOHandler {
    * @param processor Callback to process complete requests
    * @param shutdown_flag Reference to shutdown signal
    */
-  ConnectionIOHandler(
-      const IOConfig& config,
-      RequestProcessor processor,
-      const std::atomic<bool>& shutdown_flag);
+  ConnectionIOHandler(const IOConfig& config, RequestProcessor processor, const std::atomic<bool>& shutdown_flag);
 
   ~ConnectionIOHandler() = default;
 
@@ -66,7 +71,7 @@ class ConnectionIOHandler {
    * @brief Handle connection I/O loop
    * @param client_fd Client socket file descriptor
    * @param ctx Connection context
-   * 
+   *
    * Runs until:
    * - Client disconnects
    * - I/O error occurs
@@ -93,7 +98,11 @@ class ConnectionIOHandler {
    * @param client_fd Socket file descriptor
    * @param response Response string (will add \r\n)
    * @return True if send succeeded
+   *
+   * Note: Kept as member function (not static) for consistency with other handlers
+   * and potential future extensions (e.g., response buffering, metrics)
    */
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
   bool SendResponse(int client_fd, const std::string& response);
 };
 

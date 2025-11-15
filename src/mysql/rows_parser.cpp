@@ -87,11 +87,15 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       uint32_t str_len = 0;
       const unsigned char* str_data = nullptr;
       if (metadata > 255) {
-        if (data + 2 > end) return "[TRUNCATED]";
+        if (data + 2 > end) {
+          return "[TRUNCATED]";
+        }
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
-        if (data + 1 > end) return "[TRUNCATED]";
+        if (data + 1 > end) {
+          return "[TRUNCATED]";
+        }
         str_len = *data;
         str_data = data + 1;
       }
@@ -107,22 +111,30 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       const unsigned char* blob_data = nullptr;
       switch (metadata) {
         case 1:  // TINYBLOB/TINYTEXT
-          if (data + 1 > end) return "[TRUNCATED]";
+          if (data + 1 > end) {
+            return "[TRUNCATED]";
+          }
           blob_len = *data;
           blob_data = data + 1;
           break;
         case 2:  // BLOB/TEXT
-          if (data + 2 > end) return "[TRUNCATED]";
+          if (data + 2 > end) {
+            return "[TRUNCATED]";
+          }
           blob_len = binlog_util::uint2korr(data);
           blob_data = data + 2;
           break;
         case 3:  // MEDIUMBLOB/MEDIUMTEXT
-          if (data + 3 > end) return "[TRUNCATED]";
+          if (data + 3 > end) {
+            return "[TRUNCATED]";
+          }
           blob_len = binlog_util::uint3korr(data);
           blob_data = data + 3;
           break;
         case 4:  // LONGBLOB/LONGTEXT
-          if (data + 4 > end) return "[TRUNCATED]";
+          if (data + 4 > end) {
+            return "[TRUNCATED]";
+          }
           blob_len = binlog_util::uint4korr(data);
           blob_data = data + 4;
           break;
@@ -137,18 +149,24 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
       unsigned char type = metadata >> 8;
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
-        if (data + 1 > end) return "[TRUNCATED]";
+        if (data + 1 > end) {
+          return "[TRUNCATED]";
+        }
         return std::to_string(*data);
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
       uint32_t str_len = 0;
       const unsigned char* str_data = nullptr;
       if (max_len > 255) {
-        if (data + 2 > end) return "[TRUNCATED]";
+        if (data + 2 > end) {
+          return "[TRUNCATED]";
+        }
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
-        if (data + 1 > end) return "[TRUNCATED]";
+        if (data + 1 > end) {
+          return "[TRUNCATED]";
+        }
         str_len = *data;
         str_data = data + 1;
       }
@@ -167,22 +185,30 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       uint8_t len_bytes = (metadata > 0) ? metadata : 4;
       switch (len_bytes) {
         case 1:
-          if (data + 1 > end) return "[TRUNCATED]";
+          if (data + 1 > end) {
+            return "[TRUNCATED]";
+          }
           json_len = *data;
           json_data = data + 1;
           break;
         case 2:
-          if (data + 2 > end) return "[TRUNCATED]";
+          if (data + 2 > end) {
+            return "[TRUNCATED]";
+          }
           json_len = binlog_util::uint2korr(data);
           json_data = data + 2;
           break;
         case 3:
-          if (data + 3 > end) return "[TRUNCATED]";
+          if (data + 3 > end) {
+            return "[TRUNCATED]";
+          }
           json_len = binlog_util::uint3korr(data);
           json_data = data + 3;
           break;
         case 4:
-          if (data + 4 > end) return "[TRUNCATED]";
+          if (data + 4 > end) {
+            return "[TRUNCATED]";
+          }
           json_len = binlog_util::uint4korr(data);
           json_data = data + 4;
           break;

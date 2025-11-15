@@ -321,4 +321,28 @@ TEST(CacheManagerTest, MinQueryCostThreshold) {
   EXPECT_TRUE(mgr.Insert(query, {1, 2, 3}, ngrams, 25.0));
 }
 
+/**
+ * @brief Test enabling cache when started with cache disabled
+ */
+TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
+  config::CacheConfig config;
+  config.enabled = false;  // Start with cache disabled
+  config.max_memory_mb = 10;
+
+  CacheManager mgr(config, 3, 2);
+
+  // Initially disabled
+  EXPECT_FALSE(mgr.IsEnabled());
+
+  // Try to enable - should fail because cache was not initialized
+  EXPECT_FALSE(mgr.Enable());
+
+  // Should still be disabled
+  EXPECT_FALSE(mgr.IsEnabled());
+
+  // Lookup should fail
+  auto query = CreateQuery("posts", "test");
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+}
+
 }  // namespace mygramdb::cache

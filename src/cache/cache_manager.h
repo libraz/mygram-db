@@ -95,8 +95,12 @@ class CacheManager {
 
   /**
    * @brief Enable cache
+   * @return true if cache was enabled, false if cache was not initialized at startup
+   *
+   * Note: Cache can only be enabled if it was initialized at startup (cache.enabled = true).
+   * If the server was started with cache disabled, this operation will fail.
    */
-  void Enable();
+  bool Enable();
 
   /**
    * @brief Disable cache

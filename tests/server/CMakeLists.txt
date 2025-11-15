@@ -158,3 +158,16 @@ target_link_libraries(connection_io_handler_test
 )
 
 gtest_discover_tests(connection_io_handler_test)
+
+# RequestDispatcher tests
+
+add_executable(request_dispatcher_test
+  request_dispatcher_test.cpp
+)
+
+target_link_libraries(request_dispatcher_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(request_dispatcher_test)

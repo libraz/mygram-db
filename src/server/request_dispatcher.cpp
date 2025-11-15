@@ -13,10 +13,10 @@
 
 namespace mygramdb::server {
 
-RequestDispatcher::RequestDispatcher(HandlerContext& ctx, ServerConfig config) : ctx_(ctx), config_(std::move(config)) {
-  const size_t limit = config_.max_query_length <= 0 ? 0 : static_cast<size_t>(config_.max_query_length);
-  parser_.SetMaxQueryLength(limit);
-}
+RequestDispatcher::RequestDispatcher(HandlerContext& ctx, const ServerConfig& config)
+    : ctx_(ctx),
+      config_(config),
+      max_query_length_(config.max_query_length <= 0 ? 0 : static_cast<size_t>(config.max_query_length)) {}
 
 void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* handler) {
   handlers_[type] = handler;
@@ -25,11 +25,15 @@ void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* h
 std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionContext& conn_ctx) {
   spdlog::debug("Dispatching request: {}", request);
 
+  // Create a thread-local parser for this request
+  query::QueryParser parser;
+  parser.SetMaxQueryLength(max_query_length_);
+
   // Parse query
-  auto query = parser_.Parse(request);
+  auto query = parser.Parse(request);
 
   if (!query.IsValid()) {
-    return ResponseFormatter::FormatError(parser_.GetError());
+    return ResponseFormatter::FormatError(parser.GetError());
   }
 
   // Apply configured default LIMIT if not explicitly specified

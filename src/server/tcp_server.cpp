@@ -36,13 +36,13 @@
 #ifdef USE_MYSQL
 #include "server/handlers/sync_handler.h"
 #endif
-#include "server/response_formatter.h"
+#include "cache/cache_manager.h"
 #include "server/connection_io_handler.h"
+#include "server/response_formatter.h"
 #include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
-#include "cache/cache_manager.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -60,6 +60,10 @@ constexpr size_t kIpAddressBufferSize = 64;
 
 // Length of "gtid=\"" prefix in meta content
 constexpr size_t kGtidPrefixLength = 7;
+
+// Default timeout values (in seconds)
+constexpr int kDefaultSyncShutdownTimeoutSec = 30;
+constexpr int kDefaultConnectionRecvTimeoutSec = 60;
 
 /**
  * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
@@ -137,14 +141,12 @@ bool TcpServer::Start() {
   table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
 
   // 2.5. Create cache manager (if configured)
-  if (full_config_ && full_config_->cache.enabled) {
+  if (full_config_ != nullptr && full_config_->cache.enabled) {
     // Use first table's ngram settings for cache
     if (!table_contexts_.empty()) {
       const auto& first_table = table_contexts_.begin()->second;
-      cache_manager_ = std::make_unique<cache::CacheManager>(
-          full_config_->cache,
-          first_table->config.ngram_size,
-          first_table->config.kanji_ngram_size);
+      cache_manager_ = std::make_unique<cache::CacheManager>(full_config_->cache, first_table->config.ngram_size,
+                                                             first_table->config.kanji_ngram_size);
       spdlog::info("Cache manager initialized");
     }
   }
@@ -243,7 +245,7 @@ void TcpServer::Stop() {
   // Request SYNC manager to shutdown
   if (sync_manager_) {
     sync_manager_->RequestShutdown();
-    sync_manager_->WaitForCompletion(30);
+    sync_manager_->WaitForCompletion(kDefaultSyncShutdownTimeoutSec);
   }
 #endif
 
@@ -279,10 +281,9 @@ void TcpServer::HandleConnection(int client_fd) {
   stats_.IncrementConnections();
 
   // Create I/O handler config
-  IOConfig io_config{
-      .recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
-      .max_query_length = static_cast<size_t>(config_.max_query_length),
-      .recv_timeout_sec = 60};
+  IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
+                     .max_query_length = static_cast<size_t>(config_.max_query_length),
+                     .recv_timeout_sec = kDefaultConnectionRecvTimeoutSec};
 
   // Request processor callback
   auto processor = [this](const std::string& request, ConnectionContext& conn_ctx) -> std::string {

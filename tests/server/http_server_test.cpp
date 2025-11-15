@@ -423,7 +423,7 @@ TEST_F(HttpServerTest, CORSHeaders) {
   cors_config.port = 18081;
   cors_config.enable_cors = true;
   cors_config.cors_allow_origin = "*";
-  
+
   auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
   ASSERT_TRUE(cors_server->Start());
 
@@ -433,7 +433,7 @@ TEST_F(HttpServerTest, CORSHeaders) {
   ASSERT_TRUE(res);
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Origin"));
   EXPECT_EQ(res->get_header_value("Access-Control-Allow-Origin"), "*");
-  
+
   cors_server->Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
@@ -445,7 +445,7 @@ TEST_F(HttpServerTest, CORSPreflight) {
   cors_config.port = 18081;
   cors_config.enable_cors = true;
   cors_config.cors_allow_origin = "*";
-  
+
   auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
   ASSERT_TRUE(cors_server->Start());
 
@@ -456,7 +456,7 @@ TEST_F(HttpServerTest, CORSPreflight) {
   EXPECT_EQ(res->status, 204);
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Origin"));
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Methods"));
-  
+
   cors_server->Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }

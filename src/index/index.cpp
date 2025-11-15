@@ -90,18 +90,16 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
   // Sort and remove duplicates (more efficient than unordered_set)
   std::sort(old_ngrams.begin(), old_ngrams.end());
   old_ngrams.erase(std::unique(old_ngrams.begin(), old_ngrams.end()), old_ngrams.end());
-  
+
   std::sort(new_ngrams.begin(), new_ngrams.end());
   new_ngrams.erase(std::unique(new_ngrams.begin(), new_ngrams.end()), new_ngrams.end());
 
   // Calculate set differences using sorted arrays
   std::vector<std::string> to_remove;
   std::vector<std::string> to_add;
-  std::set_difference(old_ngrams.begin(), old_ngrams.end(), 
-                      new_ngrams.begin(), new_ngrams.end(),
+  std::set_difference(old_ngrams.begin(), old_ngrams.end(), new_ngrams.begin(), new_ngrams.end(),
                       std::back_inserter(to_remove));
-  std::set_difference(new_ngrams.begin(), new_ngrams.end(),
-                      old_ngrams.begin(), old_ngrams.end(),
+  std::set_difference(new_ngrams.begin(), new_ngrams.end(), old_ngrams.begin(), old_ngrams.end(),
                       std::back_inserter(to_add));
 
   // Acquire exclusive lock for modifying posting lists
@@ -125,7 +123,7 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
 void Index::RemoveDocument(DocId doc_id, const std::string& text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
-  
+
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   std::sort(ngrams.begin(), ngrams.end());
   ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());

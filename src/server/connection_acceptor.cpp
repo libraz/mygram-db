@@ -179,16 +179,22 @@ void ConnectionAcceptor::AcceptLoop() {
 
     // Convert client IP to string for ACL checks
     std::string client_ip;
+    // C-style array required by POSIX inet_ntop API
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
     char ip_buffer[INET_ADDRSTRLEN] = {};
+    // Array-to-pointer decay required by POSIX inet_ntop API
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+      // Array-to-pointer decay required by std::string::assign
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
       client_ip.assign(ip_buffer);
     } else {
       spdlog::warn("Failed to parse client address while accepting connection");
     }
 
     if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
-      spdlog::warn("Rejected TCP connection from {} (not in network.allow_cidrs)", client_ip.empty() ? "<unknown>" : client_ip);
+      spdlog::warn("Rejected TCP connection from {} (not in network.allow_cidrs)",
+                   client_ip.empty() ? "<unknown>" : client_ip);
       close(client_fd);
       continue;
     }

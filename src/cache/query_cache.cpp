@@ -6,6 +6,7 @@
 #include "cache/query_cache.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace mygramdb::cache {
 
@@ -13,6 +14,9 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms)
     : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms) {}
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
+  // Start timing
+  auto start_time = std::chrono::high_resolution_clock::now();
+
   stats_.total_queries++;
 
   // Shared lock for read
@@ -22,6 +26,15 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   if (iter == cache_map_.end()) {
     stats_.cache_misses++;
     stats_.cache_misses_not_found++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
     return std::nullopt;
   }
 
@@ -29,13 +42,22 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   if (iter->second.first.invalidated.load()) {
     stats_.cache_misses++;
     stats_.cache_misses_invalidated++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
     return std::nullopt;
   }
 
   // Cache hit
   stats_.cache_hits++;
 
-  // Decompress result
+  // Decompress result and copy query_cost_ms before releasing lock
   const auto& entry = iter->second.first;
   std::vector<DocId> result;
   try {
@@ -43,8 +65,20 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   } catch (const std::exception& e) {
     // Decompression failed, treat as miss
     stats_.cache_misses++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
     return std::nullopt;
   }
+
+  // Copy query_cost_ms before releasing lock to avoid use-after-free
+  const double query_cost_ms = entry.query_cost_ms;
 
   // Update access time (need to upgrade to unique lock)
   lock.unlock();
@@ -57,10 +91,13 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     iter->second.first.metadata.last_accessed = std::chrono::steady_clock::now();
     iter->second.first.metadata.access_count++;
 
-    // Update timing statistics
+    // Record hit latency and saved time
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     {
       std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_query_saved_time_ms += entry.query_cost_ms;
+      stats_.total_cache_hit_time_ms += hit_time_ms;
+      stats_.total_query_saved_time_ms += query_cost_ms;
     }
   }
 

@@ -105,13 +105,14 @@ TEST_F(ConnectionIOHandlerTest, HandlesMultipleRequests) {
   char buffer[1024];
   int expected_responses = 3;
   int received = 0;
-  
+
   while (received < expected_responses) {
     ssize_t bytes = recv(sockets_[1], buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) break;
+    if (bytes <= 0)
+      break;
     buffer[bytes] = '\0';
     all_responses += buffer;
-    
+
     // Count \r\n occurrences
     size_t pos = 0;
     while ((pos = all_responses.find("\r\n", pos)) != std::string::npos) {
@@ -135,9 +136,7 @@ TEST_F(ConnectionIOHandlerTest, HandlesMultipleRequests) {
 TEST_F(ConnectionIOHandlerTest, RejectsOversizedRequest) {
   config_.max_query_length = 100;  // Small limit
 
-  auto processor = [&](const std::string& req, ConnectionContext& ctx) {
-    return "OK";
-  };
+  auto processor = [&](const std::string& req, ConnectionContext& ctx) { return "OK"; };
 
   ConnectionIOHandler handler(config_, processor, shutdown_flag_);
 
@@ -151,7 +150,7 @@ TEST_F(ConnectionIOHandlerTest, RejectsOversizedRequest) {
     ASSERT_GT(bytes, 0);
     buffer[bytes] = '\0';
     EXPECT_TRUE(std::string(buffer).find("ERROR") != std::string::npos);
-    
+
     shutdown(sockets_[1], SHUT_RDWR);
   });
 
@@ -162,9 +161,7 @@ TEST_F(ConnectionIOHandlerTest, RejectsOversizedRequest) {
 }
 
 TEST_F(ConnectionIOHandlerTest, RespectsShutdownFlag) {
-  auto processor = [&](const std::string& req, ConnectionContext& ctx) {
-    return "OK";
-  };
+  auto processor = [&](const std::string& req, ConnectionContext& ctx) { return "OK"; };
 
   ConnectionIOHandler handler(config_, processor, shutdown_flag_);
 
@@ -212,7 +209,7 @@ TEST_F(ConnectionIOHandlerTest, HandlesPartialReceives) {
 
     char buffer[1024];
     recv(sockets_[1], buffer, sizeof(buffer) - 1, 0);
-    
+
     shutdown(sockets_[1], SHUT_RDWR);
     close(sockets_[1]);
   });

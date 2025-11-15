@@ -26,13 +26,9 @@ constexpr int kDefaultSyncWaitTimeoutSec = 30;
 constexpr int kSyncPollIntervalMs = 100;
 }  // namespace
 
-SyncOperationManager::SyncOperationManager(
-    const std::unordered_map<std::string, TableContext*>& table_contexts,
-    const config::Config* full_config,
-    mysql::BinlogReader* binlog_reader)
-    : table_contexts_(table_contexts),
-      full_config_(full_config),
-      binlog_reader_(binlog_reader) {}
+SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
+                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader)
+    : table_contexts_(table_contexts), full_config_(full_config), binlog_reader_(binlog_reader) {}
 
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();
@@ -93,14 +89,13 @@ std::string SyncOperationManager::GetSyncStatus() {
 
     if (state.status == "IN_PROGRESS") {
       uint64_t processed = state.processed_rows.load();
-      double elapsed = std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - state.start_time).count();
+      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start_time).count();
       double rate = elapsed > 0 ? static_cast<double>(processed) / elapsed : 0.0;
 
       if (state.total_rows > 0) {
-        double percent = (100.0 * processed) / state.total_rows;
-        oss << " progress=" << processed << "/" << state.total_rows
-            << " rows (" << std::fixed << std::setprecision(1) << percent << "%)";
+        double percent = (100.0 * static_cast<double>(processed)) / static_cast<double>(state.total_rows);
+        oss << " progress=" << processed << "/" << state.total_rows << " rows (" << std::fixed << std::setprecision(1)
+            << percent << "%)";
       } else {
         oss << " progress=" << processed << " rows";
       }
@@ -108,19 +103,16 @@ std::string SyncOperationManager::GetSyncStatus() {
       oss << " rate=" << std::fixed << std::setprecision(0) << rate << " rows/s";
     } else if (state.status == "COMPLETED") {
       uint64_t processed = state.processed_rows.load();
-      double elapsed = std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - state.start_time).count();
+      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start_time).count();
 
-      oss << " rows=" << processed
-          << " time=" << std::fixed << std::setprecision(1) << elapsed << "s";
+      oss << " rows=" << processed << " time=" << std::fixed << std::setprecision(1) << elapsed << "s";
 
       if (!state.gtid.empty()) {
         oss << " gtid=" << state.gtid;
       }
       oss << " replication=" << state.replication_status;
     } else if (state.status == "FAILED") {
-      oss << " rows=" << state.processed_rows.load()
-          << " error=\"" << state.error_message << "\"";
+      oss << " rows=" << state.processed_rows.load() << " error=\"" << state.error_message << "\"";
     } else if (state.status == "CANCELLED") {
       oss << " error=\"" << state.error_message << "\"";
     }
@@ -154,8 +146,7 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
   auto start = std::chrono::steady_clock::now();
 
   while (!syncing_tables_.empty()) {
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start).count();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
 
     if (elapsed > timeout_sec) {
       spdlog::warn("Timeout waiting for SYNC operations to complete");
@@ -196,8 +187,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   struct SyncGuard {
     SyncOperationManager* mgr;
     std::string table;
-    explicit SyncGuard(SyncOperationManager* m, std::string t)
-        : mgr(m), table(std::move(t)) {}
+    explicit SyncGuard(SyncOperationManager* manager, std::string table_name)
+        : mgr(manager), table(std::move(table_name)) {}
     ~SyncGuard() {
       std::lock_guard<std::mutex> lock(mgr->syncing_tables_mutex_);
       mgr->syncing_tables_.erase(table);
@@ -212,53 +203,50 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   try {
     // Validate config
     if (full_config_ == nullptr) {
-      update_state([](SyncState& s) {
-        s.status = "FAILED";
-        s.error_message = "Configuration not available";
-        s.is_running = false;
+      update_state([](SyncState& state) {
+        state.status = "FAILED";
+        state.error_message = "Configuration not available";
+        state.is_running = false;
       });
       spdlog::error("SYNC failed for {}: Configuration not available", table_name);
       return;
     }
 
     // Connect to MySQL
-    mysql::Connection::Config mysql_config{
-        .host = full_config_->mysql.host,
-        .port = static_cast<uint16_t>(full_config_->mysql.port),
-        .user = full_config_->mysql.user,
-        .password = full_config_->mysql.password,
-        .database = full_config_->mysql.database};
+    mysql::Connection::Config mysql_config{.host = full_config_->mysql.host,
+                                           .port = static_cast<uint16_t>(full_config_->mysql.port),
+                                           .user = full_config_->mysql.user,
+                                           .password = full_config_->mysql.password,
+                                           .database = full_config_->mysql.database};
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
     if (!mysql_conn->Connect()) {
       std::string error_msg = "Failed to connect: " + mysql_conn->GetLastError();
-      update_state([&error_msg](SyncState& s) {
-        s.status = "FAILED";
-        s.error_message = error_msg;
-        s.is_running = false;
+      update_state([&error_msg](SyncState& state) {
+        state.status = "FAILED";
+        state.error_message = error_msg;
+        state.is_running = false;
       });
       spdlog::error("SYNC failed for {}: {}", table_name, error_msg);
       return;
     }
 
     // Get table context
-    auto it = table_contexts_.find(table_name);
-    if (it == table_contexts_.end()) {
-      update_state([](SyncState& s) {
-        s.status = "FAILED";
-        s.error_message = "Table context not found";
-        s.is_running = false;
+    auto table_iter = table_contexts_.find(table_name);
+    if (table_iter == table_contexts_.end()) {
+      update_state([](SyncState& state) {
+        state.status = "FAILED";
+        state.error_message = "Table context not found";
+        state.is_running = false;
       });
       return;
     }
 
-    auto* ctx = it->second;
+    auto* ctx = table_iter->second;
 
     // Build snapshot
-    storage::SnapshotBuilder builder(
-        *mysql_conn, *ctx->index, *ctx->doc_store,
-        ctx->config, full_config_->build);
+    storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->build);
 
     RegisterBuilder(table_name, &builder);
 
@@ -277,10 +265,10 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Handle cancellation
     if (shutdown_requested_) {
-      update_state([](SyncState& s) {
-        s.status = "CANCELLED";
-        s.error_message = "Server shutdown requested";
-        s.is_running = false;
+      update_state([](SyncState& state) {
+        state.status = "CANCELLED";
+        state.error_message = "Server shutdown requested";
+        state.is_running = false;
       });
       spdlog::info("SYNC cancelled for {} due to shutdown", table_name);
       return;
@@ -290,71 +278,60 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     if (success) {
       std::string gtid = builder.GetSnapshotGTID();
       uint64_t processed = builder.GetProcessedRows();
-      
-      update_state([&gtid, processed](SyncState& s) {
-        s.status = "COMPLETED";
-        s.gtid = gtid;
-        s.processed_rows = processed;
+
+      update_state([&gtid, processed](SyncState& state) {
+        state.status = "COMPLETED";
+        state.gtid = gtid;
+        state.processed_rows = processed;
       });
 
       // Start replication if configured
-      if (full_config_->replication.enable && binlog_reader_ && !gtid.empty()) {
+      if (full_config_->replication.enable && binlog_reader_ != nullptr && !gtid.empty()) {
         if (binlog_reader_->IsRunning()) {
-          update_state([](SyncState& s) {
-            s.replication_status = "ALREADY_RUNNING";
-          });
-          spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication already running.",
-                       table_name, processed, gtid);
+          update_state([](SyncState& state) { state.replication_status = "ALREADY_RUNNING"; });
+          spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication already running.", table_name, processed,
+                       gtid);
         } else {
           binlog_reader_->SetCurrentGTID(gtid);
           if (binlog_reader_->Start()) {
-            update_state([](SyncState& s) {
-              s.replication_status = "STARTED";
-            });
-            spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication started.",
-                         table_name, processed, gtid);
+            update_state([](SyncState& state) { state.replication_status = "STARTED"; });
+            spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication started.", table_name, processed, gtid);
           } else {
             std::string error_msg = "Snapshot OK but replication failed: " + binlog_reader_->GetLastError();
-            update_state([&error_msg](SyncState& s) {
-              s.replication_status = "FAILED";
-              s.error_message = error_msg;
+            update_state([&error_msg](SyncState& state) {
+              state.replication_status = "FAILED";
+              state.error_message = error_msg;
             });
-            spdlog::error("SYNC completed for {} but replication failed: {}",
-                          table_name, binlog_reader_->GetLastError());
+            spdlog::error("SYNC completed for {} but replication failed: {}", table_name,
+                          binlog_reader_->GetLastError());
           }
         }
       } else {
-        update_state([](SyncState& s) {
-          s.replication_status = "DISABLED";
-        });
+        update_state([](SyncState& state) { state.replication_status = "DISABLED"; });
         spdlog::info("SYNC completed for {} (rows={}, replication disabled)", table_name, processed);
       }
     } else {
       std::string error_msg = builder.GetLastError();
-      update_state([&error_msg](SyncState& s) {
-        s.status = "FAILED";
-        s.error_message = error_msg;
+      update_state([&error_msg](SyncState& state) {
+        state.status = "FAILED";
+        state.error_message = error_msg;
       });
       spdlog::error("SYNC failed for {}: {}", table_name, error_msg);
     }
 
   } catch (const std::exception& e) {
     std::string error_msg = e.what();
-    update_state([&error_msg](SyncState& s) {
-      s.status = "FAILED";
-      s.error_message = error_msg;
+    update_state([&error_msg](SyncState& state) {
+      state.status = "FAILED";
+      state.error_message = error_msg;
     });
     spdlog::error("SYNC exception for {}: {}", table_name, error_msg);
   }
 
-  update_state([](SyncState& s) {
-    s.is_running = false;
-  });
+  update_state([](SyncState& state) { state.is_running = false; });
 }
 
-void SyncOperationManager::RegisterBuilder(
-    const std::string& table_name,
-    storage::SnapshotBuilder* builder) {
+void SyncOperationManager::RegisterBuilder(const std::string& table_name, storage::SnapshotBuilder* builder) {
   std::lock_guard<std::mutex> lock(builders_mutex_);
   active_builders_[table_name] = builder;
 }

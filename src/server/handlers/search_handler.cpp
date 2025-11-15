@@ -455,27 +455,112 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
     for (const auto& filter_cond : filters) {
       auto stored_value = doc_store->GetFilterValue(doc_id, filter_cond.column);
 
-      // For now, only support equality operator
-      if (filter_cond.op == query::FilterOp::EQ) {
-        // Convert filter value string to appropriate type and compare
-        bool matches = stored_value && std::visit(
-                                           [&](const auto& val) {
-                                             using T = std::decay_t<decltype(val)>;
-                                             if constexpr (std::is_same_v<T, std::monostate>) {
-                                               // NULL value never matches
-                                               return false;
-                                             } else if constexpr (std::is_same_v<T, std::string>) {
-                                               return val == filter_cond.value;
-                                             } else {
-                                               return std::to_string(val) == filter_cond.value;
-                                             }
-                                           },
-                                           stored_value.value());
-
-        if (!matches) {
+      // NULL values: only match for NE operator
+      if (!stored_value) {
+        if (filter_cond.op != query::FilterOp::NE) {
           matches_all_filters = false;
           break;
         }
+        continue;  // NULL != anything is true
+      }
+
+      // Evaluate filter condition based on operator
+      bool matches = std::visit(
+          [&](const auto& val) -> bool {
+            using T = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+              // NULL value: handled above
+              return filter_cond.op == query::FilterOp::NE;
+            } else if constexpr (std::is_same_v<T, std::string>) {
+              // String comparison
+              const std::string& str_val = val;
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  return str_val == filter_cond.value;
+                case query::FilterOp::NE:
+                  return str_val != filter_cond.value;
+                case query::FilterOp::GT:
+                  return str_val > filter_cond.value;
+                case query::FilterOp::GTE:
+                  return str_val >= filter_cond.value;
+                case query::FilterOp::LT:
+                  return str_val < filter_cond.value;
+                case query::FilterOp::LTE:
+                  return str_val <= filter_cond.value;
+                default:
+                  return false;
+              }
+            } else if constexpr (std::is_same_v<T, bool>) {
+              // Boolean: convert filter value to bool
+              bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  return val == bool_filter;
+                case query::FilterOp::NE:
+                  return val != bool_filter;
+                default:
+                  return false;  // GT/GTE/LT/LTE not meaningful for bools
+              }
+            } else if constexpr (std::is_same_v<T, double>) {
+              // Floating-point comparison
+              double filter_val = 0.0;
+              try {
+                filter_val = std::stod(filter_cond.value);
+              } catch (const std::exception&) {
+                return false;  // Invalid number
+              }
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
+                  return val == filter_val;
+                  // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
+                case query::FilterOp::NE:
+                  // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
+                  return val != filter_val;
+                  // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
+                case query::FilterOp::GT:
+                  return val > filter_val;
+                case query::FilterOp::GTE:
+                  return val >= filter_val;
+                case query::FilterOp::LT:
+                  return val < filter_val;
+                case query::FilterOp::LTE:
+                  return val <= filter_val;
+                default:
+                  return false;
+              }
+            } else {
+              // Numeric comparison (int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t)
+              int64_t filter_val = 0;
+              try {
+                filter_val = std::stoll(filter_cond.value);
+              } catch (const std::exception&) {
+                return false;  // Invalid number
+              }
+              auto numeric_val = static_cast<int64_t>(val);
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  return numeric_val == filter_val;
+                case query::FilterOp::NE:
+                  return numeric_val != filter_val;
+                case query::FilterOp::GT:
+                  return numeric_val > filter_val;
+                case query::FilterOp::GTE:
+                  return numeric_val >= filter_val;
+                case query::FilterOp::LT:
+                  return numeric_val < filter_val;
+                case query::FilterOp::LTE:
+                  return numeric_val <= filter_val;
+                default:
+                  return false;
+              }
+            }
+          },
+          stored_value.value());
+
+      if (!matches) {
+        matches_all_filters = false;
+        break;
       }
     }
 

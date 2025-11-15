@@ -66,27 +66,53 @@ TEST(QueryNormalizerTest, FilterOrdering) {
 }
 
 /**
- * @brief Test default limit normalization
+ * @brief Test default limit uses actual value (different values)
  */
-TEST(QueryNormalizerTest, DefaultLimit) {
+TEST(QueryNormalizerTest, DefaultLimitDifferent) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
   query1.search_text = "test";
   query1.limit = 100;
-  query1.limit_explicit = false;  // Default
+  query1.limit_explicit = false;  // Default (set by api.default_limit)
 
   query::Query query2;
   query2.type = query::QueryType::SEARCH;
   query2.table = "posts";
   query2.search_text = "test";
   query2.limit = 50;
-  query2.limit_explicit = false;  // Default
+  query2.limit_explicit = false;  // Default (different api.default_limit)
 
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // Default limits should be normalized to same value
+  // Even with default limits, different actual limit values should produce different cache keys
+  // This prevents cache hits from returning incorrect number of results
+  EXPECT_NE(normalized1, normalized2);
+}
+
+/**
+ * @brief Test default limit uses actual value (same values)
+ */
+TEST(QueryNormalizerTest, DefaultLimitSame) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  query1.search_text = "test";
+  query1.limit = 50;
+  query1.limit_explicit = false;  // Default (set by api.default_limit)
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "test";
+  query2.limit = 50;
+  query2.limit_explicit = false;  // Default (same api.default_limit)
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+
+  // Same limit value should produce same cache key regardless of limit_explicit flag
   EXPECT_EQ(normalized1, normalized2);
 }
 

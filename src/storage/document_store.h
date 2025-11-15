@@ -181,9 +181,12 @@ class DocumentStore {
   [[nodiscard]] bool HasFilterColumn(const std::string& filter_name) const;
 
   /**
-   * @brief Get total document count
+   * @brief Get total document count (thread-safe)
    */
-  [[nodiscard]] size_t Size() const { return doc_id_to_pk_.size(); }
+  [[nodiscard]] size_t Size() const {
+    std::shared_lock lock(mutex_);
+    return doc_id_to_pk_.size();
+  }
 
   /**
    * @brief Get memory usage estimate

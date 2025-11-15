@@ -136,21 +136,24 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   oss << "OK DOC " << doc->primary_key;
 
   // Add filters
+  // Default precision for floating point values in response
+  constexpr int kDefaultDoublePrecision = 6;
+
   for (const auto& [name, value] : doc->filters) {
     oss << " " << name << "=";
     std::visit(
-        [&oss](auto&& v) {
-          using T = std::decay_t<decltype(v)>;
+        [&oss](auto&& filter_value) {
+          using T = std::decay_t<decltype(filter_value)>;
           if constexpr (std::is_same_v<T, std::monostate>) {
             oss << "NULL";
           } else if constexpr (std::is_same_v<T, bool>) {
-            oss << (v ? "true" : "false");
+            oss << (filter_value ? "true" : "false");
           } else if constexpr (std::is_same_v<T, std::string>) {
-            oss << v;
+            oss << filter_value;
           } else if constexpr (std::is_same_v<T, double>) {
-            oss << std::fixed << std::setprecision(6) << v;
+            oss << std::fixed << std::setprecision(kDefaultDoublePrecision) << filter_value;
           } else {
-            oss << v;
+            oss << filter_value;
           }
         },
         value);

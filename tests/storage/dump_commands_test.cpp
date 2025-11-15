@@ -425,8 +425,7 @@ TEST_F(DumpCommandsTest, CredentialsNotPersisted) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success =
-      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Read dump file as binary and check for credentials
@@ -437,8 +436,7 @@ TEST_F(DumpCommandsTest, CredentialsNotPersisted) {
   dump_file.close();
 
   // Credentials should NOT be in the dump file
-  EXPECT_EQ(dump_content.find("sensitive_user"), std::string::npos)
-      << "Username should not be stored in dump file";
+  EXPECT_EQ(dump_content.find("sensitive_user"), std::string::npos) << "Username should not be stored in dump file";
   EXPECT_EQ(dump_content.find("super_secret_password"), std::string::npos)
       << "Password should not be stored in dump file";
 }
@@ -452,8 +450,7 @@ TEST_F(DumpCommandsTest, CredentialsNotLoadedFromDump) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success =
-      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Load dump
@@ -484,8 +481,7 @@ TEST_F(DumpCommandsTest, RestrictiveFilePermissions) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success =
-      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Check file permissions

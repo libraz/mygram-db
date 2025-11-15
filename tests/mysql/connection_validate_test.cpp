@@ -5,8 +5,8 @@
 
 #ifdef USE_MYSQL
 
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
 #include <cstdlib>
@@ -63,34 +63,34 @@ TEST(ConnectionValidateUnitTest, MethodExists) {
 TEST(ConnectionValidateUnitTest, QueryConstructionLogic) {
   // Test the expected query structure by validating key components
   // This tests the logic without requiring a MySQL connection
-  
+
   std::string database = "mydb";
   std::string table = "users";
   std::string column = "user_id";
-  
+
   // The query should check:
   // 1. Column is in KEY_COLUMN_USAGE
   // 2. Either CONSTRAINT_NAME = 'PRIMARY' or in single-column UNIQUE constraints
   // 3. Using information_schema tables
-  
+
   // Expected query components:
   std::vector<std::string> expected_components = {
-    "information_schema.KEY_COLUMN_USAGE",
-    "TABLE_SCHEMA = 'mydb'",
-    "TABLE_NAME = 'users'",
-    "COLUMN_NAME = 'user_id'",
-    "CONSTRAINT_NAME = 'PRIMARY'",
-    "information_schema.TABLE_CONSTRAINTS",
-    "CONSTRAINT_TYPE = 'UNIQUE'",
-    "COUNT(*) = 1",  // Ensures single-column constraint
+      "information_schema.KEY_COLUMN_USAGE",
+      "TABLE_SCHEMA = 'mydb'",
+      "TABLE_NAME = 'users'",
+      "COLUMN_NAME = 'user_id'",
+      "CONSTRAINT_NAME = 'PRIMARY'",
+      "information_schema.TABLE_CONSTRAINTS",
+      "CONSTRAINT_TYPE = 'UNIQUE'",
+      "COUNT(*) = 1",  // Ensures single-column constraint
   };
-  
+
   // Simulate query validation - in real implementation these checks would be in the query
   for (const auto& component : expected_components) {
     // This validates that our implementation concept includes these key elements
     EXPECT_FALSE(component.empty()) << "Query should include: " << component;
   }
-  
+
   // Additional logic validation
   // Single-column constraint check: GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1
   // This ensures composite keys are excluded
@@ -100,7 +100,7 @@ TEST(ConnectionValidateUnitTest, QueryConstructionLogic) {
 // Unit test: Error message content validation
 TEST(ConnectionValidateUnitTest, ErrorMessageFormats) {
   // Test expected error message formats for different failure scenarios
-  
+
   // Scenario 1: Column doesn't exist
   {
     std::string expected_error = "Column 'invalid_col' does not exist in table 'db.table'";
@@ -108,15 +108,16 @@ TEST(ConnectionValidateUnitTest, ErrorMessageFormats) {
     EXPECT_THAT(expected_error, ::testing::HasSubstr("invalid_col"));
     EXPECT_THAT(expected_error, ::testing::HasSubstr("db.table"));
   }
-  
+
   // Scenario 2: Column exists but not unique
   {
-    std::string expected_error = "Column 'col' in table 'db.table' must be a single-column PRIMARY KEY or UNIQUE KEY. "
-                                 "Composite keys are not supported.";
+    std::string expected_error =
+        "Column 'col' in table 'db.table' must be a single-column PRIMARY KEY or UNIQUE KEY. "
+        "Composite keys are not supported.";
     EXPECT_THAT(expected_error, ::testing::HasSubstr("must be a single-column PRIMARY KEY or UNIQUE KEY"));
     EXPECT_THAT(expected_error, ::testing::HasSubstr("Composite keys are not supported"));
   }
-  
+
   // Scenario 3: Query execution failure
   {
     std::string expected_error = "Failed to query table schema: some error";
@@ -127,31 +128,31 @@ TEST(ConnectionValidateUnitTest, ErrorMessageFormats) {
 // Unit test: Validation logic for different key types
 TEST(ConnectionValidateUnitTest, KeyTypeValidationLogic) {
   // Test the conceptual logic for different key configurations
-  
+
   // Case 1: Single-column PRIMARY KEY - should return COUNT = 1
   {
     int primary_key_count = 1;  // Simulates: PRIMARY KEY (id)
     EXPECT_EQ(primary_key_count, 1) << "Single-column PRIMARY KEY should be valid";
   }
-  
+
   // Case 2: Single-column UNIQUE KEY - should return COUNT = 1
   {
     int unique_key_count = 1;  // Simulates: UNIQUE KEY (email)
     EXPECT_EQ(unique_key_count, 1) << "Single-column UNIQUE KEY should be valid";
   }
-  
+
   // Case 3: Composite PRIMARY KEY - should return COUNT = 0 (filtered by HAVING COUNT(*) = 1)
   {
     int composite_key_count = 0;  // Simulates: PRIMARY KEY (id, created_at) - filtered out
     EXPECT_EQ(composite_key_count, 0) << "Composite PRIMARY KEY should be rejected";
   }
-  
+
   // Case 4: Non-unique column - should return COUNT = 0
   {
     int no_key_count = 0;  // Simulates: Regular column with no constraint
     EXPECT_EQ(no_key_count, 0) << "Non-unique column should be rejected";
   }
-  
+
   // Case 5: Column in composite UNIQUE KEY - should return COUNT = 0
   {
     int composite_unique_count = 0;  // Simulates: UNIQUE KEY (col1, col2) - filtered out
@@ -170,7 +171,7 @@ class ConnectionValidateIntegrationTest : public ::testing::Test {
 
     config_ = GetTestConfig();
     conn_ = std::make_unique<Connection>(config_);
-    
+
     if (!conn_->Connect()) {
       GTEST_SKIP() << "Failed to connect to MySQL: " << conn_->GetLastError();
     }

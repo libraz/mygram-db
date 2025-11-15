@@ -6,6 +6,7 @@
 #include "server/tcp_server.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -16,7 +17,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <fcntl.h>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -199,8 +199,7 @@ void TcpServerTest::StartServerOrSkip() {
   const std::string& error = server_->GetLastError();
   if (error.find("Operation not permitted") != std::string::npos ||
       error.find("Permission denied") != std::string::npos) {
-    GTEST_SKIP() << "Skipping TcpServerTest: " << error
-                 << ". This environment does not allow creating TCP sockets.";
+    GTEST_SKIP() << "Skipping TcpServerTest: " << error << ". This environment does not allow creating TCP sockets.";
   }
 
   FAIL() << "Failed to start TCP server: " << (error.empty() ? "unknown error" : error);
@@ -1410,6 +1409,68 @@ TEST_F(TcpServerTest, CountSearchConsistency) {
   std::string search_response2 = SendRequest(sock, "SEARCH test test LIMIT 90");
   EXPECT_TRUE(search_response2.find("OK RESULTS 100") == 0)
       << "SEARCH total_results should be consistent regardless of LIMIT";
+
+  close(sock);
+}
+
+/**
+ * @brief Test FILTER operators (regression test for bug where only EQ was implemented)
+ *
+ * This test verifies that all FILTER operators (NE, GT, GTE, LT, LTE) actually filter results.
+ * Before the fix, only EQ was implemented and other operators were ignored.
+ */
+TEST_F(TcpServerTest, FilterOperators) {
+  SkipIfSocketCreationBlocked();
+
+  // Add documents with filter values
+  std::unordered_map<std::string, storage::FilterValue> filters1;
+  filters1["score"] = static_cast<int32_t>(10);
+  filters1["status"] = std::string("active");
+  auto doc_id1 = doc_store_->AddDocument("doc1", filters1);
+  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+
+  std::unordered_map<std::string, storage::FilterValue> filters2;
+  filters2["score"] = static_cast<int32_t>(20);
+  filters2["status"] = std::string("inactive");
+  auto doc_id2 = doc_store_->AddDocument("doc2", filters2);
+  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello world");
+
+  std::unordered_map<std::string, storage::FilterValue> filters3;
+  filters3["score"] = static_cast<int32_t>(30);
+  filters3["status"] = std::string("active");
+  auto doc_id3 = doc_store_->AddDocument("doc3", filters3);
+  index_->AddDocument(static_cast<index::DocId>(doc_id3), "hello world");
+
+  StartServerOrSkip();
+  uint16_t port = server_->GetPort();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Test EQ (should work in both old and new code)
+  std::string eq_response = SendRequest(sock, "SEARCH test hello FILTER score = 20");
+  EXPECT_TRUE(eq_response.find("OK RESULTS 1") == 0) << "EQ filter should return 1 result";
+
+  // Test NE (would fail in old code - operator ignored, returns all 3)
+  std::string ne_response = SendRequest(sock, "SEARCH test hello FILTER status != active");
+  EXPECT_TRUE(ne_response.find("OK RESULTS 1") == 0) << "NE filter should return 1 result (doc2), not all results";
+
+  // Test GT (would fail in old code - operator ignored, returns all 3)
+  std::string gt_response = SendRequest(sock, "SEARCH test hello FILTER score > 20");
+  EXPECT_TRUE(gt_response.find("OK RESULTS 1") == 0) << "GT filter should return 1 result (doc3), not all results";
+
+  // Test GTE (would fail in old code - operator ignored, returns all 3)
+  std::string gte_response = SendRequest(sock, "SEARCH test hello FILTER score >= 20");
+  EXPECT_TRUE(gte_response.find("OK RESULTS 2") == 0) << "GTE filter should return 2 results (doc2, doc3), not all";
+
+  // Test LT (would fail in old code - operator ignored, returns all 3)
+  std::string lt_response = SendRequest(sock, "SEARCH test hello FILTER score < 20");
+  EXPECT_TRUE(lt_response.find("OK RESULTS 1") == 0) << "LT filter should return 1 result (doc1), not all results";
+
+  // Test LTE (would fail in old code - operator ignored, returns all 3)
+  std::string lte_response = SendRequest(sock, "SEARCH test hello FILTER score <= 20");
+  EXPECT_TRUE(lte_response.find("OK RESULTS 2") == 0) << "LTE filter should return 2 results (doc1, doc2), not all";
 
   close(sock);
 }

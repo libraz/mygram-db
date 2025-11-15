@@ -377,18 +377,18 @@ std::optional<std::string> Connection::GetLatestGTID() {
 bool Connection::ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
                                       std::string& error_message) {
   // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
-  std::string query = "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
-                      "WHERE TABLE_SCHEMA = '" +
-                      database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column +
-                      "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
-                      "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
-                      "WHERE TABLE_SCHEMA = '" +
-                      database + "' AND TABLE_NAME = '" + table +
-                      "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
-                      "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
-                      "WHERE TABLE_SCHEMA = '" +
-                      database + "' AND TABLE_NAME = '" + table +
-                      "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+  std::string query =
+      "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+      "WHERE TABLE_SCHEMA = '" +
+      database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column +
+      "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
+      "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
+      "WHERE TABLE_SCHEMA = '" +
+      database + "' AND TABLE_NAME = '" + table +
+      "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
+      "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
+      "WHERE TABLE_SCHEMA = '" +
+      database + "' AND TABLE_NAME = '" + table + "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
   MYSQL_RES* result = Execute(query);
   if (result == nullptr) {
@@ -409,9 +409,10 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
   if (count == 0) {
     // Column is not a single-column PRIMARY KEY or UNIQUE KEY
     // Check if column exists and provide more specific error
-    std::string column_check_query = "SELECT COUNT(*) FROM information_schema.COLUMNS "
-                                     "WHERE TABLE_SCHEMA = '" +
-                                     database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column + "'";
+    std::string column_check_query =
+        "SELECT COUNT(*) FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = '" +
+        database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column + "'";
 
     MYSQL_RES* col_result = Execute(column_check_query);
     if (col_result != nullptr) {

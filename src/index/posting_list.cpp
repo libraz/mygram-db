@@ -108,9 +108,9 @@ void PostingList::Add(DocId doc_id) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
-    auto it = std::lower_bound(docs.begin(), docs.end(), doc_id);
-    if (it == docs.end() || *it != doc_id) {
-      docs.insert(it, doc_id);
+    auto iter = std::lower_bound(docs.begin(), docs.end(), doc_id);
+    if (iter == docs.end() || *iter != doc_id) {
+      docs.insert(iter, doc_id);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -140,9 +140,9 @@ void PostingList::Remove(DocId doc_id) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
-    auto it = std::find(docs.begin(), docs.end(), doc_id);
-    if (it != docs.end()) {
-      docs.erase(it);
+    auto iter = std::find(docs.begin(), docs.end(), doc_id);
+    if (iter != docs.end()) {
+      docs.erase(iter);
       delta_compressed_ = EncodeDelta(docs);
     }
   } else {
@@ -155,7 +155,7 @@ bool PostingList::Contains(DocId doc_id) const {
     if (delta_compressed_.empty()) {
       return false;
     }
-    
+
     // Quick check for first element
     if (delta_compressed_[0] == doc_id) {
       return true;
@@ -163,9 +163,11 @@ bool PostingList::Contains(DocId doc_id) const {
     if (delta_compressed_[0] > doc_id) {
       return false;
     }
-    
+
     // For small arrays, linear search is faster than repeated accumulation
-    if (delta_compressed_.size() <= 16) {
+    // Threshold chosen based on performance profiling
+    constexpr size_t kLinearSearchThreshold = 16;
+    if (delta_compressed_.size() <= kLinearSearchThreshold) {
       DocId current = 0;
       for (const auto& delta : delta_compressed_) {
         current += delta;
@@ -178,21 +180,21 @@ bool PostingList::Contains(DocId doc_id) const {
       }
       return false;
     }
-    
+
     // Binary search for larger arrays
     // Cache accumulated values during search to avoid redundant computation
     size_t left = 0;
     size_t right = delta_compressed_.size();
-    
+
     while (left < right) {
       size_t mid = left + (right - left) / 2;
-      
+
       // Reconstruct value at mid position
       DocId mid_value = 0;
       for (size_t i = 0; i <= mid; ++i) {
         mid_value += delta_compressed_[i];
       }
-      
+
       if (mid_value == doc_id) {
         return true;
       }
@@ -202,7 +204,7 @@ bool PostingList::Contains(DocId doc_id) const {
         right = mid;
       }
     }
-    
+
     return false;
   }
   return roaring_bitmap_contains(roaring_bitmap_, doc_id);
@@ -258,7 +260,9 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
 
   if (reverse) {
     // For reverse order: use reverse iterator to get last N elements efficiently
-    roaring_uint32_iterator_t* iter = (roaring_uint32_iterator_t*)malloc(sizeof(roaring_uint32_iterator_t));
+    // CRoaring library requires manual memory management for iterators
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+    auto* iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
     if (iter != nullptr) {
       roaring_iterator_init_last(roaring_bitmap_, iter);
       size_t count = 0;
@@ -267,6 +271,8 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
         roaring_uint32_iterator_previous(iter);
         count++;
       }
+      // CRoaring iterator cleanup requires manual free
+      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
       free(iter);
     }
   } else {

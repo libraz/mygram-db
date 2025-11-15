@@ -301,4 +301,187 @@ TEST(QueryCacheTest, InvalidatedNoHit) {
   EXPECT_EQ(1, stats.cache_misses_invalidated);
 }
 
+/**
+ * @brief Test concurrent lookup and erase to detect use-after-free
+ *
+ * This test attempts to trigger a use-after-free bug that existed when
+ * QueryCache::Lookup released the lock before accessing entry.query_cost_ms.
+ * Multiple threads perform lookups while other threads aggressively erase entries.
+ */
+TEST(QueryCacheTest, ConcurrentLookupAndErase) {
+  QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB, low threshold
+
+  // Insert multiple entries
+  constexpr int kNumEntries = 100;
+  std::vector<CacheKey> keys;
+  keys.reserve(kNumEntries);
+
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("query_" + std::to_string(i));
+    keys.push_back(key);
+
+    std::vector<DocId> result;
+    for (int j = 0; j < 100; ++j) {
+      result.push_back(static_cast<DocId>(i * 100 + j));
+    }
+
+    CacheMetadata meta;
+    meta.table = "test";
+    meta.ngrams = {"test"};
+
+    cache.Insert(key, result, meta, 10.0);
+  }
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> lookup_count{0};
+  std::atomic<int> erase_count{0};
+
+  // Lookup threads - continuously lookup entries
+  auto lookup_func = [&]() {
+    while (!stop) {
+      for (const auto& key : keys) {
+        auto result = cache.Lookup(key);
+        lookup_count++;
+        // Small delay to increase chance of race condition
+        std::this_thread::yield();
+      }
+    }
+  };
+
+  // Erase threads - continuously erase and re-insert entries
+  auto erase_func = [&]() {
+    int idx = 0;
+    while (!stop) {
+      const auto& key = keys[idx % kNumEntries];
+
+      // Erase entry
+      cache.Erase(key);
+      erase_count++;
+
+      // Re-insert to keep entries available for lookup
+      std::vector<DocId> result;
+      for (int j = 0; j < 100; ++j) {
+        result.push_back(static_cast<DocId>((idx % kNumEntries) * 100 + j));
+      }
+
+      CacheMetadata meta;
+      meta.table = "test";
+      meta.ngrams = {"test"};
+      cache.Insert(key, result, meta, 10.0);
+
+      idx++;
+      std::this_thread::yield();
+    }
+  };
+
+  // Start threads
+  constexpr int kNumLookupThreads = 4;
+  constexpr int kNumEraseThreads = 2;
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < kNumLookupThreads; ++i) {
+    threads.emplace_back(lookup_func);
+  }
+  for (int i = 0; i < kNumEraseThreads; ++i) {
+    threads.emplace_back(erase_func);
+  }
+
+  // Run for a short duration
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  stop = true;
+
+  // Wait for all threads
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Verify operations completed without crashes
+  EXPECT_GT(lookup_count.load(), 0);
+  EXPECT_GT(erase_count.load(), 0);
+
+  // Verify statistics are consistent
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.cache_hits + stats.cache_misses, stats.total_queries);
+}
+
+/**
+ * @brief Test timing statistics are properly recorded for hits and misses
+ *
+ * This is a regression test to ensure that total_cache_hit_time_ms and
+ * total_cache_miss_time_ms are actually updated during Lookup operations.
+ * Previously these fields existed but were never populated.
+ */
+TEST(QueryCacheTest, TimingStatistics) {
+  QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB, low threshold
+
+  // Create a large result to make timing measurements more reliable
+  std::vector<DocId> large_result;
+  constexpr int kLargeResultSize = 10000;
+  large_result.reserve(kLargeResultSize);
+  for (int i = 0; i < kLargeResultSize; ++i) {
+    large_result.push_back(static_cast<DocId>(i));
+  }
+
+  // Insert a cache entry
+  auto key = CacheKeyGenerator::Generate("timing_test_query");
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"test", "timing"};
+
+  ASSERT_TRUE(cache.Insert(key, large_result, meta, 25.0));
+
+  // Perform multiple cache misses to ensure measurable time
+  for (int i = 0; i < 10; ++i) {
+    auto miss_key = CacheKeyGenerator::Generate("nonexistent_query_" + std::to_string(i));
+    auto miss_result = cache.Lookup(miss_key);
+    EXPECT_FALSE(miss_result.has_value());
+  }
+
+  // Perform multiple cache hits to ensure measurable time
+  for (int i = 0; i < 10; ++i) {
+    auto hit_result = cache.Lookup(key);
+    ASSERT_TRUE(hit_result.has_value());
+    EXPECT_EQ(kLargeResultSize, hit_result->size());
+  }
+
+  // Get statistics
+  auto stats = cache.GetStatistics();
+
+  // Verify counters
+  EXPECT_EQ(20, stats.total_queries);  // 10 misses + 10 hits
+  EXPECT_EQ(10, stats.cache_hits);
+  EXPECT_EQ(10, stats.cache_misses);
+  EXPECT_EQ(10, stats.cache_misses_not_found);
+
+  // Verify timing statistics are non-zero
+  EXPECT_GT(stats.total_cache_hit_time_ms, 0.0) << "Cache hit latency should be recorded";
+  EXPECT_GT(stats.total_cache_miss_time_ms, 0.0) << "Cache miss latency should be recorded";
+  EXPECT_GT(stats.total_query_saved_time_ms, 0.0) << "Query saved time should be recorded";
+
+  // Verify averages are computed correctly
+  EXPECT_DOUBLE_EQ(stats.total_cache_hit_time_ms / 10.0, stats.AverageCacheHitLatency());
+  EXPECT_DOUBLE_EQ(stats.total_cache_miss_time_ms / 10.0, stats.AverageCacheMissLatency());
+  EXPECT_DOUBLE_EQ(10 * 25.0, stats.TotalTimeSaved());  // 10 hits * 25ms saved each
+
+  // Perform multiple hits to verify accumulation
+  for (int i = 0; i < 5; ++i) {
+    auto result = cache.Lookup(key);
+    ASSERT_TRUE(result.has_value());
+  }
+
+  // Get updated statistics
+  stats = cache.GetStatistics();
+  EXPECT_EQ(25, stats.total_queries);  // 10 misses + 15 hits
+  EXPECT_EQ(15, stats.cache_hits);
+  EXPECT_EQ(10, stats.cache_misses);
+
+  // Verify timing has accumulated
+  EXPECT_GT(stats.total_cache_hit_time_ms, 0.0);
+  EXPECT_EQ(15 * 25.0, stats.TotalTimeSaved());  // 15 hits * 25ms saved each
+
+  // Verify average is calculated correctly
+  double expected_avg_hit = stats.total_cache_hit_time_ms / 15.0;
+  EXPECT_DOUBLE_EQ(expected_avg_hit, stats.AverageCacheHitLatency());
+}
+
 }  // namespace mygramdb::cache

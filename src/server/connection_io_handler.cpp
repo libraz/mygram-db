@@ -16,13 +16,9 @@
 
 namespace mygramdb::server {
 
-ConnectionIOHandler::ConnectionIOHandler(
-    const IOConfig& config,
-    RequestProcessor processor,
-    const std::atomic<bool>& shutdown_flag)
-    : config_(config),
-      processor_(std::move(processor)),
-      shutdown_flag_(shutdown_flag) {}
+ConnectionIOHandler::ConnectionIOHandler(const IOConfig& config, RequestProcessor processor,
+                                         const std::atomic<bool>& shutdown_flag)
+    : config_(config), processor_(std::move(processor)), shutdown_flag_(shutdown_flag) {}
 
 void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx) {
   std::vector<char> buffer(config_.recv_buffer_size);
@@ -61,12 +57,9 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
   }
 }
 
-bool ConnectionIOHandler::ProcessBuffer(
-    std::string& accumulated,
-    int client_fd,
-    ConnectionContext& ctx) {
+bool ConnectionIOHandler::ProcessBuffer(std::string& accumulated, int client_fd, ConnectionContext& ctx) {
   size_t pos = 0;
-  
+
   while ((pos = accumulated.find("\r\n")) != std::string::npos) {
     std::string request = accumulated.substr(0, pos);
     accumulated = accumulated.substr(pos + 2);
@@ -87,15 +80,19 @@ bool ConnectionIOHandler::ProcessBuffer(
   return true;
 }
 
+// Kept as member function for consistency and potential future extensions
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& response) {
   std::string full_response = response + "\r\n";
   size_t total_sent = 0;
   size_t to_send = full_response.length();
-  
+
   // Handle partial sends
   while (total_sent < to_send) {
+    // Pointer arithmetic needed for partial send resumption with POSIX send()
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     ssize_t sent = send(client_fd, full_response.c_str() + total_sent, to_send - total_sent, 0);
-    
+
     if (sent < 0) {
       if (errno == EINTR) {
         continue;  // Interrupted, retry
@@ -103,15 +100,15 @@ bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& respons
       spdlog::debug("send error on fd {}: {}", client_fd, strerror(errno));
       return false;
     }
-    
+
     if (sent == 0) {
       spdlog::debug("send returned 0 on fd {}", client_fd);
       return false;
     }
-    
+
     total_sent += sent;
   }
-  
+
   return true;
 }
 

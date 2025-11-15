@@ -53,14 +53,9 @@ std::string QueryNormalizer::Normalize(const query::Query& query) {
   // Add SORT clause (with default if not specified)
   oss << " " << NormalizeSortClause(query.order_by, query.table);
 
-  // Add LIMIT - normalize default limits to a standard value
-  if (query.limit_explicit) {
-    // Explicit limit: use as-is
-    oss << " LIMIT " << query.limit;
-  } else {
-    // Default limit: normalize to 100 (standard default)
-    oss << " LIMIT 100";
-  }
+  // Add LIMIT - use actual limit value (which may have been set by RequestDispatcher
+  // from api.default_limit if not explicitly specified by the user)
+  oss << " LIMIT " << query.limit;
 
   // Add OFFSET (always include for consistency)
   oss << " OFFSET " << query.offset;

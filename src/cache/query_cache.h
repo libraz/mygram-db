@@ -206,6 +206,13 @@ class QueryCache {
    */
   [[nodiscard]] std::optional<CacheMetadata> GetMetadata(const CacheKey& key) const;
 
+  /**
+   * @brief Increment invalidation batch counter
+   *
+   * Called by InvalidationQueue::ProcessBatch() to track batch invalidations.
+   */
+  void IncrementInvalidationBatches() { stats_.invalidations_batches++; }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
