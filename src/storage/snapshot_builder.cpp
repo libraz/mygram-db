@@ -56,6 +56,15 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
     return false;
   }
 
+  // Validate that the primary_key column is unique (PRIMARY KEY or single-column UNIQUE KEY)
+  std::string validation_error;
+  if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name, table_config_.primary_key,
+                                        validation_error)) {
+    last_error_ = "Primary key validation failed: " + validation_error;
+    spdlog::error(last_error_);
+    return false;
+  }
+
   // Start transaction with consistent snapshot for GTID consistency
   spdlog::info("Starting consistent snapshot transaction");
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {

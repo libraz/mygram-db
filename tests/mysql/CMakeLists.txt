@@ -37,6 +37,19 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   gtest_discover_tests(rows_parser_test)
 
+  # Connection validation tests
+  add_executable(connection_validate_test
+    connection_validate_test.cpp
+  )
+
+  target_link_libraries(connection_validate_test
+    mygramdb_mysql
+    GTest::gtest_main
+    GTest::gmock
+  )
+
+  gtest_discover_tests(connection_validate_test)
+
   # Binlog parsing tests (MySQL 8.0 compatibility)
   add_executable(binlog_parsing_test
     binlog_parsing_test.cpp

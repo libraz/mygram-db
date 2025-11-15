@@ -211,7 +211,11 @@ Table configuration (supports multiple tables):
 ### Basic Settings
 
 - **name**: Table name in MySQL database (required)
-- **primary_key**: Primary key column name (default: `id`, must be single-column)
+- **primary_key**: Primary key column name (default: `id`)
+  - Must be a **single-column PRIMARY KEY** or **single-column UNIQUE KEY**
+  - Composite (multi-column) primary keys are **NOT supported**
+  - The specified column must ensure uniqueness for row identification
+  - Validated at startup/sync time against actual MySQL table schema
 - **ngram_size**: N-gram size for ASCII/alphanumeric characters (default: `2`)
   - 1 = unigram, 2 = bigram, etc.
   - For mixed-language content: recommended 2

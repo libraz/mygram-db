@@ -374,6 +374,67 @@ std::optional<std::string> Connection::GetLatestGTID() {
   return gtid_set;
 }
 
+bool Connection::ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
+                                      std::string& error_message) {
+  // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
+  std::string query = "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+                      "WHERE TABLE_SCHEMA = '" +
+                      database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column +
+                      "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
+                      "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
+                      "WHERE TABLE_SCHEMA = '" +
+                      database + "' AND TABLE_NAME = '" + table +
+                      "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
+                      "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
+                      "WHERE TABLE_SCHEMA = '" +
+                      database + "' AND TABLE_NAME = '" + table +
+                      "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+
+  MYSQL_RES* result = Execute(query);
+  if (result == nullptr) {
+    error_message = "Failed to query table schema: " + GetLastError();
+    return false;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result);
+  if ((row == nullptr) || (row[0] == nullptr)) {
+    mysql_free_result(result);
+    error_message = "Failed to fetch result for unique column validation";
+    return false;
+  }
+
+  int count = std::stoi(row[0]);
+  mysql_free_result(result);
+
+  if (count == 0) {
+    // Column is not a single-column PRIMARY KEY or UNIQUE KEY
+    // Check if column exists and provide more specific error
+    std::string column_check_query = "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                                     "WHERE TABLE_SCHEMA = '" +
+                                     database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column + "'";
+
+    MYSQL_RES* col_result = Execute(column_check_query);
+    if (col_result != nullptr) {
+      MYSQL_ROW col_row = mysql_fetch_row(col_result);
+      if ((col_row != nullptr) && (col_row[0] != nullptr) && std::stoi(col_row[0]) == 0) {
+        error_message = "Column '" + column + "' does not exist in table '" + database + "." + table + "'";
+        mysql_free_result(col_result);
+        return false;
+      }
+      mysql_free_result(col_result);
+    }
+
+    // Column exists but is not unique
+    error_message = "Column '" + column + "' in table '" + database + "." + table +
+                    "' must be a single-column PRIMARY KEY or UNIQUE KEY. "
+                    "Composite keys are not supported.";
+    return false;
+  }
+
+  spdlog::info("Validated unique column: {}.{}.{}", database, table, column);
+  return true;
+}
+
 void Connection::SetMySQLError() {
   if (mysql_ != nullptr) {
     last_error_ = std::string(mysql_error(mysql_));

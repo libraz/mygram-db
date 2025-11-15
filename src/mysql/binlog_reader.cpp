@@ -80,6 +80,28 @@ bool BinlogReader::Start() {
     return false;
   }
 
+  // Validate primary keys for all tables
+  if (multi_table_mode_) {
+    for (const auto& [table_name, ctx] : table_contexts_) {
+      std::string validation_error;
+      if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name,
+                                            ctx->config.primary_key, validation_error)) {
+        last_error_ = "Primary key validation failed for table '" + table_name + "': " + validation_error;
+        spdlog::error("Cannot start binlog reader: {}", last_error_);
+        return false;
+      }
+    }
+  } else {
+    // Single-table mode
+    std::string validation_error;
+    if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
+                                          table_config_.primary_key, validation_error)) {
+      last_error_ = "Primary key validation failed: " + validation_error;
+      spdlog::error("Cannot start binlog reader: {}", last_error_);
+      return false;
+    }
+  }
+
   // Create dedicated connection for binlog reading
   // We need a separate connection because mysql_binlog_* functions
   // are blocking and cannot share a connection with other queries

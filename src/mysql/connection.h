@@ -172,6 +172,22 @@ class Connection {
   std::optional<std::string> GetLatestGTID();
 
   /**
+   * @brief Validate that specified column is unique in the table
+   *
+   * Checks if the specified column is either:
+   * - A PRIMARY KEY column
+   * - A UNIQUE KEY column
+   *
+   * @param database Database name
+   * @param table Table name
+   * @param column Column name to validate
+   * @param error_message Output parameter for error message
+   * @return true if column is unique, false otherwise
+   */
+  bool ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
+                            std::string& error_message);
+
+  /**
    * @brief Get last error message
    */
   [[nodiscard]] const std::string& GetLastError() const { return last_error_; }

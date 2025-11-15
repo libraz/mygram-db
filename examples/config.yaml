@@ -30,7 +30,9 @@ mysql:
 # Table Configuration (supports multiple tables)
 tables:
   - name: "articles"                # Table name in MySQL database
-    primary_key: "id"               # Primary key column name (default: id, must be single-column)
+    primary_key: "id"               # Primary key column name (default: id)
+                                    # Must be single-column PRIMARY KEY or UNIQUE KEY
+                                    # Validated against actual MySQL table schema at startup
 
     # Text Source Configuration
     # Option 1: Single column
