@@ -6,11 +6,13 @@
 #include "cache/cache_manager.h"
 
 #include "cache/cache_key.h"
+#include "server/server_types.h"
 
 namespace mygramdb::cache {
 
-CacheManager::CacheManager(const config::CacheConfig& cache_config, int ngram_size, int kanji_ngram_size)
-    : enabled_(cache_config.enabled), ngram_size_(ngram_size), kanji_ngram_size_(kanji_ngram_size) {
+CacheManager::CacheManager(const config::CacheConfig& cache_config,
+                           const std::unordered_map<std::string, server::TableContext*>& table_contexts)
+    : enabled_(cache_config.enabled) {
   if (enabled_) {
     // Create query cache
     const size_t max_memory_bytes = static_cast<size_t>(cache_config.max_memory_mb) * 1024 * 1024;
@@ -19,9 +21,9 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, int ngram_si
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
 
-    // Create invalidation queue
+    // Create invalidation queue with table_contexts for per-table ngram settings
     invalidation_queue_ =
-        std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), ngram_size, kanji_ngram_size);
+        std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), table_contexts);
     invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
     invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
     invalidation_queue_->Start();

@@ -558,4 +558,50 @@ TEST_F(DumpHandlerTest, ConcurrentFlagsNotAffected) {
   EXPECT_TRUE(read_only_) << "read_only flag should not be affected by load operation";
 }
 
+#ifdef USE_MYSQL
+TEST_F(DumpHandlerTest, DumpSaveWarnsButAllowedDuringSyncOperation) {
+  // Simulate SYNC in progress
+  syncing_tables_.insert("test_table");
+
+  // Try to save dump while SYNC is active
+  // Note: According to implementation, DUMP SAVE only warns but doesn't block
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+
+  // DUMP SAVE should succeed with a warning (not blocked)
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0) << "Dump save should succeed with warning (not blocked) during SYNC";
+
+  // Cleanup
+  syncing_tables_.clear();
+}
+
+TEST_F(DumpHandlerTest, DumpLoadBlockedDuringSyncOperation) {
+  // First create a dump file to load
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
+
+  // Simulate SYNC in progress
+  syncing_tables_.insert("test_table");
+
+  // Try to load dump while SYNC is active (should be blocked)
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+
+  // Should return error indicating SYNC is in progress
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Dump load should be blocked during SYNC";
+  EXPECT_TRUE(load_response.find("SYNC") != std::string::npos || load_response.find("sync") != std::string::npos)
+      << "Error message should mention SYNC operation";
+
+  // Cleanup
+  syncing_tables_.clear();
+}
+#endif
+
 }  // namespace mygramdb::server

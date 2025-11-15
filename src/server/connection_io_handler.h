@@ -18,7 +18,7 @@ struct ConnectionContext;
 namespace mygramdb::server {
 
 // Constants for I/O configuration defaults
-inline constexpr size_t kDefaultIORecvBufferSize = 4096;  // Separate from server_types.h to avoid conflicts
+inline constexpr size_t kDefaultIORecvBufferSize = 4096;       // Separate from server_types.h to avoid conflicts
 inline constexpr size_t kDefaultMaxQueryLength = 1024 * 1024;  // 1MB
 inline constexpr int kDefaultRecvTimeoutSec = 60;
 
@@ -72,9 +72,13 @@ class ConnectionIOHandler {
    * @param client_fd Client socket file descriptor
    * @param ctx Connection context
    *
+   * Sets SO_RCVTIMEO on the socket if recv_timeout_sec > 0 to prevent
+   * indefinite hangs from malicious or misbehaving clients.
+   *
    * Runs until:
    * - Client disconnects
    * - I/O error occurs
+   * - Receive timeout expires (if configured)
    * - Shutdown signal received
    */
   void HandleConnection(int client_fd, ConnectionContext& ctx);

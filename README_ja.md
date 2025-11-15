@@ -45,6 +45,19 @@ MySQL の FULLTEXT は非常に遅く、ディスク上の B-tree ページを�
 
 ### Docker（本番環境対応）
 
+**前提条件:** MySQLのGTIDモードが有効になっていることを確認してください：
+```sql
+-- GTIDモードを確認（ONであるべき）
+SHOW VARIABLES LIKE 'gtid_mode';
+
+-- OFFの場合、GTIDモードを有効化（MySQL 8.0以降）
+SET GLOBAL enforce_gtid_consistency = ON;
+SET GLOBAL gtid_mode = OFF_PERMISSIVE;
+SET GLOBAL gtid_mode = ON_PERMISSIVE;
+SET GLOBAL gtid_mode = ON;
+```
+
+**MygramDBを起動:**
 ```bash
 docker run -d --name mygramdb \
   -p 11016:11016 \
@@ -62,6 +75,9 @@ docker run -d --name mygramdb \
 # ログを確認
 docker logs -f mygramdb
 
+# 初回データ同期を実行（初回起動時に必須）
+docker exec mygramdb mygram-cli -p 11016 SYNC articles
+
 # 検索を試す
 docker exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 ```
@@ -72,6 +88,11 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
 docker-compose up -d
+
+# MySQLの準備完了を待つ（docker-compose logs -f で確認）
+
+# 初回データ同期を実行
+docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # 検索を試す
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"

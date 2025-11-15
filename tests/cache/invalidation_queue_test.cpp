@@ -12,8 +12,35 @@
 #include "cache/cache_key.h"
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
+#include "index/index.h"
+#include "server/server_types.h"
+#include "storage/document_store.h"
 
 namespace mygramdb::cache {
+
+/**
+ * @brief Helper to create table contexts for testing
+ */
+std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
+    std::vector<std::unique_ptr<server::TableContext>>& owned_contexts, int ngram_size = 3, int kanji_ngram_size = 2) {
+  std::unordered_map<std::string, server::TableContext*> contexts;
+
+  // Create contexts for common test tables
+  for (const auto& table_name : {"posts", "comments"}) {
+    auto ctx = std::make_unique<server::TableContext>();
+    ctx->name = table_name;
+    ctx->config.name = table_name;
+    ctx->config.ngram_size = ngram_size;
+    ctx->config.kanji_ngram_size = kanji_ngram_size;
+    ctx->index = std::make_unique<index::Index>(ngram_size, kanji_ngram_size);
+    ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+    contexts[table_name] = ctx.get();
+    owned_contexts.push_back(std::move(ctx));
+  }
+
+  return contexts;
+}
 
 /**
  * @brief Test basic enqueue and processing
@@ -21,7 +48,9 @@ namespace mygramdb::cache {
 TEST(InvalidationQueueTest, BasicEnqueueProcess) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Register a cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -55,7 +84,9 @@ TEST(InvalidationQueueTest, BasicEnqueueProcess) {
 TEST(InvalidationQueueTest, BatchSizeThreshold) {
   QueryCache cache(10 * 1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Set small batch size
   queue.SetBatchSize(5);
@@ -98,7 +129,9 @@ TEST(InvalidationQueueTest, BatchSizeThreshold) {
 TEST(InvalidationQueueTest, MaxDelayThreshold) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Set large batch size but short delay
   queue.SetBatchSize(1000);
@@ -134,7 +167,9 @@ TEST(InvalidationQueueTest, MaxDelayThreshold) {
 TEST(InvalidationQueueTest, Deduplication) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Register cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -171,7 +206,9 @@ TEST(InvalidationQueueTest, Deduplication) {
 TEST(InvalidationQueueTest, UpdateInvalidation) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Query for "rust"
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -210,7 +247,9 @@ TEST(InvalidationQueueTest, UpdateInvalidation) {
 TEST(InvalidationQueueTest, TableIsolation) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Query for "posts" table
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -249,7 +288,9 @@ TEST(InvalidationQueueTest, TableIsolation) {
 TEST(InvalidationQueueTest, StopWithoutStart) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Should not crash
   queue.Stop();
@@ -263,7 +304,9 @@ TEST(InvalidationQueueTest, StopWithoutStart) {
 TEST(InvalidationQueueTest, MultipleStartStop) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Start and stop multiple times
   queue.Start();
@@ -285,7 +328,9 @@ TEST(InvalidationQueueTest, MultipleStartStop) {
 TEST(InvalidationQueueTest, EnqueueWhileStopped) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Register cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -316,7 +361,9 @@ TEST(InvalidationQueueTest, EnqueueWhileStopped) {
 TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
   QueryCache cache(10 * 1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Register many cache entries
   for (int i = 0; i < 100; ++i) {
@@ -356,7 +403,9 @@ TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
 TEST(InvalidationQueueTest, BatchStatisticsCount) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Set small batch size for predictable batching
   queue.SetBatchSize(3);
@@ -407,7 +456,9 @@ TEST(InvalidationQueueTest, BatchStatisticsCount) {
 TEST(InvalidationQueueTest, SingleBatchCount) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  InvalidationQueue queue(&cache, &mgr, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   // Set large batch size
   queue.SetBatchSize(100);

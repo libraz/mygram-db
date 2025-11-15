@@ -1363,3 +1363,113 @@ TEST(QueryParserTest, SearchComplexNestedParenthesesBalanced) {
   EXPECT_TRUE(query.IsValid());
   EXPECT_EQ(query.search_text, "((golang OR python) AND (rust OR cpp))");
 }
+
+// ============================================================================
+// DUMP Command Tests
+// ============================================================================
+
+/**
+ * @brief Test DUMP SAVE without table (regression test for Issue #63)
+ *
+ * Previously, DUMP_SAVE was not in the table-not-required list, causing
+ * Query::IsValid() to return false even though the command doesn't need a table.
+ */
+TEST(QueryParserTest, DumpSaveWithoutTable) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE");
+
+  EXPECT_EQ(query.type, QueryType::DUMP_SAVE);
+  EXPECT_TRUE(query.table.empty());
+  EXPECT_TRUE(query.IsValid());
+  EXPECT_TRUE(parser.GetError().empty());
+}
+
+/**
+ * @brief Test DUMP SAVE with filepath
+ */
+TEST(QueryParserTest, DumpSaveWithFilepath) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE test.dmp");
+
+  EXPECT_EQ(query.type, QueryType::DUMP_SAVE);
+  EXPECT_TRUE(query.table.empty());
+  EXPECT_EQ(query.filepath, "test.dmp");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test DUMP LOAD without filepath
+ *
+ * "DUMP LOAD" is parsed as DUMP_LOAD with "LOAD" as the filepath (edge case).
+ * The handler will validate filepath requirements and fail appropriately.
+ */
+TEST(QueryParserTest, DumpLoadWithoutFilepath) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP LOAD");
+
+  // Parser treats this as an error due to missing subcommand argument
+  EXPECT_EQ(query.type, QueryType::UNKNOWN);
+  EXPECT_FALSE(query.IsValid());
+}
+
+/**
+ * @brief Test DUMP LOAD with filepath
+ */
+TEST(QueryParserTest, DumpLoadWithFilepath) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP LOAD test.dmp");
+
+  EXPECT_EQ(query.type, QueryType::DUMP_LOAD);
+  EXPECT_TRUE(query.table.empty());
+  EXPECT_EQ(query.filepath, "test.dmp");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test DUMP VERIFY with filepath
+ */
+TEST(QueryParserTest, DumpVerifyWithFilepath) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP VERIFY test.dmp");
+
+  EXPECT_EQ(query.type, QueryType::DUMP_VERIFY);
+  EXPECT_TRUE(query.table.empty());
+  EXPECT_EQ(query.filepath, "test.dmp");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test DUMP INFO with filepath
+ */
+TEST(QueryParserTest, DumpInfoWithFilepath) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP INFO test.dmp");
+
+  EXPECT_EQ(query.type, QueryType::DUMP_INFO);
+  EXPECT_TRUE(query.table.empty());
+  EXPECT_EQ(query.filepath, "test.dmp");
+  EXPECT_TRUE(query.IsValid());
+}
+
+/**
+ * @brief Test all DUMP commands are case insensitive
+ */
+TEST(QueryParserTest, DumpCommandsCaseInsensitive) {
+  QueryParser parser;
+
+  auto query1 = parser.Parse("dump save test.dmp");
+  EXPECT_EQ(query1.type, QueryType::DUMP_SAVE);
+  EXPECT_TRUE(query1.IsValid());
+
+  auto query2 = parser.Parse("DuMp LoAd test.dmp");
+  EXPECT_EQ(query2.type, QueryType::DUMP_LOAD);
+  EXPECT_TRUE(query2.IsValid());
+
+  auto query3 = parser.Parse("DUMP verify test.dmp");
+  EXPECT_EQ(query3.type, QueryType::DUMP_VERIFY);
+  EXPECT_TRUE(query3.IsValid());
+
+  auto query4 = parser.Parse("dump INFO test.dmp");
+  EXPECT_EQ(query4.type, QueryType::DUMP_INFO);
+  EXPECT_TRUE(query4.IsValid());
+}

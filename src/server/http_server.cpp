@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "cache/cache_manager.h"
+#include "query/result_sorter.h"
 #include "server/response_formatter.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext definition
@@ -91,18 +92,19 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
 #else
                        void* binlog_reader,
 #endif
-                       cache::CacheManager* cache_manager)
+                       cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
       binlog_reader_(binlog_reader),
-      cache_manager_(cache_manager) {
+      cache_manager_(cache_manager),
+      loading_(loading),
+      tcp_stats_(tcp_stats) {
   parsed_allow_cidrs_ = ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
-    const size_t limit = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
-    query_parser_.SetMaxQueryLength(limit);
+    max_query_length_ = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
   }
 
   server_ = std::make_unique<httplib::Server>();
@@ -129,11 +131,14 @@ HttpServer::~HttpServer() {
 
 void HttpServer::SetupRoutes() {
   // POST /{table}/search - Full-text search
-  server_->Post(R"(/(\w+)/search)",
+  // Route pattern: match any non-slash characters to support table names with dashes, dots, or unicode
+  server_->Post(R"(/([^/]+)/search)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
 
   // GET /{table}/:id - Get document by ID
-  server_->Get(R"(/(\w+)/(\d+))", [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
+  // Route pattern: match any non-slash characters for table name, digits for ID
+  server_->Get(R"(/([^/]+)/(\d+))",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
 
   // GET /info - Server information
   server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
@@ -239,6 +244,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
   stats_.IncrementRequests();
 
   try {
+    // Check if server is loading
+    if (loading_ != nullptr && loading_->load()) {
+      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+      return;
+    }
+
     // Extract table name from URL
     std::string table = req.matches[1];
 
@@ -280,27 +291,117 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       query_str << " OFFSET " << body["offset"].get<int>();
     }
 
-    // Parse and execute query
-    auto query = query_parser_.Parse(query_str.str());
+    // Parse and execute query (use per-request parser to avoid data race)
+    query::QueryParser query_parser;
+    if (max_query_length_ > 0) {
+      query_parser.SetMaxQueryLength(max_query_length_);
+    }
+    auto query = query_parser.Parse(query_str.str());
     if (!query.IsValid()) {
-      SendError(res, kHttpBadRequest, "Invalid query: " + query_parser_.GetError());
+      SendError(res, kHttpBadRequest, "Invalid query: " + query_parser.GetError());
       return;
     }
 
+    // Apply default limit if LIMIT was not explicitly specified in the request
+    if (!query.limit_explicit && full_config_ != nullptr) {
+      query.limit = static_cast<size_t>(full_config_->api.default_limit);
+    }
+
     // Apply filters from JSON payload
+    // Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
+    // Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
     if (body.contains("filters") && body["filters"].is_object()) {
       query.filters.clear();
       for (const auto& [key, val] : body["filters"].items()) {
         query::FilterCondition filter;
         filter.column = key;
-        filter.op = query::FilterOp::EQ;
-        filter.value = val.is_string() ? val.get<std::string>() : val.dump();
+
+        // Check if value is an object with operator specification
+        if (val.is_object() && val.contains("value")) {
+          // Format 2: full operator support
+          std::string op_str = val.value("op", "EQ");
+          // Parse operator
+          if (op_str == "EQ" || op_str == "==" || op_str == "=") {
+            filter.op = query::FilterOp::EQ;
+          } else if (op_str == "NE" || op_str == "!=" || op_str == "<>") {
+            filter.op = query::FilterOp::NE;
+          } else if (op_str == "GT" || op_str == ">") {
+            filter.op = query::FilterOp::GT;
+          } else if (op_str == "GTE" || op_str == ">=" || op_str == "≥") {
+            filter.op = query::FilterOp::GTE;
+          } else if (op_str == "LT" || op_str == "<") {
+            filter.op = query::FilterOp::LT;
+          } else if (op_str == "LTE" || op_str == "<=" || op_str == "≤") {
+            filter.op = query::FilterOp::LTE;
+          } else {
+            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
+            return;
+          }
+          // Get value from nested object
+          const auto& val_field = val["value"];
+          filter.value = val_field.is_string() ? val_field.get<std::string>() : val_field.dump();
+        } else {
+          // Format 1: backward compatible, defaults to EQ
+          filter.op = query::FilterOp::EQ;
+          filter.value = val.is_string() ? val.get<std::string>() : val.dump();
+        }
         query.filters.push_back(std::move(filter));
       }
     }
 
-    // Get ngram size for this table
+    // Try cache lookup first
+    if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
+      auto cached_result = cache_manager_->Lookup(query);
+      if (cached_result.has_value()) {
+        // Cache hit! Return cached results directly
+        std::vector<DocId> cached_doc_ids = cached_result.value();  // Make non-const copy
+
+        // Apply ORDER BY, LIMIT, OFFSET on cached results
+        std::vector<DocId> sorted_results;
+        if (query.order_by.has_value()) {
+          sorted_results = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, query);
+        } else {
+          size_t start_idx = std::min(static_cast<size_t>(query.offset), cached_doc_ids.size());
+          size_t end_idx = std::min(start_idx + query.limit, cached_doc_ids.size());
+          if (start_idx < cached_doc_ids.size()) {
+            sorted_results =
+                std::vector<DocId>(cached_doc_ids.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
+                                   cached_doc_ids.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
+          }
+        }
+
+        // Build JSON response from cache
+        json response;
+        response["count"] = cached_doc_ids.size();
+        response["limit"] = query.limit;
+        response["offset"] = query.offset;
+
+        json results_array = json::array();
+        for (const auto& doc_id : sorted_results) {
+          auto doc = current_doc_store->GetDocument(doc_id);
+          if (doc) {
+            json doc_obj;
+            doc_obj["doc_id"] = doc->doc_id;
+            doc_obj["primary_key"] = doc->primary_key;
+            if (!doc->filters.empty()) {
+              json filters_obj;
+              for (const auto& [key, val] : doc->filters) {
+                filters_obj[key] = FilterValueToJson(val);
+              }
+              doc_obj["filters"] = filters_obj;
+            }
+            results_array.push_back(doc_obj);
+          }
+        }
+        response["results"] = results_array;
+        SendJson(res, kHttpOk, response);
+        return;  // Cache hit, early return
+      }
+    }
+
+    // Get ngram sizes for this table
     int current_ngram_size = table_iter->second->config.ngram_size;
+    int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -320,7 +421,11 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     for (const auto& search_term : all_search_terms) {
       std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
       std::vector<std::string> ngrams;
-      if (current_ngram_size == 0) {
+
+      // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
+      if (current_kanji_ngram_size > 0) {
+        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+      } else if (current_ngram_size == 0) {
         ngrams = utils::GenerateHybridNgrams(normalized);
       } else {
         ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
@@ -372,7 +477,11 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       for (const auto& not_term : query.not_terms) {
         std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
         std::vector<std::string> ngrams;
-        if (current_ngram_size == 0) {
+
+        // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
+        if (current_kanji_ngram_size > 0) {
+          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        } else if (current_ngram_size == 0) {
           ngrams = utils::GenerateHybridNgrams(normalized);
         } else {
           ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
@@ -413,11 +522,113 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
               [&filter_cond](auto&& val) -> bool {
                 using T = std::decay_t<decltype(val)>;
                 if constexpr (std::is_same_v<T, std::monostate>) {
-                  return false;
+                  // NULL value: only match for NE operator
+                  return filter_cond.op == query::FilterOp::NE;
                 } else if constexpr (std::is_same_v<T, std::string>) {
-                  return val == filter_cond.value;
+                  // String comparison with all operators
+                  const std::string& str_val = val;
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return str_val == filter_cond.value;
+                    case query::FilterOp::NE:
+                      return str_val != filter_cond.value;
+                    case query::FilterOp::GT:
+                      return str_val > filter_cond.value;
+                    case query::FilterOp::GTE:
+                      return str_val >= filter_cond.value;
+                    case query::FilterOp::LT:
+                      return str_val < filter_cond.value;
+                    case query::FilterOp::LTE:
+                      return str_val <= filter_cond.value;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, bool>) {
+                  // Boolean: convert filter value to bool, only EQ/NE meaningful
+                  bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val == bool_filter;
+                    case query::FilterOp::NE:
+                      return val != bool_filter;
+                    default:
+                      return false;  // GT/GTE/LT/LTE not meaningful for bools
+                  }
+                } else if constexpr (std::is_same_v<T, double>) {
+                  // Floating-point comparison with all operators
+                  double filter_val = 0.0;
+                  try {
+                    filter_val = std::stod(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;  // Invalid number
+                  }
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val == filter_val;
+                    case query::FilterOp::NE:
+                      return val != filter_val;
+                    case query::FilterOp::GT:
+                      return val > filter_val;
+                    case query::FilterOp::GTE:
+                      return val >= filter_val;
+                    case query::FilterOp::LT:
+                      return val < filter_val;
+                    case query::FilterOp::LTE:
+                      return val <= filter_val;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
+                                     std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
+                  // Unsigned integer comparison - use unsigned parsing to handle large values
+                  uint64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoull(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;  // Invalid number
+                  }
+                  auto unsigned_val = static_cast<uint64_t>(val);
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return unsigned_val == filter_val;
+                    case query::FilterOp::NE:
+                      return unsigned_val != filter_val;
+                    case query::FilterOp::GT:
+                      return unsigned_val > filter_val;
+                    case query::FilterOp::GTE:
+                      return unsigned_val >= filter_val;
+                    case query::FilterOp::LT:
+                      return unsigned_val < filter_val;
+                    case query::FilterOp::LTE:
+                      return unsigned_val <= filter_val;
+                    default:
+                      return false;
+                  }
                 } else {
-                  return std::to_string(val) == filter_cond.value;
+                  // Signed integer comparison (int8_t, int16_t, int32_t, int64_t)
+                  int64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoll(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;  // Invalid number
+                  }
+                  auto signed_val = static_cast<int64_t>(val);
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return signed_val == filter_val;
+                    case query::FilterOp::NE:
+                      return signed_val != filter_val;
+                    case query::FilterOp::GT:
+                      return signed_val > filter_val;
+                    case query::FilterOp::GTE:
+                      return signed_val >= filter_val;
+                    case query::FilterOp::LT:
+                      return signed_val < filter_val;
+                    case query::FilterOp::LTE:
+                      return signed_val <= filter_val;
+                    default:
+                      return false;
+                  }
                 }
               },
               stored_value);
@@ -435,18 +646,33 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       results = std::move(filtered_results);
     }
 
-    // Store total count before applying limit/offset
+    // Store total count before applying ORDER BY and limit/offset
     size_t total_count = results.size();
 
-    // Apply limit and offset
-    size_t start_idx = std::min(static_cast<size_t>(query.offset), results.size());
-    size_t end_idx = std::min(start_idx + query.limit, results.size());
+    // Insert into cache (cache stores results before pagination)
+    // Note: For HTTP API, we use simplified cache insertion without ngram tracking and cost measurement
+    // This can be enhanced later to match TCP server's implementation
+    if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
+      std::set<std::string> empty_ngrams;  // Simplified: not tracking ngrams for HTTP (can be enhanced)
+      cache_manager_->Insert(query, results, empty_ngrams, 0.0);
+    }
 
-    if (start_idx < results.size()) {
-      results = std::vector<DocId>(results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
-                                   results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
+    // Apply ORDER BY, LIMIT, OFFSET
+    // Only use ResultSorter if ORDER BY is explicitly specified
+    std::vector<DocId> sorted_results;
+    if (query.order_by.has_value()) {
+      // Use ResultSorter for ORDER BY support (same as TCP)
+      sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
     } else {
-      results.clear();
+      // No ORDER BY: apply limit/offset directly (preserve DocID order)
+      size_t start_idx = std::min(static_cast<size_t>(query.offset), results.size());
+      size_t end_idx = std::min(start_idx + query.limit, results.size());
+
+      if (start_idx < results.size()) {
+        sorted_results =
+            std::vector<DocId>(results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
+                               results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
+      }
     }
 
     // Build JSON response
@@ -456,7 +682,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     response["offset"] = query.offset;
 
     json results_array = json::array();
-    for (const auto& doc_id : results) {
+    for (const auto& doc_id : sorted_results) {
       auto doc = current_doc_store->GetDocument(doc_id);
       if (doc) {
         json doc_obj;
@@ -488,6 +714,12 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
   stats_.IncrementRequests();
 
   try {
+    // Check if server is loading
+    if (loading_ != nullptr && loading_->load()) {
+      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+      return;
+    }
+
     // Extract table name and ID from URL
     std::string table = req.matches[1];
     std::string id_str = req.matches[2];
@@ -542,13 +774,16 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
   try {
     json response;
 
+    // Use TCP server's stats if available (includes all protocol stats), otherwise use HTTP-only stats
+    const ServerStats& effective_stats = (tcp_stats_ != nullptr) ? *tcp_stats_ : stats_;
+
     // Server info
     response["server"] = "MygramDB";
     response["version"] = ::mygramdb::Version::String();
-    response["uptime_seconds"] = stats_.GetUptimeSeconds();
+    response["uptime_seconds"] = effective_stats.GetUptimeSeconds();
 
-    // Statistics
-    auto srv_stats = stats_.GetStatistics();
+    // Statistics (from TCP server if available)
+    auto srv_stats = effective_stats.GetStatistics();
     response["total_requests"] = srv_stats.total_requests;
     response["total_commands_processed"] = srv_stats.total_commands_processed;
 
@@ -587,13 +822,19 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     }
 
     size_t total_memory = total_index_memory + total_doc_memory;
-    stats_.UpdateMemoryUsage(total_memory);
+
+    // Update memory usage on the effective stats instance
+    if (tcp_stats_ != nullptr) {
+      tcp_stats_->UpdateMemoryUsage(total_memory);
+    } else {
+      stats_.UpdateMemoryUsage(total_memory);
+    }
 
     json memory_obj;
     memory_obj["used_memory_bytes"] = total_memory;
     memory_obj["used_memory_human"] = utils::FormatBytes(total_memory);
-    memory_obj["peak_memory_bytes"] = stats_.GetPeakMemoryUsage();
-    memory_obj["peak_memory_human"] = utils::FormatBytes(stats_.GetPeakMemoryUsage());
+    memory_obj["peak_memory_bytes"] = effective_stats.GetPeakMemoryUsage();
+    memory_obj["peak_memory_human"] = utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
     memory_obj["used_memory_index"] = utils::FormatBytes(total_index_memory);
     memory_obj["used_memory_documents"] = utils::FormatBytes(total_doc_memory);
 
@@ -757,15 +998,18 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
   stats_.IncrementRequests();
 
   try {
+    // Use TCP server's stats if available (includes all protocol stats), otherwise use HTTP-only stats
+    ServerStats& effective_stats = (tcp_stats_ != nullptr) ? *tcp_stats_ : stats_;
+
     // Aggregate metrics
     auto aggregated_metrics = StatisticsService::AggregateMetrics(table_contexts_);
 
     // Update server statistics
-    StatisticsService::UpdateServerStatistics(stats_, aggregated_metrics);
+    StatisticsService::UpdateServerStatistics(effective_stats, aggregated_metrics);
 
     // Format response
-    std::string metrics =
-        ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, stats_, table_contexts_, binlog_reader_);
+    std::string metrics = ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, effective_stats,
+                                                                     table_contexts_, binlog_reader_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

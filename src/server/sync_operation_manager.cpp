@@ -145,7 +145,15 @@ void SyncOperationManager::RequestShutdown() {
 bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
   auto start = std::chrono::steady_clock::now();
 
-  while (!syncing_tables_.empty()) {
+  while (true) {
+    // Check if syncing_tables_ is empty with proper locking
+    {
+      std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+      if (syncing_tables_.empty()) {
+        return true;
+      }
+    }
+
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
 
     if (elapsed > timeout_sec) {
@@ -155,8 +163,6 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(kSyncPollIntervalMs));
   }
-
-  return true;
 }
 
 bool SyncOperationManager::IsAnySyncing() const {

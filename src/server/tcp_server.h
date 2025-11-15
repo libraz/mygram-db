@@ -143,6 +143,16 @@ class TcpServer {
    */
   ServerStats* GetMutableStats() { return &stats_; }
 
+  /**
+   * @brief Get loading flag pointer (for HttpServer)
+   */
+  std::atomic<bool>* GetLoadingFlag() { return &loading_; }
+
+  /**
+   * @brief Get cache manager pointer (for HttpServer)
+   */
+  cache::CacheManager* GetCacheManager() { return cache_manager_.get(); }
+
 #ifdef USE_MYSQL
   /**
    * @brief Start SYNC operation for a table
@@ -182,9 +192,6 @@ class TcpServer {
   std::unique_ptr<cache::CacheManager> cache_manager_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
-  // Kept for HandlerContext compatibility
-  std::unordered_set<std::string> syncing_tables_placeholder_;
-  mutable std::mutex syncing_tables_mutex_;
 #endif
 
   // Legacy fields (for backward compatibility during migration)

@@ -99,12 +99,17 @@ GET articles 12345
 ### Response
 
 ```
-OK DOC <primary_key> <filter1=value1> <filter2=value2> ...
+DOC <primary_key> <filter1=value1> <filter2=value2> ...
 ```
 
 Example:
 ```
-OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
+DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
+```
+
+Not found:
+```
+(error) Document not found
 ```
 
 ---

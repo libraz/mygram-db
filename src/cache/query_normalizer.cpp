@@ -27,8 +27,11 @@ std::string QueryNormalizer::Normalize(const query::Query& query) {
       return "";
   }
 
-  // Add table name
-  oss << " " << query.table;
+  // Add table name (lowercase for case-insensitive consistency)
+  std::string lowercase_table = query.table;
+  std::transform(lowercase_table.begin(), lowercase_table.end(), lowercase_table.begin(),
+                 [](unsigned char chr) { return std::tolower(chr); });
+  oss << " " << lowercase_table;
 
   // Add main search text
   if (!query.search_text.empty()) {
@@ -64,19 +67,38 @@ std::string QueryNormalizer::Normalize(const query::Query& query) {
 }
 
 std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
-  // Normalize whitespace: collapse multiple spaces to single space
+  // Normalize whitespace: collapse multiple spaces (including full-width) to single space
   std::string normalized;
   normalized.reserve(text.size());
 
+  // UTF-8 full-width space (U+3000) byte sequence constants
+  constexpr unsigned char kFullWidthSpaceByte1 = 0xE3;
+  constexpr unsigned char kFullWidthSpaceByte2 = 0x80;
+  constexpr unsigned char kFullWidthSpaceByte3 = 0x80;
+
   bool prev_was_space = false;
-  for (char current_char : text) {
-    if (std::isspace(static_cast<unsigned char>(current_char)) != 0) {
+  for (size_t i = 0; i < text.size(); ++i) {
+    bool is_space = false;
+
+    // Check for ASCII whitespace (space, tab, newline, etc.)
+    if (std::isspace(static_cast<unsigned char>(text[i])) != 0) {
+      is_space = true;
+    }
+    // Check for UTF-8 full-width space (U+3000 = 0xE3 0x80 0x80)
+    else if (i + 2 < text.size() && static_cast<unsigned char>(text[i]) == kFullWidthSpaceByte1 &&
+             static_cast<unsigned char>(text[i + 1]) == kFullWidthSpaceByte2 &&
+             static_cast<unsigned char>(text[i + 2]) == kFullWidthSpaceByte3) {
+      is_space = true;
+      i += 2;  // Skip the next 2 bytes of the 3-byte UTF-8 sequence
+    }
+
+    if (is_space) {
       if (!prev_was_space && !normalized.empty()) {
         normalized += ' ';
         prev_was_space = true;
       }
     } else {
-      normalized += current_char;
+      normalized += text[i];
       prev_was_space = false;
     }
   }
@@ -90,23 +112,31 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
 }
 
 std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& and_terms) {
+  // Sort AND terms for consistent cache key
+  std::vector<std::string> sorted_terms = and_terms;
+  std::sort(sorted_terms.begin(), sorted_terms.end());
+
   std::ostringstream oss;
-  for (size_t i = 0; i < and_terms.size(); ++i) {
+  for (size_t i = 0; i < sorted_terms.size(); ++i) {
     if (i > 0) {
       oss << " ";
     }
-    oss << "AND " << and_terms[i];
+    oss << "AND " << sorted_terms[i];
   }
   return oss.str();
 }
 
 std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& not_terms) {
+  // Sort NOT terms for consistent cache key
+  std::vector<std::string> sorted_terms = not_terms;
+  std::sort(sorted_terms.begin(), sorted_terms.end());
+
   std::ostringstream oss;
-  for (size_t i = 0; i < not_terms.size(); ++i) {
+  for (size_t i = 0; i < sorted_terms.size(); ++i) {
     if (i > 0) {
       oss << " ";
     }
-    oss << "NOT " << not_terms[i];
+    oss << "NOT " << sorted_terms[i];
   }
   return oss.str();
 }

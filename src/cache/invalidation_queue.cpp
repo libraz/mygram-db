@@ -7,15 +7,13 @@
 
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
+#include "server/server_types.h"
 
 namespace mygramdb::cache {
 
-InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, int ngram_size,
-                                     int kanji_ngram_size)
-    : cache_(cache),
-      invalidation_mgr_(invalidation_mgr),
-      ngram_size_(ngram_size),
-      kanji_ngram_size_(kanji_ngram_size) {}
+InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
+                                     const std::unordered_map<std::string, server::TableContext*>& table_contexts)
+    : cache_(cache), invalidation_mgr_(invalidation_mgr), table_contexts_(table_contexts) {}
 
 InvalidationQueue::~InvalidationQueue() {
   Stop();
@@ -23,11 +21,20 @@ InvalidationQueue::~InvalidationQueue() {
 
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text,
                                 const std::string& new_text) {
+  // Get ngram settings for this specific table
+  int ngram_size = 3;        // Default
+  int kanji_ngram_size = 2;  // Default
+  auto table_iter = table_contexts_.find(table_name);
+  if (table_iter != table_contexts_.end()) {
+    ngram_size = table_iter->second->config.ngram_size;
+    kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+  }
+
   if (!running_.load()) {
     // If worker not running, process immediately
     if (invalidation_mgr_ != nullptr) {
       auto affected_keys =
-          invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size_, kanji_ngram_size_);
+          invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
 
       // Phase 2: Erase from cache immediately (no queuing)
       for (const auto& key : affected_keys) {
@@ -43,7 +50,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
     affected_keys =
-        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size_, kanji_ngram_size_);
+        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
   }
 
   // Phase 2: Queue for deferred deletion

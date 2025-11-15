@@ -7,10 +7,39 @@
 
 #include <gtest/gtest.h>
 
+#include <thread>
+
 #include "config/config.h"
+#include "index/index.h"
 #include "query/query_parser.h"
+#include "server/server_types.h"
+#include "storage/document_store.h"
 
 namespace mygramdb::cache {
+
+/**
+ * @brief Helper to create table contexts for testing
+ */
+std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
+    std::vector<std::unique_ptr<server::TableContext>>& owned_contexts, int ngram_size = 3, int kanji_ngram_size = 2) {
+  std::unordered_map<std::string, server::TableContext*> contexts;
+
+  // Create contexts for common test tables
+  for (const auto& table_name : {"posts", "comments"}) {
+    auto ctx = std::make_unique<server::TableContext>();
+    ctx->name = table_name;
+    ctx->config.name = table_name;
+    ctx->config.ngram_size = ngram_size;
+    ctx->config.kanji_ngram_size = kanji_ngram_size;
+    ctx->index = std::make_unique<index::Index>(ngram_size, kanji_ngram_size);
+    ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+    contexts[table_name] = ctx.get();
+    owned_contexts.push_back(std::move(ctx));
+  }
+
+  return contexts;
+}
 
 /**
  * @brief Helper to create a basic query
@@ -33,7 +62,10 @@ TEST(CacheManagerTest, BasicWorkflow) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "golang");
   std::vector<DocId> result = {1, 2, 3, 4, 5};
@@ -63,7 +95,10 @@ TEST(CacheManagerTest, PreciseInvalidation) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   // Query 1: "golang"
   auto query1 = CreateQuery("posts", "golang");
@@ -95,7 +130,10 @@ TEST(CacheManagerTest, UpdateInvalidation) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   // Query for "rust"
   auto query1 = CreateQuery("posts", "rust");
@@ -125,7 +163,10 @@ TEST(CacheManagerTest, DeleteInvalidation) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   // Query for "docker"
   auto query1 = CreateQuery("posts", "docker");
@@ -155,7 +196,10 @@ TEST(CacheManagerTest, TableIsolation) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   // Query for "posts" table
   auto query1 = CreateQuery("posts", "golang");
@@ -184,7 +228,10 @@ TEST(CacheManagerTest, ClearTable) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   std::set<std::string> ngrams = {"tes", "est"};
 
@@ -213,7 +260,10 @@ TEST(CacheManagerTest, ClearAll) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   std::set<std::string> ngrams = {"tes", "est"};
 
@@ -239,7 +289,10 @@ TEST(CacheManagerTest, EnableDisable) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
   std::set<std::string> ngrams = {"tes", "est"};
@@ -278,7 +331,10 @@ TEST(CacheManagerTest, Statistics) {
   config.enabled = true;
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
   std::set<std::string> ngrams = {"tes", "est"};
@@ -309,7 +365,10 @@ TEST(CacheManagerTest, MinQueryCostThreshold) {
   config.max_memory_mb = 10;
   config.min_query_cost_ms = 20.0;  // Only cache queries > 20ms
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
   std::set<std::string> ngrams = {"tes", "est"};
@@ -329,7 +388,10 @@ TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
   config.enabled = false;  // Start with cache disabled
   config.max_memory_mb = 10;
 
-  CacheManager mgr(config, 3, 2);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
 
   // Initially disabled
   EXPECT_FALSE(mgr.IsEnabled());
@@ -343,6 +405,91 @@ TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
   // Lookup should fail
   auto query = CreateQuery("posts", "test");
   EXPECT_FALSE(mgr.Lookup(query).has_value());
+}
+
+/**
+ * @brief Test per-table ngram settings for cache invalidation
+ *
+ * Regression test for: テーブルごとに異なる n-gram 設定を使っていても
+ * キャッシュ無効化は常に最初のテーブルのサイズで計算される
+ */
+TEST(CacheManagerTest, PerTableNgramSettings) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_mb = 10;
+
+  // Create two tables with DIFFERENT ngram settings
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  // Table 1: posts with ngram_size=3, kanji_ngram_size=2
+  {
+    auto ctx = std::make_unique<server::TableContext>();
+    ctx->name = "posts";
+    ctx->config.name = "posts";
+    ctx->config.ngram_size = 3;
+    ctx->config.kanji_ngram_size = 2;
+    ctx->index = std::make_unique<index::Index>(3, 2);
+    ctx->doc_store = std::make_unique<storage::DocumentStore>();
+    table_contexts["posts"] = ctx.get();
+    owned_contexts.push_back(std::move(ctx));
+  }
+
+  // Table 2: comments with ngram_size=2, kanji_ngram_size=1 (DIFFERENT!)
+  {
+    auto ctx = std::make_unique<server::TableContext>();
+    ctx->name = "comments";
+    ctx->config.name = "comments";
+    ctx->config.ngram_size = 2;
+    ctx->config.kanji_ngram_size = 1;
+    ctx->index = std::make_unique<index::Index>(2, 1);
+    ctx->doc_store = std::make_unique<storage::DocumentStore>();
+    table_contexts["comments"] = ctx.get();
+    owned_contexts.push_back(std::move(ctx));
+  }
+
+  CacheManager mgr(config, table_contexts);
+
+  // Cache query for "posts" table (ngram_size=3)
+  auto query1 = CreateQuery("posts", "test");
+  std::vector<DocId> result1 = {1, 2, 3};
+  // With ngram_size=3, "test" generates: "tes", "est"
+  std::set<std::string> ngrams1 = {"tes", "est"};
+  mgr.Insert(query1, result1, ngrams1, 15.0);
+
+  // Cache query for "comments" table (ngram_size=2)
+  auto query2 = CreateQuery("comments", "test");
+  std::vector<DocId> result2 = {4, 5, 6};
+  // With ngram_size=2, "test" generates: "te", "es", "st"
+  std::set<std::string> ngrams2 = {"te", "es", "st"};
+  mgr.Insert(query2, result2, ngrams2, 15.0);
+
+  // Verify both queries are cached
+  EXPECT_TRUE(mgr.Lookup(query1).has_value());
+  EXPECT_TRUE(mgr.Lookup(query2).has_value());
+
+  // Invalidate "posts" table with "test" using POSTS' ngram settings (size=3)
+  // This should generate ngrams: "tes", "est" and invalidate query1
+  mgr.Invalidate("posts", "", "testing");
+
+  // Give time for async invalidation
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Query1 (posts) should be invalidated
+  EXPECT_FALSE(mgr.Lookup(query1).has_value());
+
+  // Query2 (comments) should STILL be cached (different table)
+  EXPECT_TRUE(mgr.Lookup(query2).has_value());
+
+  // Now invalidate "comments" table with "test" using COMMENTS' ngram settings (size=2)
+  // This should generate ngrams: "te", "es", "st" and invalidate query2
+  mgr.Invalidate("comments", "", "test");
+
+  // Give time for async invalidation
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Query2 (comments) should NOW be invalidated
+  EXPECT_FALSE(mgr.Lookup(query2).has_value());
 }
 
 }  // namespace mygramdb::cache

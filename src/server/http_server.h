@@ -79,6 +79,8 @@ class HttpServer {
    * @param full_config Full application configuration
    * @param binlog_reader Optional BinlogReader for replication status
    * @param cache_manager Optional CacheManager for cache statistics
+   * @param loading Reference to loading flag (shared with TcpServer)
+   * @param tcp_stats Optional pointer to TCP server's ServerStats (for /info and /metrics)
    */
   HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr,
@@ -87,7 +89,8 @@ class HttpServer {
 #else
              void* binlog_reader = nullptr,
 #endif
-             cache::CacheManager* cache_manager = nullptr);
+             cache::CacheManager* cache_manager = nullptr, std::atomic<bool>* loading = nullptr,
+             ServerStats* tcp_stats = nullptr);
 
   ~HttpServer();
 
@@ -136,7 +139,7 @@ class HttpServer {
  private:
   HttpServerConfig config_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
-  query::QueryParser query_parser_;
+  size_t max_query_length_{0};  // Configured max query length limit
 
   std::atomic<bool> running_{false};
 
@@ -157,6 +160,8 @@ class HttpServer {
 
   cache::CacheManager* cache_manager_;
   std::vector<utils::CIDR> parsed_allow_cidrs_;
+  std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
+  ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
 
   /**
    * @brief Setup routes

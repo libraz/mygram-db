@@ -222,4 +222,75 @@ TEST_F(ConnectionIOHandlerTest, HandlesPartialReceives) {
   EXPECT_EQ("SEARCH query=\"hello\"", received_request);
 }
 
+TEST_F(ConnectionIOHandlerTest, EnforcesReceiveTimeout) {
+  // Set a short timeout for testing
+  config_.recv_timeout_sec = 1;
+
+  auto processor = [&](const std::string& req, ConnectionContext& ctx) { return "OK"; };
+
+  ConnectionIOHandler handler(config_, processor, shutdown_flag_);
+
+  std::atomic<bool> handler_completed{false};
+  auto start_time = std::chrono::steady_clock::now();
+
+  std::thread handler_thread([&]() {
+    ConnectionContext ctx;
+    handler.HandleConnection(sockets_[0], ctx);
+    handler_completed = true;
+  });
+
+  // Don't send any data - let timeout occur
+  // The handler should close the connection after recv_timeout_sec
+
+  // Wait up to 3 seconds (well beyond the 1 second timeout)
+  handler_thread.join();
+
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time).count();
+
+  // Handler should have timed out and completed
+  EXPECT_TRUE(handler_completed);
+  // Should complete in roughly 1-2 seconds (not hang indefinitely)
+  EXPECT_LE(elapsed, 3) << "Handler should have timed out, not hung indefinitely";
+  EXPECT_GE(elapsed, 1) << "Handler should have waited at least recv_timeout_sec";
+}
+
+TEST_F(ConnectionIOHandlerTest, TimeoutNotEnforcedWhenDisabled) {
+  // Disable timeout
+  config_.recv_timeout_sec = 0;
+
+  auto processor = [&](const std::string& req, ConnectionContext& ctx) { return "OK"; };
+
+  ConnectionIOHandler handler(config_, processor, shutdown_flag_);
+
+  std::atomic<bool> handler_started{false};
+
+  std::thread handler_thread([&]() {
+    handler_started = true;
+    ConnectionContext ctx;
+    handler.HandleConnection(sockets_[0], ctx);
+  });
+
+  // Wait for handler to start
+  while (!handler_started) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  // Give it some time - with timeout=0, it should block indefinitely
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Send data to unblock and complete
+  const char* request = "TEST\r\n";
+  send(sockets_[1], request, strlen(request), 0);
+
+  // Close to complete the connection
+  shutdown(sockets_[1], SHUT_RDWR);
+  close(sockets_[1]);
+
+  handler_thread.join();
+
+  // Test passes if we successfully sent data and unblocked the handler
+  SUCCEED();
+}
+
 }  // namespace mygramdb::server

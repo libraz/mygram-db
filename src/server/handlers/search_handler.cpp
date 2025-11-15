@@ -529,28 +529,54 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
                 default:
                   return false;
               }
+            } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
+                                 std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
+              // Unsigned integer comparison - use unsigned parsing to handle large values
+              uint64_t filter_val = 0;
+              try {
+                filter_val = std::stoull(filter_cond.value);
+              } catch (const std::exception&) {
+                return false;  // Invalid number
+              }
+              auto unsigned_val = static_cast<uint64_t>(val);
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  return unsigned_val == filter_val;
+                case query::FilterOp::NE:
+                  return unsigned_val != filter_val;
+                case query::FilterOp::GT:
+                  return unsigned_val > filter_val;
+                case query::FilterOp::GTE:
+                  return unsigned_val >= filter_val;
+                case query::FilterOp::LT:
+                  return unsigned_val < filter_val;
+                case query::FilterOp::LTE:
+                  return unsigned_val <= filter_val;
+                default:
+                  return false;
+              }
             } else {
-              // Numeric comparison (int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t)
+              // Signed integer comparison (int8_t, int16_t, int32_t, int64_t)
               int64_t filter_val = 0;
               try {
                 filter_val = std::stoll(filter_cond.value);
               } catch (const std::exception&) {
                 return false;  // Invalid number
               }
-              auto numeric_val = static_cast<int64_t>(val);
+              auto signed_val = static_cast<int64_t>(val);
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
-                  return numeric_val == filter_val;
+                  return signed_val == filter_val;
                 case query::FilterOp::NE:
-                  return numeric_val != filter_val;
+                  return signed_val != filter_val;
                 case query::FilterOp::GT:
-                  return numeric_val > filter_val;
+                  return signed_val > filter_val;
                 case query::FilterOp::GTE:
-                  return numeric_val >= filter_val;
+                  return signed_val >= filter_val;
                 case query::FilterOp::LT:
-                  return numeric_val < filter_val;
+                  return signed_val < filter_val;
                 case query::FilterOp::LTE:
-                  return numeric_val <= filter_val;
+                  return signed_val <= filter_val;
                 default:
                   return false;
               }

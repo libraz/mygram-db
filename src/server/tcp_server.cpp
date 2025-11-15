@@ -142,13 +142,9 @@ bool TcpServer::Start() {
 
   // 2.5. Create cache manager (if configured)
   if (full_config_ != nullptr && full_config_->cache.enabled) {
-    // Use first table's ngram settings for cache
-    if (!table_contexts_.empty()) {
-      const auto& first_table = table_contexts_.begin()->second;
-      cache_manager_ = std::make_unique<cache::CacheManager>(full_config_->cache, first_table->config.ngram_size,
-                                                             first_table->config.kanji_ngram_size);
-      spdlog::info("Cache manager initialized");
-    }
+    // Pass table_contexts to support per-table ngram settings
+    cache_manager_ = std::make_unique<cache::CacheManager>(full_config_->cache, table_contexts_);
+    spdlog::info("Cache manager initialized with per-table ngram settings");
   }
 
 #ifdef USE_MYSQL
@@ -168,8 +164,8 @@ bool TcpServer::Start() {
       .optimization_in_progress = optimization_in_progress_,
 #ifdef USE_MYSQL
       .binlog_reader = binlog_reader_,
-      .syncing_tables = syncing_tables_placeholder_,
-      .syncing_tables_mutex = syncing_tables_mutex_,
+      .syncing_tables = sync_manager_->GetSyncingTablesRef(),
+      .syncing_tables_mutex = sync_manager_->GetSyncingTablesMutex(),
 #else
       .binlog_reader = binlog_reader_,
 #endif
@@ -277,8 +273,9 @@ void TcpServer::HandleConnection(int client_fd) {
     connection_contexts_[client_fd] = ctx;
   }
 
-  // Increment active connection count
+  // Increment active connection count and total connections received
   stats_.IncrementConnections();
+  stats_.IncrementTotalConnections();
 
   // Create I/O handler config
   IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),

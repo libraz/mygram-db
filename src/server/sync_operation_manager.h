@@ -101,6 +101,18 @@ class SyncOperationManager {
    */
   std::unordered_set<std::string> GetSyncingTables() const;
 
+  /**
+   * @brief Get reference to syncing tables set (for HandlerContext)
+   * @return Reference to the internal syncing_tables_ set
+   */
+  std::unordered_set<std::string>& GetSyncingTablesRef() { return syncing_tables_; }
+
+  /**
+   * @brief Get reference to syncing tables mutex (for HandlerContext)
+   * @return Reference to the internal syncing_tables_mutex_
+   */
+  std::mutex& GetSyncingTablesMutex() { return syncing_tables_mutex_; }
+
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;

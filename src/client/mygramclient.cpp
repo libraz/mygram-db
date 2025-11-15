@@ -12,9 +12,11 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace mygramdb::client {
@@ -224,21 +226,40 @@ class MygramClient::Impl {
       return Error(last_error_);
     }
 
-    // Receive response
+    // Receive response (loop until complete response is received)
+    std::string response;
     std::vector<char> buffer(config_.recv_buffer_size);
-    ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
-    if (received <= 0) {
-      if (received == 0) {
-        last_error_ = "Connection closed by server";
-      } else {
-        last_error_ = std::string("Failed to receive response: ") + strerror(errno);
+
+    while (true) {
+      ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
+      if (received <= 0) {
+        if (received == 0) {
+          last_error_ = "Connection closed by server";
+        } else {
+          last_error_ = std::string("Failed to receive response: ") + strerror(errno);
+        }
+
+        return Error(last_error_);
       }
 
-      return Error(last_error_);
-    }
+      buffer[received] = '\0';
+      response.append(buffer.data(), received);
 
-    buffer[received] = '\0';
-    std::string response(buffer.data(), received);
+      // Check if response is complete by looking for \r\n terminator
+      // All protocol responses end with \r\n
+      if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
+        // Response is complete
+        break;
+      }
+
+      // If we received less than buffer size, server has no more data (for now)
+      // But response doesn't end with \r\n yet, so keep reading
+      // This handles the case where server sends data in chunks
+      if (static_cast<size_t>(received) < buffer.size() - 1) {
+        // Small delay to allow more data to arrive
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
 
     // Remove trailing \r\n
     while (!response.empty() && (response.back() == '\n' || response.back() == '\r')) {

@@ -17,6 +17,10 @@
 #include "config/config.h"
 #include "query/query_parser.h"
 
+namespace mygramdb::server {
+struct TableContext;
+}  // namespace mygramdb::server
+
 namespace mygramdb::cache {
 
 /**
@@ -30,10 +34,10 @@ class CacheManager {
   /**
    * @brief Constructor
    * @param cache_config Cache configuration
-   * @param ngram_size N-gram size for ASCII/alphanumeric
-   * @param kanji_ngram_size N-gram size for CJK characters
+   * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
    */
-  CacheManager(const config::CacheConfig& cache_config, int ngram_size, int kanji_ngram_size);
+  CacheManager(const config::CacheConfig& cache_config,
+               const std::unordered_map<std::string, server::TableContext*>& table_contexts);
 
   /**
    * @brief Destructor
@@ -109,13 +113,6 @@ class CacheManager {
 
  private:
   bool enabled_;
-#if defined(__clang__)
-  [[maybe_unused]] int ngram_size_;
-  [[maybe_unused]] int kanji_ngram_size_;
-#else
-  int ngram_size_;
-  int kanji_ngram_size_;
-#endif
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

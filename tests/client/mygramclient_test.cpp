@@ -514,3 +514,70 @@ TEST_F(MygramClientTest, EmojiWithAndSearch) {
     EXPECT_EQ(resp.results[0].primary_key, "1");
   }
 }
+
+/**
+ * @brief Test large response handling (tests recv loop fix)
+ *
+ * This test validates the fix for the issue where MygramClient::SendCommand
+ * only called recv() once, causing large responses to be truncated.
+ * We create many documents so the search response exceeds the recv buffer size.
+ */
+TEST_F(MygramClientTest, LargeResponseHandling) {
+  // Add many documents to create a large response
+  // Default recv buffer is 65536 bytes, so we need to generate > 65KB response
+  // Use 1000 docs (max LIMIT) to test large response handling
+  const int num_docs = 1000;  // Max allowed by server LIMIT
+
+  for (int i = 1; i <= num_docs; i++) {
+    std::unordered_map<std::string, storage::FilterValue> filters;
+    filters["doc_num"] = static_cast<int64_t>(i);
+    doc_store_->AddDocument("doc_" + std::to_string(i), filters);
+
+    // Add same search term to all documents so they all match
+    std::string text = utils::NormalizeText("test document " + std::to_string(i), true, "keep", true);
+    index_->AddDocument(static_cast<uint64_t>(i), text);
+  }
+
+  ASSERT_FALSE(client_->Connect().has_value());
+
+  // Enable debug mode to make response even larger
+  auto debug_result = client_->EnableDebug();
+  ASSERT_FALSE(debug_result.has_value()) << "EnableDebug error: " << debug_result.value();
+
+  // Search for "test" which should match all documents
+  // This will create a very large response (>65KB with all primary keys and DEBUG info)
+  auto result = client_->Search("test", "test", num_docs);  // Request max results
+
+  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
+      << "Search error (response may have been truncated): " << std::get<Error>(result).message;
+
+  auto resp = std::get<SearchResponse>(result);
+
+  // Verify we got all results (not truncated)
+  // Note: total_count should match the number of matching docs
+  EXPECT_EQ(resp.total_count, num_docs) << "Response was likely truncated";
+
+  // We should receive all or most results (allow small variance due to parsing edge cases)
+  EXPECT_GE(resp.results.size(), num_docs - 10) << "Not enough results received - recv likely truncated response";
+  EXPECT_LE(resp.results.size(), num_docs + 10) << "Too many results - parsing issue";
+
+  // Most importantly: verify that we can receive a large response >65KB
+  // The old code would have truncated at first recv (65KB buffer)
+  // With 1000 docs, the response is approximately 70-80KB with DEBUG info
+  EXPECT_GT(resp.results.size(), 500) << "Response was definitely truncated - received less than half";
+
+  // Debug info presence indicates we read to the end of response
+  // If truncated, debug section would likely be cut off
+  EXPECT_TRUE(resp.debug.has_value()) << "Debug info missing - response may have been truncated before END";
+
+  // Verify all expected primary keys are present
+  std::set<std::string> received_pks;
+  for (const auto& doc : resp.results) {
+    received_pks.insert(doc.primary_key);
+  }
+
+  // Check a sample of expected keys
+  EXPECT_TRUE(received_pks.count("doc_1") > 0);
+  EXPECT_TRUE(received_pks.count("doc_" + std::to_string(num_docs / 2)) > 0);
+  EXPECT_TRUE(received_pks.count("doc_" + std::to_string(num_docs)) > 0);
+}

@@ -69,7 +69,7 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
   cache_config.max_memory_mb = 100;
   cache_config.min_query_cost_ms = 1.0;
 
-  cache::CacheManager cache_manager(cache_config, 1, 0);
+  cache::CacheManager cache_manager(cache_config, table_contexts_);
 
   // Aggregate metrics
   auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
@@ -111,7 +111,7 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManagerDisabled) {
   cache_config.enabled = false;
   cache_config.max_memory_mb = 100;
 
-  cache::CacheManager cache_manager(cache_config, 1, 0);
+  cache::CacheManager cache_manager(cache_config, table_contexts_);
   cache_manager.Disable();
 
   // Aggregate metrics

@@ -21,6 +21,17 @@ ConnectionIOHandler::ConnectionIOHandler(const IOConfig& config, RequestProcesso
     : config_(config), processor_(std::move(processor)), shutdown_flag_(shutdown_flag) {}
 
 void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx) {
+  // Set receive timeout on the socket if configured
+  if (config_.recv_timeout_sec > 0) {
+    struct timeval timeout {};  // Zero-initialized to avoid uninitialized warning
+    timeout.tv_sec = config_.recv_timeout_sec;
+    timeout.tv_usec = 0;
+    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+      spdlog::warn("Failed to set SO_RCVTIMEO on fd {}: {}", client_fd, strerror(errno));
+      // Continue anyway - timeout is not critical for functionality
+    }
+  }
+
   std::vector<char> buffer(config_.recv_buffer_size);
   std::string accumulated;
   const size_t max_accumulated = config_.max_query_length * 10;
@@ -30,9 +41,10 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
 
     if (bytes <= 0) {
       if (bytes < 0) {
-        // Timeout is normal (EAGAIN/EWOULDBLOCK)
+        // With SO_RCVTIMEO set, timeout will trigger EAGAIN/EWOULDBLOCK
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          continue;
+          spdlog::debug("recv timeout on fd {}, closing connection", client_fd);
+          break;  // Timeout - close connection
         }
         spdlog::debug("recv error on fd {}: {}", client_fd, strerror(errno));
       }
@@ -89,15 +101,19 @@ bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& respons
 
   // Handle partial sends
   while (total_sent < to_send) {
+    // Use MSG_NOSIGNAL to prevent SIGPIPE when client closes connection unexpectedly
     // Pointer arithmetic needed for partial send resumption with POSIX send()
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    ssize_t sent = send(client_fd, full_response.c_str() + total_sent, to_send - total_sent, 0);
+    ssize_t sent = send(client_fd, full_response.c_str() + total_sent,  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+                        to_send - total_sent, MSG_NOSIGNAL);
 
     if (sent < 0) {
       if (errno == EINTR) {
         continue;  // Interrupted, retry
       }
-      spdlog::debug("send error on fd {}: {}", client_fd, strerror(errno));
+      // EPIPE is expected when client closes connection
+      if (errno != EPIPE) {
+        spdlog::debug("send error on fd {}: {}", client_fd, strerror(errno));
+      }
       return false;
     }
 

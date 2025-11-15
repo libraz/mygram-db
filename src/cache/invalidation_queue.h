@@ -17,6 +17,10 @@
 
 #include "cache/cache_key.h"
 
+namespace mygramdb::server {
+struct TableContext;
+}  // namespace mygramdb::server
+
 namespace mygramdb::cache {
 
 // Forward declarations
@@ -58,10 +62,10 @@ class InvalidationQueue {
    * @brief Constructor
    * @param cache Pointer to query cache
    * @param invalidation_mgr Pointer to invalidation manager
-   * @param ngram_size N-gram size for ASCII/alphanumeric
-   * @param kanji_ngram_size N-gram size for CJK characters
+   * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
    */
-  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, int ngram_size, int kanji_ngram_size);
+  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
+                    const std::unordered_map<std::string, server::TableContext*>& table_contexts);
 
   /**
    * @brief Destructor
@@ -122,8 +126,8 @@ class InvalidationQueue {
  private:
   QueryCache* cache_;                      ///< Pointer to query cache
   InvalidationManager* invalidation_mgr_;  ///< Pointer to invalidation manager
-  int ngram_size_;                         ///< N-gram size for ASCII/alphanumeric
-  int kanji_ngram_size_;                   ///< N-gram size for CJK characters
+  const std::unordered_map<std::string, server::TableContext*>&
+      table_contexts_;  ///< Reference to table contexts for per-table ngram settings
 
   // Pending invalidations: (table, ngram) -> first seen timestamp
   // Using map to automatically deduplicate

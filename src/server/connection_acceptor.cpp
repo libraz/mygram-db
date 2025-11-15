@@ -215,10 +215,17 @@ void ConnectionAcceptor::AcceptLoop() {
 
     // Submit to thread pool
     if (thread_pool_ != nullptr && connection_handler_) {
-      thread_pool_->Submit([this, client_fd]() {
+      bool submitted = thread_pool_->Submit([this, client_fd]() {
         connection_handler_(client_fd);
         RemoveConnection(client_fd);
       });
+
+      if (!submitted) {
+        // Queue is full - reject connection to prevent FD leak
+        spdlog::warn("Thread pool queue full, rejecting connection (fd={})", client_fd);
+        close(client_fd);
+        RemoveConnection(client_fd);
+      }
     } else {
       spdlog::error("No connection handler or thread pool configured");
       close(client_fd);

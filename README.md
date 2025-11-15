@@ -45,6 +45,19 @@ See [Performance Guide](docs/en/performance.md) for detailed benchmarks.
 
 ### Docker (Production Ready)
 
+**Prerequisites:** Ensure MySQL has GTID mode enabled:
+```sql
+-- Check GTID mode (should be ON)
+SHOW VARIABLES LIKE 'gtid_mode';
+
+-- If OFF, enable GTID mode (MySQL 8.0+)
+SET GLOBAL enforce_gtid_consistency = ON;
+SET GLOBAL gtid_mode = OFF_PERMISSIVE;
+SET GLOBAL gtid_mode = ON_PERMISSIVE;
+SET GLOBAL gtid_mode = ON;
+```
+
+**Start MygramDB:**
 ```bash
 docker run -d --name mygramdb \
   -p 11016:11016 \
@@ -62,6 +75,9 @@ docker run -d --name mygramdb \
 # Check logs
 docker logs -f mygramdb
 
+# Trigger initial data sync (required on first start)
+docker exec mygramdb mygram-cli -p 11016 SYNC articles
+
 # Try a search
 docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
 ```
@@ -72,6 +88,11 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
 docker-compose up -d
+
+# Wait for MySQL to be ready (check with docker-compose logs -f)
+
+# Trigger initial data sync
+docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # Try searching
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"

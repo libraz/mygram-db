@@ -60,8 +60,10 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a table
-  if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD &&
+  // INFO, SAVE, LOAD, DUMP_*, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a
+  // table
+  if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD && type != QueryType::DUMP_SAVE &&
+      type != QueryType::DUMP_LOAD && type != QueryType::DUMP_VERIFY && type != QueryType::DUMP_INFO &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
       type != QueryType::REPLICATION_START && type != QueryType::SYNC_STATUS && type != QueryType::CONFIG_HELP &&
       type != QueryType::CONFIG_SHOW && type != QueryType::CONFIG_VERIFY && type != QueryType::OPTIMIZE &&

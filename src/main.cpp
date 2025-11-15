@@ -440,11 +440,13 @@ int main(int argc, char* argv[]) {
     http_config.allow_cidrs = config.network.allow_cidrs;
 
 #ifdef USE_MYSQL
-    http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config,
-                                                                 binlog_reader.get(), nullptr);
+    http_server = std::make_unique<mygramdb::server::HttpServer>(
+        http_config, table_contexts_ptrs, &config, binlog_reader.get(), tcp_server.GetCacheManager(),
+        tcp_server.GetLoadingFlag(), tcp_server.GetMutableStats());
 #else
-    http_server =
-        std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config, nullptr, nullptr);
+    http_server = std::make_unique<mygramdb::server::HttpServer>(
+        http_config, table_contexts_ptrs, &config, nullptr, tcp_server.GetCacheManager(), tcp_server.GetLoadingFlag(),
+        tcp_server.GetMutableStats());
 #endif
 
     if (!http_server->Start()) {
