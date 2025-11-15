@@ -172,7 +172,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
 
   // Server information
   oss << "# Server\r\n";
-  oss << "version: " << mygramdb::Version::FullString() << "\r\n";
+  oss << "version: " << ::mygramdb::Version::FullString() << "\r\n";
   oss << "uptime_seconds: " << stats.GetUptimeSeconds() << "\r\n";
   oss << "\r\n";
 
@@ -480,7 +480,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   // Server info (version as label)
   oss << "# HELP mygramdb_server_info MygramDB server information\n";
   oss << "# TYPE mygramdb_server_info gauge\n";
-  oss << "mygramdb_server_info{version=\"" << mygramdb::Version::String() << "\"} 1\n";
+  oss << "mygramdb_server_info{version=\"" << ::mygramdb::Version::String() << "\"} 1\n";
   oss << "\n";
 
   // Server uptime

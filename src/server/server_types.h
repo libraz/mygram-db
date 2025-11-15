@@ -86,11 +86,10 @@ struct HandlerContext {
   // NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members) - Intentional design: context references external
   // state
 
-  // NEW: Service-based access (preferred)
+  // Service-based access
   TableCatalog* table_catalog = nullptr;
 
-  // LEGACY: Direct table access (for backward compatibility during migration)
-  // TODO: Remove after all handlers are migrated to use table_catalog
+  // Direct table access (maintained for backward compatibility)
   std::unordered_map<std::string, TableContext*>& table_contexts;
 
   ServerStats& stats;

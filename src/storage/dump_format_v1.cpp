@@ -13,6 +13,14 @@
 #include <sstream>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#define CHMOD _chmod
+#else
+#include <sys/stat.h>
+#define CHMOD chmod
+#endif
+
 namespace mygramdb::storage::dump_v1 {
 
 namespace {
@@ -448,17 +456,20 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
 }  // namespace
 
 bool SerializeConfig(std::ostream& output_stream, const config::Config& config) {
-  // MySQL config
+  // MySQL config (excluding sensitive credentials)
   if (!WriteString(output_stream, config.mysql.host)) {
     return false;
   }
   if (!WriteBinary(output_stream, config.mysql.port)) {
     return false;
   }
-  if (!WriteString(output_stream, config.mysql.user)) {
+  // Write empty strings for user and password (security: do not persist credentials)
+  std::string empty_user;
+  std::string empty_password;
+  if (!WriteString(output_stream, empty_user)) {
     return false;
   }
-  if (!WriteString(output_stream, config.mysql.password)) {
+  if (!WriteString(output_stream, empty_password)) {
     return false;
   }
   if (!WriteString(output_stream, config.mysql.database)) {
@@ -620,12 +631,17 @@ bool DeserializeConfig(std::istream& input_stream, config::Config& config) {
   if (!ReadBinary(input_stream, config.mysql.port)) {
     return false;
   }
-  if (!ReadString(input_stream, config.mysql.user)) {
+  // Read user/password fields (will be empty in new dumps, ignored from old dumps)
+  std::string unused_user;
+  std::string unused_password;
+  if (!ReadString(input_stream, unused_user)) {
     return false;
   }
-  if (!ReadString(input_stream, config.mysql.password)) {
+  if (!ReadString(input_stream, unused_password)) {
     return false;
   }
+  // Note: user/password from dump are intentionally ignored for security.
+  // Credentials must be provided via config file at startup.
   if (!ReadString(input_stream, config.mysql.database)) {
     return false;
   }
@@ -797,6 +813,14 @@ bool WriteDumpV1(const std::string& filepath, const std::string& gtid, const con
       spdlog::error("Failed to open dump file for writing: {}", filepath);
       return false;
     }
+
+    // Set restrictive file permissions (600 = rw-------)
+    // This prevents unauthorized access to potentially sensitive data
+#ifndef _WIN32
+    if (CHMOD(filepath.c_str(), S_IRUSR | S_IWUSR) != 0) {
+      spdlog::warn("Failed to set restrictive permissions on dump file: {}", filepath);
+    }
+#endif
 
     // Write fixed file header
     ofs.write(dump_format::kMagicNumber.data(), 4);

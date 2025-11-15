@@ -41,6 +41,7 @@
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
+#include "cache/cache_manager.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -136,6 +137,19 @@ bool TcpServer::Start() {
   // 2. Create table catalog
   table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
 
+  // 2.5. Create cache manager (if configured)
+  if (full_config_ && full_config_->cache.enabled) {
+    // Use first table's ngram settings for cache
+    if (!table_contexts_.empty()) {
+      const auto& first_table = table_contexts_.begin()->second;
+      cache_manager_ = std::make_unique<cache::CacheManager>(
+          full_config_->cache,
+          first_table->config.ngram_size,
+          first_table->config.kanji_ngram_size);
+      spdlog::info("Cache manager initialized");
+    }
+  }
+
   // 3. Initialize handler context
   handler_context_ = std::make_unique<HandlerContext>(HandlerContext{
       .table_catalog = table_catalog_.get(),
@@ -153,6 +167,7 @@ bool TcpServer::Start() {
 #else
       .binlog_reader = binlog_reader_,
 #endif
+      .cache_manager = cache_manager_.get(),
   });
 
   // 4. Initialize command handlers
@@ -269,6 +284,8 @@ void TcpServer::Stop() {
 void TcpServer::HandleConnection(int client_fd) {
   std::vector<char> buffer(config_.recv_buffer_size);
   std::string accumulated;
+  // Allow up to 10x max_query_length for accumulated buffer (to handle protocol overhead)
+  const size_t kMaxAccumulatedSize = config_.max_query_length * 10;
 
   // Initialize connection context
   ConnectionContext ctx;
@@ -298,6 +315,15 @@ void TcpServer::HandleConnection(int client_fd) {
     }
 
     buffer[bytes_received] = '\0';
+    
+    // Check accumulated buffer size before appending
+    if (accumulated.size() + bytes_received > kMaxAccumulatedSize) {
+      spdlog::warn("Accumulated buffer exceeded limit, closing connection");
+      std::string error_response = "ERROR Request too large (no newline detected)\r\n";
+      send(client_fd, error_response.c_str(), error_response.length(), 0);
+      break;
+    }
+    
     accumulated += buffer.data();
 
     // Process complete requests (ending with \r\n)

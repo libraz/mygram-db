@@ -60,6 +60,12 @@ class Connection {
     uint32_t connect_timeout = 10;  // Default timeout in seconds
     uint32_t read_timeout = 30;     // Default timeout in seconds
     uint32_t write_timeout = 30;    // Default timeout in seconds
+    // SSL/TLS settings
+    bool ssl_enable = false;
+    std::string ssl_ca;
+    std::string ssl_cert;
+    std::string ssl_key;
+    bool ssl_verify_server_cert = true;
   };
   // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 

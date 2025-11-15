@@ -76,6 +76,28 @@
           "default": 3600000,
           "minimum": 1000,
           "maximum": 86400000
+        },
+        "ssl_enable": {
+          "type": "boolean",
+          "description": "Enable SSL/TLS for MySQL connection",
+          "default": false
+        },
+        "ssl_ca": {
+          "type": "string",
+          "description": "Path to CA certificate file for SSL/TLS"
+        },
+        "ssl_cert": {
+          "type": "string",
+          "description": "Path to client certificate file for SSL/TLS"
+        },
+        "ssl_key": {
+          "type": "string",
+          "description": "Path to client private key file for SSL/TLS"
+        },
+        "ssl_verify_server_cert": {
+          "type": "boolean",
+          "description": "Verify server certificate during SSL/TLS connection",
+          "default": true
         }
       }
     },

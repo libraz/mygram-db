@@ -14,6 +14,10 @@
 #include <sstream>
 #include <thread>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #include "config/config.h"
 #include "index/index.h"
 #include "storage/document_store.h"
@@ -410,6 +414,89 @@ TEST_F(DumpCommandsTest, DetectDataCorruption) {
   EXPECT_FALSE(load_success) << "Load should fail with corrupted data";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, load_error.type);
 }
+
+// Test that MySQL credentials are not stored in dump files
+TEST_F(DumpCommandsTest, CredentialsNotPersisted) {
+  // Set credentials in config
+  config_.mysql.user = "sensitive_user";
+  config_.mysql.password = "super_secret_password";
+
+  // Save dump
+  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
+  contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
+
+  bool save_success =
+      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  ASSERT_TRUE(save_success) << "Dump save should succeed";
+
+  // Read dump file as binary and check for credentials
+  std::ifstream dump_file(test_filepath_, std::ios::binary);
+  ASSERT_TRUE(dump_file.is_open()) << "Should be able to open dump file";
+
+  std::string dump_content((std::istreambuf_iterator<char>(dump_file)), std::istreambuf_iterator<char>());
+  dump_file.close();
+
+  // Credentials should NOT be in the dump file
+  EXPECT_EQ(dump_content.find("sensitive_user"), std::string::npos)
+      << "Username should not be stored in dump file";
+  EXPECT_EQ(dump_content.find("super_secret_password"), std::string::npos)
+      << "Password should not be stored in dump file";
+}
+
+// Test that loaded config does not contain credentials from dump
+TEST_F(DumpCommandsTest, CredentialsNotLoadedFromDump) {
+  // Save dump with credentials
+  config_.mysql.user = "dump_user";
+  config_.mysql.password = "dump_password";
+
+  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
+  contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
+
+  bool save_success =
+      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  ASSERT_TRUE(save_success) << "Dump save should succeed";
+
+  // Load dump
+  auto loaded_index1 = std::make_unique<index::Index>(2);
+  auto loaded_doc_store1 = std::make_unique<storage::DocumentStore>();
+  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> load_contexts;
+  load_contexts["table1"] = std::make_pair(loaded_index1.get(), loaded_doc_store1.get());
+
+  std::string loaded_gtid;
+  config::Config loaded_config;
+  bool load_success =
+      storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr, nullptr);
+  ASSERT_TRUE(load_success) << "Dump load should succeed";
+
+  // Loaded config should have empty credentials
+  EXPECT_TRUE(loaded_config.mysql.user.empty()) << "User should not be loaded from dump";
+  EXPECT_TRUE(loaded_config.mysql.password.empty()) << "Password should not be loaded from dump";
+
+  // Other config values should be loaded correctly
+  EXPECT_EQ(loaded_config.mysql.host, "127.0.0.1");
+  EXPECT_EQ(loaded_config.mysql.port, 3306);
+  EXPECT_EQ(loaded_config.mysql.database, "test");
+}
+
+// Test dump file permissions (Unix only)
+#ifndef _WIN32
+TEST_F(DumpCommandsTest, RestrictiveFilePermissions) {
+  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
+  contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
+
+  bool save_success =
+      storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  ASSERT_TRUE(save_success) << "Dump save should succeed";
+
+  // Check file permissions
+  struct stat st;
+  ASSERT_EQ(stat(test_filepath_.c_str(), &st), 0) << "Should be able to stat dump file";
+
+  // Permissions should be 600 (rw-------)
+  mode_t mode = st.st_mode & 0777;
+  EXPECT_EQ(mode, S_IRUSR | S_IWUSR) << "File should have 600 permissions (owner read/write only)";
+}
+#endif
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);

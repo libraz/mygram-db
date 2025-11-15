@@ -93,6 +93,29 @@ bool Connection::Connect(const std::string& context) {
   // Note: MYSQL_OPT_RECONNECT is deprecated and removed
   // Manual reconnection is handled via Reconnect() method when needed
 
+  // Configure SSL/TLS if enabled
+  if (config_.ssl_enable) {
+    // Set SSL mode to REQUIRED
+    unsigned int ssl_mode = SSL_MODE_REQUIRED;
+    if (config_.ssl_verify_server_cert) {
+      ssl_mode = SSL_MODE_VERIFY_CA;  // Verify CA certificate
+    }
+    mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode);
+
+    // Set SSL certificate paths if provided
+    if (!config_.ssl_ca.empty()) {
+      mysql_options(mysql_, MYSQL_OPT_SSL_CA, config_.ssl_ca.c_str());
+    }
+    if (!config_.ssl_cert.empty()) {
+      mysql_options(mysql_, MYSQL_OPT_SSL_CERT, config_.ssl_cert.c_str());
+    }
+    if (!config_.ssl_key.empty()) {
+      mysql_options(mysql_, MYSQL_OPT_SSL_KEY, config_.ssl_key.c_str());
+    }
+
+    spdlog::debug("SSL/TLS enabled for MySQL connection");
+  }
+
   // Connect to MySQL
   if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(), config_.password.c_str(),
                          config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
@@ -105,7 +128,8 @@ bool Connection::Connect(const std::string& context) {
 
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
-  spdlog::info("{}Connected to MySQL {}:{}{}", context_prefix, config_.host, config_.port, db_info);
+  std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";
+  spdlog::info("{}Connected to MySQL {}:{}{}{}", context_prefix, config_.host, config_.port, db_info, ssl_info);
   return true;
 }
 

@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -89,6 +90,17 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     if (filepath[0] != '/') {
       filepath = ctx_.dump_dir + "/" + filepath;
     }
+    // Canonicalize path and validate it's within dump_dir
+    try {
+      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
+      auto rel = canonical.lexically_relative(dump_canonical);
+      if (rel.empty() || rel.string().substr(0, 2) == "..") {
+        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
+      }
+    } catch (const std::exception& e) {
+      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
+    }
   } else {
     auto now = std::time(nullptr);
     std::tm tm_buf{};
@@ -160,6 +172,17 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     if (filepath[0] != '/') {
       filepath = ctx_.dump_dir + "/" + filepath;
     }
+    // Canonicalize path and validate it's within dump_dir
+    try {
+      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
+      auto rel = canonical.lexically_relative(dump_canonical);
+      if (rel.empty() || rel.string().substr(0, 2) == "..") {
+        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
+      }
+    } catch (const std::exception& e) {
+      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
+    }
   } else {
     return ResponseFormatter::FormatError("DUMP LOAD requires a filepath");
   }
@@ -204,6 +227,17 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
     if (filepath[0] != '/') {
       filepath = ctx_.dump_dir + "/" + filepath;
     }
+    // Canonicalize path and validate it's within dump_dir
+    try {
+      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
+      auto rel = canonical.lexically_relative(dump_canonical);
+      if (rel.empty() || rel.string().substr(0, 2) == "..") {
+        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
+      }
+    } catch (const std::exception& e) {
+      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
+    }
   } else {
     return ResponseFormatter::FormatError("DUMP VERIFY requires a filepath");
   }
@@ -232,6 +266,17 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
     filepath = query.filepath;
     if (filepath[0] != '/') {
       filepath = ctx_.dump_dir + "/" + filepath;
+    }
+    // Canonicalize path and validate it's within dump_dir
+    try {
+      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
+      auto rel = canonical.lexically_relative(dump_canonical);
+      if (rel.empty() || rel.string().substr(0, 2) == "..") {
+        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
+      }
+    } catch (const std::exception& e) {
+      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
     }
   } else {
     return ResponseFormatter::FormatError("DUMP INFO requires a filepath");

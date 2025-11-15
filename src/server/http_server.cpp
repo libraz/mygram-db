@@ -544,7 +544,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     // Server info
     response["server"] = "MygramDB";
-    response["version"] = mygramdb::Version::String();
+    response["version"] = ::mygramdb::Version::String();
     response["uptime_seconds"] = stats_.GetUptimeSeconds();
 
     // Statistics

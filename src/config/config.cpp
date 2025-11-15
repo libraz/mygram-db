@@ -102,6 +102,21 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   if (json_obj.contains("write_timeout_ms")) {
     config.write_timeout_ms = json_obj["write_timeout_ms"].get<int>();
   }
+  if (json_obj.contains("ssl_enable")) {
+    config.ssl_enable = json_obj["ssl_enable"].get<bool>();
+  }
+  if (json_obj.contains("ssl_ca")) {
+    config.ssl_ca = json_obj["ssl_ca"].get<std::string>();
+  }
+  if (json_obj.contains("ssl_cert")) {
+    config.ssl_cert = json_obj["ssl_cert"].get<std::string>();
+  }
+  if (json_obj.contains("ssl_key")) {
+    config.ssl_key = json_obj["ssl_key"].get<std::string>();
+  }
+  if (json_obj.contains("ssl_verify_server_cert")) {
+    config.ssl_verify_server_cert = json_obj["ssl_verify_server_cert"].get<bool>();
+  }
 
   return config;
 }

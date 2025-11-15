@@ -20,6 +20,12 @@ mysql:
   binlog_format: "ROW"              # Binary log format (default: ROW, required for replication)
   binlog_row_image: "FULL"          # Row image format (default: FULL, required for replication)
   connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
+  # SSL/TLS settings (optional but highly recommended for production)
+  ssl_enable: false                 # Enable SSL/TLS (default: false)
+  # ssl_ca: "/path/to/ca-cert.pem" # CA certificate for SSL/TLS
+  # ssl_cert: "/path/to/client-cert.pem" # Client certificate
+  # ssl_key: "/path/to/client-key.pem"   # Client private key
+  # ssl_verify_server_cert: true   # Verify server certificate (default: true)
 
 # Table Configuration (supports multiple tables)
 tables:

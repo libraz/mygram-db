@@ -44,6 +44,14 @@ namespace mygramdb::server {
 // Forward declaration
 class CommandHandler;
 
+}  // namespace mygramdb::server
+
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
+
+namespace mygramdb::server {
+
 /**
  * @brief State of a SYNC operation
  */
@@ -180,6 +188,7 @@ class TcpServer {
   std::unique_ptr<ConnectionAcceptor> acceptor_;
   std::unique_ptr<RequestDispatcher> dispatcher_;
   std::unique_ptr<SnapshotScheduler> scheduler_;
+  std::unique_ptr<cache::CacheManager> cache_manager_;
 
   // Legacy fields (for backward compatibility during migration)
   std::unordered_map<std::string, TableContext*> table_contexts_;

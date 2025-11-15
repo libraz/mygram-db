@@ -68,6 +68,12 @@ struct MysqlConfig {
   int connect_timeout_ms = defaults::kMysqlConnectTimeoutMs;
   int read_timeout_ms = defaults::kMysqlReadTimeoutMs;
   int write_timeout_ms = defaults::kMysqlWriteTimeoutMs;
+  // SSL/TLS settings
+  bool ssl_enable = false;
+  std::string ssl_ca;
+  std::string ssl_cert;
+  std::string ssl_key;
+  bool ssl_verify_server_cert = true;
 };
 
 /**

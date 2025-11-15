@@ -247,6 +247,11 @@ int main(int argc, char* argv[]) {
   mysql_config.connect_timeout = config.mysql.connect_timeout_ms / kMillisecondsPerSecond;  // ms to sec
   mysql_config.read_timeout = config.mysql.read_timeout_ms / kMillisecondsPerSecond;        // ms to sec
   mysql_config.write_timeout = config.mysql.write_timeout_ms / kMillisecondsPerSecond;      // ms to sec
+  mysql_config.ssl_enable = config.mysql.ssl_enable;
+  mysql_config.ssl_ca = config.mysql.ssl_ca;
+  mysql_config.ssl_cert = config.mysql.ssl_cert;
+  mysql_config.ssl_key = config.mysql.ssl_key;
+  mysql_config.ssl_verify_server_cert = config.mysql.ssl_verify_server_cert;
 
   auto mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mysql_config);
 

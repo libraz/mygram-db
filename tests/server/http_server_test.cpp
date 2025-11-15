@@ -145,7 +145,7 @@ TEST_F(HttpServerTest, InfoEndpoint) {
 
   // Server info
   EXPECT_EQ(body["server"], "MygramDB");
-  EXPECT_EQ(body["version"], mygramdb::Version::String());
+  EXPECT_EQ(body["version"], ::mygramdb::Version::String());
   EXPECT_TRUE(body.contains("uptime_seconds"));
 
   // Stats

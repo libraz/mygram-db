@@ -465,3 +465,86 @@ TEST(ConfigTest, LoadConfigJsonFunction) {
   EXPECT_EQ(config.mysql.user, "json_func_user");
   EXPECT_EQ(config.replication.server_id, 300U);
 }
+
+/**
+ * @brief Test MySQL SSL/TLS configuration defaults
+ */
+TEST(ConfigTest, MysqlSslDefaults) {
+  std::ofstream f("ssl_defaults.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f.close();
+
+  Config config = LoadConfig("ssl_defaults.yaml");
+
+  // Check SSL defaults
+  EXPECT_FALSE(config.mysql.ssl_enable);
+  EXPECT_TRUE(config.mysql.ssl_ca.empty());
+  EXPECT_TRUE(config.mysql.ssl_cert.empty());
+  EXPECT_TRUE(config.mysql.ssl_key.empty());
+  EXPECT_TRUE(config.mysql.ssl_verify_server_cert);
+}
+
+/**
+ * @brief Test MySQL SSL/TLS configuration with all options
+ */
+TEST(ConfigTest, MysqlSslConfiguration) {
+  std::ofstream f("ssl_config.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "  ssl_enable: true\n";
+  f << "  ssl_ca: /path/to/ca-cert.pem\n";
+  f << "  ssl_cert: /path/to/client-cert.pem\n";
+  f << "  ssl_key: /path/to/client-key.pem\n";
+  f << "  ssl_verify_server_cert: false\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f.close();
+
+  Config config = LoadConfig("ssl_config.yaml");
+
+  EXPECT_TRUE(config.mysql.ssl_enable);
+  EXPECT_EQ(config.mysql.ssl_ca, "/path/to/ca-cert.pem");
+  EXPECT_EQ(config.mysql.ssl_cert, "/path/to/client-cert.pem");
+  EXPECT_EQ(config.mysql.ssl_key, "/path/to/client-key.pem");
+  EXPECT_FALSE(config.mysql.ssl_verify_server_cert);
+}
+
+/**
+ * @brief Test MySQL SSL/TLS with partial configuration
+ */
+TEST(ConfigTest, MysqlSslPartialConfiguration) {
+  std::ofstream f("ssl_partial.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "  ssl_enable: true\n";
+  f << "  ssl_ca: /path/to/ca-cert.pem\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f.close();
+
+  Config config = LoadConfig("ssl_partial.yaml");
+
+  EXPECT_TRUE(config.mysql.ssl_enable);
+  EXPECT_EQ(config.mysql.ssl_ca, "/path/to/ca-cert.pem");
+  EXPECT_TRUE(config.mysql.ssl_cert.empty());
+  EXPECT_TRUE(config.mysql.ssl_key.empty());
+  EXPECT_TRUE(config.mysql.ssl_verify_server_cert);  // default
+}
