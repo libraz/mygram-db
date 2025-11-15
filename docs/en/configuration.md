@@ -28,6 +28,14 @@ mysql:
   binlog_format: "ROW"
   binlog_row_image: "FULL"
   connect_timeout_ms: 3000
+  read_timeout_ms: 3600000
+  write_timeout_ms: 3600000
+  # TLS/SSL settings (optional)
+  ssl_enable: false
+  ssl_ca: ""
+  ssl_cert: ""
+  ssl_key: ""
+  ssl_verify_server_cert: true
 
 tables:
   - name: "articles"
@@ -111,7 +119,14 @@ The same configuration in JSON format:
     "use_gtid": true,
     "binlog_format": "ROW",
     "binlog_row_image": "FULL",
-    "connect_timeout_ms": 3000
+    "connect_timeout_ms": 3000,
+    "read_timeout_ms": 3600000,
+    "write_timeout_ms": 3600000,
+    "ssl_enable": false,
+    "ssl_ca": "",
+    "ssl_cert": "",
+    "ssl_key": "",
+    "ssl_verify_server_cert": true
   },
   "tables": [
     {
@@ -203,6 +218,69 @@ Connection settings for MySQL server:
 - **binlog_format**: Binary log format (default: `ROW`, required for replication)
 - **binlog_row_image**: Row image format (default: `FULL`, required for replication)
 - **connect_timeout_ms**: Connection timeout in milliseconds (default: `3000`)
+- **read_timeout_ms**: Read timeout in milliseconds (default: `3600000` = 1 hour)
+- **write_timeout_ms**: Write timeout in milliseconds (default: `3600000` = 1 hour)
+
+### TLS/SSL Configuration
+
+MygramDB supports both **one-way TLS** (server certificate verification only) and **mutual TLS (mTLS)** (client and server certificate verification) for MySQL connections.
+
+- **ssl_enable**: Enable TLS/SSL for MySQL connection (default: `false`)
+- **ssl_ca**: Path to CA certificate file for verifying server certificate
+- **ssl_cert**: Path to client certificate file (optional, required for mTLS)
+- **ssl_key**: Path to client private key file (optional, required for mTLS)
+- **ssl_verify_server_cert**: Verify server certificate against CA (default: `true`)
+
+**One-way TLS (Server Authentication Only):**
+
+Use this when you want to encrypt the connection and verify the MySQL server's identity, but the server doesn't require client certificates.
+
+```yaml
+mysql:
+  host: "mysql.example.com"
+  port: 3306
+  user: "repl_user"
+  password: "your_password"
+  database: "mydb"
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_verify_server_cert: true
+```
+
+**Mutual TLS (mTLS - Client and Server Authentication):**
+
+Use this when the MySQL server requires client certificate authentication in addition to password authentication.
+
+```yaml
+mysql:
+  host: "mysql.example.com"
+  port: 3306
+  user: "repl_user"
+  password: "your_password"
+  database: "mydb"
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_cert: "/path/to/client-cert.pem"
+  ssl_key: "/path/to/client-key.pem"
+  ssl_verify_server_cert: true
+```
+
+**TLS without Server Verification (Not Recommended):**
+
+If you need to disable server certificate verification (e.g., self-signed certificates in development):
+
+```yaml
+mysql:
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_verify_server_cert: false
+```
+
+**Notes:**
+- All certificate paths must be absolute paths or relative to the working directory
+- The `ssl_cert` and `ssl_key` parameters are optional; omit them for one-way TLS
+- When `ssl_verify_server_cert` is `true`, the server's certificate must be signed by the CA specified in `ssl_ca`
+- mTLS provides the strongest security but requires proper certificate management on both sides
 
 ## Tables Section
 

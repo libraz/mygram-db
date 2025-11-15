@@ -9,6 +9,8 @@ add_library(mygramdb_server STATIC
   connection_acceptor.cpp
   request_dispatcher.cpp
   snapshot_scheduler.cpp
+  connection_io_handler.cpp
+  sync_operation_manager.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
   handlers/document_handler.cpp

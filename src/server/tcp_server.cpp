@@ -37,6 +37,7 @@
 #include "server/handlers/sync_handler.h"
 #endif
 #include "server/response_formatter.h"
+#include "server/connection_io_handler.h"
 #include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
@@ -45,9 +46,7 @@
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
-#include "mysql/connection.h"
-#include "storage/snapshot_builder.h"
-#include "utils/memory_utils.h"
+#include "server/sync_operation_manager.h"
 #endif
 
 namespace mygramdb::server {
@@ -150,6 +149,11 @@ bool TcpServer::Start() {
     }
   }
 
+#ifdef USE_MYSQL
+  // 2.6. Create SYNC operation manager (if MySQL enabled)
+  sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_);
+#endif
+
   // 3. Initialize handler context
   handler_context_ = std::make_unique<HandlerContext>(HandlerContext{
       .table_catalog = table_catalog_.get(),
@@ -162,7 +166,7 @@ bool TcpServer::Start() {
       .optimization_in_progress = optimization_in_progress_,
 #ifdef USE_MYSQL
       .binlog_reader = binlog_reader_,
-      .syncing_tables = syncing_tables_,
+      .syncing_tables = syncing_tables_placeholder_,
       .syncing_tables_mutex = syncing_tables_mutex_,
 #else
       .binlog_reader = binlog_reader_,
@@ -236,30 +240,10 @@ void TcpServer::Stop() {
   shutdown_requested_ = true;
 
 #ifdef USE_MYSQL
-  // Cancel all active SYNC operations
-  {
-    std::lock_guard<std::mutex> lock(snapshot_builders_mutex_);
-    for (auto& [table_name, builder] : active_snapshot_builders_) {
-      spdlog::info("Cancelling SYNC for table: {}", table_name);
-      builder->Cancel();
-    }
-  }
-
-  // Wait for SYNC operations to complete (with timeout)
-  auto wait_start = std::chrono::steady_clock::now();
-  constexpr int kSyncWaitTimeoutSec = 30;
-
-  while (!syncing_tables_.empty()) {
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - wait_start).count();
-
-    if (elapsed > kSyncWaitTimeoutSec) {
-      spdlog::warn("Timeout waiting for SYNC operations to complete");
-      break;
-    }
-
-    constexpr int kSyncPollIntervalMs = 100;  // Poll every 100ms
-    std::this_thread::sleep_for(std::chrono::milliseconds(kSyncPollIntervalMs));
+  // Request SYNC manager to shutdown
+  if (sync_manager_) {
+    sync_manager_->RequestShutdown();
+    sync_manager_->WaitForCompletion(30);
   }
 #endif
 
@@ -282,11 +266,6 @@ void TcpServer::Stop() {
 }
 
 void TcpServer::HandleConnection(int client_fd) {
-  std::vector<char> buffer(config_.recv_buffer_size);
-  std::string accumulated;
-  // Allow up to 10x max_query_length for accumulated buffer (to handle protocol overhead)
-  const size_t kMaxAccumulatedSize = config_.max_query_length * 10;
-
   // Initialize connection context
   ConnectionContext ctx;
   ctx.client_fd = client_fd;
@@ -299,68 +278,36 @@ void TcpServer::HandleConnection(int client_fd) {
   // Increment active connection count
   stats_.IncrementConnections();
 
-  while (!shutdown_requested_) {
-    ssize_t bytes_received = recv(client_fd, buffer.data(), buffer.size() - 1, 0);
+  // Create I/O handler config
+  IOConfig io_config{
+      .recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
+      .max_query_length = static_cast<size_t>(config_.max_query_length),
+      .recv_timeout_sec = 60};
 
-    if (bytes_received <= 0) {
-      if (bytes_received < 0) {
-        // EAGAIN/EWOULDBLOCK means timeout (SO_RCVTIMEO), which is normal
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          // Check if we should continue (no data, but connection still alive)
-          continue;
-        }
-        spdlog::debug("recv error: {}", strerror(errno));
-      }
-      break;
+  // Request processor callback
+  auto processor = [this](const std::string& request, ConnectionContext& conn_ctx) -> std::string {
+    // Update context from map
+    {
+      std::scoped_lock<std::mutex> lock(contexts_mutex_);
+      conn_ctx = connection_contexts_[conn_ctx.client_fd];
     }
 
-    buffer[bytes_received] = '\0';
-    
-    // Check accumulated buffer size before appending
-    if (accumulated.size() + bytes_received > kMaxAccumulatedSize) {
-      spdlog::warn("Accumulated buffer exceeded limit, closing connection");
-      std::string error_response = "ERROR Request too large (no newline detected)\r\n";
-      send(client_fd, error_response.c_str(), error_response.length(), 0);
-      break;
+    // Dispatch request
+    std::string response = dispatcher_->Dispatch(request, conn_ctx);
+    stats_.IncrementRequests();
+
+    // Update context back to map
+    {
+      std::scoped_lock<std::mutex> lock(contexts_mutex_);
+      connection_contexts_[conn_ctx.client_fd] = conn_ctx;
     }
-    
-    accumulated += buffer.data();
 
-    // Process complete requests (ending with \r\n)
-    size_t pos = 0;
-    while ((pos = accumulated.find("\r\n")) != std::string::npos) {
-      std::string request = accumulated.substr(0, pos);
-      accumulated = accumulated.substr(pos + 2);
+    return response;
+  };
 
-      if (request.empty()) {
-        continue;
-      }
-
-      // Get connection context
-      {
-        std::scoped_lock<std::mutex> lock(contexts_mutex_);
-        ctx = connection_contexts_[client_fd];
-      }
-
-      // Dispatch request
-      std::string response = dispatcher_->Dispatch(request, ctx);
-      stats_.IncrementRequests();
-
-      // Update connection context (in case debug mode changed)
-      {
-        std::scoped_lock<std::mutex> lock(contexts_mutex_);
-        connection_contexts_[client_fd] = ctx;
-      }
-
-      // Send response
-      response += "\r\n";
-      ssize_t sent = send(client_fd, response.c_str(), response.length(), 0);
-      if (sent < 0) {
-        spdlog::debug("send error: {}", strerror(errno));
-        break;
-      }
-    }
-  }
+  // Delegate to ConnectionIOHandler
+  ConnectionIOHandler io_handler(io_config, processor, shutdown_requested_);
+  io_handler.HandleConnection(client_fd, ctx);
 
   // Clean up connection
   {
@@ -376,246 +323,17 @@ void TcpServer::HandleConnection(int client_fd) {
 #ifdef USE_MYSQL
 
 std::string TcpServer::StartSync(const std::string& table_name) {
-  std::lock_guard<std::mutex> lock(sync_mutex_);
-
-  // Check if table exists
-  if (table_contexts_.find(table_name) == table_contexts_.end()) {
-    return ResponseFormatter::FormatError("Table '" + table_name + "' not found in configuration");
+  if (!sync_manager_) {
+    return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
-
-  // Check if already running for this table
-  if (sync_states_[table_name].is_running) {
-    return ResponseFormatter::FormatError("SYNC already in progress for table '" + table_name + "'");
-  }
-
-  // Check memory health before starting
-  auto memory_health = utils::GetMemoryHealthStatus();
-  if (memory_health == utils::MemoryHealthStatus::CRITICAL) {
-    return ResponseFormatter::FormatError("Memory critically low. Cannot start SYNC. Check system memory.");
-  }
-
-  // Mark table as syncing
-  {
-    std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
-    syncing_tables_.insert(table_name);
-  }
-
-  // Initialize state
-  sync_states_[table_name].is_running = true;
-  sync_states_[table_name].status = "STARTING";
-  sync_states_[table_name].table_name = table_name;
-  sync_states_[table_name].processed_rows = 0;
-  sync_states_[table_name].error_message.clear();
-
-  // Launch async snapshot build
-  std::thread([this, table_name]() { BuildSnapshotAsync(table_name); }).detach();
-
-  return "OK SYNC STARTED table=" + table_name + " job_id=1";
+  return sync_manager_->StartSync(table_name);
 }
 
 std::string TcpServer::GetSyncStatus() {
-  std::lock_guard<std::mutex> lock(sync_mutex_);
-
-  std::ostringstream oss;
-  bool any_active = false;
-
-  for (const auto& [table_name, state] : sync_states_) {
-    if (!state.is_running && state.status.empty()) {
-      continue;  // Skip uninitialized states
-    }
-
-    any_active = true;
-
-    oss << "table=" << table_name << " status=" << state.status;
-
-    if (state.status == "IN_PROGRESS") {
-      uint64_t processed = state.processed_rows.load();
-      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start_time).count();
-      double rate = elapsed > 0 ? static_cast<double>(processed) / elapsed : 0.0;
-
-      if (state.total_rows > 0) {
-        double percent = (100.0 * static_cast<double>(processed)) / static_cast<double>(state.total_rows);
-        oss << " progress=" << processed << "/" << state.total_rows << " rows (" << std::fixed << std::setprecision(1)
-            << percent << "%)";
-      } else {
-        oss << " progress=" << processed << " rows";
-      }
-
-      oss << " rate=" << std::fixed << std::setprecision(0) << rate << " rows/s";
-    } else if (state.status == "COMPLETED") {
-      uint64_t processed = state.processed_rows.load();
-      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start_time).count();
-
-      oss << " rows=" << processed << " time=" << std::fixed << std::setprecision(1) << elapsed << "s";
-
-      if (!state.gtid.empty()) {
-        oss << " gtid=" << state.gtid;
-      }
-
-      oss << " replication=" << state.replication_status;
-    } else if (state.status == "FAILED") {
-      uint64_t processed = state.processed_rows.load();
-      oss << " rows=" << processed << " error=\"" << state.error_message << "\"";
-    } else if (state.status == "CANCELLED") {
-      oss << " error=\"" << state.error_message << "\"";
-    }
-
-    oss << "\n";
+  if (!sync_manager_) {
+    return "status=IDLE message=\"SYNC manager not initialized\"";
   }
-
-  if (!any_active) {
-    return "status=IDLE message=\"No sync operation performed\"";
-  }
-
-  std::string result = oss.str();
-  if (!result.empty() && result.back() == '\n') {
-    result.pop_back();  // Remove trailing newline
-  }
-  return result;
-}
-
-void TcpServer::BuildSnapshotAsync(const std::string& table_name) {
-  auto& state = sync_states_[table_name];
-  state.status = "IN_PROGRESS";
-  state.start_time = std::chrono::steady_clock::now();
-
-  // RAII guard to ensure cleanup even on exceptions
-  struct SyncGuard {
-    TcpServer* server;
-    std::string table;
-    explicit SyncGuard(TcpServer* srv, std::string tbl) : server(srv), table(std::move(tbl)) {}
-    ~SyncGuard() {
-      // Remove from syncing set
-      std::lock_guard<std::mutex> lock(server->syncing_tables_mutex_);
-      server->syncing_tables_.erase(table);
-    }
-    // Delete copy and move operations - this is an RAII guard
-    SyncGuard(const SyncGuard&) = delete;
-    SyncGuard& operator=(const SyncGuard&) = delete;
-    SyncGuard(SyncGuard&&) = delete;
-    SyncGuard& operator=(SyncGuard&&) = delete;
-  };
-  SyncGuard guard(this, table_name);
-
-  try {
-    // Create MySQL connection
-    if (full_config_ == nullptr) {
-      state.status = "FAILED";
-      state.error_message = "Configuration not available";
-      state.is_running = false;
-      spdlog::error("SYNC failed for table {}: Configuration not available", table_name);
-      return;
-    }
-
-    mysql::Connection::Config mysql_config{.host = full_config_->mysql.host,
-                                           .port = static_cast<uint16_t>(full_config_->mysql.port),
-                                           .user = full_config_->mysql.user,
-                                           .password = full_config_->mysql.password,
-                                           .database = full_config_->mysql.database};
-
-    auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
-
-    if (!mysql_conn->Connect()) {
-      state.status = "FAILED";
-      state.error_message = "Failed to connect to MySQL: " + mysql_conn->GetLastError();
-      state.is_running = false;
-      spdlog::error("SYNC failed for table {}: {}", table_name, state.error_message);
-      return;
-    }
-
-    // Get table context
-    auto table_iter = table_contexts_.find(table_name);
-    if (table_iter == table_contexts_.end()) {
-      state.status = "FAILED";
-      state.error_message = "Table context not found";
-      state.is_running = false;
-      return;
-    }
-
-    auto* ctx = table_iter->second;
-
-    // Build snapshot with cancellation support
-    storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->build);
-
-    // Store builder pointer for shutdown cancellation
-    {
-      std::lock_guard<std::mutex> lock(snapshot_builders_mutex_);
-      active_snapshot_builders_[table_name] = &builder;
-    }
-
-    bool success = builder.Build([&](const auto& progress) {
-      state.total_rows = progress.total_rows;
-      state.processed_rows = progress.processed_rows;
-
-      // Check for shutdown signal
-      if (shutdown_requested_) {
-        builder.Cancel();
-      }
-    });
-
-    // Clear builder pointer
-    {
-      std::lock_guard<std::mutex> lock(snapshot_builders_mutex_);
-      active_snapshot_builders_.erase(table_name);
-    }
-
-    // Check if cancelled by shutdown
-    if (shutdown_requested_) {
-      state.status = "CANCELLED";
-      state.error_message = "Server shutdown requested";
-      state.is_running = false;
-      spdlog::info("SYNC cancelled for table {} due to shutdown", table_name);
-      return;
-    }
-
-    if (success) {
-      state.status = "COMPLETED";
-      state.gtid = builder.GetSnapshotGTID();
-      state.processed_rows = builder.GetProcessedRows();
-
-      // Start or restart binlog replication if enabled and BinlogReader exists
-      if (full_config_->replication.enable && binlog_reader_ != nullptr && !state.gtid.empty()) {
-        auto* reader = static_cast<mysql::BinlogReader*>(binlog_reader_);
-
-        // Check if already running
-        if (reader->IsRunning()) {
-          // Already running - just update GTID and mark as already running
-          spdlog::info("SYNC completed for table {} (rows={}, gtid={}). Replication already running.", table_name,
-                       state.processed_rows.load(), state.gtid);
-          state.replication_status = "ALREADY_RUNNING";
-        } else {
-          // Not running - set GTID and start replication
-          reader->SetCurrentGTID(state.gtid);
-
-          if (reader->Start()) {
-            state.replication_status = "STARTED";
-            spdlog::info("SYNC completed for table {} (rows={}, gtid={}). Replication started.", table_name,
-                         state.processed_rows.load(), state.gtid);
-          } else {
-            state.replication_status = "FAILED";
-            state.error_message = "Snapshot succeeded but replication failed to start: " + reader->GetLastError();
-            spdlog::error("SYNC completed for table {} but replication failed to start: {}", table_name,
-                          reader->GetLastError());
-          }
-        }
-      } else {
-        state.replication_status = "DISABLED";
-        spdlog::info("SYNC completed for table {} (rows={}, replication disabled)", table_name,
-                     state.processed_rows.load());
-      }
-    } else {
-      state.status = "FAILED";
-      state.error_message = builder.GetLastError();
-      spdlog::error("SYNC failed for table {}: {}", table_name, state.error_message);
-    }
-
-  } catch (const std::exception& e) {
-    state.status = "FAILED";
-    state.error_message = e.what();
-    spdlog::error("SYNC exception for table {}: {}", table_name, e.what());
-  }
-
-  state.is_running = false;
+  return sync_manager_->GetSyncStatus();
 }
 
 #endif  // USE_MYSQL

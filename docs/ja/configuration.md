@@ -28,6 +28,14 @@ mysql:
   binlog_format: "ROW"
   binlog_row_image: "FULL"
   connect_timeout_ms: 3000
+  read_timeout_ms: 3600000
+  write_timeout_ms: 3600000
+  # TLS/SSL 設定（オプション）
+  ssl_enable: false
+  ssl_ca: ""
+  ssl_cert: ""
+  ssl_key: ""
+  ssl_verify_server_cert: true
 
 tables:
   - name: "articles"
@@ -110,7 +118,14 @@ JSON 形式での同じ設定：
     "use_gtid": true,
     "binlog_format": "ROW",
     "binlog_row_image": "FULL",
-    "connect_timeout_ms": 3000
+    "connect_timeout_ms": 3000,
+    "read_timeout_ms": 3600000,
+    "write_timeout_ms": 3600000,
+    "ssl_enable": false,
+    "ssl_ca": "",
+    "ssl_cert": "",
+    "ssl_key": "",
+    "ssl_verify_server_cert": true
   },
   "tables": [
     {
@@ -203,6 +218,69 @@ MySQL サーバーの接続設定：
 - **binlog_format**: バイナリログ形式（デフォルト: `ROW`、レプリケーションに必須）
 - **binlog_row_image**: 行イメージ形式（デフォルト: `FULL`、レプリケーションに必須）
 - **connect_timeout_ms**: 接続タイムアウト（ミリ秒、デフォルト: `3000`）
+- **read_timeout_ms**: 読み取りタイムアウト（ミリ秒、デフォルト: `3600000` = 1時間）
+- **write_timeout_ms**: 書き込みタイムアウト（ミリ秒、デフォルト: `3600000` = 1時間）
+
+### TLS/SSL 設定
+
+MygramDB は MySQL 接続に対して **片側 TLS**（サーバー証明書の検証のみ）と **相互 TLS (mTLS)**（クライアントとサーバー両方の証明書検証）の両方をサポートしています。
+
+- **ssl_enable**: MySQL 接続で TLS/SSL を有効化（デフォルト: `false`）
+- **ssl_ca**: サーバー証明書を検証するための CA 証明書ファイルのパス
+- **ssl_cert**: クライアント証明書ファイルのパス（オプション、mTLS に必要）
+- **ssl_key**: クライアント秘密鍵ファイルのパス（オプション、mTLS に必要）
+- **ssl_verify_server_cert**: CA に対してサーバー証明書を検証（デフォルト: `true`）
+
+**片側 TLS（サーバー認証のみ）：**
+
+接続を暗号化し MySQL サーバーの身元を検証したいが、サーバーがクライアント証明書を要求しない場合に使用します。
+
+```yaml
+mysql:
+  host: "mysql.example.com"
+  port: 3306
+  user: "repl_user"
+  password: "your_password"
+  database: "mydb"
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_verify_server_cert: true
+```
+
+**相互 TLS (mTLS - クライアントとサーバー認証)：**
+
+MySQL サーバーがパスワード認証に加えてクライアント証明書認証を要求する場合に使用します。
+
+```yaml
+mysql:
+  host: "mysql.example.com"
+  port: 3306
+  user: "repl_user"
+  password: "your_password"
+  database: "mydb"
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_cert: "/path/to/client-cert.pem"
+  ssl_key: "/path/to/client-key.pem"
+  ssl_verify_server_cert: true
+```
+
+**サーバー検証なしの TLS（非推奨）：**
+
+サーバー証明書の検証を無効にする必要がある場合（例：開発環境での自己署名証明書）：
+
+```yaml
+mysql:
+  ssl_enable: true
+  ssl_ca: "/path/to/ca.pem"
+  ssl_verify_server_cert: false
+```
+
+**注意事項：**
+- すべての証明書パスは絶対パスまたは作業ディレクトリからの相対パスである必要があります
+- `ssl_cert` と `ssl_key` パラメータはオプションです。片側 TLS の場合は省略してください
+- `ssl_verify_server_cert` が `true` の場合、サーバーの証明書は `ssl_ca` で指定された CA によって署名されている必要があります
+- mTLS は最も強力なセキュリティを提供しますが、両側で適切な証明書管理が必要です
 
 ## Tables セクション
 
