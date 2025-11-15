@@ -403,6 +403,7 @@ int main(int argc, char* argv[]) {
   server_config.max_connections = kDefaultMaxConnections;
   server_config.default_limit = config.api.default_limit;
   server_config.max_query_length = config.api.max_query_length;
+  server_config.allow_cidrs = config.network.allow_cidrs;
 
 #ifdef USE_MYSQL
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.dump.dir, &config,
@@ -429,6 +430,9 @@ int main(int argc, char* argv[]) {
     mygramdb::server::HttpServerConfig http_config;
     http_config.bind = config.api.http.bind;
     http_config.port = config.api.http.port;
+    http_config.enable_cors = config.api.http.enable_cors;
+    http_config.cors_allow_origin = config.api.http.cors_allow_origin;
+    http_config.allow_cidrs = config.network.allow_cidrs;
 
 #ifdef USE_MYSQL
     http_server = std::make_unique<mygramdb::server::HttpServer>(http_config, table_contexts_ptrs, &config,

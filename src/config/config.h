@@ -193,7 +193,7 @@ struct DumpConfig {
  */
 struct ApiConfig {
   struct {
-    std::string bind = "0.0.0.0";
+    std::string bind = "127.0.0.1";
     int port = defaults::kTcpPort;
   } tcp;
 
@@ -201,6 +201,8 @@ struct ApiConfig {
     bool enable = true;
     std::string bind = "127.0.0.1";
     int port = defaults::kHttpPort;
+    bool enable_cors = false;
+    std::string cors_allow_origin;
   } http;
 
   /**

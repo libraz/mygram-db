@@ -185,10 +185,12 @@ nlohmann::json ConfigToJson(const Config& config) {
            {"port", config.api.tcp.port},
        }},
       {"http",
-       {
-           {"enable", config.api.http.enable},
-           {"bind", config.api.http.bind},
-           {"port", config.api.http.port},
+      {
+          {"enable", config.api.http.enable},
+          {"bind", config.api.http.bind},
+          {"port", config.api.http.port},
+          {"enable_cors", config.api.http.enable_cors},
+          {"cors_allow_origin", config.api.http.cors_allow_origin},
        }},
       {"default_limit", config.api.default_limit},
       {"max_query_length", config.api.max_query_length},

@@ -106,4 +106,23 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allo
   return false;
 }
 
+bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allow_cidrs) {
+  if (parsed_allow_cidrs.empty()) {
+    return true;
+  }
+
+  auto client_ip = ParseIPv4(ip_str);
+  if (!client_ip) {
+    return false;
+  }
+
+  for (const auto& cidr : parsed_allow_cidrs) {
+    if (cidr.Contains(client_ip.value())) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 }  // namespace mygramdb::utils

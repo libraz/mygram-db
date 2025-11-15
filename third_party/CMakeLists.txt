@@ -67,6 +67,31 @@ if(SPDLOG_IID)
   set_target_properties(spdlog PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${SPDLOG_IID}")
 endif()
 
+# LZ4 for result compression
+FetchContent_Declare(
+  lz4
+  GIT_REPOSITORY https://github.com/lz4/lz4.git
+  GIT_TAG v1.9.4
+)
+FetchContent_GetProperties(lz4)
+if(NOT lz4_POPULATED)
+  FetchContent_Populate(lz4)
+endif()
+if(NOT TARGET lz4)
+  add_library(lz4 STATIC
+    ${lz4_SOURCE_DIR}/lib/lz4.c
+    ${lz4_SOURCE_DIR}/lib/lz4hc.c
+    ${lz4_SOURCE_DIR}/lib/lz4frame.c
+    ${lz4_SOURCE_DIR}/lib/xxhash.c)
+  target_include_directories(lz4 PUBLIC ${lz4_SOURCE_DIR}/lib)
+  set_target_properties(lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+get_target_property(LZ4_IID lz4 INTERFACE_INCLUDE_DIRECTORIES)
+if(LZ4_IID)
+  set_target_properties(lz4 PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LZ4_IID}")
+endif()
+
 # CRoaring for Roaring bitmaps (using v4.0.0 for better CMake compatibility)
 FetchContent_Declare(
   roaring

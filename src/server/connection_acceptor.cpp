@@ -15,6 +15,7 @@
 
 #include "server/server_types.h"
 #include "server/thread_pool.h"
+#include "utils/network_utils.h"
 
 namespace mygramdb::server {
 
@@ -168,6 +169,22 @@ void ConnectionAcceptor::AcceptLoop() {
       if (!should_stop_) {
         spdlog::error("Accept failed: {}", strerror(errno));
       }
+      continue;
+    }
+
+    // Convert client IP to string for ACL checks
+    std::string client_ip;
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+    char ip_buffer[INET_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+      client_ip.assign(ip_buffer);
+    } else {
+      spdlog::warn("Failed to parse client address while accepting connection");
+    }
+
+    if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
+      spdlog::warn("Rejected TCP connection from {} (not in network.allow_cidrs)", client_ip.empty() ? "<unknown>" : client_ip);
+      close(client_fd);
       continue;
     }
 

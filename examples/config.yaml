@@ -157,18 +157,20 @@ dump:
 # API Server Configuration
 api:
   tcp:
-    bind: "0.0.0.0"                 # TCP bind address (default: 0.0.0.0, all interfaces)
+    bind: "127.0.0.1"               # TCP bind address (default: loopback only)
     port: 11016                     # TCP port (default: 11016)
   http:
     enable: true                    # Enable HTTP/JSON API (default: true)
     bind: "127.0.0.1"               # HTTP bind address (default: 127.0.0.1)
     port: 8080                      # HTTP port (default: 8080)
+    enable_cors: false              # Enable CORS headers for browser clients (default: false)
+    cors_allow_origin: ""           # Origin allowed when CORS is enabled (e.g., "https://app.example.com")
   default_limit: 100                # Default LIMIT when not specified (range 5-1000)
   max_query_length: 128             # Max query expression length (0 = unlimited)
 
 # Network Security (optional)
 network:
-  allow_cidrs: []                   # Allow CIDR list (default: empty = allow all)
+  allow_cidrs: []                   # Allow CIDR list applied to TCP/HTTP (default: empty = allow all)
                                     # Example: ["192.168.1.0/24", "10.0.0.0/8"]
                                     # When specified, only connections from these IP ranges are accepted
 

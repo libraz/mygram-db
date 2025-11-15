@@ -105,8 +105,13 @@ class CacheManager {
 
  private:
   bool enabled_;
+#if defined(__clang__)
   [[maybe_unused]] int ngram_size_;
   [[maybe_unused]] int kanji_ngram_size_;
+#else
+  int ngram_size_;
+  int kanji_ngram_size_;
+#endif
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

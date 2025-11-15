@@ -222,6 +222,37 @@ TEST(QueryParserTest, FilterOperators) {
   EXPECT_EQ(query6.filters[0].op, FilterOp::LTE);
 }
 
+TEST(QueryParserTest, FilterWithoutSpacesEquals) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER status=1");
+
+  EXPECT_TRUE(query.IsValid());
+  ASSERT_EQ(query.filters.size(), 1);
+  EXPECT_EQ(query.filters[0].column, "status");
+  EXPECT_EQ(query.filters[0].op, FilterOp::EQ);
+  EXPECT_EQ(query.filters[0].value, "1");
+}
+
+TEST(QueryParserTest, FilterWithoutSpacesGreaterEqual) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER score>=42");
+
+  EXPECT_TRUE(query.IsValid());
+  ASSERT_EQ(query.filters.size(), 1);
+  EXPECT_EQ(query.filters[0].column, "score");
+  EXPECT_EQ(query.filters[0].op, FilterOp::GTE);
+  EXPECT_EQ(query.filters[0].value, "42");
+}
+
+TEST(QueryParserTest, FilterAttachedOperatorWithSeparateValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER status= 1");
+
+  EXPECT_TRUE(query.IsValid());
+  ASSERT_EQ(query.filters.size(), 1);
+  EXPECT_EQ(query.filters[0].value, "1");
+}
+
 /**
  * @brief Test case insensitivity
  */

@@ -261,6 +261,7 @@ class QueryParser {
    * @brief Parse filter conditions
    */
   bool ParseFilters(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  bool ParseFilterArguments(const std::vector<std::string>& tokens, size_t& pos, FilterCondition& filter);
 
   /**
    * @brief Parse LIMIT clause

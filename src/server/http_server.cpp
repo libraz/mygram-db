@@ -11,6 +11,7 @@
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <type_traits>
 #include <variant>
 
 #include "cache/cache_manager.h"
@@ -19,6 +20,7 @@
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "utils/memory_utils.h"
+#include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
 
@@ -41,11 +43,43 @@ constexpr int kHttpOk = 200;
 constexpr int kHttpNoContent = 204;
 constexpr int kHttpBadRequest = 400;
 constexpr int kHttpNotFound = 404;
+constexpr int kHttpForbidden = 403;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
 
 // Server startup delay (milliseconds)
 constexpr int kStartupDelayMs = 100;
+
+std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<utils::CIDR> parsed;
+  parsed.reserve(allow_cidrs.size());
+
+  for (const auto& cidr_str : allow_cidrs) {
+    auto cidr = utils::CIDR::Parse(cidr_str);
+    if (!cidr) {
+      spdlog::warn("Ignoring invalid CIDR entry in network.allow_cidrs: {}", cidr_str);
+      continue;
+    }
+    parsed.push_back(*cidr);
+  }
+
+  return parsed;
+}
+
+json FilterValueToJson(const storage::FilterValue& value) {
+  json serialized = nullptr;
+  std::visit(
+      [&](const auto& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          serialized = nullptr;
+        } else {
+          serialized = arg;
+        }
+      },
+      value);
+  return serialized;
+}
 }  // namespace
 
 using storage::DocId;
@@ -63,6 +97,8 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       full_config_(full_config),
       binlog_reader_(binlog_reader),
       cache_manager_(cache_manager) {
+  parsed_allow_cidrs_ = ParseAllowCidrs(config_.allow_cidrs);
+
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
     const size_t limit = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
@@ -74,6 +110,9 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   // Set timeouts
   server_->set_read_timeout(config_.read_timeout_sec, 0);
   server_->set_write_timeout(config_.write_timeout_sec, 0);
+
+  // Setup network ACL before registering routes
+  SetupAccessControl();
 
   // Setup routes
   SetupRoutes();
@@ -113,18 +152,34 @@ void HttpServer::SetupRoutes() {
   server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
 }
 
+void HttpServer::SetupAccessControl() {
+  server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+    if (utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+      return httplib::Server::HandlerResponse::Unhandled;
+    }
+
+    stats_.IncrementRequests();
+    const auto& remote = req.remote_addr.empty() ? std::string("<unknown>") : req.remote_addr;
+    spdlog::warn("Rejected HTTP request from {} (not in network.allow_cidrs)", remote);
+    SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
+    return httplib::Server::HandlerResponse::Handled;
+  });
+}
+
 void HttpServer::SetupCors() {
+  const std::string allow_origin = config_.cors_allow_origin.empty() ? "null" : config_.cors_allow_origin;
+
   // CORS preflight
-  server_->Options(".*", [](const httplib::Request& /*req*/, httplib::Response& res) {
-    res.set_header("Access-Control-Allow-Origin", "*");
+  server_->Options(".*", [allow_origin](const httplib::Request& /*req*/, httplib::Response& res) {
+    res.set_header("Access-Control-Allow-Origin", allow_origin);
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type");
     res.status = kHttpNoContent;
   });
 
   // Add CORS headers to all responses
-  server_->set_post_routing_handler([](const httplib::Request& /*req*/, httplib::Response& res) {
-    res.set_header("Access-Control-Allow-Origin", "*");
+  server_->set_post_routing_handler([allow_origin](const httplib::Request& /*req*/, httplib::Response& res) {
+    res.set_header("Access-Control-Allow-Origin", allow_origin);
   });
 }
 
@@ -215,18 +270,6 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     std::ostringstream query_str;
     query_str << "SEARCH " << table << " " << body["q"].get<std::string>();
 
-    // Add filters
-    if (body.contains("filters") && body["filters"].is_object()) {
-      for (const auto& [key, val] : body["filters"].items()) {
-        query_str << " FILTER " << key << "=";
-        if (val.is_string()) {
-          query_str << val.get<std::string>();
-        } else {
-          query_str << val.dump();
-        }
-      }
-    }
-
     // Add limit
     if (body.contains("limit")) {
       query_str << " LIMIT " << body["limit"].get<int>();
@@ -242,6 +285,18 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     if (!query.IsValid()) {
       SendError(res, kHttpBadRequest, "Invalid query: " + query_parser_.GetError());
       return;
+    }
+
+    // Apply filters from JSON payload
+    if (body.contains("filters") && body["filters"].is_object()) {
+      query.filters.clear();
+      for (const auto& [key, val] : body["filters"].items()) {
+        query::FilterCondition filter;
+        filter.column = key;
+        filter.op = query::FilterOp::EQ;
+        filter.value = val.is_string() ? val.get<std::string>() : val.dump();
+        query.filters.push_back(std::move(filter));
+      }
     }
 
     // Get ngram size for this table
@@ -412,21 +467,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         if (!doc->filters.empty()) {
           json filters_obj;
           for (const auto& [key, val] : doc->filters) {
-            // Convert FilterValue to JSON
-            std::visit(
-                [&](auto&& arg) {
-                  using T = std::decay_t<decltype(arg)>;
-                  if constexpr (std::is_same_v<T, int64_t>) {
-                    filters_obj[key] = arg;
-                  } else if constexpr (std::is_same_v<T, double>) {
-                    filters_obj[key] = arg;
-                  } else if constexpr (std::is_same_v<T, std::string>) {
-                    filters_obj[key] = arg;
-                  } else if constexpr (std::is_same_v<T, int64_t>) {
-                    filters_obj[key] = arg;
-                  }
-                },
-                val);
+            filters_obj[key] = FilterValueToJson(val);
           }
           doc_obj["filters"] = filters_obj;
         }
@@ -483,19 +524,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     if (!doc->filters.empty()) {
       json filters_obj;
       for (const auto& [key, val] : doc->filters) {
-        // Convert FilterValue to JSON
-        std::visit(
-            [&](auto&& arg) {
-              using T = std::decay_t<decltype(arg)>;
-              if constexpr (std::is_same_v<T, int64_t>) {
-                filters_obj[key] = arg;
-              } else if constexpr (std::is_same_v<T, double>) {
-                filters_obj[key] = arg;
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                filters_obj[key] = arg;
-              }
-            },
-            val);
+        filters_obj[key] = FilterValueToJson(val);
       }
       response["filters"] = filters_obj;
     }
@@ -667,28 +696,31 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
   try {
     json response;
 
-    // MySQL config
+    // MySQL config summary (no credentials)
     json mysql_obj;
-    mysql_obj["host"] = full_config_->mysql.host;
-    mysql_obj["port"] = full_config_->mysql.port;
-    mysql_obj["database"] = full_config_->mysql.database;
-    mysql_obj["user"] = full_config_->mysql.user;
+    mysql_obj["configured"] = !full_config_->mysql.user.empty() || !full_config_->mysql.host.empty();
+    mysql_obj["database_defined"] = !full_config_->mysql.database.empty();
     response["mysql"] = mysql_obj;
 
-    // API config
+    // API config summary (no bind/port exposure)
     json api_obj;
-    api_obj["tcp"]["bind"] = full_config_->api.tcp.bind;
-    api_obj["tcp"]["port"] = full_config_->api.tcp.port;
-    api_obj["http"]["enable"] = full_config_->api.http.enable;
-    api_obj["http"]["bind"] = full_config_->api.http.bind;
-    api_obj["http"]["port"] = full_config_->api.http.port;
+    api_obj["tcp"]["enabled"] = true;
+    api_obj["http"]["enabled"] = full_config_->api.http.enable;
+    api_obj["http"]["cors_enabled"] = full_config_->api.http.enable_cors;
     response["api"] = api_obj;
 
-    // Replication config
+    // Network ACL status
+    json net_obj;
+    net_obj["allow_cidrs_configured"] = !full_config_->network.allow_cidrs.empty();
+    response["network"] = net_obj;
+
+    // Replication config summary
     json repl_obj;
     repl_obj["enable"] = full_config_->replication.enable;
-    repl_obj["server_id"] = full_config_->replication.server_id;
     response["replication"] = repl_obj;
+
+    response["notes"] =
+        "Sensitive configuration values are redacted over HTTP. Use CONFIG SHOW over a secured connection for details.";
 
     SendJson(res, kHttpOk, response);
 

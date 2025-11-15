@@ -10,11 +10,13 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/network_utils.h"
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
@@ -42,7 +44,7 @@ constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queri
  * @brief TCP server configuration
  */
 struct ServerConfig {
-  std::string host = "0.0.0.0";
+  std::string host = "127.0.0.1";
   uint16_t port = kDefaultPort;
   int max_connections = kDefaultMaxConnections;
   int worker_threads = 0;  // Number of worker threads (0 = CPU count)
@@ -50,6 +52,8 @@ struct ServerConfig {
   int send_buffer_size = kDefaultSendBufferSize;
   int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
   int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
+  std::vector<std::string> allow_cidrs;
+  std::vector<utils::CIDR> parsed_allow_cidrs;
 };
 
 /**

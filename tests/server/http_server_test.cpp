@@ -34,11 +34,14 @@ class HttpServerTest : public ::testing::Test {
     std::unordered_map<std::string, storage::FilterValue> filters1;
     filters1["status"] = static_cast<int64_t>(1);
     filters1["category"] = std::string("tech");
+    filters1["score"] = 3.14159;
+    filters1["series"] = std::string("Project X=Beta");
     auto doc_id1 = doc_store->AddDocument("article_1", filters1);
 
     std::unordered_map<std::string, storage::FilterValue> filters2;
     filters2["status"] = static_cast<int64_t>(1);
     filters2["category"] = std::string("news");
+    filters2["score"] = 1.61803;
     auto doc_id2 = doc_store->AddDocument("article_2", filters2);
 
     std::unordered_map<std::string, storage::FilterValue> filters3;
@@ -73,6 +76,8 @@ class HttpServerTest : public ::testing::Test {
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
     config_->api.http.port = 18080;  // Use different port for testing
+    config_->api.http.enable_cors = true;
+    config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
     config_->replication.server_id = 12345;
 
@@ -80,6 +85,9 @@ class HttpServerTest : public ::testing::Test {
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
     http_config.port = 18080;
+
+    http_config.enable_cors = true;
+    http_config.cors_allow_origin = "*";
 
     http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
   }
@@ -197,18 +205,44 @@ TEST_F(HttpServerTest, ConfigEndpoint) {
   EXPECT_EQ(res->status, 200);
 
   auto body = json::parse(res->body);
-  EXPECT_EQ(body["mysql"]["host"], "127.0.0.1");
-  EXPECT_EQ(body["mysql"]["port"], 3306);
-  EXPECT_EQ(body["mysql"]["database"], "testdb");
-  EXPECT_EQ(body["mysql"]["user"], "test_user");
-  EXPECT_EQ(body["api"]["http"]["enable"], true);
-  EXPECT_EQ(body["api"]["http"]["port"], 18080);
+  EXPECT_TRUE(body["mysql"]["configured"].get<bool>());
+  EXPECT_TRUE(body["mysql"]["database_defined"].get<bool>());
+  EXPECT_TRUE(body["api"]["http"]["enabled"].get<bool>());
+  EXPECT_FALSE(body["api"]["http"]["cors_enabled"].get<bool>());
+  EXPECT_TRUE(body.contains("network"));
+  EXPECT_FALSE(body["network"]["allow_cidrs_configured"].get<bool>());
+  EXPECT_TRUE(body.contains("notes"));
+}
+
+TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
+  HttpServerConfig restricted_config;
+  restricted_config.bind = "127.0.0.1";
+  restricted_config.port = 18082;
+  restricted_config.allow_cidrs = {"10.0.0.0/8"};
+
+  auto restricted_server = std::make_unique<HttpServer>(restricted_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(restricted_server->Start());
+
+  httplib::Client client("http://127.0.0.1:18082");
+  auto res = client.Get("/health");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 403);
+
+  restricted_server->Stop();
 }
 
 TEST_F(HttpServerTest, SearchEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
+
+  auto doc_id1 = doc_store_->GetDocId("article_1");
+  auto doc_id2 = doc_store_->GetDocId("article_2");
+  auto doc_id3 = doc_store_->GetDocId("article_3");
+  ASSERT_TRUE(doc_id1.has_value());
+  ASSERT_TRUE(doc_id2.has_value());
+  ASSERT_TRUE(doc_id3.has_value());
 
   json request_body;
   request_body["q"] = "machine";
@@ -220,10 +254,48 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(res->status, 200);
 
   auto body = json::parse(res->body);
-  EXPECT_TRUE(body.contains("count"));
-  EXPECT_TRUE(body.contains("results"));
+  EXPECT_EQ(body["count"], 1);
   EXPECT_EQ(body["limit"], 10);
   EXPECT_EQ(body["offset"], 0);
+  ASSERT_TRUE(body["results"].is_array());
+  ASSERT_EQ(body["results"].size(), 1);
+  const auto& first_result = body["results"][0];
+  EXPECT_EQ(first_result["doc_id"], doc_id1.value());
+  EXPECT_EQ(first_result["primary_key"], "article_1");
+  ASSERT_TRUE(first_result.contains("filters"));
+  EXPECT_EQ(first_result["filters"]["category"], "tech");
+
+  // Query that returns all documents and exercise limit/offset behavior
+  json multi_request;
+  multi_request["q"] = "e";  // Shared character present in all documents
+  multi_request["limit"] = 2;
+
+  auto multi_res = client.Post("/test/search", multi_request.dump(), "application/json");
+  ASSERT_TRUE(multi_res);
+  EXPECT_EQ(multi_res->status, 200);
+
+  auto multi_body = json::parse(multi_res->body);
+  EXPECT_EQ(multi_body["count"], 3);
+  EXPECT_EQ(multi_body["limit"], 2);
+  EXPECT_EQ(multi_body["offset"], 0);
+  ASSERT_EQ(multi_body["results"].size(), 2);
+  EXPECT_EQ(multi_body["results"][0]["doc_id"], doc_id1.value());
+  EXPECT_EQ(multi_body["results"][1]["doc_id"], doc_id2.value());
+
+  // Offset should advance into the result set and preserve ordering
+  json paged_request = multi_request;
+  paged_request["offset"] = 1;
+  auto paged_res = client.Post("/test/search", paged_request.dump(), "application/json");
+  ASSERT_TRUE(paged_res);
+  EXPECT_EQ(paged_res->status, 200);
+
+  auto paged_body = json::parse(paged_res->body);
+  EXPECT_EQ(paged_body["count"], 3);
+  EXPECT_EQ(paged_body["limit"], 2);
+  EXPECT_EQ(paged_body["offset"], 1);
+  ASSERT_EQ(paged_body["results"].size(), 2);
+  EXPECT_EQ(paged_body["results"][0]["doc_id"], doc_id2.value());
+  EXPECT_EQ(paged_body["results"][1]["doc_id"], doc_id3.value());
 }
 
 TEST_F(HttpServerTest, SearchWithFilters) {
@@ -232,20 +304,40 @@ TEST_F(HttpServerTest, SearchWithFilters) {
   httplib::Client client("http://127.0.0.1:18080");
 
   json request_body;
-  request_body["q"] = "news";
-  // Note: Filter implementation depends on query parser
-  // For now, test that request is processed without crash
+  request_body["q"] = "machine";
   request_body["limit"] = 10;
+  request_body["filters"] = {{"series", "Project X=Beta"}};
 
   auto res = client.Post("/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
-  // Should return valid response (either 200 with results or 400 if query fails)
-  EXPECT_TRUE(res->status == 200 || res->status == 400);
+  EXPECT_EQ(res->status, 200);
 
   auto body = json::parse(res->body);
-  // Response should have either results or error field
-  EXPECT_TRUE(body.contains("results") || body.contains("error"));
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_1");
+  EXPECT_DOUBLE_EQ(body["results"][0]["filters"]["score"], 3.14159);
+  EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
+}
+
+TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"] = {{"series", "Project X=Beta"}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
 }
 
 TEST_F(HttpServerTest, SearchMissingQuery) {
@@ -296,6 +388,8 @@ TEST_F(HttpServerTest, GetDocumentEndpoint) {
   EXPECT_TRUE(body.contains("filters"));
   EXPECT_EQ(body["filters"]["status"], 1);
   EXPECT_EQ(body["filters"]["category"], "tech");
+  EXPECT_DOUBLE_EQ(body["filters"]["score"], 3.14159);
+  EXPECT_EQ(body["filters"]["series"], "Project X=Beta");
 }
 
 TEST_F(HttpServerTest, GetDocumentNotFound) {

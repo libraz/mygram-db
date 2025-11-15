@@ -10,10 +10,14 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <fcntl.h>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -29,6 +33,8 @@ using namespace mygramdb;
 class TcpServerTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    SkipIfSocketCreationBlocked();
+
     // Create index and doc_store as unique_ptrs
     auto index = std::make_unique<index::Index>(1);
     auto doc_store = std::make_unique<storage::DocumentStore>();
@@ -57,25 +63,7 @@ class TcpServerTest : public ::testing::Test {
     }
   }
 
-  // Helper to create client socket
-  int CreateClientSocket(uint16_t port) {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-      return -1;
-    }
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
-
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-      close(sock);
-      return -1;
-    }
-
-    return sock;
-  }
+  int CreateClientSocket(uint16_t port);
 
   // Helper to send request and receive response
   std::string SendRequest(int sock, const std::string& request) {
@@ -108,7 +96,115 @@ class TcpServerTest : public ::testing::Test {
   TableContext table_context_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<TcpServer> server_;
+
+  static void SkipIfSocketCreationBlocked();
+  void StartServerOrSkip();
 };
+
+void TcpServerTest::SkipIfSocketCreationBlocked() {
+  static bool checked = false;
+  static bool skip_due_to_permissions = false;
+  static std::string permission_error;
+
+  if (!checked) {
+    checked = true;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+      close(fd);
+    } else {
+      if (errno == EPERM || errno == EACCES) {
+        skip_due_to_permissions = true;
+        permission_error = std::strerror(errno);
+      }
+    }
+  }
+
+  if (skip_due_to_permissions) {
+    GTEST_SKIP() << "Skipping TcpServerTest: unable to create AF_INET socket (" << permission_error
+                 << "). WSL/OS is blocking TCP sockets; enable networking to run this test.";
+  }
+}
+
+int TcpServerTest::CreateClientSocket(uint16_t port) {
+  constexpr int kConnectTimeoutSec = 5;
+  constexpr int kSocketIoTimeoutSec = 5;
+
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    return -1;
+  }
+
+  // Set socket non-blocking to implement custom connect timeout
+  int flags = fcntl(sock, F_GETFL, 0);
+  if (flags >= 0) {
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  }
+
+  struct sockaddr_in server_addr {};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
+
+  int result = connect(sock, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr));
+  if (result < 0) {
+    if (errno != EINPROGRESS) {
+      close(sock);
+      return -1;
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(sock, &write_fds);
+
+    struct timeval timeout {};
+    timeout.tv_sec = kConnectTimeoutSec;
+
+    int ready = select(sock + 1, nullptr, &write_fds, nullptr, &timeout);
+    if (ready <= 0) {
+      close(sock);
+      errno = (ready == 0) ? ETIMEDOUT : errno;
+      return -1;
+    }
+
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
+      if (so_error != 0) {
+        errno = so_error;
+      }
+      close(sock);
+      return -1;
+    }
+  }
+
+  // Restore blocking mode if we changed it
+  if (flags >= 0) {
+    fcntl(sock, F_SETFL, flags);
+  }
+
+  // Apply send/receive timeouts to avoid hangs on recv()
+  struct timeval io_timeout {};
+  io_timeout.tv_sec = kSocketIoTimeoutSec;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+
+  return sock;
+}
+
+void TcpServerTest::StartServerOrSkip() {
+  if (server_->Start()) {
+    return;
+  }
+
+  const std::string& error = server_->GetLastError();
+  if (error.find("Operation not permitted") != std::string::npos ||
+      error.find("Permission denied") != std::string::npos) {
+    GTEST_SKIP() << "Skipping TcpServerTest: " << error
+                 << ". This environment does not allow creating TCP sockets.";
+  }
+
+  FAIL() << "Failed to start TCP server: " << (error.empty() ? "unknown error" : error);
+}
 
 /**
  * @brief Test server construction
@@ -123,7 +219,7 @@ TEST_F(TcpServerTest, Construction) {
  * @brief Test server start and stop
  */
 TEST_F(TcpServerTest, StartStop) {
-  EXPECT_TRUE(server_->Start());
+  StartServerOrSkip();
   EXPECT_TRUE(server_->IsRunning());
   EXPECT_GT(server_->GetPort(), 0);
 
@@ -135,7 +231,7 @@ TEST_F(TcpServerTest, StartStop) {
  * @brief Test double start
  */
 TEST_F(TcpServerTest, DoubleStart) {
-  EXPECT_TRUE(server_->Start());
+  StartServerOrSkip();
   EXPECT_FALSE(server_->Start());  // Should fail
   EXPECT_TRUE(server_->IsRunning());
 }
@@ -144,7 +240,7 @@ TEST_F(TcpServerTest, DoubleStart) {
  * @brief Test GET request for non-existent document
  */
 TEST_F(TcpServerTest, GetNonExistent) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   // Wait for server to be ready
@@ -163,7 +259,7 @@ TEST_F(TcpServerTest, GetNonExistent) {
  * @brief Test SEARCH on empty index
  */
 TEST_F(TcpServerTest, SearchEmpty) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -181,7 +277,7 @@ TEST_F(TcpServerTest, SearchEmpty) {
  * @brief Test COUNT on empty index
  */
 TEST_F(TcpServerTest, CountEmpty) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -206,7 +302,7 @@ TEST_F(TcpServerTest, SearchWithDocuments) {
   auto doc_id2 = doc_store_->AddDocument("2", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello there");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -232,7 +328,7 @@ TEST_F(TcpServerTest, CountWithDocuments) {
   auto doc_id2 = doc_store_->AddDocument("2", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello there");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -256,7 +352,7 @@ TEST_F(TcpServerTest, GetDocument) {
   auto doc_id = doc_store_->AddDocument("test123", filters);
   index_->AddDocument(static_cast<index::DocId>(doc_id), "hello world");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -281,7 +377,7 @@ TEST_F(TcpServerTest, SearchWithLimit) {
     index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
   }
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -306,7 +402,7 @@ TEST_F(TcpServerTest, SearchWithOffset) {
     index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
   }
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -336,7 +432,7 @@ TEST_F(TcpServerTest, SearchWithNot) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "ghi jkl");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -366,7 +462,7 @@ TEST_F(TcpServerTest, SearchWithAnd) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -396,7 +492,7 @@ TEST_F(TcpServerTest, SearchWithMultipleAnds) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc xyz");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -426,7 +522,7 @@ TEST_F(TcpServerTest, SearchWithAndAndNot) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc def");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -456,7 +552,7 @@ TEST_F(TcpServerTest, CountWithAnd) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -485,7 +581,7 @@ TEST_F(TcpServerTest, SearchWithQuotedString) {
   auto doc_id3 = doc_store_->AddDocument("3", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id3), "world");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -508,7 +604,7 @@ TEST_F(TcpServerTest, MultipleRequests) {
   auto doc_id = doc_store_->AddDocument("1", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -529,7 +625,7 @@ TEST_F(TcpServerTest, MultipleRequests) {
  * @brief Test invalid command
  */
 TEST_F(TcpServerTest, InvalidCommand) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -551,7 +647,7 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
   auto doc_id = doc_store_->AddDocument("1", {});
   index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -587,7 +683,7 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
  * @brief Test INFO command
  */
 TEST_F(TcpServerTest, InfoCommand) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -655,7 +751,7 @@ TEST_F(TcpServerTest, InfoCommand) {
  * @brief Test SAVE command
  */
 TEST_F(TcpServerTest, DebugOn) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
   int sock = CreateClientSocket(port);
   ASSERT_GE(sock, 0);
@@ -673,7 +769,7 @@ TEST_F(TcpServerTest, DebugOn) {
  * @brief Test DEBUG OFF command
  */
 TEST_F(TcpServerTest, DebugOff) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
   int sock = CreateClientSocket(port);
   ASSERT_GE(sock, 0);
@@ -697,7 +793,7 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
   index_->AddDocument(doc_id1, "hello world");
   index_->AddDocument(doc_id2, "test data");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
   int sock = CreateClientSocket(port);
   ASSERT_GE(sock, 0);
@@ -743,7 +839,7 @@ TEST_F(TcpServerTest, DebugModePerConnection) {
   auto doc_id = doc_store_->AddDocument("100", {});
   index_->AddDocument(doc_id, "hello world");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   // Connection 1: Enable debug
@@ -842,7 +938,7 @@ TEST_F(TcpServerTest, InfoCommandWithTables) {
  */
 TEST_F(TcpServerTest, InfoCommandWithoutTables) {
   // Server created in SetUp has nullptr for config
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -932,7 +1028,7 @@ TEST_F(TcpServerTest, HybridNgramSearchWithKanjiNgramSize) {
   index_->AddDocument(4, "東北地方");  // Tohoku region (kanji only)
 
   // Start server
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   uint16_t port = server_->GetPort();
@@ -1043,7 +1139,7 @@ TEST_F(TcpServerTest, HybridNgramSearchWithKanjiNgramSize) {
  * @brief Test INFO command includes replication statistics
  */
 TEST_F(TcpServerTest, InfoCommandReplicationStatistics) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
 
   // Get server statistics and increment some replication counters
   ServerStats* stats = server_->GetMutableStats();
@@ -1094,7 +1190,7 @@ TEST_F(TcpServerTest, InfoCommandReplicationStatistics) {
  * @brief Test INFO command replication statistics initially zero
  */
 TEST_F(TcpServerTest, InfoCommandReplicationStatisticsInitiallyZero) {
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
 
   int port = server_->GetPort();
   int sock = CreateClientSocket(port);
@@ -1132,7 +1228,7 @@ TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
   auto doc_id2 = doc_store_->AddDocument("101", {});
   index_->AddDocument(doc_id2, "hello universe");
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
 
   int sock = CreateClientSocket(port);
@@ -1220,7 +1316,7 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
     index_->AddDocument(static_cast<index::DocId>(doc_id), "large dataset text");
   }
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -1295,7 +1391,7 @@ TEST_F(TcpServerTest, CountSearchConsistency) {
     index_->AddDocument(static_cast<index::DocId>(doc_id), "test document");
   }
 
-  ASSERT_TRUE(server_->Start());
+  StartServerOrSkip();
   uint16_t port = server_->GetPort();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 

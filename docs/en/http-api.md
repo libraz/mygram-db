@@ -9,15 +9,17 @@ Enable the HTTP server in your `config.yaml`:
 ```yaml
 api:
   tcp:
-    bind: "0.0.0.0"
+    bind: "127.0.0.1"
     port: 11016
   http:
     enable: true          # Enable HTTP server
     bind: "127.0.0.1"     # Bind address (default: localhost only)
     port: 8080            # HTTP port (default: 8080)
+    enable_cors: false    # Optional: enable only when exposing to browsers
+    cors_allow_origin: "" # Optional origin allowed when CORS is enabled
 ```
 
-**Security Note**: By default, the HTTP server binds to `127.0.0.1` (localhost only). To accept connections from other machines, set `bind: "0.0.0.0"` and use the `network.allow_cidrs` setting to restrict access.
+**Security Note**: TCP/HTTP servers bind to loopback by default. If you must expose them publicly, explicitly set `api.tcp.bind`/`api.http.bind`, configure `network.allow_cidrs` to the exact IP ranges that should connect, and keep TLS/API authentication in front of MygramDB (e.g., reverse proxy). CORS is disabled by default and should only be enabled with a trusted origin.
 
 ## API Endpoints
 
@@ -368,7 +370,7 @@ GET /health HTTP/1.1
 
 ### GET /config
 
-Current server configuration (passwords are masked).
+Current server configuration summary (sensitive values are omitted).
 
 **Request:**
 
@@ -381,26 +383,25 @@ GET /config HTTP/1.1
 ```json
 {
   "mysql": {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "database": "mydb",
-    "user": "repl_user"
+    "configured": true,
+    "database_defined": true
   },
   "api": {
     "tcp": {
-      "bind": "0.0.0.0",
-      "port": 11016
+      "enabled": true
     },
     "http": {
-      "enable": true,
-      "bind": "127.0.0.1",
-      "port": 8080
+      "enabled": true,
+      "cors_enabled": false
     }
   },
+  "network": {
+    "allow_cidrs_configured": false
+  },
   "replication": {
-    "enable": true,
-    "server_id": 12345
-  }
+    "enable": true
+  },
+  "notes": "Sensitive configuration values are redacted over HTTP. Use CONFIG SHOW over a secured connection for details."
 }
 ```
 
@@ -433,12 +434,12 @@ GET /replication/status HTTP/1.1
 
 ## CORS Support
 
-The HTTP server includes CORS (Cross-Origin Resource Sharing) support enabled by default, allowing web applications to make requests from different domains.
+Set `api.http.enable_cors: true` to turn on CORS (Cross-Origin Resource Sharing) headers for browser clients, then specify the trusted origin via `api.http.cors_allow_origin`. Keep CORS disabled when the API is not accessed directly from browsers.
 
 **CORS Headers:**
 
 ```
-Access-Control-Allow-Origin: *
+Access-Control-Allow-Origin: https://app.example.com
 Access-Control-Allow-Methods: GET, POST, OPTIONS
 Access-Control-Allow-Headers: Content-Type
 ```

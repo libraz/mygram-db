@@ -82,6 +82,22 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
   return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
+std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<utils::CIDR> parsed;
+  parsed.reserve(allow_cidrs.size());
+
+  for (const auto& cidr_str : allow_cidrs) {
+    auto cidr = utils::CIDR::Parse(cidr_str);
+    if (!cidr) {
+      spdlog::warn("Ignoring invalid CIDR entry in network.allow_cidrs: {}", cidr_str);
+      continue;
+    }
+    parsed.push_back(*cidr);
+  }
+
+  return parsed;
+}
+
 }  // namespace
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
@@ -97,6 +113,7 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
       dump_dir_(std::move(dump_dir)),
       table_contexts_(std::move(table_contexts)),
       binlog_reader_(binlog_reader) {
+  config_.parsed_allow_cidrs = ParseAllowCidrs(config_.allow_cidrs);
   // NOTE: Component initialization moved to Start() method
   // This allows for better error handling and resource cleanup
 }

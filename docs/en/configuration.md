@@ -77,12 +77,14 @@ dump:
 
 api:
   tcp:
-    bind: "0.0.0.0"
+    bind: "127.0.0.1"
     port: 11016
   http:
     enable: true
     bind: "127.0.0.1"
     port: 8080
+    enable_cors: false
+    cors_allow_origin: ""
   default_limit: 100
   max_query_length: 128
 
@@ -163,13 +165,15 @@ The same configuration in JSON format:
   },
   "api": {
     "tcp": {
-      "bind": "0.0.0.0",
+      "bind": "127.0.0.1",
       "port": 11016
     },
     "http": {
       "enable": true,
       "bind": "127.0.0.1",
-      "port": 8080
+      "port": 8080,
+      "enable_cors": false,
+      "cors_allow_origin": ""
     },
     "default_limit": 100,
     "max_query_length": 128
@@ -390,7 +394,7 @@ API server configuration:
 ```yaml
 api:
   tcp:
-    bind: "0.0.0.0"                 # Default: 0.0.0.0 (all interfaces)
+    bind: "127.0.0.1"               # Default: loopback only. Change to 0.0.0.0 to allow remote clients.
     port: 11016                     # Default: 11016
 ```
 
@@ -402,6 +406,8 @@ api:
     enable: true                    # Default: true
     bind: "127.0.0.1"               # Default: 127.0.0.1 (localhost only)
     port: 8080                      # Default: 8080
+    enable_cors: false              # Default: disabled. Enable only when exposing to browsers.
+    cors_allow_origin: "https://app.example.com"  # Required when CORS is enabled.
   default_limit: 100                # Default LIMIT when not specified (5-1000)
   max_query_length: 128             # Max query expression length (0 = unlimited)
 
@@ -420,6 +426,7 @@ api:
 Network security configuration:
 
 - **allow_cidrs**: Allow CIDR list (default: `[]` = allow all)
+  - Applies to both TCP and HTTP interfaces
   - When empty, all IP addresses are allowed
   - When specified, only connections from these IP ranges are accepted
   - Supports standard CIDR notation (e.g., `192.168.1.0/24`, `10.0.0.0/8`)

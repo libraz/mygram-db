@@ -76,12 +76,14 @@ dump:
 
 api:
   tcp:
-    bind: "0.0.0.0"
+    bind: "127.0.0.1"
     port: 11016
   http:
     enable: true
     bind: "127.0.0.1"
     port: 8080
+    enable_cors: false
+    cors_allow_origin: ""
   default_limit: 100
   max_query_length: 128
 
@@ -162,13 +164,15 @@ JSON 形式での同じ設定：
   },
   "api": {
     "tcp": {
-      "bind": "0.0.0.0",
+      "bind": "127.0.0.1",
       "port": 11016
     },
     "http": {
       "enable": true,
       "bind": "127.0.0.1",
-      "port": 8080
+      "port": 8080,
+      "enable_cors": false,
+      "cors_allow_origin": ""
     },
     "default_limit": 100,
     "max_query_length": 128
@@ -385,7 +389,7 @@ API サーバー設定：
 ```yaml
 api:
   tcp:
-    bind: "0.0.0.0"                 # デフォルト: 0.0.0.0（全インターフェース）
+    bind: "127.0.0.1"               # デフォルト: 127.0.0.1。リモート公開時のみ 0.0.0.0 等へ変更
     port: 11016                     # デフォルト: 11016
 ```
 
@@ -397,6 +401,8 @@ api:
     enable: true                    # デフォルト: true
     bind: "127.0.0.1"               # デフォルト: 127.0.0.1（ローカルホストのみ）
     port: 8080                      # デフォルト: 8080
+    enable_cors: false              # デフォルト: false。ブラウザ公開時のみ有効化
+    cors_allow_origin: "https://app.example.com"  # CORS 有効時は必須
   default_limit: 100                # LIMIT 省略時のデフォルト (5-1000)
   max_query_length: 128             # クエリ式の最大長 (0 = 無制限)
 
@@ -411,6 +417,7 @@ api:
 ネットワークセキュリティ設定：
 
 - **allow_cidrs**: 許可 CIDR リスト（デフォルト: `[]` = すべて許可）
+  - TCP/HTTP の両方に適用されます
   - 空の場合、すべての IP アドレスが許可されます
   - 指定された場合、これらの IP 範囲からの接続のみが受け入れられます
   - 標準 CIDR 表記をサポート（例: `192.168.1.0/24`, `10.0.0.0/8`）

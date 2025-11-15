@@ -55,6 +55,11 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
+### Security Considerations
+
+- MySQL credentials are transmitted in plain text unless your MySQL server requires TLS. Place MygramDB close to MySQL on a trusted network, or terminate TLS/SSH tunnels in front of it when replicating across untrusted links.
+- Snapshots created via `DUMP SAVE` include the MySQL host/user/password. Store dump files on encrypted storage with restrictive permissions (e.g., `chmod 600`) and rotate them like any other secret.
+
 ## Manual Snapshot Synchronization
 
 Starting from version 1.X.X, MygramDB supports **manual snapshot synchronization** to prevent unexpected load on the MySQL master during startup.

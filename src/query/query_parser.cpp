@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <sstream>
 
@@ -836,13 +837,77 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
   // FILTER <col> <op> <value>
   pos++;  // Skip "FILTER"
 
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  if (pos + 2 >= tokens.size()) {  // 2: Need column, operator, and value after current pos
+  FilterCondition filter;
+  if (!ParseFilterArguments(tokens, pos, filter)) {
+    return false;
+  }
+
+  query.filters.push_back(filter);
+  return true;
+}
+
+bool QueryParser::ParseFilterArguments(const std::vector<std::string>& tokens, size_t& pos, FilterCondition& filter) {
+  if (pos >= tokens.size()) {
     SetError("FILTER requires column, operator, and value");
     return false;
   }
 
-  FilterCondition filter;
+  const auto parse_compound_token = [&](const std::string& token) -> bool {
+    std::string column_part;
+    std::string op_part;
+    std::string value_part;
+
+    static const std::array<std::string, 6> kOperators = {">=", "<=", "!=", "=", ">", "<"};
+
+    for (const auto& op_symbol : kOperators) {
+      auto operator_pos = token.find(op_symbol);
+      if (operator_pos != std::string::npos) {
+        column_part = token.substr(0, operator_pos);
+        value_part = token.substr(operator_pos + op_symbol.size());
+        op_part = op_symbol;
+        break;
+      }
+    }
+
+    if (op_part.empty() || column_part.empty()) {
+      return false;
+    }
+
+    auto filter_op = ParseFilterOp(op_part);
+    if (!filter_op.has_value()) {
+      return false;
+    }
+
+    filter.column = column_part;
+    filter.op = filter_op.value();
+
+    if (!value_part.empty()) {
+      filter.value = value_part;
+      ++pos;
+      return true;
+    }
+
+    if (pos + 1 >= tokens.size()) {
+      SetError("FILTER requires column, operator, and value");
+      return false;
+    }
+
+    filter.value = tokens[pos + 1];
+    pos += 2;
+    return true;
+  };
+
+  if (parse_compound_token(tokens[pos])) {
+    return true;
+  }
+
+  // Fallback to standard "col op value" tokens
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  if (pos + 2 >= tokens.size()) {
+    SetError("FILTER requires column, operator, and value");
+    return false;
+  }
+
   filter.column = tokens[pos++];
 
   auto filter_op = ParseFilterOp(tokens[pos++]);
@@ -854,7 +919,6 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
 
   filter.value = tokens[pos++];
 
-  query.filters.push_back(filter);
   return true;
 }
 

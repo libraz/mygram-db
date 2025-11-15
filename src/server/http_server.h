@@ -18,12 +18,14 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/network_utils.h"
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
@@ -51,7 +53,9 @@ struct HttpServerConfig {
   int port = defaults::kHttpPort;
   int read_timeout_sec = defaults::kHttpTimeoutSec;
   int write_timeout_sec = defaults::kHttpTimeoutSec;
-  bool enable_cors = true;
+  bool enable_cors = false;
+  std::string cors_allow_origin;
+  std::vector<std::string> allow_cidrs;
 };
 
 // Forward declaration for TableContext
@@ -152,11 +156,17 @@ class HttpServer {
 #endif
 
   cache::CacheManager* cache_manager_;
+  std::vector<utils::CIDR> parsed_allow_cidrs_;
 
   /**
    * @brief Setup routes
    */
   void SetupRoutes();
+
+  /**
+   * @brief Setup CIDR-based access control
+   */
+  void SetupAccessControl();
 
   /**
    * @brief Handle POST /{table}/search

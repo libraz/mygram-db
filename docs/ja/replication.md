@@ -55,6 +55,11 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
+### セキュリティ上の注意
+
+- MySQL が TLS を必須にしていない場合、MygramDB から送信される資格情報は平文のままになります。信頼できるネットワーク内に配置するか、TLS/SSH トンネルなどで暗号化された経路を確保してください。
+- `DUMP SAVE` で生成されるスナップショットには MySQL のホスト・ユーザー・パスワードが含まれます。暗号化ストレージや `chmod 600` のような厳しい権限で保管し、秘密情報として運用してください。
+
 ## レプリケーション開始オプション
 
 設定ファイルの `replication.start_from` で設定:

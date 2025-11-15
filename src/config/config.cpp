@@ -513,6 +513,12 @@ Config ParseConfigFromJson(const json& root) {
       if (http.contains("port")) {
         config.api.http.port = http["port"].get<int>();
       }
+      if (http.contains("enable_cors")) {
+        config.api.http.enable_cors = http["enable_cors"].get<bool>();
+      }
+      if (http.contains("cors_allow_origin")) {
+        config.api.http.cors_allow_origin = http["cors_allow_origin"].get<std::string>();
+      }
     }
     if (api.contains("default_limit")) {
       config.api.default_limit = api["default_limit"].get<int>();

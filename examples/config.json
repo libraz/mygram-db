@@ -95,13 +95,15 @@
   },
   "api": {
     "tcp": {
-      "bind": "0.0.0.0",
+      "bind": "127.0.0.1",
       "port": 11016
     },
     "http": {
       "enable": true,
       "bind": "127.0.0.1",
-      "port": 8080
+      "port": 8080,
+      "enable_cors": false,
+      "cors_allow_origin": ""
     },
     "default_limit": 100,
     "max_query_length": 128

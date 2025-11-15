@@ -133,6 +133,46 @@ TEST(IndexTest, UpdateDocument) {
 }
 
 /**
+ * @brief Ensure UpdateDocument keeps SearchAnd(limit, reverse) results in sync
+ */
+TEST(IndexTest, UpdateDocumentMaintainsTopNOrdering) {
+  Index index(1);
+
+  constexpr DocId kBaseDocs = 512;
+  constexpr size_t kTopCount = 3;
+
+  // All initial documents contain the term "a"
+  for (DocId doc_id = 1; doc_id <= kBaseDocs; ++doc_id) {
+    index.AddDocument(doc_id, "aaaa");
+  }
+
+  // Extra document intentionally lacks the term so it is not part of the posting list yet
+  const DocId extra_doc = kBaseDocs + 1;
+  index.AddDocument(extra_doc, "zzzz");
+
+  auto expect_top_docs = [&](const std::vector<DocId>& expected) {
+    auto results = index.SearchAnd({"a"}, kTopCount, true);
+    ASSERT_EQ(results.size(), kTopCount);
+    for (size_t i = 0; i < expected.size(); ++i) {
+      EXPECT_EQ(results[i], expected[i]);
+    }
+  };
+
+  expect_top_docs({kBaseDocs, kBaseDocs - 1, kBaseDocs - 2});
+  EXPECT_EQ(index.Count("a"), kBaseDocs);
+
+  // Remove highest doc_id from the posting list via update
+  index.UpdateDocument(kBaseDocs, "aaaa", "zzzz");
+  expect_top_docs({kBaseDocs - 1, kBaseDocs - 2, kBaseDocs - 3});
+  EXPECT_EQ(index.Count("a"), kBaseDocs - 1);
+
+  // Add the extra document into the posting list via update and ensure it becomes the new top result
+  index.UpdateDocument(extra_doc, "zzzz", "aaaa");
+  expect_top_docs({extra_doc, kBaseDocs - 1, kBaseDocs - 2});
+  EXPECT_EQ(index.Count("a"), kBaseDocs);
+}
+
+/**
  * @brief Test AND search with single term
  */
 TEST(IndexTest, SearchAndSingleTerm) {
@@ -252,6 +292,48 @@ TEST(IndexTest, SearchOrNonExistentTerm) {
 }
 
 /**
+ * @brief Stress test OR search with large posting lists and overlapping terms
+ */
+TEST(IndexTest, SearchOrLargeDataset) {
+  Index index(1);
+
+  constexpr DocId kDocs = 10000;
+  std::vector<DocId> expected;
+  expected.reserve(kDocs);
+
+  for (DocId doc_id = 1; doc_id <= kDocs; ++doc_id) {
+    bool has_a = false;
+    bool has_b = false;
+    std::string text;
+
+    if (doc_id % 10 == 0) {
+      text = "ab";  // Contains both
+      has_a = true;
+      has_b = true;
+    } else if (doc_id % 2 == 0) {
+      text = "aaaa";  // Only 'a'
+      has_a = true;
+    } else if (doc_id % 3 == 0) {
+      text = "bbbb";  // Only 'b'
+      has_b = true;
+    } else {
+      text = "cccc";  // Neither term
+    }
+
+    index.AddDocument(doc_id, text);
+    if (has_a || has_b) {
+      expected.push_back(doc_id);
+    }
+  }
+
+  auto results = index.SearchOr({"a", "b"});
+  ASSERT_EQ(results.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(results[i], expected[i]) << "Mismatch at position " << i;
+  }
+}
+
+/**
  * @brief Test NOT search with single term
  */
 TEST(IndexTest, SearchNotSingleTerm) {
@@ -361,6 +443,49 @@ TEST(IndexTest, SearchNotEmptyDocSet) {
   // Empty document set should return empty
   auto results = index.SearchNot(all_docs, {"a"});
   EXPECT_EQ(results.size(), 0);
+}
+
+/**
+ * @brief Stress test NOT search against large document sets with overlapping exclusions
+ */
+TEST(IndexTest, SearchNotLargeDataset) {
+  Index index(1);
+
+  constexpr DocId kDocs = 9000;
+  std::vector<DocId> all_docs;
+  std::vector<DocId> expected;
+  all_docs.reserve(kDocs);
+  expected.reserve(kDocs);
+
+  for (DocId doc_id = 1; doc_id <= kDocs; ++doc_id) {
+    all_docs.push_back(doc_id);
+    bool excluded = false;
+    std::string text;
+
+    if (doc_id % 35 == 0) {
+      text = "xy";  // Contains both excluded terms
+      excluded = true;
+    } else if (doc_id % 7 == 0) {
+      text = "xxx";  // Contains 'x'
+      excluded = true;
+    } else if (doc_id % 5 == 0) {
+      text = "yyy";  // Contains 'y'
+      excluded = true;
+    } else {
+      text = "zzz";  // Neither term
+    }
+
+    index.AddDocument(doc_id, text);
+    if (!excluded) {
+      expected.push_back(doc_id);
+    }
+  }
+
+  auto results = index.SearchNot(all_docs, {"x", "y"});
+  ASSERT_EQ(results.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(results[i], expected[i]) << "DocId mismatch at " << i;
+  }
 }
 
 /**

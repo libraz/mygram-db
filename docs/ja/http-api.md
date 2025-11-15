@@ -9,15 +9,17 @@ MygramDB は、WebアプリケーションやHTTPクライアントとの統合�
 ```yaml
 api:
   tcp:
-    bind: "0.0.0.0"
+    bind: "127.0.0.1"
     port: 11016
   http:
     enable: true          # HTTPサーバーを有効化
     bind: "127.0.0.1"     # バインドアドレス（デフォルト: ローカルホストのみ）
     port: 8080            # HTTPポート（デフォルト: 8080）
+    enable_cors: false    # ブラウザ公開時のみ有効化
+    cors_allow_origin: "" # CORS有効時は許可するOriginを指定
 ```
 
-**セキュリティノート**: デフォルトでは、HTTPサーバーは `127.0.0.1`（ローカルホストのみ）にバインドします。他のマシンからの接続を受け入れる場合は、`bind: "0.0.0.0"` に設定し、`network.allow_cidrs` 設定を使用してアクセスを制限してください。
+**セキュリティノート**: デフォルトでは TCP/HTTP サーバーはループバックにのみバインドします。公開する必要がある場合は `api.tcp.bind` / `api.http.bind` を明示的に設定し、`network.allow_cidrs` で許可 IP を厳密に指定し、MygramDB の前段に TLS/認証付きリバースプロキシ等を配置してください。CORS はデフォルトで無効であり、信頼できるOriginに限定して使用します。
 
 ## API エンドポイント
 
@@ -368,7 +370,7 @@ GET /health HTTP/1.1
 
 ### GET /config
 
-現在のサーバー設定（パスワードはマスクされます）。
+現在のサーバー設定サマリ（機密値は返却されません）。
 
 **リクエスト:**
 
@@ -381,26 +383,25 @@ GET /config HTTP/1.1
 ```json
 {
   "mysql": {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "database": "mydb",
-    "user": "repl_user"
+    "configured": true,
+    "database_defined": true
   },
   "api": {
     "tcp": {
-      "bind": "0.0.0.0",
-      "port": 11016
+      "enabled": true
     },
     "http": {
-      "enable": true,
-      "bind": "127.0.0.1",
-      "port": 8080
+      "enabled": true,
+      "cors_enabled": false
     }
   },
+  "network": {
+    "allow_cidrs_configured": false
+  },
   "replication": {
-    "enable": true,
-    "server_id": 12345
-  }
+    "enable": true
+  },
+  "notes": "機密情報はHTTP経由では提供されません。安全な接続上で CONFIG SHOW を利用してください。"
 }
 ```
 
@@ -433,12 +434,12 @@ GET /replication/status HTTP/1.1
 
 ## CORS サポート
 
-HTTPサーバーは、デフォルトでCORS（クロスオリジンリソース共有）サポートが有効になっており、異なるドメインからWebアプリケーションがリクエストできます。
+ブラウザから直接アクセスする場合は `api.http.enable_cors: true` を設定し、`api.http.cors_allow_origin` に信頼できるOriginを指定します。不要な場合は CORS を無効のままにしてください。
 
 **CORS ヘッダー:**
 
 ```
-Access-Control-Allow-Origin: *
+Access-Control-Allow-Origin: https://app.example.com
 Access-Control-Allow-Methods: GET, POST, OPTIONS
 Access-Control-Allow-Headers: Content-Type
 ```
