@@ -48,7 +48,9 @@ namespace mygramdb::mysql {
  * @param is_null Whether the field is NULL
  * @return String representation of the value
  */
-static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null) {
+static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null,
+                                    const unsigned char* end) {
+  constexpr uint32_t kMaxFieldLength = 256 * 1024 * 1024;  // 256MB max for any field
   if (is_null) {
     return "";  // NULL values represented as empty string
   }
@@ -85,11 +87,17 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       uint32_t str_len = 0;
       const unsigned char* str_data = nullptr;
       if (metadata > 255) {
+        if (data + 2 > end) return "[TRUNCATED]";
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
+        if (data + 1 > end) return "[TRUNCATED]";
         str_len = *data;
         str_data = data + 1;
+      }
+      if (str_len > kMaxFieldLength || str_data + str_len > end) {
+        spdlog::error("VARCHAR field length {} exceeds bounds", str_len);
+        return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(str_data), str_len};
     }
@@ -99,21 +107,29 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       const unsigned char* blob_data = nullptr;
       switch (metadata) {
         case 1:  // TINYBLOB/TINYTEXT
+          if (data + 1 > end) return "[TRUNCATED]";
           blob_len = *data;
           blob_data = data + 1;
           break;
         case 2:  // BLOB/TEXT
+          if (data + 2 > end) return "[TRUNCATED]";
           blob_len = binlog_util::uint2korr(data);
           blob_data = data + 2;
           break;
         case 3:  // MEDIUMBLOB/MEDIUMTEXT
+          if (data + 3 > end) return "[TRUNCATED]";
           blob_len = binlog_util::uint3korr(data);
           blob_data = data + 3;
           break;
         case 4:  // LONGBLOB/LONGTEXT
+          if (data + 4 > end) return "[TRUNCATED]";
           blob_len = binlog_util::uint4korr(data);
           blob_data = data + 4;
           break;
+      }
+      if (blob_len > kMaxFieldLength || blob_data + blob_len > end) {
+        spdlog::error("BLOB field length {} exceeds bounds", blob_len);
+        return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(blob_data), blob_len};
     }
@@ -121,18 +137,24 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
       unsigned char type = metadata >> 8;
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
-        // For now, return the numeric value
+        if (data + 1 > end) return "[TRUNCATED]";
         return std::to_string(*data);
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
       uint32_t str_len = 0;
       const unsigned char* str_data = nullptr;
       if (max_len > 255) {
+        if (data + 2 > end) return "[TRUNCATED]";
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
+        if (data + 1 > end) return "[TRUNCATED]";
         str_len = *data;
         str_data = data + 1;
+      }
+      if (str_len > kMaxFieldLength || str_data + str_len > end) {
+        spdlog::error("STRING field length {} exceeds bounds", str_len);
+        return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(str_data), str_len};
     }
@@ -145,21 +167,29 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       uint8_t len_bytes = (metadata > 0) ? metadata : 4;
       switch (len_bytes) {
         case 1:
+          if (data + 1 > end) return "[TRUNCATED]";
           json_len = *data;
           json_data = data + 1;
           break;
         case 2:
+          if (data + 2 > end) return "[TRUNCATED]";
           json_len = binlog_util::uint2korr(data);
           json_data = data + 2;
           break;
         case 3:
+          if (data + 3 > end) return "[TRUNCATED]";
           json_len = binlog_util::uint3korr(data);
           json_data = data + 3;
           break;
         case 4:
+          if (data + 4 > end) return "[TRUNCATED]";
           json_len = binlog_util::uint4korr(data);
           json_data = data + 4;
           break;
+      }
+      if (json_len > kMaxFieldLength || json_data + json_len > end) {
+        spdlog::error("JSON field length {} exceeds bounds", json_len);
+        return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(json_data), json_len};
     }
@@ -378,7 +408,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         }
 
         // Decode field value
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
 
         // Store in row data
         row.columns[col_meta.name] = value;
@@ -611,7 +641,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;  // Exit both loops cleanly
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+
+        // Check for truncation marker
+        if (value == "[TRUNCATED]") {
+          spdlog::error("Field truncation detected at column {}", col_idx);
+          return std::nullopt;
+        }
 
         // Check again after decode, as DecodeFieldValue advances ptr
         if (ptr > end) {
@@ -683,7 +719,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+
+        // Check for truncation marker
+        if (value == "[TRUNCATED]") {
+          spdlog::error("Field truncation detected in after image at column {}", col_idx);
+          return std::nullopt;
+        }
 
         // Check again after decode
         if (ptr > end) {
@@ -839,7 +881,13 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           return std::nullopt;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+
+        // Check for truncation marker
+        if (value == "[TRUNCATED]") {
+          spdlog::error("Field truncation detected in DELETE_ROWS at column {}", col_idx);
+          return std::nullopt;
+        }
 
         row.columns[col_meta.name] = value;
 

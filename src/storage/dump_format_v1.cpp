@@ -63,8 +63,13 @@ bool WriteString(std::ostream& output_stream, const std::string& str) {
  * @brief Read string from stream (length-prefixed)
  */
 bool ReadString(std::istream& input_stream, std::string& str) {
+  constexpr uint32_t kMaxStringLength = 256 * 1024 * 1024;  // 256MB limit
   uint32_t len = 0;
   if (!ReadBinary(input_stream, len)) {
+    return false;
+  }
+  if (len > kMaxStringLength) {
+    spdlog::error("String length {} exceeds maximum allowed size {}", len, kMaxStringLength);
     return false;
   }
   if (len > 0) {
@@ -390,11 +395,17 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   }
 
   // text_source
+  constexpr uint32_t kMaxConcatColumns = 1000;
+  constexpr uint32_t kMaxFilterCount = 1000;
   if (!ReadString(input_stream, table.text_source.column)) {
     return false;
   }
   uint32_t concat_size = 0;
   if (!ReadBinary(input_stream, concat_size)) {
+    return false;
+  }
+  if (concat_size > kMaxConcatColumns) {
+    spdlog::error("Concat column count {} exceeds maximum allowed {}", concat_size, kMaxConcatColumns);
     return false;
   }
   table.text_source.concat.resize(concat_size);
@@ -412,6 +423,10 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, req_filter_count)) {
     return false;
   }
+  if (req_filter_count > kMaxFilterCount) {
+    spdlog::error("Required filter count {} exceeds maximum allowed {}", req_filter_count, kMaxFilterCount);
+    return false;
+  }
   table.required_filters.resize(req_filter_count);
   for (uint32_t i = 0; i < req_filter_count; ++i) {
     if (!DeserializeRequiredFilterConfig(input_stream, table.required_filters[i])) {
@@ -422,6 +437,10 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   // filters
   uint32_t filter_count = 0;
   if (!ReadBinary(input_stream, filter_count)) {
+    return false;
+  }
+  if (filter_count > kMaxFilterCount) {
+    spdlog::error("Filter count {} exceeds maximum allowed {}", filter_count, kMaxFilterCount);
     return false;
   }
   table.filters.resize(filter_count);
@@ -624,6 +643,7 @@ bool SerializeConfig(std::ostream& output_stream, const config::Config& config) 
 }
 
 bool DeserializeConfig(std::istream& input_stream, config::Config& config) {
+  constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
   // MySQL config
   if (!ReadString(input_stream, config.mysql.host)) {
     return false;
@@ -667,6 +687,10 @@ bool DeserializeConfig(std::istream& input_stream, config::Config& config) {
   // Tables
   uint32_t table_count = 0;
   if (!ReadBinary(input_stream, table_count)) {
+    return false;
+  }
+  if (table_count > kMaxTableCount) {
+    spdlog::error("Table count {} exceeds maximum allowed {}", table_count, kMaxTableCount);
     return false;
   }
   config.tables.resize(table_count);
@@ -768,8 +792,13 @@ bool DeserializeConfig(std::istream& input_stream, config::Config& config) {
   }
 
   // Network config
+  constexpr uint32_t kMaxCIDRCount = 10000;
   uint32_t cidr_count = 0;
   if (!ReadBinary(input_stream, cidr_count)) {
+    return false;
+  }
+  if (cidr_count > kMaxCIDRCount) {
+    spdlog::error("CIDR count {} exceeds maximum allowed {}", cidr_count, kMaxCIDRCount);
     return false;
   }
   config.network.allow_cidrs.resize(cidr_count);

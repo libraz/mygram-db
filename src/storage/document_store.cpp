@@ -465,8 +465,14 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
+    constexpr uint32_t kMaxGTIDLength = 1024;
+    constexpr uint64_t kMaxDocumentCount = 1000000000;  // 1 billion documents
     uint32_t gtid_len = 0;
     ReadBinary(ifs, gtid_len);
+    if (gtid_len > kMaxGTIDLength) {
+      spdlog::error("GTID length {} exceeds maximum allowed {}", gtid_len, kMaxGTIDLength);
+      return false;
+    }
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       ifs.read(gtid.data(), gtid_len);
@@ -480,6 +486,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     // Read document count
     uint64_t doc_count = 0;
     ReadBinary(ifs, doc_count);
+    if (doc_count > kMaxDocumentCount) {
+      spdlog::error("Document count {} exceeds maximum allowed {}", doc_count, kMaxDocumentCount);
+      return false;
+    }
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
@@ -494,8 +504,16 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       auto doc_id = static_cast<DocId>(doc_id_value);
 
       // Read pk length and pk
+      constexpr uint32_t kMaxPKLength = 1024 * 1024;  // 1MB max for primary key
+      constexpr uint32_t kMaxFilterCount = 1000;
+      constexpr uint32_t kMaxFilterNameLength = 1024;
+      constexpr uint32_t kMaxFilterStringLength = 64 * 1024;  // 64KB max for filter string
       uint32_t pk_len = 0;
       ReadBinary(ifs, pk_len);
+      if (pk_len > kMaxPKLength) {
+        spdlog::error("Primary key length {} exceeds maximum allowed {}", pk_len, kMaxPKLength);
+        return false;
+      }
 
       std::string primary_key_str(pk_len, '\0');
       ifs.read(primary_key_str.data(), pk_len);
@@ -506,6 +524,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       // Read filters
       uint32_t filter_count = 0;
       ReadBinary(ifs, filter_count);
+      if (filter_count > kMaxFilterCount) {
+        spdlog::error("Filter count {} exceeds maximum allowed {}", filter_count, kMaxFilterCount);
+        return false;
+      }
 
       if (filter_count > 0) {
         std::unordered_map<std::string, FilterValue> filters;
@@ -514,6 +536,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
           // Read filter name
           uint32_t name_len = 0;
           ReadBinary(ifs, name_len);
+          if (name_len > kMaxFilterNameLength) {
+            spdlog::error("Filter name length {} exceeds maximum allowed {}", name_len, kMaxFilterNameLength);
+            return false;
+          }
 
           std::string name(name_len, '\0');
           ifs.read(name.data(), name_len);
@@ -586,6 +612,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
             case kTypeIndexString: {  // std::string
               uint32_t str_len = 0;
               ReadBinary(ifs, str_len);
+              if (str_len > kMaxFilterStringLength) {
+                spdlog::error("Filter string length {} exceeds maximum allowed {}", str_len, kMaxFilterStringLength);
+                return false;
+              }
               std::string string_value(str_len, '\0');
               ifs.read(string_value.data(), str_len);
               value = string_value;
@@ -752,8 +782,14 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
+    constexpr uint32_t kMaxGTIDLength = 1024;
+    constexpr uint64_t kMaxDocumentCount = 1000000000;  // 1 billion documents
     uint32_t gtid_len = 0;
     ReadBinary(input_stream, gtid_len);
+    if (gtid_len > kMaxGTIDLength) {
+      spdlog::error("GTID length {} exceeds maximum allowed {}", gtid_len, kMaxGTIDLength);
+      return false;
+    }
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       input_stream.read(gtid.data(), static_cast<std::streamsize>(gtid_len));
@@ -767,6 +803,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     // Read document count
     uint64_t doc_count = 0;
     ReadBinary(input_stream, doc_count);
+    if (doc_count > kMaxDocumentCount) {
+      spdlog::error("Document count {} exceeds maximum allowed {}", doc_count, kMaxDocumentCount);
+      return false;
+    }
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
@@ -781,8 +821,16 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
       auto doc_id = static_cast<DocId>(doc_id_value);
 
       // Read pk length and pk
+      constexpr uint32_t kMaxPKLength = 1024 * 1024;  // 1MB max for primary key
+      constexpr uint32_t kMaxFilterCount = 1000;
+      constexpr uint32_t kMaxFilterNameLength = 1024;
+      constexpr uint32_t kMaxFilterStringLength = 64 * 1024;  // 64KB max for filter string
       uint32_t pk_len = 0;
       ReadBinary(input_stream, pk_len);
+      if (pk_len > kMaxPKLength) {
+        spdlog::error("Primary key length {} exceeds maximum allowed {}", pk_len, kMaxPKLength);
+        return false;
+      }
 
       std::string primary_key_str(pk_len, '\0');
       input_stream.read(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
@@ -793,6 +841,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
       // Read filters
       uint32_t filter_count = 0;
       ReadBinary(input_stream, filter_count);
+      if (filter_count > kMaxFilterCount) {
+        spdlog::error("Filter count {} exceeds maximum allowed {}", filter_count, kMaxFilterCount);
+        return false;
+      }
 
       if (filter_count > 0) {
         std::unordered_map<std::string, FilterValue> filters;
@@ -801,6 +853,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
           // Read filter name
           uint32_t name_len = 0;
           ReadBinary(input_stream, name_len);
+          if (name_len > kMaxFilterNameLength) {
+            spdlog::error("Filter name length {} exceeds maximum allowed {}", name_len, kMaxFilterNameLength);
+            return false;
+          }
 
           std::string name(name_len, '\0');
           input_stream.read(name.data(), static_cast<std::streamsize>(name_len));
@@ -873,6 +929,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
             case kTypeIndexString: {  // std::string
               uint32_t str_len = 0;
               ReadBinary(input_stream, str_len);
+              if (str_len > kMaxFilterStringLength) {
+                spdlog::error("Filter string length {} exceeds maximum allowed {}", str_len, kMaxFilterStringLength);
+                return false;
+              }
               std::string str_value(str_len, '\0');
               input_stream.read(str_value.data(), static_cast<std::streamsize>(str_len));
               value = str_value;
