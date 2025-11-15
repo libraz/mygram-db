@@ -103,8 +103,9 @@ bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& respons
   while (total_sent < to_send) {
     // Use MSG_NOSIGNAL to prevent SIGPIPE when client closes connection unexpectedly
     // Pointer arithmetic needed for partial send resumption with POSIX send()
-    ssize_t sent = send(client_fd, full_response.c_str() + total_sent,  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-                        to_send - total_sent, MSG_NOSIGNAL);
+    ssize_t sent =
+        send(client_fd, full_response.c_str() + total_sent,  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+             to_send - total_sent, MSG_NOSIGNAL);
 
     if (sent < 0) {
       if (errno == EINTR) {
