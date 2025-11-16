@@ -37,7 +37,7 @@ namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile std::sig_atomic_t g_shutdown_requested = 0;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_snapshot_building = 0;
+volatile std::sig_atomic_t g_cancel_snapshot_requested = 0;
 
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
 constexpr size_t kGtidPrefixLength = 5;           // "gtid="
@@ -45,25 +45,17 @@ constexpr size_t kDefaultMaxConnections = 1000;   // Default max TCP connections
 constexpr int kShutdownCheckIntervalMs = 100;     // Shutdown check interval (ms)
 constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
 
-#ifdef USE_MYSQL
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-mygramdb::storage::SnapshotBuilder* g_current_snapshot_builder = nullptr;
-#endif
-
 /**
  * @brief Signal handler for graceful shutdown
  * @param signal Signal number
+ *
+ * This handler is async-signal-safe: it only sets atomic flags and performs
+ * no other operations (no mutex locks, no heap allocations, no function calls).
  */
 void SignalHandler(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
     g_shutdown_requested = 1;
-
-#ifdef USE_MYSQL
-    // If snapshot is being built, cancel it immediately
-    if (g_snapshot_building != 0 && g_current_snapshot_builder != nullptr) {
-      g_current_snapshot_builder->Cancel();
-    }
-#endif
+    g_cancel_snapshot_requested = 1;  // Set flag for main loop to process
   }
 }
 
@@ -343,22 +335,20 @@ int main(int argc, char* argv[]) {
       mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store, table_config,
                                                           config.build);
 
-      // Set global pointer for signal handler
-      g_snapshot_building = 1;
-      g_current_snapshot_builder = &snapshot_builder;
+      bool snapshot_success = snapshot_builder.Build([&table_config, &snapshot_builder](const auto& progress) {
+        // Check cancellation flag in progress callback (safe: main thread context)
+        if (g_cancel_snapshot_requested != 0) {
+          spdlog::info("Snapshot cancellation requested during build");
+          snapshot_builder.Cancel();
+        }
 
-      bool snapshot_success = snapshot_builder.Build([&table_config](const auto& progress) {
         if (progress.processed_rows % kProgressLogInterval == 0) {
           spdlog::debug("table: {} - Progress: {} rows processed ({:.0f} rows/s)", table_config.name,
                         progress.processed_rows, progress.rows_per_second);
         }
       });
 
-      // Clear global pointer
-      g_snapshot_building = 0;
-      g_current_snapshot_builder = nullptr;
-
-      // Check if build was cancelled by signal
+      // Check if shutdown was requested
       if (g_shutdown_requested != 0) {
         spdlog::warn("Snapshot build cancelled by shutdown signal for table: {}", table_config.name);
         return 1;
@@ -456,6 +446,14 @@ int main(int argc, char* argv[]) {
   std::unordered_map<std::string, TableContext*> table_contexts_ptrs;
   for (auto& [name, ctx] : table_contexts) {
     table_contexts_ptrs[name] = ctx.get();
+  }
+
+  // Validate network ACL configuration
+  if (config.network.allow_cidrs.empty()) {
+    spdlog::warn(
+        "Network ACL is empty - all connections will be DENIED by default. "
+        "Configure 'network.allow_cidrs' to allow specific IP ranges, "
+        "or use ['0.0.0.0/0'] to allow all (NOT RECOMMENDED for production).");
   }
 
   // Start TCP server

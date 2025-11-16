@@ -543,6 +543,21 @@ Config ParseConfigFromJson(const json& root) {
     if (api.contains("max_query_length")) {
       config.api.max_query_length = api["max_query_length"].get<int>();
     }
+    if (api.contains("rate_limiting")) {
+      const auto& rate_limiting = api["rate_limiting"];
+      if (rate_limiting.contains("enable")) {
+        config.api.rate_limiting.enable = rate_limiting["enable"].get<bool>();
+      }
+      if (rate_limiting.contains("capacity")) {
+        config.api.rate_limiting.capacity = rate_limiting["capacity"].get<int>();
+      }
+      if (rate_limiting.contains("refill_rate")) {
+        config.api.rate_limiting.refill_rate = rate_limiting["refill_rate"].get<int>();
+      }
+      if (rate_limiting.contains("max_clients")) {
+        config.api.rate_limiting.max_clients = rate_limiting["max_clients"].get<int>();
+      }
+    }
   }
 
   // Parse network config

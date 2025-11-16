@@ -95,9 +95,15 @@ api:
     cors_allow_origin: ""
   default_limit: 100
   max_query_length: 128
+  rate_limiting:
+    enable: false
+    capacity: 100
+    refill_rate: 10
+    max_clients: 10000
 
 network:
-  allow_cidrs: []
+  allow_cidrs:
+    - "127.0.0.1/32"
 
 logging:
   level: "info"
@@ -479,7 +485,20 @@ api:
   tcp:
     bind: "127.0.0.1"               # Default: loopback only. Change to 0.0.0.0 to allow remote clients.
     port: 11016                     # Default: 11016
+    max_connections: 10000          # Maximum concurrent connections (default: 10000)
 ```
+
+- **bind**: IP address to bind the TCP server (default: `127.0.0.1`)
+  - Use `127.0.0.1` for localhost-only access (most secure)
+  - Use `0.0.0.0` to accept connections from any network interface
+- **port**: TCP port number (default: `11016`)
+- **max_connections**: Maximum number of concurrent TCP connections (default: `10000`)
+  - **SECURITY**: Prevents file descriptor exhaustion and resource starvation attacks
+  - Connections exceeding this limit are immediately rejected and closed
+  - Set based on system `ulimit -n` (open file limit) and available memory
+  - **Production recommendation**: Set to half of your system's file descriptor limit
+  - Example: If `ulimit -n` returns 65536, set `max_connections: 30000`
+  - Each connection consumes one file descriptor plus memory for buffers
 
 ### HTTP API (Optional)
 
@@ -502,35 +521,96 @@ api:
 - **max_query_length**: Rejects overly long boolean expressions to avoid resource exhaustion.
   - Default 128 characters; set to `0` to disable the guard.
   - The length includes search text, AND/NOT terms, and FILTER values.
+
+### Rate Limiting (Optional)
+
+Rate limiting protects against DoS attacks and resource exhaustion using the **token bucket algorithm**:
+
+```yaml
+api:
+  rate_limiting:
+    enable: false                   # Default: false (disabled)
+    capacity: 100                   # Maximum tokens per client (burst size)
+    refill_rate: 10                 # Tokens added per second per client
+    max_clients: 10000              # Maximum number of tracked clients
 ```
 
-## Network Section (Optional)
+- **enable**: Enable/disable rate limiting (default: `false`)
+  - When disabled, no rate limiting is applied
+  - When enabled, limits requests per client IP address
+- **capacity**: Maximum tokens per client (burst size, default: `100`)
+  - Allows a burst of up to N requests before throttling kicks in
+  - Example: With capacity=100, a client can make 100 immediate requests
+- **refill_rate**: Tokens added per second per client (default: `10`)
+  - Sustained rate limit in requests/second
+  - Example: With refill_rate=10, a client can make 10 requests/second continuously
+- **max_clients**: Maximum number of tracked clients (default: `10000`)
+  - Memory management to prevent tracking too many IP addresses
+  - Oldest inactive clients are automatically cleaned up
 
-Network security configuration:
+**Token Bucket Algorithm:**
 
-- **allow_cidrs**: Allow CIDR list (default: `[]` = allow all)
+1. Each client starts with a full bucket of tokens (capacity)
+2. Each request consumes 1 token
+3. Tokens are automatically refilled at the configured rate
+4. If no tokens available, request is rejected with rate limit error
+
+**Example Use Cases:**
+
+- **High throughput**: `capacity: 1000, refill_rate: 100` - Allows 1000 request burst, 100 req/s sustained
+- **Moderate protection**: `capacity: 100, refill_rate: 10` - Allows 100 request burst, 10 req/s sustained
+- **Strict limiting**: `capacity: 10, refill_rate: 1` - Allows 10 request burst, 1 req/s sustained
+
+**Note:** Rate limiting is disabled by default. Enable it explicitly in production environments to protect against abuse.
+```
+
+## Network Section (REQUIRED for Production)
+
+Network security configuration using IP allowlist (fail-closed by default):
+
+- **allow_cidrs**: Allow CIDR list (**SECURITY: Default deny when empty**)
   - Applies to both TCP and HTTP interfaces
-  - When empty, all IP addresses are allowed
-  - When specified, only connections from these IP ranges are accepted
+  - **When empty: ALL connections are DENIED by default** (fail-closed security posture)
+  - When specified: only connections from these IP ranges are accepted
   - Supports standard CIDR notation (e.g., `192.168.1.0/24`, `10.0.0.0/8`)
   - Multiple CIDR ranges can be specified
 
+**IMPORTANT SECURITY CHANGE:** Previous versions allowed all connections when `allow_cidrs` was empty. Current version **denies all connections by default** for security. You MUST explicitly configure allowed IP ranges.
+
+### Recommended Configurations
+
+**Localhost only (most secure):**
 ```yaml
 network:
   allow_cidrs:
-    - "192.168.1.0/24"
-    - "10.0.0.0/8"
-    - "172.16.0.0/16"
+    - "127.0.0.1/32"  # Only local connections
+```
+
+**Private network:**
+```yaml
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"      # Localhost
+    - "192.168.1.0/24"    # Local subnet
+    - "10.0.0.0/8"        # Private network
+```
+
+**Allow all (NOT RECOMMENDED for production):**
+```yaml
+network:
+  allow_cidrs:
+    - "0.0.0.0/0"  # WARNING: Allows connections from anywhere
 ```
 
 **Common CIDR ranges:**
 
-- Private networks:
-  - `10.0.0.0/8` - Class A private network
-  - `172.16.0.0/12` - Class B private network
-  - `192.168.0.0/16` - Class C private network
-- Localhost: `127.0.0.1/32`
-- Single IP: `192.168.1.100/32`
+- **Localhost:** `127.0.0.1/32` (single IP, most secure for local-only access)
+- **Private networks:**
+  - `10.0.0.0/8` - Class A private network (10.0.0.0 - 10.255.255.255)
+  - `172.16.0.0/12` - Class B private network (172.16.0.0 - 172.31.255.255)
+  - `192.168.0.0/16` - Class C private network (192.168.0.0 - 192.168.255.255)
+- **Single IP:** `192.168.1.100/32` (only this specific IP)
+- **Allow all:** `0.0.0.0/0` (**NOT RECOMMENDED** - allows any IP address)
 
 ## Logging Section
 

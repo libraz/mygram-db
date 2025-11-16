@@ -18,6 +18,7 @@
 #ifdef USE_MYSQL
 
 #include "mock_connection.h"
+#include "mysql/binlog_filter_evaluator.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
 
@@ -926,7 +927,7 @@ TEST(BinlogReaderFilterTest, InvalidFilterValueExceptionHandling) {
   storage::FilterValue test_value = 3.14;
 
   // Should not crash, should return false
-  bool result = BinlogReader::CompareFilterValue(test_value, float_filter);
+  bool result = BinlogFilterEvaluator::CompareFilterValue(test_value, float_filter);
   EXPECT_FALSE(result);
 
   // Test invalid datetime value (stoull exception)
@@ -939,21 +940,21 @@ TEST(BinlogReaderFilterTest, InvalidFilterValueExceptionHandling) {
   storage::FilterValue datetime_value = uint64_t(1234567890);
 
   // Should not crash, should return false
-  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  result = BinlogFilterEvaluator::CompareFilterValue(datetime_value, datetime_filter);
   EXPECT_FALSE(result);
 
   // Test overflow in stoull
   datetime_filter.value = "99999999999999999999999999";  // Way too large
-  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  result = BinlogFilterEvaluator::CompareFilterValue(datetime_value, datetime_filter);
   EXPECT_FALSE(result);
 
   // Test valid values for comparison
   float_filter.value = "3.14";
-  result = BinlogReader::CompareFilterValue(test_value, float_filter);
+  result = BinlogFilterEvaluator::CompareFilterValue(test_value, float_filter);
   EXPECT_TRUE(result);
 
   datetime_filter.value = "1234567890";
-  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  result = BinlogFilterEvaluator::CompareFilterValue(datetime_value, datetime_filter);
   EXPECT_TRUE(result);
 }
 
@@ -1007,7 +1008,7 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   article_row.text = "Article text";
   article_row.columns["author_id"] = "42";  // RowData.columns is string-to-string map
 
-  auto article_filters = multi_reader.ExtractAllFilters(article_row, articles_ctx.config);
+  auto article_filters = BinlogFilterEvaluator::ExtractAllFilters(article_row, articles_ctx.config);
   // Verify articles table extracts author_id (not post_id)
   EXPECT_TRUE(article_filters.find("author_id") != article_filters.end());
   // Articles should NOT have post_id since it's not in the config
@@ -1020,7 +1021,7 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   comment_row.columns["post_id"] = "999";   // RowData.columns is string-to-string map
   comment_row.columns["author_id"] = "42";  // Also add author_id to row data
 
-  auto comment_filters = multi_reader.ExtractAllFilters(comment_row, comments_ctx.config);
+  auto comment_filters = BinlogFilterEvaluator::ExtractAllFilters(comment_row, comments_ctx.config);
   // Verify comments table extracts post_id (not author_id)
   EXPECT_TRUE(comment_filters.find("post_id") != comment_filters.end());
   // Comments should NOT have author_id since it's not in the config
@@ -1082,12 +1083,12 @@ TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
   filters_draft["status"] = static_cast<int64_t>(0);
 
   // Published table should accept status=1, reject status=0
-  EXPECT_TRUE(multi_reader.EvaluateRequiredFilters(filters_published, published_ctx.config));
-  EXPECT_FALSE(multi_reader.EvaluateRequiredFilters(filters_draft, published_ctx.config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, published_ctx.config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, published_ctx.config));
 
   // Draft table should accept status=0, reject status=1
-  EXPECT_FALSE(multi_reader.EvaluateRequiredFilters(filters_published, draft_ctx.config));
-  EXPECT_TRUE(multi_reader.EvaluateRequiredFilters(filters_draft, draft_ctx.config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, draft_ctx.config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, draft_ctx.config));
 }
 
 /**
@@ -1280,6 +1281,123 @@ TEST(BinlogReaderTest, MultiTableDDLProcessing) {
 
   SUCCEED()
       << "Multi-table DDL processing properly iterates all registered tables (src/mysql/binlog_reader.cpp:1181-1201)";
+}
+
+/**
+ * @brief Test filter value size validation (security: memory exhaustion protection)
+ */
+TEST_F(BinlogReaderFixture, FilterValueSizeValidation) {
+  // Normal size filter value should work
+  config::RequiredFilterConfig normal_filter;
+  normal_filter.name = "status";
+  normal_filter.op = "=";
+  normal_filter.value = "active";  // Small value
+
+  storage::FilterValue test_value = std::string("active");
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(test_value, normal_filter))
+      << "Normal-sized filter value should be accepted";
+
+  // Large but acceptable filter value (< 1MB)
+  config::RequiredFilterConfig large_filter;
+  large_filter.name = "description";
+  large_filter.op = "=";
+  large_filter.value = std::string(100 * 1024, 'x');  // 100KB
+
+  storage::FilterValue large_test_value = large_filter.value;
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(large_test_value, large_filter))
+      << "Large filter value (100KB) should be accepted";
+
+  // Oversized filter value (> 1MB) should be rejected
+  config::RequiredFilterConfig oversized_filter;
+  oversized_filter.name = "malicious";
+  oversized_filter.op = "=";
+  oversized_filter.value = std::string(2 * 1024 * 1024, 'x');  // 2MB (exceeds limit)
+
+  storage::FilterValue oversized_test_value = std::string("test");
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(oversized_test_value, oversized_filter))
+      << "Oversized filter value (2MB) should be rejected for security";
+
+  // Edge case: exactly at limit (1MB)
+  config::RequiredFilterConfig edge_filter;
+  edge_filter.name = "edge_case";
+  edge_filter.op = "=";
+  edge_filter.value = std::string(1024 * 1024, 'y');  // Exactly 1MB
+
+  storage::FilterValue edge_test_value = edge_filter.value;
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(edge_test_value, edge_filter))
+      << "Filter value at exact limit (1MB) should be accepted";
+
+  // Just over limit (1MB + 1 byte)
+  config::RequiredFilterConfig just_over_filter;
+  just_over_filter.name = "just_over";
+  just_over_filter.op = "=";
+  just_over_filter.value = std::string(1024 * 1024 + 1, 'z');  // 1MB + 1 byte
+
+  storage::FilterValue just_over_test_value = std::string("test");
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(just_over_test_value, just_over_filter))
+      << "Filter value just over limit (1MB+1) should be rejected";
+}
+
+/**
+ * @brief Test filter value size validation with different data types
+ */
+TEST_F(BinlogReaderFixture, FilterValueSizeValidationTypes) {
+  // Integer filter with oversized string representation
+  config::RequiredFilterConfig int_filter;
+  int_filter.name = "number";
+  int_filter.op = "=";
+  int_filter.value = std::string(2 * 1024 * 1024, '9');  // 2MB of '9's
+
+  storage::FilterValue int_value = int64_t(999);
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(int_value, int_filter))
+      << "Oversized integer filter value string should be rejected";
+
+  // Double filter with oversized string representation
+  config::RequiredFilterConfig double_filter;
+  double_filter.name = "price";
+  double_filter.op = "=";
+  double_filter.value = std::string(2 * 1024 * 1024, '1');  // 2MB
+
+  storage::FilterValue double_value = 123.45;
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(double_value, double_filter))
+      << "Oversized double filter value string should be rejected";
+
+  // Datetime filter with oversized string representation
+  config::RequiredFilterConfig datetime_filter;
+  datetime_filter.name = "created_at";
+  datetime_filter.op = "=";
+  datetime_filter.value = std::string(2 * 1024 * 1024, '2');  // 2MB
+
+  storage::FilterValue datetime_value = uint64_t(1234567890);
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(datetime_value, datetime_filter))
+      << "Oversized datetime filter value string should be rejected";
+}
+
+/**
+ * @brief Test that NULL checks work regardless of filter value size
+ */
+TEST_F(BinlogReaderFixture, FilterValueSizeValidationNullChecks) {
+  // IS NULL should work even with oversized filter value
+  config::RequiredFilterConfig null_filter;
+  null_filter.name = "deleted_at";
+  null_filter.op = "IS NULL";
+  null_filter.value = std::string(2 * 1024 * 1024, 'x');  // Oversized (but ignored for IS NULL)
+
+  storage::FilterValue null_value = std::monostate{};
+  // IS NULL doesn't use filter.value, so size check happens but doesn't affect NULL check
+  // The function returns false early due to size check before reaching NULL logic
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(null_value, null_filter))
+      << "Oversized filter value should be rejected even for NULL checks";
+
+  // IS NOT NULL should also be affected by size validation
+  config::RequiredFilterConfig not_null_filter;
+  not_null_filter.name = "updated_at";
+  not_null_filter.op = "IS NOT NULL";
+  not_null_filter.value = std::string(2 * 1024 * 1024, 'y');  // Oversized
+
+  storage::FilterValue non_null_value = uint64_t(1234567890);
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(non_null_value, not_null_filter))
+      << "Oversized filter value should be rejected even for NOT NULL checks";
 }
 
 #endif  // USE_MYSQL

@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 #include <zlib.h>
 
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -18,8 +19,17 @@
 #include <io.h>
 #define CHMOD _chmod
 #else
+#include <fcntl.h>
+#include <sys/fcntl.h>  // For O_NOFOLLOW on macOS
 #include <sys/stat.h>
+#include <unistd.h>
 #define CHMOD chmod
+
+// Ensure O_NOFOLLOW is defined (standard on POSIX systems)
+#ifndef O_NOFOLLOW
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): Platform compatibility constant for symlink protection
+#define O_NOFOLLOW 0x00000100
+#endif
 #endif
 
 namespace mygramdb::storage::dump_v1 {
@@ -851,17 +861,76 @@ bool WriteDumpV1(const std::string& filepath, const std::string& gtid, const con
       spdlog::info("Created dump directory: {}", parent_dir.string());
     }
 
-    std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc);
+#ifndef _WIN32
+    // SECURITY: Validate dump directory exists and is not itself a symlink
+    // Note: We allow symlinks in parent paths (like /var -> /private/var on macOS)
+    // but not in the final directory component
+    if (!parent_dir.empty() && std::filesystem::exists(parent_dir)) {
+      if (std::filesystem::is_symlink(parent_dir)) {
+        spdlog::error("Dump directory is a symlink - not allowed: {}", parent_dir.string());
+        return false;
+      }
+    }
+
+    // SECURITY: Check if file path is a symlink before opening
+    std::error_code error_code;
+    if (std::filesystem::exists(filepath, error_code) && std::filesystem::is_symlink(filepath)) {
+      spdlog::error("Dump file path is a symlink - not allowed: {}", filepath);
+      return false;
+    }
+
+    // SECURITY: Open file with O_NOFOLLOW to prevent symlink attacks (TOCTOU protection)
+    // O_CREAT | O_EXCL: Fail if file already exists (atomic creation)
+    // O_NOFOLLOW: Fail if the file is a symbolic link
+    // S_IRUSR | S_IWUSR: Set permissions to 600 (rw-------)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
+    int file_descriptor = open(filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    if (file_descriptor < 0) {
+      if (errno == EEXIST) {
+        // File already exists - check if it's a symlink before removing
+        if (std::filesystem::is_symlink(filepath)) {
+          spdlog::error("Existing dump file is a symlink - not allowed: {}", filepath);
+          return false;
+        }
+        // File exists and is not a symlink - try to remove and recreate
+        spdlog::warn("Dump file already exists, removing: {}", filepath);
+        if (std::filesystem::remove(filepath)) {
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
+          file_descriptor = open(filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+        }
+      }
+      if (file_descriptor < 0) {
+        spdlog::error("Failed to create dump file securely: {} ({})", filepath, std::strerror(errno));
+        return false;
+      }
+    }
+
+    // Verify ownership (file must be owned by current process user)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by fstat()
+    struct stat file_stat {};
+    if (fstat(file_descriptor, &file_stat) != 0 || file_stat.st_uid != geteuid()) {
+      close(file_descriptor);
+      spdlog::error("Dump file ownership verification failed: {}", filepath);
+      std::filesystem::remove(filepath);  // Clean up potentially compromised file
+      return false;
+    }
+
+    // Create ofstream from file descriptor
+    // Note: We need to close file_descriptor manually or use __gnu_cxx::stdio_filebuf on Linux
+    // For simplicity, we'll close file_descriptor and reopen with ofstream since ownership is verified
+    close(file_descriptor);
+
+    std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc | std::ios::out);
     if (!ofs) {
       spdlog::error("Failed to open dump file for writing: {}", filepath);
       return false;
     }
-
-    // Set restrictive file permissions (600 = rw-------)
-    // This prevents unauthorized access to potentially sensitive data
-#ifndef _WIN32
-    if (CHMOD(filepath.c_str(), S_IRUSR | S_IWUSR) != 0) {
-      spdlog::warn("Failed to set restrictive permissions on dump file: {}", filepath);
+#else
+    // Windows: Use standard file opening (symlink attacks less common on Windows)
+    std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+      spdlog::error("Failed to open dump file for writing: {}", filepath);
+      return false;
     }
 #endif
 

@@ -160,11 +160,11 @@ TEST(NetworkUtilsTest, CIDR_Contains_DifferentPrefixes) {
 }
 
 TEST(NetworkUtilsTest, IsIPAllowed_EmptyList) {
-  // Empty list should allow all IPs
+  // Empty list should DENY all IPs (fail-closed)
   std::vector<std::string> empty_list;
-  EXPECT_TRUE(IsIPAllowed("192.168.1.1", empty_list));
-  EXPECT_TRUE(IsIPAllowed("10.0.0.1", empty_list));
-  EXPECT_TRUE(IsIPAllowed("172.16.0.1", empty_list));
+  EXPECT_FALSE(IsIPAllowed("192.168.1.1", empty_list));
+  EXPECT_FALSE(IsIPAllowed("10.0.0.1", empty_list));
+  EXPECT_FALSE(IsIPAllowed("172.16.0.1", empty_list));
 }
 
 TEST(NetworkUtilsTest, IsIPAllowed_SingleCIDR) {

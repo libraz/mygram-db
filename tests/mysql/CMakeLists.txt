@@ -15,19 +15,47 @@ if(USE_MYSQL AND MYSQL_FOUND)
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
-  # Binlog reader tests
-  add_executable(mysql_binlog_reader_test
-    binlog_reader_test.cpp
+  # Binlog reader tests (split into focused files)
+
+  add_executable(binlog_reader_core_test
+    binlog_reader_core_test.cpp
   )
 
-  target_link_libraries(mysql_binlog_reader_test
+  target_link_libraries(binlog_reader_core_test
     mygramdb_server
     GTest::gtest_main
     GTest::gmock
   )
 
-  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
-  gtest_discover_tests(mysql_binlog_reader_test
+  gtest_discover_tests(binlog_reader_core_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
+
+  add_executable(binlog_reader_events_test
+    binlog_reader_events_test.cpp
+  )
+
+  target_link_libraries(binlog_reader_events_test
+    mygramdb_server
+    GTest::gtest_main
+    GTest::gmock
+  )
+
+  gtest_discover_tests(binlog_reader_events_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
+
+  add_executable(binlog_reader_multitable_test
+    binlog_reader_multitable_test.cpp
+  )
+
+  target_link_libraries(binlog_reader_multitable_test
+    mygramdb_server
+    GTest::gtest_main
+    GTest::gmock
+  )
+
+  gtest_discover_tests(binlog_reader_multitable_test
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -74,6 +102,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
   gtest_discover_tests(binlog_parsing_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
+
+  # Binlog filter validation tests (SECURITY: Input validation)
+  add_executable(binlog_filter_validation_test
+    binlog_filter_validation_test.cpp
+  )
+
+  target_link_libraries(binlog_filter_validation_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
+  gtest_discover_tests(binlog_filter_validation_test
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 endif()

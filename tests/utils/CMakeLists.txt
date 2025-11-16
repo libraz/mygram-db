@@ -52,3 +52,14 @@ target_link_libraries(daemon_utils_test PRIVATE
 )
 
 gtest_discover_tests(daemon_utils_test)
+
+add_executable(network_acl_security_test
+  network_acl_security_test.cpp
+)
+
+target_link_libraries(network_acl_security_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(network_acl_security_test)

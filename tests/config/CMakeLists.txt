@@ -57,6 +57,21 @@ target_link_libraries(logging_config_test PRIVATE
 
 gtest_discover_tests(logging_config_test)
 
+# Rate limiting config test
+add_executable(config_rate_limiting_test
+  config_rate_limiting_test.cpp
+)
+
+target_link_libraries(config_rate_limiting_test PRIVATE
+  mygramdb_config
+  GTest::gtest_main
+)
+
+gtest_discover_tests(config_rate_limiting_test
+  PROPERTIES
+    RESOURCE_LOCK config_rate_limiting_lock
+)
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

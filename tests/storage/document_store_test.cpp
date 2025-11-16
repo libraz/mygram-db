@@ -703,3 +703,309 @@ TEST(DocumentStoreTest, ComplexEmoji) {
   ASSERT_TRUE(family.has_value());
   EXPECT_EQ(std::get<std::string>(family.value()), "👨‍👩‍👧‍👦");
 }
+
+/**
+ * @brief Test concurrent writes from multiple threads
+ *
+ * DocumentStore should handle concurrent writes safely.
+ * This test simulates multiple binlog threads or concurrent updates.
+ */
+TEST(DocumentStoreTest, ConcurrentWrites) {
+  DocumentStore store;
+
+  const int num_threads = 10;
+  const int writes_per_thread = 100;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> success_count{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&store, &success_count, t]() {
+      for (int i = 0; i < writes_per_thread; ++i) {
+        std::string pk = "pk_thread" + std::to_string(t) + "_doc" + std::to_string(i);
+        std::unordered_map<std::string, FilterValue> filters;
+        filters["thread_id"] = static_cast<int64_t>(t);
+        filters["doc_num"] = static_cast<int64_t>(i);
+
+        DocId doc_id = store.AddDocument(pk, filters);
+        if (doc_id > 0) {
+          success_count++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All writes should succeed
+  EXPECT_EQ(success_count.load(), num_threads * writes_per_thread);
+  EXPECT_EQ(store.Size(), static_cast<size_t>(num_threads * writes_per_thread));
+
+  // Verify data integrity - spot check some documents
+  auto doc_id = store.GetDocId("pk_thread0_doc0");
+  ASSERT_TRUE(doc_id.has_value());
+
+  auto thread_id = store.GetFilterValue(doc_id.value(), "thread_id");
+  ASSERT_TRUE(thread_id.has_value());
+  EXPECT_EQ(std::get<int64_t>(thread_id.value()), 0);
+}
+
+/**
+ * @brief Test concurrent mixed read and write operations
+ *
+ * Simulates realistic workload with both reads and writes happening concurrently.
+ */
+TEST(DocumentStoreTest, ConcurrentReadWrite) {
+  DocumentStore store;
+
+  // Pre-populate store with some documents
+  for (int i = 0; i < 100; ++i) {
+    std::string pk = "initial_pk" + std::to_string(i);
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["status"] = static_cast<int64_t>(i % 10);
+    store.AddDocument(pk, filters);
+  }
+
+  const int num_reader_threads = 20;
+  const int num_writer_threads = 5;
+  const int operations_per_thread = 100;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> read_success{0};
+  std::atomic<int> write_success{0};
+
+  // Launch reader threads
+  for (int t = 0; t < num_reader_threads; ++t) {
+    threads.emplace_back([&store, &read_success]() {
+      for (int i = 0; i < operations_per_thread; ++i) {
+        // Read operations
+        DocId doc_id = (i % 100) + 1;
+        auto doc = store.GetDocument(doc_id);
+        if (doc.has_value()) {
+          read_success++;
+        }
+
+        // Filter operations
+        auto results = store.FilterByValue("status", static_cast<int64_t>(i % 10));
+        if (!results.empty()) {
+          read_success++;
+        }
+      }
+    });
+  }
+
+  // Launch writer threads
+  for (int t = 0; t < num_writer_threads; ++t) {
+    threads.emplace_back([&store, &write_success, t]() {
+      for (int i = 0; i < operations_per_thread; ++i) {
+        std::string pk = "new_pk_thread" + std::to_string(t) + "_doc" + std::to_string(i);
+        std::unordered_map<std::string, FilterValue> filters;
+        filters["status"] = static_cast<int64_t>(i % 10);
+        filters["thread_id"] = static_cast<int64_t>(t);
+
+        DocId doc_id = store.AddDocument(pk, filters);
+        if (doc_id > 0) {
+          write_success++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All operations should succeed
+  EXPECT_EQ(write_success.load(), num_writer_threads * operations_per_thread);
+  // Reads should mostly succeed (some may fail due to concurrent modifications)
+  EXPECT_GT(read_success.load(), 0);
+
+  // Verify final size
+  EXPECT_EQ(store.Size(), 100 + static_cast<size_t>(num_writer_threads * operations_per_thread));
+}
+
+/**
+ * @brief Test concurrent updates to the same documents
+ *
+ * Multiple threads updating different fields of the same documents.
+ */
+TEST(DocumentStoreTest, ConcurrentUpdates) {
+  DocumentStore store;
+
+  // Add documents
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 100; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["value"] = static_cast<int64_t>(0);
+    doc_ids.push_back(store.AddDocument(pk, filters));
+  }
+
+  const int num_threads = 10;
+  const int updates_per_thread = 50;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> update_success{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&store, &doc_ids, &update_success, t]() {
+      for (int i = 0; i < updates_per_thread; ++i) {
+        DocId doc_id = doc_ids[i % doc_ids.size()];
+        std::unordered_map<std::string, FilterValue> filters;
+        filters["thread_" + std::to_string(t)] = static_cast<int64_t>(i);
+
+        bool updated = store.UpdateDocument(doc_id, filters);
+        if (updated) {
+          update_success++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All updates should succeed
+  EXPECT_EQ(update_success.load(), num_threads * updates_per_thread);
+
+  // Verify some documents have been updated
+  for (auto doc_id : doc_ids) {
+    auto doc = store.GetDocument(doc_id);
+    ASSERT_TRUE(doc.has_value());
+    // Document should have multiple filters from different threads
+    EXPECT_GE(doc->filters.size(), 1);
+  }
+}
+
+/**
+ * @brief Test concurrent deletes
+ *
+ * Multiple threads deleting different documents concurrently.
+ */
+TEST(DocumentStoreTest, ConcurrentDeletes) {
+  DocumentStore store;
+
+  // Add documents
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 1000; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    doc_ids.push_back(store.AddDocument(pk));
+  }
+
+  const int num_threads = 10;
+  const int deletes_per_thread = 100;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> delete_success{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&store, &doc_ids, &delete_success, t]() {
+      for (int i = 0; i < deletes_per_thread; ++i) {
+        int doc_index = t * deletes_per_thread + i;
+        DocId doc_id = doc_ids[doc_index];
+
+        bool removed = store.RemoveDocument(doc_id);
+        if (removed) {
+          delete_success++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All deletes should succeed
+  EXPECT_EQ(delete_success.load(), num_threads * deletes_per_thread);
+  EXPECT_EQ(store.Size(), 1000 - static_cast<size_t>(num_threads * deletes_per_thread));
+
+  // Verify deleted documents are gone
+  for (int i = 0; i < num_threads * deletes_per_thread; ++i) {
+    auto doc = store.GetDocument(doc_ids[i]);
+    EXPECT_FALSE(doc.has_value());
+  }
+}
+
+/**
+ * @brief Test concurrent batch operations
+ *
+ * Multiple threads performing batch additions concurrently.
+ */
+TEST(DocumentStoreTest, ConcurrentBatchOperations) {
+  DocumentStore store;
+
+  const int num_threads = 10;
+  const int batch_size = 100;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> total_added{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&store, &total_added, t]() {
+      std::vector<DocumentStore::DocumentItem> batch;
+      for (int i = 0; i < 100; ++i) {
+        std::string pk = "batch_thread" + std::to_string(t) + "_doc" + std::to_string(i);
+        std::unordered_map<std::string, FilterValue> filters;
+        filters["batch_id"] = static_cast<int64_t>(t);
+        batch.push_back({pk, filters});
+      }
+
+      std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+      total_added += doc_ids.size();
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All documents should be added
+  EXPECT_EQ(total_added.load(), num_threads * batch_size);
+  EXPECT_EQ(store.Size(), static_cast<size_t>(num_threads * batch_size));
+}
+
+/**
+ * @brief Test concurrent read-write with filter queries
+ *
+ * Realistic scenario: reads and writes with filter-based queries.
+ */
+TEST(DocumentStoreTest, ConcurrentFilterOperations) {
+  DocumentStore store;
+
+  // Pre-populate
+  for (int i = 0; i < 500; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["category"] = static_cast<int64_t>(i % 20);
+    store.AddDocument(pk, filters);
+  }
+
+  const int num_threads = 20;
+  const int operations_per_thread = 100;
+
+  std::vector<std::thread> threads;
+  std::atomic<int> filter_queries{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&store, &filter_queries]() {
+      for (int i = 0; i < operations_per_thread; ++i) {
+        // Perform filter query
+        auto results = store.FilterByValue("category", static_cast<int64_t>(i % 20));
+        if (!results.empty()) {
+          filter_queries++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Most filter queries should succeed
+  EXPECT_GT(filter_queries.load(), num_threads * operations_per_thread * 0.9);
+}

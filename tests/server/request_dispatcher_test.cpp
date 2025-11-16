@@ -278,3 +278,186 @@ TEST_F(RequestDispatcherTest, ConcurrentMixedQueries) {
 
   EXPECT_EQ(total_count.load(), kNumThreads * kRequestsPerThread);
 }
+
+/**
+ * @brief Test successful SEARCH query dispatch
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchQuery) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello", conn_ctx);
+
+  // Should return OK response with search results
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("RESULTS") != std::string::npos);
+}
+
+/**
+ * @brief Test successful COUNT query dispatch
+ */
+TEST_F(RequestDispatcherTest, DispatchCountQuery) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("COUNT posts hello", conn_ctx);
+
+  // Should return OK response with count
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("COUNT") != std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with LIMIT
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchWithLimit) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello LIMIT 5", conn_ctx);
+
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("RESULTS") != std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with LIMIT and OFFSET
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchWithLimitOffset) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello LIMIT 10 OFFSET 5", conn_ctx);
+
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("RESULTS") != std::string::npos);
+}
+
+/**
+ * @brief Test SEARCH with AND operator
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchWithAnd) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello AND world", conn_ctx);
+
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test SEARCH with OR operator
+ * Note: OR operator may not be supported in all query syntaxes
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchWithOr) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello OR world", conn_ctx);
+
+  // OR may not be supported - accept both success and error
+  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test SEARCH with NOT operator
+ */
+TEST_F(RequestDispatcherTest, DispatchSearchWithNot) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello NOT test", conn_ctx);
+
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test error for missing table name
+ */
+TEST_F(RequestDispatcherTest, DispatchErrorMissingTable) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test error for non-existent table
+ */
+TEST_F(RequestDispatcherTest, DispatchErrorNonExistentTable) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("SEARCH nonexistent hello", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("not found") != std::string::npos || response.find("does not exist") != std::string::npos);
+}
+
+/**
+ * @brief Test error for invalid command
+ */
+TEST_F(RequestDispatcherTest, DispatchErrorInvalidCommand) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("INVALID_COMMAND posts hello", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test debug mode enables debug info
+ */
+TEST_F(RequestDispatcherTest, DispatchWithDebugMode) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = true;
+
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello", conn_ctx);
+
+  EXPECT_TRUE(response.find("OK") == 0) << "Response: " << response;
+  // Debug info should be present
+  EXPECT_TRUE(response.find("DEBUG") != std::string::npos || response.find("query_time_ms") != std::string::npos);
+}
+
+/**
+ * @brief Test query length validation
+ */
+TEST_F(RequestDispatcherTest, DispatchQueryTooLong) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  // Create a query longer than max_query_length (10000)
+  std::string long_query = "SEARCH posts " + std::string(10001, 'a');
+
+  std::string response = dispatcher_->Dispatch(long_query, conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("too long") != std::string::npos || response.find("exceeds") != std::string::npos);
+}
+
+/**
+ * @brief Test empty query
+ */
+TEST_F(RequestDispatcherTest, DispatchEmptyQuery) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Test whitespace-only query
+ */
+TEST_F(RequestDispatcherTest, DispatchWhitespaceQuery) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher_->Dispatch("   ", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+}

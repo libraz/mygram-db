@@ -96,7 +96,8 @@
   "api": {
     "tcp": {
       "bind": "127.0.0.1",
-      "port": 11016
+      "port": 11016,
+      "max_connections": 10000
     },
     "http": {
       "enable": true,
@@ -106,10 +107,16 @@
       "cors_allow_origin": ""
     },
     "default_limit": 100,
-    "max_query_length": 128
+    "max_query_length": 128,
+    "rate_limiting": {
+      "enable": false,
+      "capacity": 100,
+      "refill_rate": 10,
+      "max_clients": 10000
+    }
   },
   "network": {
-    "allow_cidrs": []
+    "allow_cidrs": ["127.0.0.1/32"]
   },
   "logging": {
     "level": "info",

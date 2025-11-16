@@ -80,10 +80,11 @@ class DumpCommandsTest : public ::testing::Test {
     test_gtid_ = "00000000-0000-0000-0000-000000000000:1-100";
 
     // Create unique test filepath for parallel test execution
+    // Use temp_directory_path() instead of /tmp to avoid symlink issues on macOS
     std::stringstream ss;
-    ss << "/tmp/mygramdb_dump_test_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id())
-       << "_" << std::chrono::steady_clock::now().time_since_epoch().count() << ".dmp";
-    test_filepath_ = ss.str();
+    ss << "mygramdb_dump_test_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+       << std::chrono::steady_clock::now().time_since_epoch().count() << ".dmp";
+    test_filepath_ = (std::filesystem::temp_directory_path() / ss.str()).string();
   }
 
   void TearDown() override {

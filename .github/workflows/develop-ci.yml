@@ -1,0 +1,107 @@
+name: Develop CI
+
+on:
+  push:
+    branches: [ develop ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-build:
+    name: Linux Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ccache
+        key: ${{ runner.os }}-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-
+
+    - name: Cache LLVM installation
+      id: cache-llvm
+      uses: actions/cache@v4
+      with:
+        path: |
+          /usr/lib/llvm-18
+          /usr/bin/clang-format-18
+          /usr/bin/clang-tidy-18
+        key: ${{ runner.os }}-llvm-18
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libmysqlclient-dev \
+          libicu-dev \
+          libreadline-dev \
+          pkg-config \
+          ccache
+
+    - name: Install LLVM/Clang 18
+      if: steps.cache-llvm.outputs.cache-hit != 'true'
+      run: |
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 18
+        sudo apt-get install -y clang-format-18 clang-tidy-18
+
+    - name: Setup LLVM alternatives
+      run: |
+        sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+        sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
+
+    - name: Check code formatting
+      run: make format-check
+
+    - name: Setup ccache
+      run: |
+        ccache --set-config=max_size=500M
+        ccache --zero-stats
+
+    - name: Configure CMake
+      env:
+        CC: ccache gcc
+        CXX: ccache g++
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTS=ON \
+              -DUSE_ICU=ON \
+              -DUSE_MYSQL=ON \
+              ..
+
+    - name: Build
+      run: |
+        cd build
+        make -j$(nproc)
+
+    - name: Show ccache statistics
+      run: ccache --show-stats
+
+    - name: Upload build artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-linux
+        path: |
+          build/CMakeFiles/*.log
+          build/Testing/Temporary/

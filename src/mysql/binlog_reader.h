@@ -220,26 +220,9 @@ class BinlogReader {
   bool PopEvent(BinlogEvent& event);
 
   /**
-   * @brief Process single event
+   * @brief Process single event (delegates to BinlogEventProcessor)
    */
   bool ProcessEvent(const BinlogEvent& event);
-
-  /**
-   * @brief Evaluate required_filters conditions for a binlog event
-   * @param filters Filter values from binlog event
-   * @param table_config Table configuration containing required_filters
-   * @return true if all required_filters conditions are satisfied
-   */
-  static bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
-                                      const config::TableConfig& table_config);
-
-  /**
-   * @brief Compare filter value against required filter condition
-   * @param value Filter value from binlog
-   * @param filter Required filter configuration
-   * @return true if condition is satisfied
-   */
-  static bool CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter);
 
   /**
    * @brief Fetch column names from INFORMATION_SCHEMA and update TableMetadata
@@ -249,66 +232,9 @@ class BinlogReader {
   bool FetchColumnNames(TableMetadata& metadata);
 
   /**
-   * @brief Extract all filter columns (both required and optional) from row data
-   * @param row_data Row data from binlog
-   * @param table_config Table configuration to use for filter extraction
-   * @return Map of filter name to FilterValue
-   */
-  static std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
-      const RowData& row_data, const config::TableConfig& table_config);
-
-  /**
-   * @brief Extract all filter columns using default table_config_ (single-table mode)
-   * @param row_data Row data from binlog
-   * @return Map of filter name to FilterValue
-   * @deprecated Use the version with explicit table_config parameter
-   */
-  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(const RowData& row_data) const;
-
-  /**
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
-
-  /**
-   * @brief Parse binlog event buffer and create BinlogEvent
-   * @param buffer Raw binlog event data
-   * @param length Length of the buffer
-   * @return BinlogEvent if successfully parsed, nullopt otherwise
-   */
-  std::optional<BinlogEvent> ParseBinlogEvent(const unsigned char* buffer, unsigned long length);
-
-  /**
-   * @brief Extract GTID from GTID event
-   * @param buffer Event buffer
-   * @param length Buffer length
-   * @return GTID string if found
-   */
-  static std::optional<std::string> ExtractGTID(const unsigned char* buffer, unsigned long length);
-
-  /**
-   * @brief Parse TABLE_MAP event
-   * @param buffer Event buffer (post-header)
-   * @param length Buffer length
-   * @return TableMetadata if successfully parsed
-   */
-  static std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer, unsigned long length);
-
-  /**
-   * @brief Extract SQL query string from QUERY_EVENT
-   * @param buffer Event buffer
-   * @param length Buffer length
-   * @return Query string if successfully extracted
-   */
-  static std::optional<std::string> ExtractQueryString(const unsigned char* buffer, unsigned long length);
-
-  /**
-   * @brief Check if DDL affects target table
-   * @param query SQL query string
-   * @param table_name Target table name
-   * @return true if DDL affects the table
-   */
-  static bool IsTableAffectingDDL(const std::string& query, const std::string& table_name);
 };
 
 }  // namespace mygramdb::mysql

@@ -30,19 +30,57 @@ gtest_discover_tests(response_formatter_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
-# TCP Server tests
+# TCP Server tests (split into focused files)
 
-add_executable(tcp_server_test
-  tcp_server_test.cpp
+add_executable(tcp_server_basic_test
+  tcp_server_basic_test.cpp
 )
 
-target_link_libraries(tcp_server_test
+target_link_libraries(tcp_server_basic_test
   mygramdb_server
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
-gtest_discover_tests(tcp_server_test
+gtest_discover_tests(tcp_server_basic_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(tcp_server_search_test
+  tcp_server_search_test.cpp
+)
+
+target_link_libraries(tcp_server_search_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(tcp_server_search_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(tcp_server_commands_test
+  tcp_server_commands_test.cpp
+)
+
+target_link_libraries(tcp_server_commands_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(tcp_server_commands_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(tcp_server_advanced_test
+  tcp_server_advanced_test.cpp
+)
+
+target_link_libraries(tcp_server_advanced_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(tcp_server_advanced_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -62,23 +100,73 @@ gtest_discover_tests(thread_pool_test
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
-# HTTP Server tests
+# HTTP Server tests (split into focused files)
 
-add_executable(http_server_test
-  http_server_test.cpp
+add_executable(http_server_basic_test
+  http_server_basic_test.cpp
 )
 
-target_link_libraries(http_server_test
+target_link_libraries(http_server_basic_test
   mygramdb_server
   httplib::httplib
   nlohmann_json::nlohmann_json
   GTest::gtest_main
 )
 
-target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+target_include_directories(http_server_basic_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
-gtest_discover_tests(http_server_test
+gtest_discover_tests(http_server_basic_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(http_server_search_test
+  http_server_search_test.cpp
+)
+
+target_link_libraries(http_server_search_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_server_search_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_server_search_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(http_server_document_test
+  http_server_document_test.cpp
+)
+
+target_link_libraries(http_server_document_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_server_document_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_server_document_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+add_executable(http_server_features_test
+  http_server_features_test.cpp
+)
+
+target_link_libraries(http_server_features_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_server_features_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_server_features_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -176,6 +264,54 @@ target_link_libraries(request_dispatcher_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid request dispatcher conflicts
 gtest_discover_tests(request_dispatcher_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# SyncOperationManager Deadlock Prevention tests
+
+add_executable(sync_operation_manager_deadlock_test
+  sync_operation_manager_deadlock_test.cpp
+)
+
+target_link_libraries(sync_operation_manager_deadlock_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(sync_operation_manager_deadlock_test
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
+# RateLimiter tests
+
+add_executable(rate_limiter_test
+  rate_limiter_test.cpp
+)
+
+target_link_libraries(rate_limiter_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(rate_limiter_test
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
+# ConnectionLimit tests (SECURITY: Resource exhaustion prevention)
+
+add_executable(connection_limit_test
+  connection_limit_test.cpp
+)
+
+target_link_libraries(connection_limit_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(connection_limit_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 

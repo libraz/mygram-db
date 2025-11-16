@@ -595,14 +595,38 @@ TEST(IndexTest, MemoryUsage) {
   Index index(1);
 
   size_t initial_usage = index.MemoryUsage();
+  // Initial usage may be zero if no memory is allocated yet
   EXPECT_GE(initial_usage, 0);
 
   // Add documents
   index.AddDocument(1, "abc");
   index.AddDocument(2, "def");
 
-  size_t after_usage = index.MemoryUsage();
-  EXPECT_GT(after_usage, initial_usage);
+  size_t after_two_docs = index.MemoryUsage();
+  // After adding documents, memory should increase
+  EXPECT_GT(after_two_docs, initial_usage);
+
+  // Add more documents and verify memory growth
+  for (int i = 3; i <= 100; ++i) {
+    index.AddDocument(i, "test document " + std::to_string(i));
+  }
+
+  size_t after_hundred_docs = index.MemoryUsage();
+  EXPECT_GT(after_hundred_docs, after_two_docs);
+
+  // Memory usage should be reasonable (not more than 100MB for 100 small documents)
+  EXPECT_LT(after_hundred_docs, 100 * 1024 * 1024);
+
+  // Remove some documents and verify memory decreases or stays reasonable
+  for (int i = 1; i <= 50; ++i) {
+    std::string text = (i == 1 || i == 2) ? (i == 1 ? "abc" : "def") : "test document " + std::to_string(i);
+    index.RemoveDocument(i, text);
+  }
+
+  size_t after_removal = index.MemoryUsage();
+  // After removal, memory might not decrease immediately (depending on implementation)
+  // but it should not increase
+  EXPECT_LE(after_removal, after_hundred_docs);
 }
 
 /**

@@ -67,6 +67,7 @@ TEST(TcpServerMultiTableTest, MultiTableSearch) {
   mygramdb::server::ServerConfig config;
   config.port = 0;
   config.host = "127.0.0.1";
+  config.allow_cidrs = {"127.0.0.1/32"};
 
   mygramdb::server::TcpServer server(config, table_contexts, "./snapshots", nullptr);
   ASSERT_TRUE(server.Start());
@@ -165,6 +166,7 @@ TEST(TcpServerMultiTableTest, MultiTableCount) {
   mygramdb::server::ServerConfig config;
   config.port = 0;
   config.host = "127.0.0.1";
+  config.allow_cidrs = {"127.0.0.1/32"};
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -245,6 +247,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   mygramdb::server::ServerConfig config;
   config.port = 0;
   config.host = "127.0.0.1";
+  config.allow_cidrs = {"127.0.0.1/32"};
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -341,6 +344,7 @@ TEST(TcpServerMultiTableTest, MultiTableInfo) {
   mygramdb::server::ServerConfig config;
   config.port = 0;
   config.host = "127.0.0.1";
+  config.allow_cidrs = {"127.0.0.1/32"};
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -410,6 +414,7 @@ TEST(TcpServerMultiTableTest, TableIsolation) {
   mygramdb::server::ServerConfig config;
   config.port = 0;
   config.host = "127.0.0.1";
+  config.allow_cidrs = {"127.0.0.1/32"};
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 

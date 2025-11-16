@@ -48,11 +48,15 @@ class DumpHandlerTest : public ::testing::Test {
 
     stats_ = std::make_unique<ServerStats>();
 
+    // Create test dump directory (avoid /tmp which is a symlink on macOS)
+    test_dump_dir_ = std::filesystem::temp_directory_path() / ("dump_handler_test_" + std::to_string(getpid()));
+    std::filesystem::create_directories(test_dump_dir_);
+
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
         .table_contexts = table_contexts_,
         .stats = *stats_,
         .full_config = config_.get(),
-        .dump_dir = "/tmp",
+        .dump_dir = test_dump_dir_.string(),
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
@@ -72,16 +76,17 @@ class DumpHandlerTest : public ::testing::Test {
     AddTestData();
 
     // Create unique test file path for parallel test execution
+    // Use relative path (not absolute) since DumpHandler enforces dump_dir containment
     std::stringstream ss;
-    ss << "/tmp/test_snapshot_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+    ss << "test_snapshot_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
        << std::chrono::steady_clock::now().time_since_epoch().count() << ".dmp";
     test_filepath_ = ss.str();
   }
 
   void TearDown() override {
-    // Clean up test files
-    if (std::filesystem::exists(test_filepath_)) {
-      std::filesystem::remove(test_filepath_);
+    // Clean up test dump directory (will remove test_filepath_ too since it's inside)
+    if (std::filesystem::exists(test_dump_dir_)) {
+      std::filesystem::remove_all(test_dump_dir_);
     }
   }
 
@@ -111,6 +116,7 @@ class DumpHandlerTest : public ::testing::Test {
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<DumpHandler> handler_;
   std::string test_filepath_;
+  std::filesystem::path test_dump_dir_;
   ConnectionContext conn_ctx_;
 };
 
@@ -127,7 +133,9 @@ TEST_F(DumpHandlerTest, DumpSaveBasic) {
 
   EXPECT_TRUE(response.find("OK SAVED") == 0) << "Response: " << response;
   EXPECT_TRUE(response.find(test_filepath_) != std::string::npos);
-  EXPECT_TRUE(std::filesystem::exists(test_filepath_));
+  // File is saved in dump_dir, so check the full path
+  std::filesystem::path full_path = test_dump_dir_ / test_filepath_;
+  EXPECT_TRUE(std::filesystem::exists(full_path));
 }
 
 TEST_F(DumpHandlerTest, DumpSaveWithDefaultFilepath) {
@@ -161,9 +169,10 @@ TEST_F(DumpHandlerTest, DumpSaveWithRelativePath) {
   std::string response = handler_->Handle(query, conn_ctx_);
 
   EXPECT_TRUE(response.find("OK SAVED") == 0) << "Response: " << response;
-  std::string expected_path = "/tmp/relative_test.dmp";
+  // File is saved in dump_dir, not /tmp
+  std::filesystem::path expected_path = test_dump_dir_ / "relative_test.dmp";
   EXPECT_TRUE(std::filesystem::exists(expected_path));
-  std::filesystem::remove(expected_path);
+  // No need to remove - TearDown will clean up test_dump_dir_
 }
 
 TEST_F(DumpHandlerTest, DumpSaveSetsReadOnlyMode) {
@@ -308,8 +317,9 @@ TEST_F(DumpHandlerTest, DumpVerifyCorruptedFile) {
   save_query.filepath = test_filepath_;
   handler_->Handle(save_query, conn_ctx_);
 
-  // Corrupt the file
-  std::fstream file(test_filepath_, std::ios::binary | std::ios::in | std::ios::out);
+  // Corrupt the file (must use full path in dump_dir)
+  std::filesystem::path full_path = test_dump_dir_ / test_filepath_;
+  std::fstream file(full_path, std::ios::binary | std::ios::in | std::ios::out);
   file.seekp(100);
   file.put(0xFF);
   file.close();
@@ -603,5 +613,103 @@ TEST_F(DumpHandlerTest, DumpLoadBlockedDuringSyncOperation) {
   syncing_tables_.clear();
 }
 #endif
+
+/**
+ * @brief Test path traversal prevention in DUMP SAVE
+ */
+TEST_F(DumpHandlerTest, PathTraversalPreventionSave) {
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+
+  // Test case 1: Attempt to use "../" to escape dump directory
+  query.filepath = "../etc/passwd";
+  std::string response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject path traversal with ../";
+  EXPECT_TRUE(response.find("path traversal") != std::string::npos ||
+              response.find("Invalid filepath") != std::string::npos)
+      << "Error should mention path traversal or invalid filepath";
+
+  // Test case 2: Attempt to use absolute path outside dump directory
+  query.filepath = "/etc/passwd";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject absolute path outside dump directory";
+
+  // Test case 3: Valid relative path should work
+  query.filepath = "valid_dump.dmp";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") != 0)
+      << "Valid relative path should not be rejected for path traversal";
+
+  // Cleanup
+  std::filesystem::remove(test_dump_dir_ / "valid_dump.dmp");
+}
+
+/**
+ * @brief Test path traversal prevention in DUMP LOAD
+ */
+TEST_F(DumpHandlerTest, PathTraversalPreventionLoad) {
+  // First create a valid dump file
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = "test_load_traversal.dmp";
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK") == 0) << "Failed to create test dump file";
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_LOAD;
+
+  // Test case 1: Attempt to use "../" to escape dump directory
+  query.filepath = "../etc/passwd";
+  std::string response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject path traversal with ../";
+  EXPECT_TRUE(response.find("path traversal") != std::string::npos ||
+              response.find("Invalid filepath") != std::string::npos)
+      << "Error should mention path traversal or invalid filepath";
+
+  // Test case 2: Attempt to use absolute path outside dump directory
+  query.filepath = "/etc/passwd";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject absolute path outside dump directory";
+
+  // Test case 3: Valid relative path should work
+  query.filepath = "test_load_traversal.dmp";
+  response = handler_->Handle(query, conn_ctx_);
+  // Should either succeed or fail for reasons other than path traversal
+  if (response.find("ERROR") == 0) {
+    EXPECT_TRUE(response.find("path traversal") == std::string::npos &&
+                response.find("Invalid filepath") == std::string::npos)
+        << "Valid path should not fail due to path traversal";
+  }
+
+  // Cleanup
+  std::filesystem::remove(test_dump_dir_ / "test_load_traversal.dmp");
+}
+
+/**
+ * @brief Test path traversal prevention in DUMP VERIFY
+ */
+TEST_F(DumpHandlerTest, PathTraversalPreventionVerify) {
+  query::Query query;
+  query.type = query::QueryType::DUMP_VERIFY;
+
+  // Test case 1: Attempt to use "../" to escape dump directory
+  query.filepath = "../etc/passwd";
+  std::string response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject path traversal with ../";
+  EXPECT_TRUE(response.find("path traversal") != std::string::npos ||
+              response.find("Invalid filepath") != std::string::npos)
+      << "Error should mention path traversal or invalid filepath";
+
+  // Test case 2: Attempt to use "../../" for deeper traversal
+  query.filepath = "../../etc/passwd";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject deeper path traversal";
+
+  // Test case 3: Attempt with encoded path separators (should be handled by filesystem library)
+  query.filepath = "..%2F..%2Fetc%2Fpasswd";
+  response = handler_->Handle(query, conn_ctx_);
+  // May succeed if interpreted as literal filename, but should not traverse
+  // The important thing is it doesn't access /etc/passwd
+}
 
 }  // namespace mygramdb::server

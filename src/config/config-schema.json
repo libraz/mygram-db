@@ -535,6 +535,39 @@
           "default": 128,
           "minimum": 1,
           "maximum": 4096
+        },
+        "rate_limiting": {
+          "type": "object",
+          "description": "Rate limiting configuration (token bucket algorithm)",
+          "additionalProperties": false,
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Enable rate limiting",
+              "default": false
+            },
+            "capacity": {
+              "type": "integer",
+              "description": "Maximum number of tokens per client (burst size)",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "refill_rate": {
+              "type": "integer",
+              "description": "Tokens added per second per client",
+              "default": 10,
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "max_clients": {
+              "type": "integer",
+              "description": "Maximum number of tracked clients (for memory management)",
+              "default": 10000,
+              "minimum": 10,
+              "maximum": 100000
+            }
+          }
         }
       }
     },

@@ -74,6 +74,7 @@ class CacheCountIntegrationTest : public ::testing::Test {
     // Create TCP server
     server_config_.port = 0;  // OS assigns port
     server_config_.host = "127.0.0.1";
+    server_config_.allow_cidrs = {"127.0.0.1/32"};
 
     server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, "./test_snapshots", full_config_.get());
     ASSERT_TRUE(server_->Start());

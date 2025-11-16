@@ -6,6 +6,7 @@
 #include "utils/network_utils.h"
 
 #include <arpa/inet.h>
+#include <spdlog/spdlog.h>
 
 #include <optional>
 #include <sstream>
@@ -82,9 +83,10 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
 }
 
 bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allow_cidrs) {
-  // If allow_cidrs is empty, allow all
+  // SECURITY: Default deny when ACL is empty (fail-closed)
+  // Users must explicitly configure allowed CIDRs
   if (allow_cidrs.empty()) {
-    return true;
+    return false;  // Fail-closed: deny by default
   }
 
   // Parse client IP
@@ -107,8 +109,12 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allo
 }
 
 bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allow_cidrs) {
+  // SECURITY: Default deny when ACL is empty (fail-closed)
+  // Users must explicitly configure allowed CIDRs
   if (parsed_allow_cidrs.empty()) {
-    return true;
+    // Note: We don't log here to avoid issues during static initialization
+    // or test discovery. The server initialization code should log this warning.
+    return false;  // Fail-closed: deny by default
   }
 
   auto client_ip = ParseIPv4(ip_str);

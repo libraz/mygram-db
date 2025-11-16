@@ -11,6 +11,7 @@ add_library(mygramdb_server STATIC
   snapshot_scheduler.cpp
   connection_io_handler.cpp
   sync_operation_manager.cpp
+  rate_limiter.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
   handlers/document_handler.cpp

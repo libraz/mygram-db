@@ -2,6 +2,11 @@
 
 include(GoogleTest)
 
+# Signal handler safety tests
+add_executable(signal_handler_test signal_handler_test.cpp)
+target_link_libraries(signal_handler_test PRIVATE GTest::gtest_main)
+gtest_discover_tests(signal_handler_test)
+
 # Unit test subdirectories
 add_subdirectory(utils)
 add_subdirectory(config)

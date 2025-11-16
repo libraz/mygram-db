@@ -9,8 +9,7 @@ target_include_directories(mygramdb_query PUBLIC
 )
 
 target_link_libraries(mygramdb_query PUBLIC
-  mygramdb_index
-  mygramdb_storage
+  mygramdb_storage  # Includes mygramdb_index transitively
   mygramdb_utils
   spdlog::spdlog
 )

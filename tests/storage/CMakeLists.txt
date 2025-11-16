@@ -59,6 +59,22 @@ gtest_discover_tests(dump_commands_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# Dump security tests (TOCTOU protection, symlink attacks)
+add_executable(dump_security_test
+  dump_security_test.cpp
+)
+
+target_link_libraries(dump_security_test
+  mygramdb_config   # May include mygramdb_storage via mygramdb_mysql
+  mygramdb_storage  # Includes mygramdb_index transitively
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(dump_security_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
+
 # Dump save/load integration test (MySQL only)
 if(USE_MYSQL AND MYSQL_FOUND)
   # Dump save/load integration test

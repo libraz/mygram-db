@@ -110,3 +110,18 @@ target_link_libraries(invalidation_queue_test PRIVATE
 gtest_discover_tests(invalidation_queue_test
   PROPERTIES RESOURCE_LOCK cache_state
 )
+
+# CacheMetrics test (validates performance monitoring)
+add_executable(cache_metrics_test
+  cache_metrics_test.cpp
+)
+
+target_link_libraries(cache_metrics_test PRIVATE
+  mygramdb_server  # Includes mygramdb_cache transitively
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+gtest_discover_tests(cache_metrics_test
+  PROPERTIES RESOURCE_LOCK cache_state
+)

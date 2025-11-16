@@ -29,3 +29,33 @@ target_link_libraries(multi_table_integration_test
 gtest_discover_tests(multi_table_integration_test
   PROPERTIES RESOURCE_LOCK server_port
 )
+
+# End-to-End Integration Tests
+add_executable(end_to_end_integration_test
+  end_to_end_test.cpp
+)
+
+target_link_libraries(end_to_end_integration_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(end_to_end_integration_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# Stress Tests
+add_executable(stress_test
+  stress_test.cpp
+)
+
+target_link_libraries(stress_test
+  mygramdb_storage  # Includes mygramdb_index transitively
+  GTest::gtest_main
+)
+
+# Note: Stress tests may take a long time
+gtest_discover_tests(stress_test
+  PROPERTIES TIMEOUT 300  # 5 minutes timeout
+)

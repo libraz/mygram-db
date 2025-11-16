@@ -35,15 +35,23 @@ SyncOperationManager::~SyncOperationManager() {
   WaitForCompletion(kDefaultSyncWaitTimeoutSec);
 
   // Join all sync threads to ensure clean shutdown
-  // Use sync_mutex_ for consistency with StartSync()
-  std::lock_guard<std::mutex> lock(sync_mutex_);
-  for (auto& [table_name, thread] : sync_threads_) {
+  // IMPORTANT: Copy threads to local variable BEFORE joining to avoid deadlock.
+  // If we hold sync_mutex_ while joining, and BuildSnapshotAsync tries to acquire
+  // sync_mutex_, we will deadlock.
+  std::unordered_map<std::string, std::thread> threads_to_join;
+  {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    threads_to_join = std::move(sync_threads_);
+    sync_threads_.clear();
+  }
+
+  // Join threads WITHOUT holding sync_mutex_
+  for (auto& [table_name, thread] : threads_to_join) {
     if (thread.joinable()) {
       spdlog::debug("Joining sync thread for table: {}", table_name);
       thread.join();
     }
   }
-  sync_threads_.clear();
 }
 
 std::string SyncOperationManager::StartSync(const std::string& table_name) {

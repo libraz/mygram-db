@@ -177,6 +177,17 @@ void ConnectionAcceptor::AcceptLoop() {
       continue;
     }
 
+    // SECURITY: Check connection limit BEFORE any processing to prevent resource exhaustion
+    {
+      std::lock_guard<std::mutex> lock(fds_mutex_);
+      if (static_cast<int>(active_fds_.size()) >= config_.max_connections) {
+        spdlog::warn("Connection limit reached ({}/{}), rejecting new connection", active_fds_.size(),
+                     config_.max_connections);
+        close(client_fd);
+        continue;
+      }
+    }
+
     // Convert client IP to string for ACL checks
     std::string client_ip;
     // C-style array required by POSIX inet_ntop API

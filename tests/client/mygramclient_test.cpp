@@ -50,6 +50,7 @@ class MygramClientTest : public ::testing::Test {
     server::ServerConfig server_config;
     server_config.port = 0;  // Let OS assign port
     server_config.host = "127.0.0.1";
+    server_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost connections
 
     full_config_.api.tcp.bind = server_config.host;
     full_config_.api.tcp.port = server_config.port;

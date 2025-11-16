@@ -198,6 +198,11 @@ struct DumpConfig {
  * @brief API configuration
  */
 struct ApiConfig {
+  // Rate limiting defaults
+  static constexpr int kDefaultRateLimitCapacity = 100;      ///< Default burst size
+  static constexpr int kDefaultRateLimitRefillRate = 10;     ///< Default tokens per second
+  static constexpr int kDefaultRateLimitMaxClients = 10000;  ///< Default max tracked clients
+
   struct {
     std::string bind = "127.0.0.1";
     int port = defaults::kTcpPort;
@@ -221,6 +226,16 @@ struct ApiConfig {
    * @brief Maximum length (in characters) allowed for query expressions (search text + conditions)
    */
   int max_query_length = defaults::kDefaultQueryLengthLimit;
+
+  /**
+   * @brief Rate limiting configuration (token bucket algorithm)
+   */
+  struct {
+    bool enable = false;                            ///< Enable rate limiting (default: false)
+    int capacity = kDefaultRateLimitCapacity;       ///< Maximum tokens per client (burst size)
+    int refill_rate = kDefaultRateLimitRefillRate;  ///< Tokens added per second per client
+    int max_clients = kDefaultRateLimitMaxClients;  ///< Maximum number of tracked clients
+  } rate_limiting;
 };
 
 /**

@@ -168,6 +168,11 @@ api:
   tcp:
     bind: "127.0.0.1"               # TCP bind address (default: loopback only)
     port: 11016                     # TCP port (default: 11016)
+    max_connections: 10000          # Maximum concurrent connections (default: 10000)
+                                    # SECURITY: Prevents file descriptor exhaustion and resource starvation
+                                    # - Connections exceeding this limit are immediately rejected
+                                    # - Set based on system ulimit -n and available memory
+                                    # - Production recommendation: system ulimit / 2
   http:
     enable: false                   # Enable HTTP/JSON API (default: false)
                                      # - Set to true to enable HTTP API
@@ -179,11 +184,27 @@ api:
   default_limit: 100                # Default LIMIT when not specified (range 5-1000)
   max_query_length: 128             # Max query expression length (0 = unlimited)
 
-# Network Security (optional)
+  # Rate Limiting (optional, disabled by default)
+  rate_limiting:
+    enable: false                   # Enable rate limiting (default: false)
+                                    # - Uses token bucket algorithm per client IP
+                                    # - Protects against DoS attacks and resource exhaustion
+    capacity: 100                   # Maximum tokens per client (burst size) (default: 100)
+                                    # - Allows burst of up to N requests before throttling
+    refill_rate: 10                 # Tokens added per second per client (default: 10)
+                                    # - Sustained rate limit: N requests/second per IP
+    max_clients: 10000              # Maximum number of tracked clients (default: 10000)
+                                    # - Memory management: prevents tracking too many IPs
+
+# Network Security (REQUIRED for production)
+# SECURITY: Empty allow_cidrs will DENY all connections by default (fail-closed)
+# You MUST explicitly configure allowed IP ranges
 network:
-  allow_cidrs: []                   # Allow CIDR list applied to TCP/HTTP (default: empty = allow all)
-                                    # Example: ["192.168.1.0/24", "10.0.0.0/8"]
-                                    # When specified, only connections from these IP ranges are accepted
+  allow_cidrs:                      # Allow CIDR list applied to TCP/HTTP
+    - "127.0.0.1/32"                # RECOMMENDED: Localhost only (most secure)
+    # - "192.168.1.0/24"            # Example: Local network
+    # - "10.0.0.0/8"                # Example: Private network
+    # - "0.0.0.0/0"                 # WARNING: Allow all (NOT RECOMMENDED for production)
 
 # Logging Configuration
 logging:
