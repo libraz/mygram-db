@@ -24,6 +24,15 @@ struct TableContext;
 namespace mygramdb::cache {
 
 /**
+ * @brief Cache lookup result with metadata
+ */
+struct CacheLookupResult {
+  std::vector<DocId> results;                        ///< Cached search results
+  double query_cost_ms = 0.0;                        ///< Original query execution time
+  std::chrono::steady_clock::time_point created_at;  ///< When cache entry was created
+};
+
+/**
  * @brief Unified cache manager
  *
  * Integrates QueryCache, InvalidationManager, and InvalidationQueue
@@ -61,6 +70,13 @@ class CacheManager {
    * @return Cached result if found and valid, nullopt otherwise
    */
   [[nodiscard]] std::optional<std::vector<DocId>> Lookup(const query::Query& query);
+
+  /**
+   * @brief Lookup cached query result with metadata
+   * @param query Parsed query
+   * @return Cached result with metadata if found and valid, nullopt otherwise
+   */
+  [[nodiscard]] std::optional<CacheLookupResult> LookupWithMetadata(const query::Query& query);
 
   /**
    * @brief Insert query result into cache

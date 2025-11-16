@@ -105,6 +105,98 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   return result;
 }
 
+std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata) {
+  // Start timing
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  // Shared lock for read
+  std::shared_lock lock(mutex_);
+
+  stats_.total_queries++;
+
+  auto iter = cache_map_.find(key);
+  if (iter == cache_map_.end()) {
+    stats_.cache_misses++;
+    stats_.cache_misses_not_found++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
+    return std::nullopt;
+  }
+
+  // Check invalidation flag
+  if (iter->second.first.invalidated.load()) {
+    stats_.cache_misses++;
+    stats_.cache_misses_invalidated++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
+    return std::nullopt;
+  }
+
+  // Cache hit
+  stats_.cache_hits++;
+
+  // Decompress result and copy metadata before releasing lock
+  const auto& entry = iter->second.first;
+  std::vector<DocId> result;
+  try {
+    result = ResultCompressor::Decompress(entry.compressed, entry.original_size);
+  } catch (const std::exception& e) {
+    // Decompression failed, treat as miss
+    stats_.cache_misses++;
+
+    // Record miss latency
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_miss_time_ms += miss_time_ms;
+    }
+
+    return std::nullopt;
+  }
+
+  // Copy metadata before releasing lock to avoid use-after-free
+  metadata.query_cost_ms = entry.query_cost_ms;
+  metadata.created_at = entry.metadata.created_at;
+
+  // Update access time (need to upgrade to unique lock)
+  lock.unlock();
+  std::unique_lock write_lock(mutex_);
+
+  // Re-check existence and verify it's the same entry (not a new entry with same key)
+  iter = cache_map_.find(key);
+  if (iter != cache_map_.end() && iter->second.first.metadata.created_at == metadata.created_at) {
+    Touch(key);
+    iter->second.first.metadata.last_accessed = std::chrono::steady_clock::now();
+    iter->second.first.metadata.access_count++;
+
+    // Record hit latency and saved time
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    {
+      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+      stats_.total_cache_hit_time_ms += hit_time_ms;
+      stats_.total_query_saved_time_ms += metadata.query_cost_ms;  // Time saved by not re-executing
+    }
+  }
+
+  return result;
+}
+
 bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, const CacheMetadata& metadata,
                         double query_cost_ms) {
   // Check if query cost meets threshold

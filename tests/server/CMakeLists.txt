@@ -210,3 +210,37 @@ target_link_libraries(request_dispatcher_test
 gtest_discover_tests(request_dispatcher_test
   PROPERTIES RESOURCE_LOCK server_port
 )
+
+# Integration: Cache Pagination tests
+# Tests for SEARCH query caching with OFFSET/LIMIT
+
+add_executable(integration_cache_pagination_test
+  integration_cache_pagination_test.cpp
+)
+
+target_link_libraries(integration_cache_pagination_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
+gtest_discover_tests(integration_cache_pagination_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# Integration: Cache COUNT tests
+# Tests for COUNT query caching
+
+add_executable(integration_cache_count_test
+  integration_cache_count_test.cpp
+)
+
+target_link_libraries(integration_cache_count_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
+gtest_discover_tests(integration_cache_count_test
+  PROPERTIES RESOURCE_LOCK server_port
+)

@@ -122,6 +122,29 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
     oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
     oss << "terms: " << debug_info->search_terms.size() << "\r\n";
     oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
+
+    // Cache debug information
+    switch (debug_info->cache_info.status) {
+      case query::CacheDebugInfo::Status::HIT:
+        oss << "cache: hit\r\n";
+        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
+        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
+            << "\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+        oss << "cache: miss (not found)\r\n";
+        oss << "query_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
+            << "\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+        oss << "cache: miss (invalidated)\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_DISABLED:
+        oss << "cache: disabled\r\n";
+        break;
+      default:
+        break;
+    }
   }
 
   return oss.str();

@@ -34,8 +34,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   // Try cache lookup first
   auto cache_lookup_start = std::chrono::high_resolution_clock::now();
   if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-    auto cached_result = ctx_.cache_manager->Lookup(query);
-    if (cached_result.has_value()) {
+    auto cached_lookup = ctx_.cache_manager->LookupWithMetadata(query);
+    if (cached_lookup.has_value()) {
       // Cache hit! Return cached result
       storage::DocumentStore* current_doc_store = nullptr;
       index::Index* dummy_index = nullptr;
@@ -50,22 +50,29 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         double cache_lookup_time_ms =
             std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
 
+        // Apply pagination to cached results
+        // Cache stores full results (before pagination) to allow different OFFSET/LIMIT on same query
+        auto full_results = cached_lookup.value().results;
+        size_t total_results = full_results.size();
+        auto paginated_results = query::ResultSorter::SortAndPaginate(full_results, *current_doc_store, query);
+
         if (conn_ctx.debug_mode) {
           query::DebugInfo debug_info;
           debug_info.query_time_ms = cache_lookup_time_ms;
-          debug_info.final_results = cached_result.value().size();
+          debug_info.final_results = paginated_results.size();
 
-          // Cache hit debug info
+          // Cache hit debug info with actual metadata
+          auto now = std::chrono::steady_clock::now();
           debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
-          debug_info.cache_info.cache_age_ms = 0.0;    // TODO: Calculate from cache entry timestamp
-          debug_info.cache_info.cache_saved_ms = 0.0;  // TODO: Calculate from query cost in cache entry
+          debug_info.cache_info.cache_age_ms =
+              std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
+          debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
 
-          return ResponseFormatter::FormatSearchResponse(cached_result.value(), cached_result.value().size(),
-                                                         current_doc_store, &debug_info);
+          return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store,
+                                                         &debug_info);
         }
 
-        return ResponseFormatter::FormatSearchResponse(cached_result.value(), cached_result.value().size(),
-                                                       current_doc_store);
+        return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store);
       }
     }
   }
@@ -290,6 +297,35 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
     return ResponseFormatter::FormatError("Server is loading, please try again later");
   }
 
+  // Try cache lookup first
+  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
+  if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
+    auto cached_lookup = ctx_.cache_manager->LookupWithMetadata(query);
+    if (cached_lookup.has_value()) {
+      // Cache hit! Return count from cached result
+      auto cache_lookup_end = std::chrono::high_resolution_clock::now();
+      double cache_lookup_time_ms =
+          std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
+
+      if (conn_ctx.debug_mode) {
+        query::DebugInfo debug_info;
+        debug_info.query_time_ms = cache_lookup_time_ms;
+        debug_info.final_results = cached_lookup.value().results.size();
+
+        // Cache hit debug info with actual metadata
+        auto now = std::chrono::steady_clock::now();
+        debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
+        debug_info.cache_info.cache_age_ms =
+            std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
+        debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
+
+        return ResponseFormatter::FormatCountResponse(cached_lookup.value().results.size(), &debug_info);
+      }
+
+      return ResponseFormatter::FormatCountResponse(cached_lookup.value().results.size());
+    }
+  }
+
   // Get table context
   index::Index* current_index = nullptr;
   storage::DocumentStore* current_doc_store = nullptr;
@@ -364,11 +400,37 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
     results = ApplyFilters(results, query.filters, current_doc_store);
   }
 
+  // Calculate query execution time
+  auto end_time = std::chrono::high_resolution_clock::now();
+  double query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+  // Store in cache if enabled
+  if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
+    // Collect all ngrams from term_infos
+    std::set<std::string> all_ngrams;
+    for (const auto& term_info : term_infos) {
+      all_ngrams.insert(term_info.ngrams.begin(), term_info.ngrams.end());
+    }
+
+    // Insert result into cache (COUNT caches the full result set like SEARCH)
+    ctx_.cache_manager->Insert(query, results, all_ngrams, query_time_ms);
+  }
+
   // Calculate final debug info
   if (conn_ctx.debug_mode) {
-    auto end_time = std::chrono::high_resolution_clock::now();
-    debug_info.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    debug_info.query_time_ms = query_time_ms;
     debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+
+    // Cache debug info
+    if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
+      // Cache was enabled but missed (either not found or invalidated)
+      debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+      debug_info.cache_info.query_cost_ms = query_time_ms;
+    } else {
+      // Cache disabled
+      debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+    }
+
     return ResponseFormatter::FormatCountResponse(results.size(), &debug_info);
   }
 

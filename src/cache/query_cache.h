@@ -139,11 +139,27 @@ class QueryCache {
   QueryCache& operator=(QueryCache&&) = delete;
 
   /**
+   * @brief Cache lookup result with metadata
+   */
+  struct LookupMetadata {
+    double query_cost_ms = 0.0;                        ///< Original query execution time
+    std::chrono::steady_clock::time_point created_at;  ///< When cache entry was created
+  };
+
+  /**
    * @brief Lookup cache entry
    * @param key Cache key
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
   [[nodiscard]] std::optional<std::vector<DocId>> Lookup(const CacheKey& key);
+
+  /**
+   * @brief Lookup cache entry with metadata
+   * @param key Cache key
+   * @param[out] metadata Output parameter for cache metadata
+   * @return Decompressed result if found and not invalidated, nullopt otherwise
+   */
+  [[nodiscard]] std::optional<std::vector<DocId>> LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata);
 
   /**
    * @brief Insert cache entry

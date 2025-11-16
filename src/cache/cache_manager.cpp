@@ -64,6 +64,40 @@ std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query
   return query_cache_->Lookup(key);
 }
 
+std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Query& query) {
+  if (!enabled_ || !query_cache_) {
+    return std::nullopt;
+  }
+
+  // Only cache SEARCH and COUNT queries
+  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT) {
+    return std::nullopt;
+  }
+
+  // Normalize query and generate cache key
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  if (normalized.empty()) {
+    return std::nullopt;
+  }
+
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+
+  // Lookup in cache with metadata
+  QueryCache::LookupMetadata metadata;
+  auto result = query_cache_->LookupWithMetadata(key, metadata);
+  if (!result.has_value()) {
+    return std::nullopt;
+  }
+
+  // Package result with metadata
+  CacheLookupResult lookup_result;
+  lookup_result.results = std::move(result.value());
+  lookup_result.query_cost_ms = metadata.query_cost_ms;
+  lookup_result.created_at = metadata.created_at;
+
+  return lookup_result;
+}
+
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
                           const std::set<std::string>& ngrams, double query_cost_ms) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
