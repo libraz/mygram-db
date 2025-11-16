@@ -549,3 +549,88 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationMultipleDocuments) {
   EXPECT_DOUBLE_EQ(std::get<double>(doc100->filters["value"]), 150.0);
   EXPECT_EQ(std::get<std::string>(doc100->filters["name"]), "doc_100");
 }
+
+/**
+ * @brief Test loading from corrupted stream (truncated GTID)
+ */
+TEST_F(DocumentStoreSerializationTest, CorruptedStreamTruncatedGTID) {
+  // Create a minimal valid snapshot with truncated GTID data
+  std::stringstream stream;
+
+  // Write magic number
+  const uint64_t kMagic = 0x4752414D4442534EUL;  // "MYGRAMDB"
+  stream.write(reinterpret_cast<const char*>(&kMagic), sizeof(kMagic));
+
+  // Write version
+  const uint32_t kVersion = 1;
+  stream.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
+
+  // Write next_doc_id
+  const uint32_t next_id = 1;
+  stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+
+  // Write GTID length that claims 100 bytes but provide no data (truncated)
+  const uint32_t gtid_len = 100;
+  stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+  // Intentionally NOT writing GTID data to simulate truncation
+
+  DocumentStore store;
+  EXPECT_FALSE(store.LoadFromStream(stream));
+}
+
+/**
+ * @brief Test loading from corrupted stream (invalid GTID length)
+ */
+TEST_F(DocumentStoreSerializationTest, CorruptedStreamInvalidGTIDLength) {
+  // Create a minimal valid snapshot with excessive GTID length
+  std::stringstream stream;
+
+  // Write magic number
+  const uint64_t kMagic = 0x4752414D4442534EUL;  // "MYGRAMDB"
+  stream.write(reinterpret_cast<const char*>(&kMagic), sizeof(kMagic));
+
+  // Write version
+  const uint32_t kVersion = 1;
+  stream.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
+
+  // Write next_doc_id
+  const uint32_t next_id = 1;
+  stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+
+  // Write invalid GTID length (exceeds maximum)
+  const uint32_t gtid_len = 2000;  // Exceeds kMaxGTIDLength (1024)
+  stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+
+  DocumentStore store;
+  EXPECT_FALSE(store.LoadFromStream(stream));
+}
+
+/**
+ * @brief Test loading from corrupted stream (truncated document count)
+ */
+TEST_F(DocumentStoreSerializationTest, CorruptedStreamTruncatedDocCount) {
+  // Create a snapshot with truncated document count
+  std::stringstream stream;
+
+  // Write magic number
+  const uint64_t kMagic = 0x4752414D4442534EUL;  // "MYGRAMDB"
+  stream.write(reinterpret_cast<const char*>(&kMagic), sizeof(kMagic));
+
+  // Write version
+  const uint32_t kVersion = 1;
+  stream.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
+
+  // Write next_doc_id
+  const uint32_t next_id = 1;
+  stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+
+  // Write valid GTID
+  const uint32_t gtid_len = 10;
+  stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+  stream.write("0123456789", gtid_len);
+
+  // Intentionally NOT writing document count to simulate truncation
+
+  DocumentStore store;
+  EXPECT_FALSE(store.LoadFromStream(stream));
+}

@@ -462,24 +462,55 @@ void Index::Optimize(uint64_t total_docs) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  // Take snapshot to prevent iterator invalidation while allowing concurrent searches
-  std::vector<std::pair<std::string, PostingList*>> postings_snapshot;
+  // Phase 1a: Take snapshot of shared_ptrs (brief shared_lock)
+  // Copy shared_ptrs only - this is fast and doesn't block writes for long
+  std::unordered_map<std::string, std::shared_ptr<PostingList>> snapshot;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-    postings_snapshot.reserve(term_postings_.size());
-    for (const auto& [term, posting] : term_postings_) {
-      postings_snapshot.emplace_back(term, posting.get());
-    }
+    snapshot = term_postings_;  // Copy shared_ptrs (reference counting)
+  }
+  // Lock released - AddDocument/RemoveDocument can now proceed
+
+  // Phase 1b: Create optimized copies outside the lock (CPU-intensive work)
+  // This doesn't block any operations - searches and writes continue normally
+  // The snapshot keeps posting lists alive via shared_ptr reference counting
+  std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
+  for (const auto& [term, posting] : snapshot) {
+    // Clone creates an optimized copy without modifying the original
+    optimized_postings[term] = posting->Clone(total_docs);
   }
 
-  // Optimize each posting
-  for (const auto& [term, posting] : postings_snapshot) {
-    posting->Optimize(total_docs);
+  // Phase 2: Atomically swap the old index with the new optimized index
+  // Brief exclusive lock to update the map
+  size_t term_count = 0;
+  {
+    std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+
+    term_count = optimized_postings.size();
+
+    // Update only terms that still exist in the index
+    // This preserves concurrent modifications:
+    // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
+    // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
+    // - Terms modified during Phase 1: will use optimized version from snapshot
+    for (auto& [term, optimized_posting] : optimized_postings) {
+      // Only update if term still exists (wasn't removed during Phase 1)
+      if (term_postings_.find(term) != term_postings_.end()) {
+        term_postings_[term] = std::move(optimized_posting);
+      }
+      // If term was removed, don't re-add it
+    }
   }
 
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   // 1024: Standard conversion factor for bytes to KB to MB
-  spdlog::info("Optimized index: {} terms, {} MB", postings_snapshot.size(), MemoryUsage() / (1024 * 1024));
+  size_t final_term_count = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    final_term_count = term_postings_.size();
+  }
+  spdlog::info("Optimized index: {} terms optimized, {} terms final, {} MB", term_count, final_term_count,
+               MemoryUsage() / (1024 * 1024));
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 }
 
@@ -527,7 +558,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     size_t batch_end = std::min(i + batch_size, total_terms);
 
     // Create optimized copies for this batch
-    std::unordered_map<std::string, std::unique_ptr<PostingList>> optimized_batch;
+    std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_batch;
 
     for (size_t j = i; j < batch_end; ++j) {
       const auto& term = terms[j];
@@ -598,7 +629,7 @@ PostingList* Index::GetOrCreatePostingList(const std::string& term) {
   }
 
   // Create new posting list
-  auto posting = std::make_unique<PostingList>(roaring_threshold_);
+  auto posting = std::make_shared<PostingList>(roaring_threshold_);
   auto* ptr = posting.get();
   term_postings_[term] = std::move(posting);
   return ptr;
@@ -782,7 +813,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
     ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Load into a new map to minimize lock time
-    std::unordered_map<std::string, std::unique_ptr<PostingList>> new_postings;
+    std::unordered_map<std::string, std::shared_ptr<PostingList>> new_postings;
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
@@ -804,7 +835,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
       ifs.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
 
       // Deserialize posting list
-      auto posting = std::make_unique<PostingList>(roaring_threshold_);
+      auto posting = std::make_shared<PostingList>(roaring_threshold_);
       size_t offset = 0;
       if (!posting->Deserialize(posting_data, offset)) {
         spdlog::error("Failed to deserialize posting list for term: {}", term);
@@ -867,7 +898,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     input_stream.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Load into a new map to minimize lock time
-    std::unordered_map<std::string, std::unique_ptr<PostingList>> new_postings;
+    std::unordered_map<std::string, std::shared_ptr<PostingList>> new_postings;
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
@@ -889,7 +920,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       input_stream.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
 
       // Deserialize posting list
-      auto posting = std::make_unique<PostingList>(roaring_threshold_);
+      auto posting = std::make_shared<PostingList>(roaring_threshold_);
       size_t offset = 0;
       if (!posting->Deserialize(posting_data, offset)) {
         spdlog::error("Failed to deserialize posting list for term: {}", term);

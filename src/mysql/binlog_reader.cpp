@@ -59,10 +59,28 @@ BinlogReader::~BinlogReader() {
 }
 
 bool BinlogReader::Start() {
-  if (running_) {
+  // Atomically check and set running_ to prevent concurrent Start() calls
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
     last_error_ = "Binlog reader is already running";
     return false;
   }
+
+  // RAII guard to reset running_ flag on failure
+  struct RunningGuard {
+    std::atomic<bool>& flag;
+    bool& success;
+    explicit RunningGuard(std::atomic<bool>& f, bool& s) : flag(f), success(s) {}
+    ~RunningGuard() {
+      if (!success) {
+        flag = false;
+      }
+    }
+    RunningGuard(const RunningGuard&) = delete;
+    RunningGuard& operator=(const RunningGuard&) = delete;
+  };
+  bool start_success = false;
+  RunningGuard guard(running_, start_success);
 
   // Check MySQL connection
   if (!connection_.IsConnected()) {
@@ -128,7 +146,7 @@ bool BinlogReader::Start() {
   }
 
   should_stop_ = false;
-  running_ = true;
+  // Note: running_ is already set to true by compare_exchange_strong above
 
   try {
     // Start worker thread first
@@ -138,16 +156,17 @@ bool BinlogReader::Start() {
     reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
 
     spdlog::info("Binlog reader started from GTID: {}", current_gtid_);
+    start_success = true;  // Mark start as successful
     return true;
   } catch (const std::exception& e) {
     last_error_ = std::string("Failed to start threads: ") + e.what();
     spdlog::error("Cannot start binlog reader: {}", last_error_);
 
-    // Clean up on failure
-    running_ = false;
+    // Clean up on failure (RunningGuard will reset running_ flag)
     should_stop_ = true;
 
-    // Try to join threads if they were created
+    // Ensure threads are properly joined and cleaned up to prevent leaks
+    // Even if only one thread was created before exception, both are checked
     if (worker_thread_ && worker_thread_->joinable()) {
       worker_thread_->join();
     }
@@ -155,6 +174,7 @@ bool BinlogReader::Start() {
       reader_thread_->join();
     }
 
+    // Explicitly reset thread objects to ensure cleanup
     worker_thread_.reset();
     reader_thread_.reset();
 
@@ -275,9 +295,14 @@ void BinlogReader::ReaderThreadFunc() {
 
     // Encode GTID set to binary format if we have one
     if (!current_gtid.empty()) {
-      // Encode GTID set using our encoder and store in member variable
-      // (must persist during mysql_binlog_open call)
-      gtid_encoded_data_ = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+      // Protect gtid_encoded_data_ access with mutex to prevent race conditions
+      // if Start() is called concurrently (though compare_exchange_strong should prevent this)
+      {
+        std::lock_guard<std::mutex> lock(gtid_mutex_);
+        // Encode GTID set using our encoder and store in member variable
+        // (must persist during mysql_binlog_open call)
+        gtid_encoded_data_ = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+      }
 
       // Use callback approach: MySQL will call our callback to encode the GTID into the packet
       rpl.gtid_set_encoded_size = gtid_encoded_data_.size();
@@ -351,9 +376,9 @@ void BinlogReader::ReaderThreadFunc() {
           // Close current binlog stream
           mysql_binlog_close(binlog_connection_->GetHandle(), &rpl);
 
-          // Wait before reconnecting
-          reconnect_attempt++;
-          int delay_ms = config_.reconnect_delay_ms * std::min(reconnect_attempt, 10);
+          // Wait before reconnecting with exponential backoff (capped at 10x)
+          reconnect_attempt = std::min(reconnect_attempt + 1, 10);
+          int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
           spdlog::info("Reconnect attempt #{}, waiting {} ms", reconnect_attempt, delay_ms);
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
@@ -767,13 +792,29 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
           // Update document store filters
           current_doc_store->UpdateDocument(doc_id, event.filters);
 
-          // For full-text index update, we would need the old text to remove old n-grams
-          // The rows_parser provides both before and after images in UPDATE events
-          // For now, we use simplified approach: update filters only
-          // Future optimization: extract old text from before image and update index properly
-          std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+          // Update full-text index if text has changed
+          bool text_changed = false;
+          if (!event.old_text.empty() || !event.text.empty()) {
+            // Remove old text from index if available
+            if (!event.old_text.empty()) {
+              std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
+              current_index->RemoveDocument(doc_id, old_normalized);
+              text_changed = true;
+            }
 
-          spdlog::debug("UPDATE: pk={} (filters updated)", event.primary_key);
+            // Add new text to index if available
+            if (!event.text.empty()) {
+              std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+              current_index->AddDocument(doc_id, new_normalized);
+              text_changed = true;
+            }
+          }
+
+          if (text_changed) {
+            spdlog::debug("UPDATE: pk={} (filters and text updated)", event.primary_key);
+          } else {
+            spdlog::debug("UPDATE: pk={} (filters updated)", event.primary_key);
+          }
           if (server_stats_ != nullptr) {
             server_stats_->IncrementReplUpdateModified();
           }
@@ -1039,20 +1080,19 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
 
       // Create event from first row pair (for now)
       const auto& row_pair = row_pairs_opt->front();
-      const auto& after_row = row_pair.second;  // Use after image
+      const auto& before_row = row_pair.first;  // Before image
+      const auto& after_row = row_pair.second;  // After image
 
       BinlogEvent event;
       event.type = BinlogEventType::UPDATE;
       event.table_name = table_meta->table_name;
       event.primary_key = after_row.primary_key;
-      event.text = after_row.text;
+      event.text = after_row.text;  // New text (after image)
+      event.old_text = before_row.text;  // Old text (before image) for index update
       event.gtid = current_gtid_;
 
       // Extract all filters (required + optional) from after image using the correct config
       event.filters = ExtractAllFilters(after_row, *current_config);
-
-      // Note: For proper index update, we should use before image text
-      // to remove old n-grams. For now, simplified implementation.
 
       spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
                     event.filters.size());
@@ -1137,13 +1177,27 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       std::string query = query_opt.value();
       spdlog::debug("QUERY_EVENT: {}", query);
 
-      // Check if this affects our target table
-      if (IsTableAffectingDDL(query, table_config_.name)) {
-        BinlogEvent event;
-        event.type = BinlogEventType::DDL;
-        event.table_name = table_config_.name;
-        event.text = query;  // Store the DDL query
-        return event;
+      // Check if this affects any of our target tables
+      if (multi_table_mode_) {
+        // Multi-table mode: check all registered tables
+        for (const auto& [table_name, ctx] : table_contexts_) {
+          if (IsTableAffectingDDL(query, table_name)) {
+            BinlogEvent event;
+            event.type = BinlogEventType::DDL;
+            event.table_name = table_name;
+            event.text = query;  // Store the DDL query
+            return event;
+          }
+        }
+      } else {
+        // Single-table mode: check only our configured table
+        if (IsTableAffectingDDL(query, table_config_.name)) {
+          BinlogEvent event;
+          event.type = BinlogEventType::DDL;
+          event.table_name = table_config_.name;
+          event.text = query;  // Store the DDL query
+          return event;
+        }
       }
 
       return std::nullopt;

@@ -399,8 +399,22 @@ TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
 /**
  * @brief Test for thread-unsafe Optimize() fix
  *
- * Verifies that Optimize() acquires proper locking to prevent concurrent
- * modifications to term_postings_ during optimization.
+ * Regression test for: Optimize() had dangling pointer issue causing SEGFAULT
+ *
+ * The bug (discovered during code review):
+ * - Optimize() created a snapshot with raw pointers: vector<pair<string, PostingList*>>
+ * - After releasing shared_lock, other threads could delete entries from term_postings_
+ * - When unique_ptr was destroyed, the raw pointers in snapshot became dangling
+ * - Calling posting->Optimize() on dangling pointer caused SEGFAULT
+ *
+ * The fix:
+ * - Changed from unique_ptr to shared_ptr for reference counting
+ * - Optimize() creates snapshot with shared_ptr copies (increments reference count)
+ * - Even if entries are removed from term_postings_, snapshot keeps them alive
+ * - Concurrent searches can continue during optimization (maintains high concurrency)
+ *
+ * This test verifies that Optimize() properly synchronizes with concurrent
+ * operations (searches and additions) without crashes or data corruption.
  */
 TEST(IndexConcurrentTest, OptimizeThreadSafety) {
   Index index;
@@ -433,14 +447,17 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
       std::this_thread::yield();
     }
 
+    std::atomic<int> successful_searches{0};
+
     try {
       // Perform searches (shared access)
-      // Note: Some searches may return varying results during optimization
-      // The key is that they don't crash
+      // With shared_ptr fix, searches should succeed even during optimization
       for (int i = 0; i < 100; ++i) {
         auto results = index.SearchAnd({"do"});  // Search for bigram "do" from "document"
-        // Don't fail if empty - optimization may affect results temporarily
-        (void)results;
+        // Searches should return results (all initial documents contain "do")
+        if (!results.empty()) {
+          successful_searches++;
+        }
       }
 
       // Add new documents (write access)
@@ -451,6 +468,11 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
     } catch (...) {
       test_passed = false;
     }
+
+    // Verify that searches were successful during optimization
+    // This validates that shared_ptr approach maintains concurrency
+    EXPECT_GT(successful_searches.load(), 0)
+        << "Searches should succeed during Optimize() with shared_ptr approach";
   });
 
   optimize_thread.join();
@@ -462,6 +484,122 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
   // Verify index is still functional (search for bigram "do" which appears in all documents)
   auto results = index.SearchAnd({"do"});
   EXPECT_GT(results.size(), static_cast<size_t>(num_docs)) << "Index corrupted after concurrent Optimize()";
+}
+
+/**
+ * @brief Test Optimize() dangling pointer bug with document removal
+ *
+ * This is a more aggressive test specifically targeting the dangling pointer bug.
+ * By removing documents during optimization, we increase the likelihood of
+ * triggering the bug if the fix is reverted.
+ */
+TEST(IndexConcurrentTest, OptimizeDanglingPointerRegression) {
+  Index index;
+  const int num_docs = 500;
+
+  // Add initial documents with diverse content to create many different terms
+  for (int i = 0; i < num_docs; ++i) {
+    std::string text = "document " + std::to_string(i) + " unique content " + std::to_string(i * 2);
+    index.AddDocument(static_cast<DocId>(i), text);
+  }
+
+  std::atomic<bool> optimization_running{false};
+  std::atomic<bool> test_passed{true};
+  std::atomic<int> operations_during_optimize{0};
+
+  // Thread 1: Call Optimize() - this is where the bug manifests
+  std::thread optimize_thread([&]() {
+    optimization_running = true;
+    try {
+      index.Optimize(num_docs);
+    } catch (...) {
+      test_passed = false;
+    }
+    optimization_running = false;
+  });
+
+  // Thread 2: Aggressively remove and re-add documents
+  // This forces term_postings_ modifications that could create dangling pointers
+  std::thread modify_thread([&]() {
+    // Wait for optimization to start
+    while (!optimization_running.load()) {
+      std::this_thread::yield();
+    }
+
+    std::atomic<int> successful_searches{0};
+
+    try {
+      // Perform searches DURING modification to verify concurrent access
+      // Search for bigram "do" that exists in "document" (docs 200-499 won't be deleted)
+      for (int i = 0; i < 50; ++i) {
+        auto results = index.SearchAnd({"do"});  // bigram from "document"
+        if (!results.empty()) {
+          successful_searches++;
+        }
+        std::this_thread::yield();  // Give optimization thread time to run
+      }
+
+      // Remove documents - only first 200, leaving 300 documents with "document" term
+      for (int i = 0; i < 200; ++i) {
+        index.RemoveDocument(static_cast<DocId>(i), "document " + std::to_string(i) + " unique content " +
+                                                         std::to_string(i * 2));
+        operations_during_optimize++;
+      }
+
+      // Add new documents with different terms
+      for (int i = num_docs; i < num_docs + 200; ++i) {
+        std::string text = "newdoc " + std::to_string(i) + " different terms " + std::to_string(i * 3);
+        index.AddDocument(static_cast<DocId>(i), text);
+        operations_during_optimize++;
+      }
+
+      // More searches after modifications - search for "do" which still exists (docs 200-499)
+      for (int i = 0; i < 50; ++i) {
+        auto results = index.SearchAnd({"do"});  // bigram from "document"
+        if (!results.empty()) {
+          successful_searches++;
+        }
+        std::this_thread::yield();
+      }
+
+      // Search for newly added documents using bigram "ne" from "newdoc"
+      for (int i = 0; i < 50; ++i) {
+        auto results = index.SearchAnd({"ne"});  // bigram from "newdoc"
+        if (!results.empty()) {
+          successful_searches++;
+        }
+        std::this_thread::yield();
+      }
+    } catch (...) {
+      test_passed = false;
+    }
+
+    // Verify searches succeeded during heavy modifications
+    // Note: Some searches might return 0 results due to timing, but most should succeed
+    EXPECT_GT(successful_searches.load(), 50)
+        << "Majority of searches should succeed during Optimize() with shared_ptr approach";
+  });
+
+  optimize_thread.join();
+  modify_thread.join();
+
+  // Verify test passed without crashes (the main goal)
+  EXPECT_TRUE(test_passed.load()) << "Dangling pointer or other thread safety issue detected";
+
+  // Verify index is still functional - search for bigram "do" from "document" (300 docs remain)
+  auto results_document = index.SearchAnd({"do"});
+  EXPECT_GT(results_document.size(), 0UL) << "Index corrupted after concurrent Optimize()";
+
+  // Verify newly added documents are searchable - search for bigram "ne" from "newdoc"
+  auto results_newdoc = index.SearchAnd({"ne"});
+  EXPECT_GT(results_newdoc.size(), 0UL) << "Newly added documents not found after Optimize()";
+
+  // Log how many operations happened during optimization
+  // This is informational - the test's success is based on not crashing
+  if (operations_during_optimize.load() > 0) {
+    SUCCEED() << "Successfully performed " << operations_during_optimize.load()
+              << " operations during Optimize() without dangling pointer issues";
+  }
 }
 
 /**

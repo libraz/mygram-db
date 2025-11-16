@@ -238,7 +238,9 @@ class Index {
   double roaring_threshold_;
 
   // Term -> Posting list mapping
-  std::unordered_map<std::string, std::unique_ptr<PostingList>> term_postings_;
+  // Note: Using shared_ptr instead of unique_ptr to safely handle concurrent access
+  // during optimization (Optimize() creates snapshots that need reference counting)
+  std::unordered_map<std::string, std::shared_ptr<PostingList>> term_postings_;
 
   // Shared mutex for read/write protection
   // - Readers (Search): shared_lock (multiple concurrent readers allowed)

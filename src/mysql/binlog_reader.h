@@ -48,7 +48,8 @@ struct BinlogEvent {
   BinlogEventType type = BinlogEventType::UNKNOWN;
   std::string table_name;
   std::string primary_key;
-  std::string text;  // Normalized text for INSERT/UPDATE
+  std::string text;  // Normalized text for INSERT/UPDATE (after image for UPDATE)
+  std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
   std::unordered_map<std::string, storage::FilterValue> filters;
   std::string gtid;  // GTID for this event
 };
@@ -146,8 +147,8 @@ class BinlogReader {
   void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
 
  private:
-  Connection& connection_;                         // Main connection (used for queries, not binlog)
-  std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading
+  Connection& connection_;  // Reference to main connection (used for metadata queries, externally owned)
+  std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading (internally owned)
 
   // Multi-table support
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
@@ -268,11 +269,6 @@ class BinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
-
-  /**
-   * @brief Write GTID to state file
-   */
-  void WriteGTIDToStateFile(const std::string& gtid) const;
 
   /**
    * @brief Parse binlog event buffer and create BinlogEvent

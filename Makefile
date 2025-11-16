@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-parallel-full test-parallel-2 test-verbose test-sequential test-debug clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
+.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
 
 # Build directory
 BUILD_DIR := build
@@ -12,6 +12,11 @@ PREFIX ?= /usr/local
 # clang-format command (can be overridden: make CLANG_FORMAT=clang-format-18 format)
 CLANG_FORMAT ?= clang-format
 
+# Test options (can be overridden)
+TEST_JOBS ?= 4          # Parallel jobs for tests (make test TEST_JOBS=2)
+TEST_VERBOSE ?= 0       # Verbose output (make test TEST_VERBOSE=1)
+TEST_DEBUG ?= 0         # Debug output (make test TEST_DEBUG=1)
+
 # Default target
 .DEFAULT_GOAL := build
 
@@ -19,23 +24,26 @@ help:
 	@echo "MygramDB Build System"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make build     - Build the project (default)"
-	@echo "  make test      - Run all tests (limited parallelism j=4, recommended)"
-	@echo "  make test-parallel-2      - Run tests with j=2 (safer)"
-	@echo "  make test-parallel-full   - Run tests with full parallelism (may hang)"
-	@echo "  make test-verbose         - Run tests with verbose output (for debugging hangs)"
-	@echo "  make test-sequential      - Run tests sequentially (for identifying hanging tests)"
-	@echo "  make test-debug           - Run tests with debug output"
-	@echo "  make clean     - Clean build directory"
-	@echo "  make rebuild   - Clean and rebuild"
-	@echo "  make install   - Install binaries and files"
-	@echo "  make uninstall - Uninstall binaries and files"
-	@echo "  make format       - Format code with clang-format"
-	@echo "  make format-check - Check code formatting (CI)"
-	@echo "  make lint         - Check code with clang-tidy"
-	@echo "  make configure - Configure CMake (for changing options)"
-	@echo "  make run       - Build and run mygramdb"
-	@echo "  make help      - Show this help message"
+	@echo "  make build          - Build the project (default)"
+	@echo "  make test           - Run all tests (configurable with TEST_JOBS, TEST_VERBOSE, TEST_DEBUG)"
+	@echo "  make test-full      - Run tests with full parallelism (same as TEST_JOBS=\$$(nproc))"
+	@echo "  make test-sequential - Run tests sequentially (same as TEST_JOBS=1)"
+	@echo "  make test-verbose   - Run tests with verbose output (same as TEST_VERBOSE=1)"
+	@echo "  make clean          - Clean build directory"
+	@echo "  make rebuild        - Clean and rebuild"
+	@echo "  make install        - Install binaries and files"
+	@echo "  make uninstall      - Uninstall binaries and files"
+	@echo "  make format         - Format code with clang-format"
+	@echo "  make format-check   - Check code formatting (CI)"
+	@echo "  make lint           - Check code with clang-tidy"
+	@echo "  make configure      - Configure CMake (for changing options)"
+	@echo "  make run            - Build and run mygramdb"
+	@echo "  make help           - Show this help message"
+	@echo ""
+	@echo "Test options (override with environment variables):"
+	@echo "  TEST_JOBS=N        - Number of parallel test jobs (default: 4, use 1 for sequential)"
+	@echo "  TEST_VERBOSE=1     - Enable verbose test output"
+	@echo "  TEST_DEBUG=1       - Enable debug test output"
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  make docker-build - Build Docker image"
@@ -45,15 +53,19 @@ help:
 	@echo "  make docker-test  - Test Docker environment"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make                    # Build the project"
-	@echo "  make test               # Run tests"
-	@echo "  make test-sequential    # Run tests one at a time to identify hangs"
-	@echo "  make install            # Install to $(PREFIX) (default: /usr/local)"
-	@echo "  make PREFIX=/opt/mygramdb install  # Install to custom location"
+	@echo "  make                                  # Build the project"
+	@echo "  make test                             # Run tests (j=4, default)"
+	@echo "  make test-full                        # Run tests with full parallelism"
+	@echo "  make test-sequential                  # Run tests sequentially"
+	@echo "  make test-verbose                     # Run tests with verbose output"
+	@echo "  make test TEST_JOBS=2                 # Run tests with 2 parallel jobs (custom)"
+	@echo "  make test TEST_JOBS=1 TEST_VERBOSE=1  # Sequential verbose tests (combined)"
+	@echo "  make install                          # Install to $(PREFIX) (default: /usr/local)"
+	@echo "  make PREFIX=/opt/mygramdb install     # Install to custom location"
 	@echo "  make CMAKE_OPTIONS=\"-DENABLE_ASAN=ON\" configure  # Enable AddressSanitizer"
 	@echo "  make CMAKE_OPTIONS=\"-DBUILD_TESTS=OFF\" configure # Disable tests"
-	@echo "  make docker-up          # Start Docker environment"
-	@echo "  make docker-logs        # View logs"
+	@echo "  make docker-up                        # Start Docker environment"
+	@echo "  make docker-logs                      # View logs"
 
 # Configure CMake
 configure:
@@ -66,44 +78,28 @@ build: configure
 	$(MAKE) -C $(BUILD_DIR) -j$$(nproc)
 	@echo "Build complete!"
 
-# Run tests (limited parallelism to avoid resource conflicts)
+# Run tests with configurable options
 test: build
-	@echo "Running tests with limited parallelism (j=4)..."
-	cd $(BUILD_DIR) && ctest --output-on-failure --parallel 4
+	@echo "Running tests (jobs=$(TEST_JOBS), verbose=$(TEST_VERBOSE), debug=$(TEST_DEBUG))..."
+	@if [ "$(TEST_JOBS)" = "1" ]; then \
+		echo "Running tests sequentially..."; \
+	fi
+	@cd $(BUILD_DIR) && \
+		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS)"; \
+		if [ "$(TEST_VERBOSE)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --verbose"; fi; \
+		if [ "$(TEST_DEBUG)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --debug"; fi; \
+		ctest $$CTEST_FLAGS
 	@echo "Tests complete!"
 
-# Run tests with maximum parallelism (may hang due to resource conflicts)
-test-parallel-full: build
-	@echo "Running tests with full parallelism (j=$$(nproc))..."
-	@echo "WARNING: This may hang due to resource conflicts"
-	cd $(BUILD_DIR) && ctest --output-on-failure --parallel $$(nproc)
-	@echo "Tests complete!"
+# Convenience aliases for common test scenarios
+test-full:
+	@$(MAKE) test TEST_JOBS=$$(nproc)
 
-# Run tests with minimal parallelism (safer)
-test-parallel-2: build
-	@echo "Running tests with minimal parallelism (j=2)..."
-	cd $(BUILD_DIR) && ctest --output-on-failure --parallel 2
-	@echo "Tests complete!"
+test-sequential:
+	@$(MAKE) test TEST_JOBS=1
 
-# Run tests with verbose output to identify hanging tests
-test-verbose: build
-	@echo "Running tests with verbose output..."
-	@echo "Press Ctrl+C if a test hangs to identify which one"
-	cd $(BUILD_DIR) && ctest --verbose --parallel 4
-	@echo "Tests complete!"
-
-# Run tests sequentially with progress to identify hanging tests
-test-sequential: build
-	@echo "Running tests sequentially (no parallel execution)..."
-	@echo "This will show which test is running when it hangs"
-	cd $(BUILD_DIR) && ctest --verbose --output-on-failure
-	@echo "Tests complete!"
-
-# Run tests with debug output
-test-debug: build
-	@echo "Running tests with debug output..."
-	cd $(BUILD_DIR) && ctest --debug --verbose --output-on-failure --parallel 4
-	@echo "Tests complete!"
+test-verbose:
+	@$(MAKE) test TEST_VERBOSE=1
 
 # Clean build directory
 clean:

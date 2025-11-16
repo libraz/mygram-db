@@ -13,15 +13,15 @@ namespace mygramdb::query {
 
 namespace {
 
-// Buffer sizes for string formatting
-constexpr size_t kDocIdBufferSize = 16;
-constexpr size_t kNumericBufferSize = 32;
-
 // Format widths for zero-padded strings
 constexpr int kDocIdWidth = 10;
 constexpr int kNumericWidth = 20;
 constexpr int kDoubleWidth = 20;
 constexpr int kDoublePrecision = 6;
+
+// Buffer sizes for string formatting (width + null terminator + safety margin)
+constexpr size_t kDocIdBufferSize = kDocIdWidth + 2;  // Ensure enough space for width + null
+constexpr size_t kNumericBufferSize = 32;
 
 // Signed integer offset to make all values positive for sorting
 constexpr long long kSignedOffset = (1LL << 60);
@@ -189,9 +189,12 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
   // Performance optimization: use partial_sort when LIMIT is specified
   // This only sorts the top K elements instead of the entire array
   // For large datasets (e.g., 1M docs with 800K hits), this is critical
-  // Check for overflow in offset + limit
+  // Check for overflow in offset + limit and clamp to results.size()
   uint64_t total_needed_64 = static_cast<uint64_t>(query.offset) + static_cast<uint64_t>(query.limit);
-  uint32_t total_needed = (total_needed_64 > UINT32_MAX) ? UINT32_MAX : static_cast<uint32_t>(total_needed_64);
+  // Clamp to min(total_needed_64, results.size()) to avoid out-of-bounds access
+  size_t total_needed = (total_needed_64 > results.size())
+                            ? results.size()
+                            : static_cast<size_t>(total_needed_64);
 
   // Use partial_sort aggressively when total_needed is significantly smaller than result size
   // Threshold: if we need less than 50% of results, use partial_sort

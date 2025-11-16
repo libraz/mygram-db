@@ -63,6 +63,7 @@ class InvalidationQueue {
    * @param cache Pointer to query cache
    * @param invalidation_mgr Pointer to invalidation manager
    * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
+   * @note table_contexts must remain valid for the lifetime of this InvalidationQueue instance
    */
   InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
                     const std::unordered_map<std::string, server::TableContext*>& table_contexts);
@@ -160,7 +161,7 @@ class InvalidationQueue {
   /**
    * @brief Create composite key for deduplication
    */
-  static std::string MakeCompositeKey(const std::string& table, const std::string& ngram);
+  static std::string MakeCompositeKey(const std::string& table, const std::string& cache_key);
 };
 
 }  // namespace mygramdb::cache

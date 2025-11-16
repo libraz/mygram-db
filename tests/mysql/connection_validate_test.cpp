@@ -59,6 +59,30 @@ TEST(ConnectionValidateUnitTest, MethodExists) {
   EXPECT_FALSE(error_message.empty());
 }
 
+/**
+ * @brief Test ValidateUniqueColumn with null mysql_ handle
+ * Regression test for: ValidateUniqueColumn crashed when mysql_ was nullptr
+ * This could happen if Reconnect() failed or connection was never established
+ */
+TEST(ConnectionValidateUnitTest, NullHandleDoesNotCrash) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+
+  Connection conn(config);
+
+  std::string error_message;
+  // Call ValidateUniqueColumn without connecting (mysql_ handle may be nullptr or unconnected)
+  bool result = conn.ValidateUniqueColumn("test_db", "test_table", "id", error_message);
+
+  // Should not crash and should return false with an error message
+  EXPECT_FALSE(result);
+  // Error message could be either "Not connected" (if handle is null) or a connection error
+  EXPECT_FALSE(error_message.empty());
+}
+
 // Unit test: Query construction logic verification
 TEST(ConnectionValidateUnitTest, QueryConstructionLogic) {
   // Test the expected query structure by validating key components

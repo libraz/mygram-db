@@ -130,8 +130,8 @@ class SyncOperationManager {
   mutable std::mutex builders_mutex_;
 
   // Sync threads tracking (non-detached for proper cleanup)
+  // Protected by sync_mutex_ to prevent race conditions with sync_states_
   std::unordered_map<std::string, std::thread> sync_threads_;
-  mutable std::mutex sync_threads_mutex_;
 
   std::atomic<bool> shutdown_requested_{false};
 

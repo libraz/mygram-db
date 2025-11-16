@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace mygramdb::index {
@@ -147,7 +148,7 @@ class PostingList {
    * @param total_docs Total number of documents (for density calculation)
    * @return New posting list with optimized storage
    */
-  [[nodiscard]] std::unique_ptr<PostingList> Clone(uint64_t total_docs) const;
+  [[nodiscard]] std::shared_ptr<PostingList> Clone(uint64_t total_docs) const;
 
   /**
    * @brief Serialize posting list to buffer

@@ -376,6 +376,12 @@ std::optional<std::string> Connection::GetLatestGTID() {
 
 bool Connection::ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
                                       std::string& error_message) {
+  // Check connection before using mysql_ handle
+  if (mysql_ == nullptr) {
+    error_message = "Not connected to MySQL";
+    return false;
+  }
+
   // Escape parameters to prevent SQL injection
   std::vector<char> escaped_db(database.length() * 2 + 1);
   std::vector<char> escaped_table(table.length() * 2 + 1);

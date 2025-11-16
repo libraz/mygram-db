@@ -61,33 +61,39 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
     // Add affected keys to pending set
+    // Always update timestamp even if key exists to ensure proper batch processing
     for (const auto& key : affected_keys) {
       const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-      if (pending_ngrams_.find(composite_key) == pending_ngrams_.end()) {
-        pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
-      }
+      pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
     }
   }
 
   // Wake up worker if batch size reached
-  queue_cv_.notify_one();
+  // Check running_ again to handle race condition where Stop() was called
+  // between initial check and queue insertion
+  if (running_.load()) {
+    queue_cv_.notify_one();
+  }
+  // Note: If worker stopped, Stop() will call ProcessBatch() to handle remaining items
 }
 
 void InvalidationQueue::Start() {
-  if (running_.load()) {
-    return;
+  // Atomically check and set running_ to prevent concurrent Start() calls
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
+    return;  // Already running
   }
 
-  running_.store(true);
   worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
 }
 
 void InvalidationQueue::Stop() {
-  if (!running_.load()) {
-    return;
+  // Atomically check and clear running_ to prevent concurrent Stop() calls
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
+    return;  // Already stopped
   }
 
-  running_.store(false);
   queue_cv_.notify_all();
 
   if (worker_thread_.joinable()) {
@@ -215,8 +221,8 @@ void InvalidationQueue::ProcessBatch() {
   }
 }
 
-std::string InvalidationQueue::MakeCompositeKey(const std::string& table, const std::string& ngram) {
-  return table + ":" + ngram;
+std::string InvalidationQueue::MakeCompositeKey(const std::string& table, const std::string& cache_key) {
+  return table + ":" + cache_key;
 }
 
 }  // namespace mygramdb::cache

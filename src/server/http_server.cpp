@@ -194,10 +194,12 @@ bool HttpServer::Start() {
     return false;
   }
 
+  // Set running flag before starting thread to avoid race condition
+  running_ = true;
+
   // Start server in separate thread
   server_thread_ = std::make_unique<std::thread>([this]() {
     spdlog::info("Starting HTTP server on {}:{}", config_.bind, config_.port);
-    running_ = true;
 
     if (!server_->listen(config_.bind, config_.port)) {
       last_error_ = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
@@ -654,11 +656,13 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     size_t total_count = results.size();
 
     // Insert into cache (cache stores results before pagination)
-    // Note: For HTTP API, we use simplified cache insertion without ngram tracking and cost measurement
-    // This can be enhanced later to match TCP server's implementation
     if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
-      std::set<std::string> empty_ngrams;  // Simplified: not tracking ngrams for HTTP (can be enhanced)
-      cache_manager_->Insert(query, results, empty_ngrams, 0.0);
+      // Collect all ngrams from term_infos to enable proper cache invalidation
+      std::set<std::string> all_ngrams;
+      for (const auto& term_info : term_infos) {
+        all_ngrams.insert(term_info.ngrams.begin(), term_info.ngrams.end());
+      }
+      cache_manager_->Insert(query, results, all_ngrams, 0.0);
     }
 
     // Apply ORDER BY, LIMIT, OFFSET
@@ -777,7 +781,12 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 }
 
 void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  // Increment request counter on the effective stats instance
+  if (tcp_stats_ != nullptr) {
+    tcp_stats_->IncrementRequests();
+  } else {
+    stats_.IncrementRequests();
+  }
 
   try {
     json response;

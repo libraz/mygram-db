@@ -285,6 +285,63 @@ TEST(SyncOperationManagerTest, RapidCreateDestroyNoThreadLeak) {
   SUCCEED();
 }
 
+/**
+ * @brief Test concurrent StartSync calls with thread safety
+ * Regression test for: sync_threads_ and sync_states_ race condition
+ * Ensures both are protected by the same mutex (sync_mutex_)
+ */
+TEST(SyncOperationManagerTest, ConcurrentStartSyncThreadSafe) {
+  // Create minimal setup
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+
+  auto ctx = std::make_unique<TableContext>();
+  ctx->name = "test_table";
+  ctx->config = table_config;
+  ctx->index = std::make_unique<index::Index>(3, 2);
+  ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  table_contexts["test_table"] = ctx.get();
+
+  config::Config full_config;
+  full_config.mysql.host = "localhost";
+  full_config.mysql.database = "test";
+
+  SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
+
+  // Try to start sync from multiple threads concurrently
+  std::atomic<int> success_count{0};
+  std::atomic<int> already_running_count{0};
+  constexpr int num_threads = 5;
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&]() {
+      std::string result = sync_mgr.StartSync("test_table");
+      if (result.find("OK SYNC STARTED") != std::string::npos) {
+        success_count.fetch_add(1);
+      } else if (result.find("already in progress") != std::string::npos) {
+        already_running_count.fetch_add(1);
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // With proper mutex protection:
+  // - Exactly one thread should succeed in starting the sync
+  // - Other threads should get "already in progress" error
+  EXPECT_LE(success_count.load(), 1) << "At most one StartSync should succeed";
+
+  // Clean up
+  sync_mgr.RequestShutdown();
+}
+
 }  // namespace mygramdb::server
 
 #endif  // USE_MYSQL

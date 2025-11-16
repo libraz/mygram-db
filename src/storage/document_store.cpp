@@ -468,6 +468,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     constexpr uint64_t kMaxDocumentCount = 1000000000;  // 1 billion documents
     uint32_t gtid_len = 0;
     ReadBinary(ifs, gtid_len);
+    if (!ifs.good()) {
+      spdlog::error("Failed to read GTID length from snapshot");
+      return false;
+    }
     if (gtid_len > kMaxGTIDLength) {
       spdlog::error("GTID length {} exceeds maximum allowed {}", gtid_len, kMaxGTIDLength);
       return false;
@@ -475,6 +479,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       ifs.read(gtid.data(), gtid_len);
+      if (!ifs.good()) {
+        spdlog::error("Failed to read GTID data from snapshot");
+        return false;
+      }
       if (replication_gtid != nullptr) {
         *replication_gtid = gtid;
       }
@@ -485,6 +493,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     // Read document count
     uint64_t doc_count = 0;
     ReadBinary(ifs, doc_count);
+    if (!ifs.good()) {
+      spdlog::error("Failed to read document count from snapshot");
+      return false;
+    }
     if (doc_count > kMaxDocumentCount) {
       spdlog::error("Document count {} exceeds maximum allowed {}", doc_count, kMaxDocumentCount);
       return false;

@@ -530,15 +530,20 @@ class MygramClient {
 #ifdef USE_READLINE
       // Use readline for better line editing and history
       std::string prompt = config_.host + ":" + std::to_string(config_.port) + "> ";
-      char* input = readline(prompt.c_str());
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
+      char* raw_input = readline(prompt.c_str());
 
-      if (input == nullptr) {
+      if (raw_input == nullptr) {
         // EOF (Ctrl-D)
         std::cout << '\n';
         break;
       }
 
-      line = input;
+      // Use RAII to ensure memory is freed even if exception occurs
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
+      std::unique_ptr<char, decltype(&free)> input(raw_input, &free);
+
+      line = input.get();
 
       // Trim whitespace
       line.erase(0, line.find_first_not_of(" \t\r\n"));
@@ -549,11 +554,9 @@ class MygramClient {
 
       // Add to history if non-empty
       if (!line.empty()) {
-        add_history(input);
+        add_history(input.get());
       }
-
-      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
-      free(input);
+      // input is automatically freed by unique_ptr destructor
 #else
       // Fallback to std::getline
       std::cout << config_.host << ":" << config_.port << "> ";

@@ -35,7 +35,8 @@ SyncOperationManager::~SyncOperationManager() {
   WaitForCompletion(kDefaultSyncWaitTimeoutSec);
 
   // Join all sync threads to ensure clean shutdown
-  std::lock_guard<std::mutex> thread_lock(sync_threads_mutex_);
+  // Use sync_mutex_ for consistency with StartSync()
+  std::lock_guard<std::mutex> lock(sync_mutex_);
   for (auto& [table_name, thread] : sync_threads_) {
     if (thread.joinable()) {
       spdlog::debug("Joining sync thread for table: {}", table_name);
@@ -78,15 +79,14 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
   sync_states_[table_name].error_message.clear();
 
   // Clean up old thread if it exists and is joinable
-  {
-    std::lock_guard<std::mutex> thread_lock(sync_threads_mutex_);
-    auto it = sync_threads_.find(table_name);
-    if (it != sync_threads_.end() && it->second.joinable()) {
-      it->second.join();
-    }
-    // Launch async build (store thread instead of detaching)
-    sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  // Note: Thread access is now protected by sync_mutex_ (same as sync_states_)
+  // to prevent race conditions between state updates and thread lifecycle
+  auto it = sync_threads_.find(table_name);
+  if (it != sync_threads_.end() && it->second.joinable()) {
+    it->second.join();
   }
+  // Launch async build (store thread instead of detaching)
+  sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
 
   return "OK SYNC STARTED table=" + table_name + " job_id=1";
 }
@@ -289,10 +289,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       std::lock_guard<std::mutex> lock(sync_mutex_);
       sync_states_[table_name].total_rows = progress.total_rows;
       sync_states_[table_name].processed_rows = progress.processed_rows;
-
-      if (shutdown_requested_) {
-        builder.Cancel();
-      }
+      // Note: No need to call builder.Cancel() here as RequestShutdown() already handles it
     });
 
     UnregisterBuilder(table_name);

@@ -764,4 +764,111 @@ TEST(InvalidationQueueTest, ResourceCleanupOrder) {
   SUCCEED();
 }
 
+/**
+ * @brief Test concurrent Start() calls are thread-safe
+ * Regression test for: running_ flag was not atomically checked-and-set
+ */
+TEST(InvalidationQueueTest, ConcurrentStartCallsThreadSafe) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Attempt to start the queue from multiple threads concurrently
+  constexpr int num_threads = 10;
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&]() { queue.Start(); });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // With proper atomic compare_exchange_strong:
+  // - Only one worker thread should be created
+  // - No race condition or crash should occur
+  // The queue should be in a valid running state
+  EXPECT_TRUE(queue.IsRunning());
+
+  // Stop the queue
+  queue.Stop();
+  EXPECT_FALSE(queue.IsRunning());
+}
+
+/**
+ * @brief Test concurrent Stop() calls are thread-safe
+ * Regression test for: running_ flag was not atomically checked-and-cleared
+ */
+TEST(InvalidationQueueTest, ConcurrentStopCallsThreadSafe) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Start the queue first
+  queue.Start();
+  EXPECT_TRUE(queue.IsRunning());
+
+  // Attempt to stop the queue from multiple threads concurrently
+  constexpr int num_threads = 10;
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&]() { queue.Stop(); });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // With proper atomic compare_exchange_strong:
+  // - Worker thread should be joined exactly once
+  // - No race condition or crash should occur
+  EXPECT_FALSE(queue.IsRunning());
+}
+
+/**
+ * @brief Test concurrent Start() calls followed by Stop()
+ * Regression test for: concurrent Start() and Stop() should be atomic
+ */
+TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Start the queue from multiple threads
+  constexpr int num_threads = 5;
+  std::vector<std::thread> start_threads;
+
+  for (int i = 0; i < num_threads; ++i) {
+    start_threads.emplace_back([&]() { queue.Start(); });
+  }
+
+  for (auto& thread : start_threads) {
+    thread.join();
+  }
+
+  // Queue should be running (only one Start() should have succeeded)
+  EXPECT_TRUE(queue.IsRunning());
+
+  // Now stop from multiple threads
+  std::vector<std::thread> stop_threads;
+  for (int i = 0; i < num_threads; ++i) {
+    stop_threads.emplace_back([&]() { queue.Stop(); });
+  }
+
+  for (auto& thread : stop_threads) {
+    thread.join();
+  }
+
+  // Queue should be stopped
+  EXPECT_FALSE(queue.IsRunning());
+}
+
 }  // namespace mygramdb::cache

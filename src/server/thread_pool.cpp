@@ -98,6 +98,8 @@ void ThreadPool::WorkerThread() {
       }
 
       // Get next task
+      // Note: This check is technically redundant after the wait() condition,
+      // but kept for defensive programming and clarity
       if (!tasks_.empty()) {
         task = std::move(tasks_.front());
         tasks_.pop();
