@@ -45,6 +45,18 @@ target_link_libraries(config_help_test PRIVATE
 
 gtest_discover_tests(config_help_test)
 
+# Logging config test
+add_executable(logging_config_test
+  logging_config_test.cpp
+)
+
+target_link_libraries(logging_config_test PRIVATE
+  mygramdb_config
+  GTest::gtest_main
+)
+
+gtest_discover_tests(logging_config_test)
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

@@ -2,6 +2,7 @@
 build/
 build-*/
 cmake-build-*/
+dist/
 *.o
 *.a
 *.so
@@ -58,7 +59,7 @@ snapshots/
 
 # SQL files (may contain sensitive data)
 *.sql
-!docker/mysql/init/*.sql
+!support/docker/mysql/init/*.sql
 
 # Backup directory
 backup/

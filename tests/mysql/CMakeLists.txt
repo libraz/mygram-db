@@ -76,18 +76,4 @@ if(USE_MYSQL AND MYSQL_FOUND)
   gtest_discover_tests(binlog_parsing_test
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
-
-  # Integration tests (disabled by default, require MySQL server)
-  add_executable(mysql_connection_integration_test
-    connection_integration_test.cpp
-  )
-
-  target_link_libraries(mysql_connection_integration_test
-    mygramdb_mysql
-    GTest::gtest_main
-  )
-
-  # Integration tests are not added to CTest by default
-  # Run manually with: ENABLE_MYSQL_INTEGRATION_TESTS=1 ./bin/mysql_connection_integration_test
-  # To add to CTest: gtest_discover_tests(mysql_connection_integration_test)
 endif()

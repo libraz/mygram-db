@@ -155,10 +155,83 @@ mygramdb --help
 mygram-cli --help
 ```
 
+## サービスとして実行（systemd）
+
+MygramDB は**セキュリティ上の理由からrootでの実行を拒否**します。非特権ユーザーで実行する必要があります。
+
+### 1. 専用ユーザーの作成
+
+```bash
+sudo useradd -r -s /bin/false mygramdb
+```
+
+### 2. 必要なディレクトリの作成
+
+```bash
+sudo mkdir -p /etc/mygramdb /var/lib/mygramdb/dumps
+sudo chown -R mygramdb:mygramdb /var/lib/mygramdb
+```
+
+### 3. 設定ファイルのコピー
+
+```bash
+sudo cp examples/config.yaml /etc/mygramdb/config.yaml
+sudo chown mygramdb:mygramdb /etc/mygramdb/config.yaml
+sudo chmod 600 /etc/mygramdb/config.yaml  # 認証情報を保護
+```
+
+### 4. systemd サービスのインストール
+
+```bash
+sudo cp support/systemd/mygramdb.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### 5. サービスの起動と有効化
+
+```bash
+# サービスの起動
+sudo systemctl start mygramdb
+
+# ステータス確認
+sudo systemctl status mygramdb
+
+# ブート時の自動起動を有効化
+sudo systemctl enable mygramdb
+
+# ログの確認
+sudo journalctl -u mygramdb -f
+```
+
+## 手動実行（デーモンモード）
+
+手動操作や従来型のinitシステムの場合、`-d` / `--daemon` オプションを使用できます：
+
+```bash
+# デーモンとして実行（バックグラウンドプロセス）
+sudo -u mygramdb mygramdb -d -c /etc/mygramdb/config.yaml
+
+# 実行確認
+ps aux | grep mygramdb
+
+# 停止（SIGTERM送信）
+pkill -TERM mygramdb
+```
+
+**注意**: デーモンとして実行する場合、すべての出力は `/dev/null` にリダイレクトされます。必要に応じて設定でファイルベースのログを設定してください。
+
+## セキュリティに関する注意事項
+
+- **root実行のブロック**: MygramDB は root として起動すると拒否されます
+- **推奨方法**: systemd の `User=` および `Group=` ディレクティブを使用（`support/systemd/mygramdb.service` を参照）
+- **Docker**: 既に非root ユーザー `mygramdb` として実行するよう設定済み
+- **ファイルパーミッション**: 設定ファイルは mygramdb ユーザーのみが読み取り可能にすべき（モード 600）
+- **デーモンモード**: 従来型initシステムや手動バックグラウンド実行には `-d` / `--daemon` を使用
+
 ## 次のステップ
 
 インストールが成功したら：
 
 1. [設定ガイド](configuration.md) を参照して設定ファイルをセットアップ
 2. [レプリケーションガイド](replication.md) を参照して MySQL レプリケーションを設定
-3. `mygramdb -c config.yaml`（または `mygramdb config.yaml`）を実行してサーバーを起動
+3. `mygramdb -c config.yaml` を非rootユーザーまたはsystemd経由で実行

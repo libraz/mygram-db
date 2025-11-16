@@ -1,5 +1,5 @@
 /**
- * @file connection_integration_test.cpp
+ * @file connection_test.cpp
  * @brief Integration tests for MySQL connection (requires MySQL server)
  *
  * These tests require a running MySQL server and should be run separately
@@ -7,12 +7,12 @@
  * the ENABLE_MYSQL_INTEGRATION_TESTS environment variable.
  */
 
+#include "mysql/connection.h"
+
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
 #include <cstdlib>
-
-#include "mysql/connection.h"
 
 #ifdef USE_MYSQL
 

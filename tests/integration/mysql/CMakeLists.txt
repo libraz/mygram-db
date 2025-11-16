@@ -1,0 +1,16 @@
+# MySQL Connection Integration Tests
+# Requires running MySQL server (disabled by default)
+
+add_executable(mysql_connection_integration_test
+  connection_test.cpp
+)
+
+target_link_libraries(mysql_connection_integration_test
+  mygramdb_mysql
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
+gtest_discover_tests(mysql_connection_integration_test
+  PROPERTIES RESOURCE_LOCK mysql_connection
+)

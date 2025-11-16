@@ -1,0 +1,54 @@
+[Unit]
+Description=MygramDB - In-memory full-text search engine with MySQL replication
+Documentation=https://github.com/yourusername/mygram-db
+After=network.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mygramdb
+Group=mygramdb
+
+# Security: MygramDB refuses to run as root
+# Create user/group with: sudo useradd -r -s /bin/false mygramdb
+
+# Environment
+Environment="CONFIG_FILE=/etc/mygramdb/config.yaml"
+
+# Working directory
+WorkingDirectory=/var/lib/mygramdb
+
+# Start command
+ExecStart=/usr/local/bin/mygramdb -c ${CONFIG_FILE}
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mygramdb
+ReadOnlyPaths=/etc/mygramdb
+
+# Capabilities (minimal required)
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System call filtering
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mygramdb
+
+[Install]
+WantedBy=multi-user.target

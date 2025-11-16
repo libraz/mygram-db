@@ -193,7 +193,7 @@ docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d
 
 ## データベースの初期化
 
-MySQL コンテナは `docker/mysql/init/` 内のスクリプトを自動実行します：
+MySQL コンテナは `support/docker/mysql/init/` 内のスクリプトを自動実行します：
 
 - `01-create-tables.sql` - サンプルテーブルを作成
 
@@ -201,7 +201,7 @@ MySQL コンテナは `docker/mysql/init/` 内のスクリプトを自動実行�
 
 ```bash
 # SQL スクリプトを作成
-cat > docker/mysql/init/02-my-tables.sql <<EOF
+cat > support/docker/mysql/init/02-my-tables.sql <<EOF
 CREATE TABLE my_table (
     id BIGINT PRIMARY KEY,
     content TEXT

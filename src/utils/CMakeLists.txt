@@ -2,6 +2,7 @@ add_library(mygramdb_utils STATIC
   string_utils.cpp
   network_utils.cpp
   memory_utils.cpp
+  daemon_utils.cpp
 )
 
 target_include_directories(mygramdb_utils PUBLIC

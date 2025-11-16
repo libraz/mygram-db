@@ -64,7 +64,7 @@ RUN mkdir -p /var/lib/mygramdb /etc/mygramdb && \
 COPY --from=builder /build/examples/config-minimal.yaml /etc/mygramdb/config.yaml.example
 
 # Copy entrypoint script
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY support/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Switch to non-root user

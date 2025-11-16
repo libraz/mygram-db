@@ -49,9 +49,9 @@ MEMORY_NORMALIZE_NFKC=${MEMORY_NORMALIZE_NFKC:-true}
 MEMORY_NORMALIZE_WIDTH=${MEMORY_NORMALIZE_WIDTH:-narrow}
 MEMORY_NORMALIZE_LOWER=${MEMORY_NORMALIZE_LOWER:-false}
 
-SNAPSHOT_DIR=${SNAPSHOT_DIR:-/var/lib/mygramdb/snapshots}
-SNAPSHOT_INTERVAL_SEC=${SNAPSHOT_INTERVAL_SEC:-600}
-SNAPSHOT_RETAIN=${SNAPSHOT_RETAIN:-3}
+DUMP_DIR=${DUMP_DIR:-/var/lib/mygramdb/dumps}
+DUMP_INTERVAL_SEC=${DUMP_INTERVAL_SEC:-0}  # 0 = disabled (set to 7200 for 120-minute intervals)
+DUMP_RETAIN=${DUMP_RETAIN:-3}
 
 API_BIND=${API_BIND:-0.0.0.0}
 API_PORT=${API_PORT:-11016}
@@ -63,7 +63,7 @@ CONFIG_FILE=${CONFIG_FILE:-/etc/mygramdb/config.yaml}
 
 # Create configuration directory
 mkdir -p "$(dirname "$CONFIG_FILE")"
-mkdir -p "$SNAPSHOT_DIR"
+mkdir -p "$DUMP_DIR"
 mkdir -p "$(dirname "$REPLICATION_STATE_FILE")"
 
 # Generate configuration file
@@ -120,9 +120,9 @@ memory:
 
 # Dump Persistence
 dump:
-  dir: "${SNAPSHOT_DIR}"
-  interval_sec: ${SNAPSHOT_INTERVAL_SEC}
-  retain: ${SNAPSHOT_RETAIN}
+  dir: "${DUMP_DIR}"
+  interval_sec: ${DUMP_INTERVAL_SEC}
+  retain: ${DUMP_RETAIN}
 
 # API Server
 api:

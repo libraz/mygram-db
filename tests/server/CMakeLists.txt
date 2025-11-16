@@ -46,22 +46,6 @@ gtest_discover_tests(tcp_server_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# TCP Server Multi-Table tests
-
-add_executable(tcp_server_multi_table_test
-  tcp_server_multi_table_test.cpp
-)
-
-target_link_libraries(tcp_server_multi_table_test
-  mygramdb_server
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
-gtest_discover_tests(tcp_server_multi_table_test
-  PROPERTIES RESOURCE_LOCK server_port
-)
-
 # Thread Pool tests
 
 add_executable(thread_pool_test
@@ -111,22 +95,6 @@ target_link_libraries(dump_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
 gtest_discover_tests(dump_handler_test
-  PROPERTIES RESOURCE_LOCK storage_io
-)
-
-# GTID Dump Integration tests
-
-add_executable(gtid_dump_integration_test
-  gtid_dump_integration_test.cpp
-)
-
-target_link_libraries(gtid_dump_integration_test
-  mygramdb_server  # Includes all dependencies transitively
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
-gtest_discover_tests(gtid_dump_integration_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -211,36 +179,3 @@ gtest_discover_tests(request_dispatcher_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# Integration: Cache Pagination tests
-# Tests for SEARCH query caching with OFFSET/LIMIT
-
-add_executable(integration_cache_pagination_test
-  integration_cache_pagination_test.cpp
-)
-
-target_link_libraries(integration_cache_pagination_test
-  mygramdb_server
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
-gtest_discover_tests(integration_cache_pagination_test
-  PROPERTIES RESOURCE_LOCK server_port
-)
-
-# Integration: Cache COUNT tests
-# Tests for COUNT query caching
-
-add_executable(integration_cache_count_test
-  integration_cache_count_test.cpp
-)
-
-target_link_libraries(integration_cache_count_test
-  mygramdb_server
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
-gtest_discover_tests(integration_cache_count_test
-  PROPERTIES RESOURCE_LOCK server_port
-)

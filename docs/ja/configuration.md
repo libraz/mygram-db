@@ -79,7 +79,7 @@ memory:
 dump:
   dir: "/var/lib/mygramdb/dumps"
   default_filename: "mygramdb.dmp"
-  interval_sec: 600
+  interval_sec: 0                   # 0 = 無効 (7200で120分間隔を推奨)
   retain: 3
 
 api:
@@ -87,7 +87,7 @@ api:
     bind: "127.0.0.1"
     port: 11016
   http:
-    enable: true
+    enable: false                   # デフォルトで無効
     bind: "127.0.0.1"
     port: 8080
     enable_cors: false
@@ -101,6 +101,7 @@ network:
 logging:
   level: "info"
   json: true
+  file: ""
 ```
 
 ### JSON 形式 (config.json)
@@ -174,7 +175,7 @@ JSON 形式での同じ設定：
   "dump": {
     "dir": "/var/lib/mygramdb/dumps",
     "default_filename": "mygramdb.dmp",
-    "interval_sec": 600,
+    "interval_sec": 0,
     "retain": 3
   },
   "api": {
@@ -183,7 +184,7 @@ JSON 形式での同じ設定：
       "port": 11016
     },
     "http": {
-      "enable": true,
+      "enable": false,
       "bind": "127.0.0.1",
       "port": 8080,
       "enable_cors": false,
@@ -455,7 +456,7 @@ normalize:
   - ディレクトリが存在しない場合は起動時に自動作成されます
   - 起動時に書き込み権限が検証されます
 - **default_filename**: 手動`DUMP SAVE`コマンドのデフォルトファイル名（デフォルト: `mygramdb.dmp`）
-- **interval_sec**: 自動保存間隔（秒、デフォルト: `600`、`0` = 無効）
+- **interval_sec**: 自動保存間隔（秒、デフォルト: `0` = 無効、推奨: `7200` で120分間隔）
   - 自動ダンプはタイムスタンプベースのファイル名で保存されます：`auto_YYYYMMDD_HHMMSS.dmp`
   - Redis RDB永続化と同様の仕組み
 - **retain**: 保持する自動保存ダンプ数（デフォルト: `3`）
@@ -480,7 +481,7 @@ api:
 ```yaml
 api:
   http:
-    enable: true                    # デフォルト: true
+    enable: true                    # デフォルト: false
     bind: "127.0.0.1"               # デフォルト: 127.0.0.1（ローカルホストのみ）
     port: 8080                      # デフォルト: 8080
     enable_cors: false              # デフォルト: false。ブラウザ公開時のみ有効化
@@ -529,11 +530,28 @@ network:
 - **level**: ログレベル（デフォルト: `info`）
   - オプション: `debug`, `info`, `warn`, `error`
 - **json**: JSON 形式出力（デフォルト: `true`）
+- **file**: ログファイルパス（デフォルト: `""` = 標準出力）
+  - 空文字列: 標準出力へ出力（systemd/Docker環境推奨）
+  - ファイルパス: ファイルへ出力（例: `/var/log/mygramdb/mygramdb.log`）
+  - **`-d`/`--daemon` オプション使用時は必須**（デーモンモードでは標準出力が `/dev/null` にリダイレクトされます）
 
 ```yaml
 logging:
   level: "info"
   json: true
+  file: ""                          # 空 = 標準出力、またはファイルパスを指定
+```
+
+**systemd/Docker（推奨）**:
+```yaml
+logging:
+  file: ""                          # 標準出力へ、systemd journalに記録される
+```
+
+**デーモンモード（`-d` オプション）**:
+```yaml
+logging:
+  file: "/var/log/mygramdb/mygramdb.log"  # デーモンモードではファイル指定必須
 ```
 
 ## Cache セクション

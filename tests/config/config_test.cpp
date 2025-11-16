@@ -146,7 +146,7 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_EQ(config.build.batch_size, 5000);
   EXPECT_EQ(config.memory.hard_limit_mb, 8192);
   EXPECT_EQ(config.api.tcp.port, 11016);
-  EXPECT_TRUE(config.api.http.enable);
+  EXPECT_FALSE(config.api.http.enable);
 }
 
 /**

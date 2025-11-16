@@ -2,7 +2,7 @@
 
 include(GoogleTest)
 
-# Test subdirectories
+# Unit test subdirectories
 add_subdirectory(utils)
 add_subdirectory(config)
 add_subdirectory(index)
@@ -12,3 +12,6 @@ add_subdirectory(cache)
 add_subdirectory(mysql)
 add_subdirectory(server)
 add_subdirectory(client)
+
+# Integration tests
+add_subdirectory(integration)

@@ -1,5 +1,5 @@
 /**
- * @file integration_cache_pagination_test.cpp
+ * @file pagination_test.cpp
  * @brief Integration tests for cache behavior with OFFSET/LIMIT pagination
  *
  * This test suite verifies the fix for the bug where cache hits would return

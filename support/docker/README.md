@@ -5,7 +5,7 @@ This directory contains Docker-related files for MygramDB.
 ## Directory Structure
 
 ```
-docker/
+support/docker/
 ├── README.md              # This file
 ├── entrypoint.sh          # Entrypoint script for configuration generation
 └── mysql/
@@ -76,4 +76,4 @@ services:
 
 ## Documentation
 
-See [docs/en/docker-deployment.md](../docs/en/docker-deployment.md) or [docs/ja/docker-deployment.md](../docs/ja/docker-deployment.md) for detailed documentation.
+See [docs/en/docker-deployment.md](../../docs/en/docker-deployment.md) or [docs/ja/docker-deployment.md](../../docs/ja/docker-deployment.md) for detailed documentation.

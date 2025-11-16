@@ -147,7 +147,7 @@ format-check:
 
 # Check code with clang-tidy
 lint: build
-	@bash scripts/run-clang-tidy.sh
+	@bash support/dev/run-clang-tidy.sh
 
 # Build and run mygramdb
 run: build

@@ -1,6 +1,6 @@
 /**
- * @file tcp_server_multi_table_test.cpp
- * @brief Unit tests for TCP server multi-table functionality
+ * @file multi_table_test.cpp
+ * @brief Integration tests for TCP server multi-table functionality
  */
 
 #include <arpa/inet.h>

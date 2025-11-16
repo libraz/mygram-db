@@ -40,7 +40,7 @@ jobs:
               - 'third_party/**'
               - 'Makefile'
               - 'Dockerfile'
-              - 'docker/**'
+              - 'support/docker/**'
               - 'examples/**'
               - '.dockerignore'
 

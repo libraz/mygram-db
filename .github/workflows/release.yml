@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-rpm:
+    name: Build RPM Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git describe
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build RPM package
+        run: |
+          cd support/rpm
+          ./test-rpm-build.sh
+
+      - name: List generated RPMs
+        run: |
+          echo "Generated RPM packages:"
+          ls -lh dist/rpm/*.rpm
+
+      - name: Test RPM installation (AlmaLinux 9)
+        run: |
+          docker run --rm -v "$(pwd)/dist:/dist" almalinux:9 bash -c "
+            echo '=== Installing Oracle MySQL 8.0 repository ==='
+            dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm > /dev/null 2>&1
+            dnf module disable -y mysql > /dev/null 2>&1
+
+            echo '=== Installing MygramDB RPM ==='
+            dnf install -y /dist/rpm/mygramdb-${{ steps.version.outputs.version }}-*.el9.*.rpm
+
+            echo '=== Verifying installation ==='
+            echo 'Checking for missing library dependencies...'
+            ldd /usr/bin/mygramdb | grep 'not found' && exit 1 || echo 'mygramdb: OK'
+            ldd /usr/bin/mygram-cli | grep 'not found' && exit 1 || echo 'mygram-cli: OK'
+
+            echo '=== Installation test passed! ==='
+          "
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-packages
+          path: |
+            dist/rpm/*.rpm
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/rpm/mygramdb-${{ steps.version.outputs.version }}-*.el9.*.rpm
+            dist/rpm/mygramdb-debuginfo-${{ steps.version.outputs.version }}-*.el9.*.rpm
+            dist/rpm/mygramdb-debugsource-${{ steps.version.outputs.version }}-*.el9.*.rpm
+          body: |
+            ## MygramDB ${{ steps.version.outputs.version }}
+
+            ### Installation (RHEL/AlmaLinux/Rocky Linux 9)
+
+            ```bash
+            # Install Oracle MySQL 8.0 repository
+            sudo dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
+            sudo dnf module disable -y mysql
+
+            # Download and install MygramDB RPM
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm
+            sudo dnf install -y ./mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm
+
+            # Configure and start service
+            sudo cp /etc/mygramdb/config.yaml.example /etc/mygramdb/config.yaml
+            sudo vi /etc/mygramdb/config.yaml  # Edit configuration
+            sudo systemctl enable --now mygramdb
+            ```
+
+            ### Package Details
+            - **Platform**: RHEL 9 / AlmaLinux 9 / Rocky Linux 9
+            - **Architecture**: aarch64 (ARM64)
+            - **Build Type**: Static linking (minimal dependencies)
+            - **Dependencies**: libicu, MySQL client libraries (auto-installed)
+
+            ### Files Included
+            - Binary: `/usr/bin/mygramdb`
+            - CLI client: `/usr/bin/mygram-cli`
+            - Systemd service: `/usr/lib/systemd/system/mygramdb.service`
+            - Config example: `/etc/mygramdb/config.yaml.example`
+            - Data directory: `/var/lib/mygramdb`

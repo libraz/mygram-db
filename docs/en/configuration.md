@@ -80,7 +80,7 @@ memory:
 dump:
   dir: "/var/lib/mygramdb/dumps"
   default_filename: "mygramdb.dmp"
-  interval_sec: 600
+  interval_sec: 0                   # 0 = disabled (set to 7200 for 120-minute intervals)
   retain: 3
 
 api:
@@ -88,7 +88,7 @@ api:
     bind: "127.0.0.1"
     port: 11016
   http:
-    enable: true
+    enable: false                   # Disabled by default
     bind: "127.0.0.1"
     port: 8080
     enable_cors: false
@@ -102,6 +102,7 @@ network:
 logging:
   level: "info"
   json: true
+  file: ""
 ```
 
 ### JSON Format (config.json)
@@ -175,7 +176,7 @@ The same configuration in JSON format:
   "dump": {
     "dir": "/var/lib/mygramdb/dumps",
     "default_filename": "mygramdb.dmp",
-    "interval_sec": 600,
+    "interval_sec": 0,
     "retain": 3
   },
   "api": {
@@ -184,7 +185,7 @@ The same configuration in JSON format:
       "port": 11016
     },
     "http": {
-      "enable": true,
+      "enable": false,
       "bind": "127.0.0.1",
       "port": 8080,
       "enable_cors": false,
@@ -460,7 +461,7 @@ Dump (snapshot) persistence settings with automatic backup:
   - Directory is created automatically on startup if it doesn't exist
   - Write permissions are verified at startup
 - **default_filename**: Default filename for manual `DUMP SAVE` commands (default: `mygramdb.dmp`)
-- **interval_sec**: Auto-save interval in seconds (default: `600`, `0` = disabled)
+- **interval_sec**: Auto-save interval in seconds (default: `0` = disabled, recommended: `7200` for 120-minute intervals)
   - Automatic dumps are saved with timestamp-based filenames: `auto_YYYYMMDD_HHMMSS.dmp`
   - Similar to Redis RDB persistence
 - **retain**: Number of auto-saved dumps to retain (default: `3`)
@@ -485,7 +486,7 @@ api:
 ```yaml
 api:
   http:
-    enable: true                    # Default: true
+    enable: true                    # Default: false
     bind: "127.0.0.1"               # Default: 127.0.0.1 (localhost only)
     port: 8080                      # Default: 8080
     enable_cors: false              # Default: disabled. Enable only when exposing to browsers.
@@ -538,11 +539,28 @@ Logging configuration:
 - **level**: Log level (default: `info`)
   - Options: `debug`, `info`, `warn`, `error`
 - **json**: JSON format output (default: `true`)
+- **file**: Log file path (default: `""` = stdout)
+  - Empty string: log to stdout (recommended for systemd/Docker)
+  - File path: log to file (e.g., `/var/log/mygramdb/mygramdb.log`)
+  - **Required when using `-d`/`--daemon` option** (stdout is redirected to `/dev/null` in daemon mode)
 
 ```yaml
 logging:
   level: "info"
   json: true
+  file: ""                          # Empty = stdout, or set file path
+```
+
+**systemd/Docker (recommended)**:
+```yaml
+logging:
+  file: ""                          # Log to stdout, captured by systemd journal
+```
+
+**Daemon mode (`-d` option)**:
+```yaml
+logging:
+  file: "/var/log/mygramdb/mygramdb.log"  # Must specify file for daemon mode
 ```
 
 ## Cache Section

@@ -38,7 +38,7 @@ constexpr int kMemoryArenaChunkMb = 64;
 constexpr double kRoaringThreshold = 0.18;
 
 // Dump defaults
-constexpr int kDumpIntervalSec = 600;
+constexpr int kDumpIntervalSec = 0;  // 0 = disabled by default (set to 7200 for 120-minute intervals)
 constexpr const char* kDumpDefaultFilename = "mygramdb.dmp";
 
 // API defaults
@@ -204,7 +204,7 @@ struct ApiConfig {
   } tcp;
 
   struct {
-    bool enable = true;
+    bool enable = false;  // Disabled by default (set to true to enable HTTP API)
     std::string bind = "127.0.0.1";
     int port = defaults::kHttpPort;
     bool enable_cors = false;
@@ -236,6 +236,7 @@ struct NetworkConfig {
 struct LoggingConfig {
   std::string level = "info";
   bool json = true;
+  std::string file;  ///< Log file path (empty = stdout, path = file output)
 };
 
 /**

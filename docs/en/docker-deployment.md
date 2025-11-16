@@ -193,7 +193,7 @@ Adjust these in `docker-compose.prod.yml` based on your workload.
 
 ## Database Initialization
 
-The MySQL container automatically executes scripts in `docker/mysql/init/`:
+The MySQL container automatically executes scripts in `support/docker/mysql/init/`:
 
 - `01-create-tables.sql` - Creates sample tables
 
@@ -201,7 +201,7 @@ To add your own initialization scripts:
 
 ```bash
 # Create your SQL script
-cat > docker/mysql/init/02-my-tables.sql <<EOF
+cat > support/docker/mysql/init/02-my-tables.sql <<EOF
 CREATE TABLE my_table (
     id BIGINT PRIMARY KEY,
     content TEXT

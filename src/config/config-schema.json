@@ -450,9 +450,9 @@
         },
         "interval_sec": {
           "type": "integer",
-          "description": "Dump interval in seconds",
-          "default": 600,
-          "minimum": 60,
+          "description": "Dump interval in seconds (0 = disabled, 7200 = 120 minutes recommended)",
+          "default": 0,
+          "minimum": 0,
           "maximum": 86400
         },
         "retain": {
@@ -496,7 +496,7 @@
             "enable": {
               "type": "boolean",
               "description": "Enable HTTP server",
-              "default": true
+              "default": false
             },
             "bind": {
               "type": "string",
@@ -585,6 +585,11 @@
           "type": "boolean",
           "description": "JSON format output",
           "default": true
+        },
+        "file": {
+          "type": "string",
+          "description": "Log file path (empty string = stdout, path = file output)",
+          "default": ""
         }
       }
     },

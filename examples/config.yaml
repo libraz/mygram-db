@@ -155,7 +155,8 @@ dump:
                                      # - Created automatically if doesn't exist
                                      # - Write permissions verified at startup
   default_filename: "mygramdb.dmp"  # Default filename for manual DUMP SAVE (default: mygramdb.dmp)
-  interval_sec: 600                 # Auto-save interval in seconds (0 = disabled, default: 600)
+  interval_sec: 0                   # Auto-save interval in seconds (0 = disabled, default: 0)
+                                     # - Set to 7200 for 120-minute intervals (recommended)
                                      # - Auto-saved files: auto_YYYYMMDD_HHMMSS.dmp
                                      # - Similar to Redis RDB persistence
   retain: 3                         # Number of auto-saved dumps to retain (default: 3)
@@ -168,7 +169,9 @@ api:
     bind: "127.0.0.1"               # TCP bind address (default: loopback only)
     port: 11016                     # TCP port (default: 11016)
   http:
-    enable: true                    # Enable HTTP/JSON API (default: true)
+    enable: false                   # Enable HTTP/JSON API (default: false)
+                                     # - Set to true to enable HTTP API
+                                     # - TCP API is always enabled
     bind: "127.0.0.1"               # HTTP bind address (default: 127.0.0.1)
     port: 8080                      # HTTP port (default: 8080)
     enable_cors: false              # Enable CORS headers for browser clients (default: false)
@@ -186,6 +189,10 @@ network:
 logging:
   level: "info"                     # Log level: "debug", "info", "warn", "error" (default: info)
   json: true                        # JSON format output (default: true)
+  file: ""                          # Log file path (default: "" = stdout)
+                                     # - Empty string: log to stdout (systemd/Docker)
+                                     # - Path: log to file (e.g., "/var/log/mygramdb/mygramdb.log")
+                                     # - Required when using -d/--daemon option
 
 # Query Result Cache Configuration (optional)
 cache:

@@ -9,6 +9,7 @@
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
 #include "storage/snapshot_builder.h"
+#include "utils/daemon_utils.h"
 #include "version.h"
 
 #ifdef USE_MYSQL
@@ -16,6 +17,8 @@
 #include "mysql/connection.h"
 #endif
 
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <csignal>
@@ -25,6 +28,10 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+
+#ifndef _WIN32
+#include <unistd.h>  // for getuid(), geteuid()
+#endif
 
 namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -72,6 +79,20 @@ using TableContext = mygramdb::server::TableContext;
  * @return Exit code
  */
 int main(int argc, char* argv[]) {
+  // Check if running as root (security check)
+#ifndef _WIN32
+  if (getuid() == 0 || geteuid() == 0) {
+    std::cerr << "ERROR: Running MygramDB as root is not allowed for security reasons.\n";
+    std::cerr << "Please run as a non-privileged user.\n";
+    std::cerr << "\n";
+    std::cerr << "Recommended approaches:\n";
+    std::cerr << "  - systemd: Use User= and Group= directives in service file\n";
+    std::cerr << "  - Docker: Use USER directive in Dockerfile (already configured)\n";
+    std::cerr << "  - Manual: Run as a dedicated user (e.g., 'sudo -u mygramdb mygramdb -c config.yaml')\n";
+    return 1;
+  }
+#endif
+
   // Setup signal handlers
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
@@ -83,6 +104,7 @@ int main(int argc, char* argv[]) {
   // Parse command line arguments
   // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   bool config_test_mode = false;
+  bool daemon_mode = false;
   const char* config_path = nullptr;
   const char* schema_path = nullptr;
 
@@ -95,6 +117,7 @@ int main(int argc, char* argv[]) {
       std::cout << "\n";
       std::cout << "Options:\n";
       std::cout << "  -c, --config <file>            Configuration file path\n";
+      std::cout << "  -d, --daemon                   Run as daemon (background process)\n";
       std::cout << "  -t, --config-test              Test configuration file and exit\n";
       std::cout << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
       std::cout << "  -h, --help                     Show this help message\n";
@@ -129,6 +152,8 @@ int main(int argc, char* argv[]) {
         return 1;
       }
       config_path = argv[++i];
+    } else if (arg == "-d" || arg == "--daemon") {
+      daemon_mode = true;
     } else if (arg == "-t" || arg == "--config-test") {
       config_test_mode = true;
     } else if (arg == "-s" || arg == "--schema") {
@@ -182,11 +207,43 @@ int main(int argc, char* argv[]) {
   } else if (config.logging.level == "error") {
     spdlog::set_level(spdlog::level::err);
   }
+
+  // Configure log output (file or stdout)
+  if (!config.logging.file.empty()) {
+    try {
+      // Ensure log directory exists
+      std::filesystem::path log_path(config.logging.file);
+      std::filesystem::path log_dir = log_path.parent_path();
+      if (!log_dir.empty() && !std::filesystem::exists(log_dir)) {
+        std::filesystem::create_directories(log_dir);
+      }
+
+      // Create file logger
+      auto file_logger = spdlog::basic_logger_mt("mygramdb", config.logging.file);
+      spdlog::set_default_logger(file_logger);
+      spdlog::info("Logging to file: {}", config.logging.file);
+    } catch (const spdlog::spdlog_ex& ex) {
+      std::cerr << "Log file initialization failed: " << ex.what() << "\n";
+      return 1;
+    }
+  }
+
   spdlog::info("Configuration loaded successfully from {}", config_path);
 
   if (config.tables.empty()) {
     spdlog::error("No tables configured");
     return 1;
+  }
+
+  // Daemonize if requested (must be done after argument parsing but before opening files/sockets)
+  if (daemon_mode) {
+    spdlog::info("Daemonizing process...");
+    if (!mygramdb::utils::Daemonize()) {
+      spdlog::error("Failed to daemonize process");
+      return 1;
+    }
+    // Note: After daemonization, stdout/stderr are redirected to /dev/null
+    // All output must go through spdlog to be visible (configure file logging if needed)
   }
 
   // Config test mode: validate and exit

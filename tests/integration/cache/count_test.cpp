@@ -1,5 +1,5 @@
 /**
- * @file integration_cache_count_test.cpp
+ * @file count_test.cpp
  * @brief Integration tests for COUNT query caching
  *
  * Test Coverage:

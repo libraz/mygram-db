@@ -2,7 +2,33 @@ cmake_minimum_required(VERSION 3.15)
 # Set CMake policy to suppress deprecation warnings from dependencies
 cmake_policy(SET CMP0048 NEW)
 cmake_policy(SET CMP0077 NEW)
-project(MygramDB VERSION 1.0.0 LANGUAGES CXX C)
+
+# Get version from environment variable or git tag
+if(DEFINED ENV{MYGRAMDB_VERSION})
+  set(PROJECT_VERSION_FROM_ENV "$ENV{MYGRAMDB_VERSION}")
+  message(STATUS "Version from environment: ${PROJECT_VERSION_FROM_ENV}")
+  project(MygramDB VERSION ${PROJECT_VERSION_FROM_ENV} LANGUAGES CXX C)
+else()
+  # Get version from git tag
+  execute_process(
+    COMMAND git describe --tags --abbrev=0
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+
+  # Parse version from tag (remove 'v' prefix if present)
+  if(GIT_TAG)
+    string(REGEX REPLACE "^v" "" PROJECT_VERSION_FROM_GIT "${GIT_TAG}")
+    message(STATUS "Version from git tag: ${PROJECT_VERSION_FROM_GIT}")
+  else()
+    set(PROJECT_VERSION_FROM_GIT "0.0.0")
+    message(WARNING "No git tag found, using default version: ${PROJECT_VERSION_FROM_GIT}")
+  endif()
+
+  project(MygramDB VERSION ${PROJECT_VERSION_FROM_GIT} LANGUAGES CXX C)
+endif()
 
 # C++ Standard
 set(CMAKE_CXX_STANDARD 17)
@@ -102,7 +128,9 @@ if(PkgConfig_FOUND)
   if(MYSQL_FOUND)
     message(STATUS "Found MySQL client via pkg-config")
     message(STATUS "  Include dirs: ${MYSQL_INCLUDE_DIRS}")
-    message(STATUS "  Libraries: ${MYSQL_LIBRARIES}")
+    message(STATUS "  Libraries: ${MYSQL_LINK_LIBRARIES}")
+    # Use LINK_LIBRARIES which includes full link flags
+    set(MYSQL_LIBRARIES ${MYSQL_LINK_LIBRARIES})
   endif()
 endif()
 

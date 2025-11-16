@@ -1,6 +1,6 @@
 /**
- * @file gtid_snapshot_integration_test.cpp
- * @brief Critical integration tests for GTID preservation and transaction consistency
+ * @file gtid_dump_test.cpp
+ * @brief Integration tests for GTID preservation and transaction consistency
  *
  * These tests verify that:
  * 1. GTID is correctly captured at snapshot time

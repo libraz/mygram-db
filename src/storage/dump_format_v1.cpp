@@ -9,6 +9,7 @@
 #include <zlib.h>
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -837,6 +838,19 @@ bool WriteDumpV1(const std::string& filepath, const std::string& gtid, const con
                  const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
                  const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats) {
   try {
+    // Ensure parent directory exists
+    std::filesystem::path file_path(filepath);
+    std::filesystem::path parent_dir = file_path.parent_path();
+
+    if (!parent_dir.empty() && !std::filesystem::exists(parent_dir)) {
+      std::error_code error_code;
+      if (!std::filesystem::create_directories(parent_dir, error_code)) {
+        spdlog::error("Failed to create dump directory: {} ({})", parent_dir.string(), error_code.message());
+        return false;
+      }
+      spdlog::info("Created dump directory: {}", parent_dir.string());
+    }
+
     std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc);
     if (!ofs) {
       spdlog::error("Failed to open dump file for writing: {}", filepath);

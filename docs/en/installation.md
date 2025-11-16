@@ -155,10 +155,83 @@ mygramdb --help
 mygram-cli --help
 ```
 
+## Running as a Service (systemd)
+
+MygramDB **refuses to run as root** for security reasons. You must run it as a non-privileged user.
+
+### 1. Create a dedicated user
+
+```bash
+sudo useradd -r -s /bin/false mygramdb
+```
+
+### 2. Create required directories
+
+```bash
+sudo mkdir -p /etc/mygramdb /var/lib/mygramdb/dumps
+sudo chown -R mygramdb:mygramdb /var/lib/mygramdb
+```
+
+### 3. Copy configuration file
+
+```bash
+sudo cp examples/config.yaml /etc/mygramdb/config.yaml
+sudo chown mygramdb:mygramdb /etc/mygramdb/config.yaml
+sudo chmod 600 /etc/mygramdb/config.yaml  # Protect credentials
+```
+
+### 4. Install systemd service
+
+```bash
+sudo cp support/systemd/mygramdb.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### 5. Start and enable service
+
+```bash
+# Start service
+sudo systemctl start mygramdb
+
+# Check status
+sudo systemctl status mygramdb
+
+# Enable auto-start on boot
+sudo systemctl enable mygramdb
+
+# View logs
+sudo journalctl -u mygramdb -f
+```
+
+## Running Manually (Daemon Mode)
+
+For manual operation or traditional init systems, you can use the `-d` / `--daemon` option:
+
+```bash
+# Run as daemon (background process)
+sudo -u mygramdb mygramdb -d -c /etc/mygramdb/config.yaml
+
+# Check if running
+ps aux | grep mygramdb
+
+# Stop (send SIGTERM)
+pkill -TERM mygramdb
+```
+
+**Note**: When running as daemon, all output is redirected to `/dev/null`. Configure file-based logging in your configuration if needed.
+
+## Security Notes
+
+- **Root execution blocked**: MygramDB will refuse to start if run as root
+- **Recommended approach**: Use systemd `User=` and `Group=` directives (see `support/systemd/mygramdb.service`)
+- **Docker**: Already configured to run as non-root user `mygramdb`
+- **File permissions**: Configuration files should be readable only by the mygramdb user (mode 600)
+- **Daemon mode**: Use `-d` / `--daemon` for traditional init systems or manual background execution
+
 ## Next Steps
 
 After successful installation:
 
 1. See [Configuration Guide](configuration.md) to set up your config file
 2. See [Replication Guide](replication.md) to configure MySQL replication
-3. Run `mygramdb -c config.yaml` (or `mygramdb config.yaml`) to start the server
+3. Run `mygramdb -c config.yaml` as a non-root user or via systemd
