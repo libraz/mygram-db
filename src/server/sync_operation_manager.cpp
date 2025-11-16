@@ -81,9 +81,9 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
   // Clean up old thread if it exists and is joinable
   // Note: Thread access is now protected by sync_mutex_ (same as sync_states_)
   // to prevent race conditions between state updates and thread lifecycle
-  auto it = sync_threads_.find(table_name);
-  if (it != sync_threads_.end() && it->second.joinable()) {
-    it->second.join();
+  auto thread_iter = sync_threads_.find(table_name);
+  if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
+    thread_iter->second.join();
   }
   // Launch async build (store thread instead of detaching)
   sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });

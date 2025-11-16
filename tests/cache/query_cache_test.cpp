@@ -668,7 +668,7 @@ TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
   std::vector<std::thread> threads;
 
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&cache, &key1, &key2, lookups_per_thread]() {
+    threads.emplace_back([&cache, &key1, &key2]() {
       for (int j = 0; j < lookups_per_thread; ++j) {
         // Alternate between two keys
         auto key = (j % 2 == 0) ? key1 : key2;

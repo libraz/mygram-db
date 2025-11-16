@@ -341,7 +341,7 @@ TEST_F(BinlogReaderFixture, ProcessUpdateOnlyFiltersChange) {
 
   // Update with same text but different filter
   BinlogEvent update_event = MakeEvent(BinlogEventType::UPDATE, "102", 1, "sametext");
-  update_event.old_text = "sametext";  // Same text
+  update_event.old_text = "sametext";                      // Same text
   update_event.filters["category"] = std::string("news");  // Different category
 
   ASSERT_TRUE(reader_->ProcessEvent(update_event));
@@ -984,7 +984,7 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   server::TableContext comments_ctx;
   comments_ctx.name = "comments";
   comments_ctx.config.name = "comments";
-  comments_ctx.config.primary_key = "comment_id";  // Different primary key
+  comments_ctx.config.primary_key = "comment_id";   // Different primary key
   comments_ctx.config.text_source.column = "body";  // Different text column
   comments_ctx.index = std::make_unique<index::Index>(2);
   comments_ctx.doc_store = std::make_unique<storage::DocumentStore>();
@@ -1017,7 +1017,7 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   RowData comment_row;
   comment_row.primary_key = "200";
   comment_row.text = "Comment text";
-  comment_row.columns["post_id"] = "999";  // RowData.columns is string-to-string map
+  comment_row.columns["post_id"] = "999";   // RowData.columns is string-to-string map
   comment_row.columns["author_id"] = "42";  // Also add author_id to row data
 
   auto comment_filters = multi_reader.ExtractAllFilters(comment_row, comments_ctx.config);
@@ -1278,7 +1278,8 @@ TEST(BinlogReaderTest, MultiTableDDLProcessing) {
   // - All registered tables are checked for DDL
   // - Proper multi-table DDL handling
 
-  SUCCEED() << "Multi-table DDL processing properly iterates all registered tables (src/mysql/binlog_reader.cpp:1181-1201)";
+  SUCCEED()
+      << "Multi-table DDL processing properly iterates all registered tables (src/mysql/binlog_reader.cpp:1181-1201)";
 }
 
 #endif  // USE_MYSQL

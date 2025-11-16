@@ -529,7 +529,8 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
 
   // Get statistics - many entries should have been evicted due to memory limit
   auto stats = cache_mgr.GetStatistics();
-  EXPECT_GT(stats.evictions, 0) << "LRU eviction should have occurred (10KB cache, inserted " << kNumEntries << " entries)";
+  EXPECT_GT(stats.evictions, 0) << "LRU eviction should have occurred (10KB cache, inserted " << kNumEntries
+                                << " entries)";
   EXPECT_LT(stats.current_entries, kNumEntries) << "Not all entries should fit in cache";
 
   // CRITICAL: Verify that invalidation metadata was cleaned up during eviction

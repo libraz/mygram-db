@@ -48,7 +48,7 @@ struct BinlogEvent {
   BinlogEventType type = BinlogEventType::UNKNOWN;
   std::string table_name;
   std::string primary_key;
-  std::string text;  // Normalized text for INSERT/UPDATE (after image for UPDATE)
+  std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
   std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
   std::unordered_map<std::string, storage::FilterValue> filters;
   std::string gtid;  // GTID for this event
@@ -254,8 +254,8 @@ class BinlogReader {
    * @param table_config Table configuration to use for filter extraction
    * @return Map of filter name to FilterValue
    */
-  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
-      const RowData& row_data, const config::TableConfig& table_config) const;
+  static std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
+      const RowData& row_data, const config::TableConfig& table_config);
 
   /**
    * @brief Extract all filter columns using default table_config_ (single-table mode)

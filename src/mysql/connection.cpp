@@ -418,7 +418,7 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
     return false;
   }
 
-  int count;
+  int count = 0;
   try {
     count = std::stoi(row[0]);
   } catch (const std::invalid_argument& e) {

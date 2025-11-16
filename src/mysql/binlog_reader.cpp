@@ -70,7 +70,7 @@ bool BinlogReader::Start() {
   struct RunningGuard {
     std::atomic<bool>& flag;
     bool& success;
-    explicit RunningGuard(std::atomic<bool>& f, bool& s) : flag(f), success(s) {}
+    explicit RunningGuard(std::atomic<bool>& flag_ref, bool& success_ref) : flag(flag_ref), success(success_ref) {}
     ~RunningGuard() {
       if (!success) {
         flag = false;
@@ -78,6 +78,8 @@ bool BinlogReader::Start() {
     }
     RunningGuard(const RunningGuard&) = delete;
     RunningGuard& operator=(const RunningGuard&) = delete;
+    RunningGuard(RunningGuard&&) = delete;
+    RunningGuard& operator=(RunningGuard&&) = delete;
   };
   bool start_success = false;
   RunningGuard guard(running_, start_success);
@@ -156,6 +158,7 @@ bool BinlogReader::Start() {
     reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
 
     spdlog::info("Binlog reader started from GTID: {}", current_gtid_);
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used by RunningGuard destructor
     start_success = true;  // Mark start as successful
     return true;
   } catch (const std::exception& e) {
@@ -277,6 +280,7 @@ void BinlogReader::ReaderThreadFunc() {
         continue;
       }
       spdlog::info("[binlog worker] Reconnected successfully");
+      // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
       reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       continue;
     }
@@ -337,6 +341,7 @@ void BinlogReader::ReaderThreadFunc() {
       if (!binlog_connection_->Connect()) {
         spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
       } else {
+        // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
         reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       }
       continue;
@@ -392,6 +397,7 @@ void BinlogReader::ReaderThreadFunc() {
           if (!binlog_connection_->Connect()) {
             spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
           } else {
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
             reconnect_attempt = 0;  // Reset delay counter after successful reconnection
           }
           break;  // Exit inner loop to retry from outer loop
@@ -527,7 +533,7 @@ bool BinlogReader::EvaluateRequiredFilters(const std::unordered_map<std::string,
 }
 
 std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFilters(
-    const RowData& row_data, const config::TableConfig& table_config) const {
+    const RowData& row_data, const config::TableConfig& table_config) {
   std::unordered_map<std::string, storage::FilterValue> all_filters;
 
   // Convert required_filters to FilterConfig format for extraction
@@ -598,7 +604,7 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value, const c
   } else if (std::holds_alternative<double>(value)) {
     // Float comparison
     double val = std::get<double>(value);
-    double target;
+    double target = 0.0;
     try {
       target = std::stod(filter.value);
     } catch (const std::exception& e) {
@@ -656,7 +662,7 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value, const c
     // For datetime comparison, we need to parse target value
     // For now, assume target is numeric (epoch timestamp)
     // TODO: Add proper datetime parsing if needed
-    uint64_t target;
+    uint64_t target = 0;
     try {
       target = std::stoull(filter.value);
     } catch (const std::exception& e) {
@@ -1087,7 +1093,7 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       event.type = BinlogEventType::UPDATE;
       event.table_name = table_meta->table_name;
       event.primary_key = after_row.primary_key;
-      event.text = after_row.text;  // New text (after image)
+      event.text = after_row.text;       // New text (after image)
       event.old_text = before_row.text;  // Old text (before image) for index update
       event.gtid = current_gtid_;
 
@@ -1488,14 +1494,14 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
   // Escape backticks in identifier names
-  auto escape_identifier = [](const std::string& id) {
+  auto escape_identifier = [](const std::string& identifier) {
     std::string escaped;
-    escaped.reserve(id.length());
-    for (char c : id) {
-      if (c == '`') {
+    escaped.reserve(identifier.length());
+    for (char chr : identifier) {
+      if (chr == '`') {
         escaped += "``";  // Double backtick for escaping
       } else {
-        escaped += c;
+        escaped += chr;
       }
     }
     return escaped;

@@ -571,8 +571,9 @@ Config ParseConfigFromJson(const json& root) {
       config.cache.enabled = cache["enabled"].get<bool>();
     }
     if (cache.contains("max_memory_mb")) {
+      constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
       int max_memory_mb = cache["max_memory_mb"].get<int>();
-      config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * 1024 * 1024;
+      config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * kBytesPerMB;
     }
     if (cache.contains("min_query_cost_ms")) {
       config.cache.min_query_cost_ms = cache["min_query_cost_ms"].get<double>();
@@ -603,9 +604,10 @@ Config ParseConfigFromJson(const json& root) {
     if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
       auto system_info = utils::GetSystemMemoryInfo();
       if (system_info) {
-        constexpr double kMaxCacheRatio = 0.5;  // Maximum 50% of physical memory
-        uint64_t max_allowed_cache = static_cast<uint64_t>(
-            static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
+        constexpr double kMaxCacheRatio = 0.5;       // Maximum 50% of physical memory
+        constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
+        auto max_allowed_cache =
+            static_cast<uint64_t>(static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
 
         if (config.cache.max_memory_bytes > max_allowed_cache) {
           std::stringstream err_msg;
@@ -614,12 +616,11 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "  Physical memory: " << utils::FormatBytes(system_info->total_physical_bytes) << "\n";
           err_msg << "  Maximum allowed (50% of physical memory): " << utils::FormatBytes(max_allowed_cache) << "\n";
           err_msg << "  Recommendation:\n";
-          err_msg << "    - Set cache.max_memory_mb to at most "
-                  << (max_allowed_cache / 1024 / 1024) << " MB\n";
+          err_msg << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMB) << " MB\n";
           err_msg << "    - Consider system memory requirements for index and operations\n";
           err_msg << "  Example:\n";
           err_msg << "    cache:\n";
-          err_msg << "      max_memory_mb: " << (max_allowed_cache / 1024 / 1024);
+          err_msg << "      max_memory_mb: " << (max_allowed_cache / kBytesPerMB);
           throw std::runtime_error(err_msg.str());
         }
       } else {

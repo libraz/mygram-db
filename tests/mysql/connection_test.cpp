@@ -185,9 +185,7 @@ TEST(MySQLConnectionTest, MySQLResultRAIIWrapper) {
   }
 
   // Test that MySQLResult can be returned from function
-  auto create_result = []() -> MySQLResult {
-    return MySQLResult(nullptr);
-  };
+  auto create_result = []() -> MySQLResult { return MySQLResult(nullptr); };
 
   MySQLResult result = create_result();
   EXPECT_FALSE(result);

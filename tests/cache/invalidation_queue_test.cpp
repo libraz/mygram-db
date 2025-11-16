@@ -582,8 +582,7 @@ TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
 
   // Metadata should be cleaned up regardless of Erase() success
   // (in the fixed version, UnregisterCacheEntry is called first)
-  EXPECT_EQ(0, mgr.GetTrackedEntryCount())
-      << "Metadata should be cleaned up even if subsequent operations fail";
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount()) << "Metadata should be cleaned up even if subsequent operations fail";
 }
 
 /**
@@ -622,8 +621,7 @@ TEST(InvalidationQueueTest, SpuriousWakeupHandling) {
 
   // Stop should complete quickly (< 1 second) even though max_delay is 60 seconds
   // This verifies that running_ flag is checked after wakeup
-  EXPECT_LT(stop_duration.count(), 1000)
-      << "Stop() took too long, suggesting spurious wakeup handling is broken";
+  EXPECT_LT(stop_duration.count(), 1000) << "Stop() took too long, suggesting spurious wakeup handling is broken";
 }
 
 /**
@@ -665,7 +663,7 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
   InvalidationQueue queue(&cache, &mgr, table_contexts);
 
   queue.SetMaxDelay(3600000);  // 1 hour in milliseconds - very long delay
-  queue.SetBatchSize(10000);  // Very high threshold
+  queue.SetBatchSize(10000);   // Very high threshold
 
   queue.Start();
 
@@ -689,8 +687,7 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
   // Should stop quickly even with pending items
-  EXPECT_LT(duration.count(), 500)
-      << "Stop() with pending items took too long";
+  EXPECT_LT(duration.count(), 500) << "Stop() with pending items took too long";
 }
 
 /**

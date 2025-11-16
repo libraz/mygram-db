@@ -68,8 +68,10 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: |
+          type=gha,scope=docker-build
+          type=gha,scope=docker-release
+        cache-to: type=gha,mode=max,scope=docker-release
 
     - name: Generate release notes
       id: release_notes

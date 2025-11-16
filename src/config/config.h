@@ -243,7 +243,7 @@ struct LoggingConfig {
  */
 struct CacheConfig {
   bool enabled = true;                          ///< Enable/disable cache (default: true)
-  size_t max_memory_bytes = 32 * 1024 * 1024;  ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
+  size_t max_memory_bytes = 32 * 1024 * 1024;   ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
   double min_query_cost_ms = 10.0;              ///< Minimum query cost to cache (default: 10ms)  // NOLINT
   int ttl_seconds = 3600;                       ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
   std::string invalidation_strategy = "ngram";  ///< Invalidation strategy: "ngram", "table"

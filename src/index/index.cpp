@@ -455,10 +455,12 @@ void Index::Optimize(uint64_t total_docs) {
   // RAII guard to ensure flag is cleared
   struct OptimizationGuard {
     std::atomic<bool>& flag;
-    explicit OptimizationGuard(std::atomic<bool>& f) : flag(f) {}
+    explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
     ~OptimizationGuard() { flag = false; }
     OptimizationGuard(const OptimizationGuard&) = delete;
     OptimizationGuard& operator=(const OptimizationGuard&) = delete;
+    OptimizationGuard(OptimizationGuard&&) = delete;
+    OptimizationGuard& operator=(OptimizationGuard&&) = delete;
   };
   OptimizationGuard guard(is_optimizing_);
 

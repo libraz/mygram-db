@@ -70,14 +70,20 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-ccache-
 
+    - name: Cache LLVM installation
+      id: cache-llvm
+      uses: actions/cache@v4
+      with:
+        path: |
+          /usr/lib/llvm-18
+          /usr/bin/clang-format-18
+          /usr/bin/clang-tidy-18
+        key: ${{ runner.os }}-llvm-18
+
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          wget \
-          lsb-release \
-          software-properties-common \
-          gnupg \
           cmake \
           build-essential \
           libmysqlclient-dev \
@@ -87,11 +93,16 @@ jobs:
           lcov \
           ccache
 
-        # Install LLVM/Clang 18 for clang-format and clang-tidy
+    - name: Install LLVM/Clang 18
+      if: steps.cache-llvm.outputs.cache-hit != 'true'
+      run: |
         wget https://apt.llvm.org/llvm.sh
         chmod +x llvm.sh
         sudo ./llvm.sh 18
         sudo apt-get install -y clang-format-18 clang-tidy-18
+
+    - name: Setup LLVM alternatives
+      run: |
         sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
         sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 
@@ -171,8 +182,8 @@ jobs:
 
   build-and-test-macos:
     name: Build and Test (macOS)
-    needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true')
+    needs: [changes, linux-test-and-coverage]
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     runs-on: macos-latest
 
     steps:
@@ -195,6 +206,14 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-ccache-
 
+    - name: Cache Homebrew packages
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/Homebrew
+        key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/ci.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-brew-
+
     - name: Install dependencies (macOS)
       run: |
         brew install \
@@ -203,13 +222,7 @@ jobs:
           icu4c \
           readline \
           pkg-config \
-          llvm@18 \
           ccache
-
-    - name: Check code formatting
-      run: |
-        export PATH="/opt/homebrew/opt/llvm@18/bin:$PATH"
-        make CLANG_FORMAT=clang-format format-check
 
     - name: Setup ccache
       run: |
@@ -264,8 +277,6 @@ jobs:
 
   docker-build:
     name: Docker Build Test
-    needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -283,8 +294,8 @@ jobs:
         push: false
         load: true
         tags: mygramdb:test
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=docker-build
+        cache-to: type=gha,mode=max,scope=docker-build
 
     - name: Test Docker image
       run: |

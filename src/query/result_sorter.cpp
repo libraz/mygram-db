@@ -192,9 +192,7 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
   // Check for overflow in offset + limit and clamp to results.size()
   uint64_t total_needed_64 = static_cast<uint64_t>(query.offset) + static_cast<uint64_t>(query.limit);
   // Clamp to min(total_needed_64, results.size()) to avoid out-of-bounds access
-  size_t total_needed = (total_needed_64 > results.size())
-                            ? results.size()
-                            : static_cast<size_t>(total_needed_64);
+  size_t total_needed = (total_needed_64 > results.size()) ? results.size() : static_cast<size_t>(total_needed_64);
 
   // Use partial_sort aggressively when total_needed is significantly smaller than result size
   // Threshold: if we need less than 50% of results, use partial_sort
@@ -206,7 +204,8 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     // For 800K results with K=100: ~800K * log2(100) ≈ 5.3M operations
     // vs full sort: 800K * log2(800K) ≈ 15.9M operations
     // Memory: in-place, no additional allocation
-    std::partial_sort(results.begin(), results.begin() + total_needed, results.end(), comparator);
+    std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
+                      comparator);
 
     spdlog::trace("Used partial_sort for {} out of {} results", total_needed, results.size());
   } else {

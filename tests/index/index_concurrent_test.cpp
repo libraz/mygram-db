@@ -471,8 +471,7 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
 
     // Verify that searches were successful during optimization
     // This validates that shared_ptr approach maintains concurrency
-    EXPECT_GT(successful_searches.load(), 0)
-        << "Searches should succeed during Optimize() with shared_ptr approach";
+    EXPECT_GT(successful_searches.load(), 0) << "Searches should succeed during Optimize() with shared_ptr approach";
   });
 
   optimize_thread.join();
@@ -541,8 +540,8 @@ TEST(IndexConcurrentTest, OptimizeDanglingPointerRegression) {
 
       // Remove documents - only first 200, leaving 300 documents with "document" term
       for (int i = 0; i < 200; ++i) {
-        index.RemoveDocument(static_cast<DocId>(i), "document " + std::to_string(i) + " unique content " +
-                                                         std::to_string(i * 2));
+        index.RemoveDocument(static_cast<DocId>(i),
+                             "document " + std::to_string(i) + " unique content " + std::to_string(i * 2));
         operations_during_optimize++;
       }
 
