@@ -6,13 +6,30 @@
 #include <gtest/gtest.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 namespace {
+
+/**
+ * @brief Generate a unique temporary file path using mkstemp
+ * @return Temporary file path
+ */
+std::string GenerateTempFilePath() {
+  char temp_template[] = "/tmp/mygramdb_test_XXXXXX";
+  int fd = mkstemp(temp_template);
+  if (fd == -1) {
+    throw std::runtime_error("Failed to create temporary file");
+  }
+  close(fd);
+  unlink(temp_template);  // Remove the file, we just need the path
+  return std::string(temp_template);
+}
 
 /**
  * @brief Read entire file content
@@ -32,8 +49,8 @@ std::string ReadFileContent(const std::string& filepath) {
  * @brief Test basic file logging
  */
 TEST(FileLoggingTest, BasicFileLogging) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string log_file = std::string(temp_file) + ".log";
+  std::string temp_file = GenerateTempFilePath();
+  std::string log_file = temp_file + ".log";
 
   // Ensure file doesn't exist
   std::filesystem::remove(log_file);
@@ -66,8 +83,8 @@ TEST(FileLoggingTest, BasicFileLogging) {
  * @brief Test file logging with directory creation
  */
 TEST(FileLoggingTest, DirectoryCreation) {
-  const char* temp_dir = std::tmpnam(nullptr);
-  std::string log_dir = std::string(temp_dir) + "_logs";
+  std::string temp_dir = GenerateTempFilePath();
+  std::string log_dir = temp_dir + "_logs";
   std::string log_file = log_dir + "/test.log";
 
   // Ensure directory doesn't exist
@@ -105,8 +122,8 @@ TEST(FileLoggingTest, DirectoryCreation) {
  * @brief Test file logging with multiple messages
  */
 TEST(FileLoggingTest, MultipleMessages) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string log_file = std::string(temp_file) + ".log";
+  std::string temp_file = GenerateTempFilePath();
+  std::string log_file = temp_file + ".log";
 
   std::filesystem::remove(log_file);
 
@@ -141,11 +158,11 @@ TEST(FileLoggingTest, MultipleMessages) {
  * @brief Test file logging with nested directory path
  */
 TEST(FileLoggingTest, NestedDirectoryPath) {
-  const char* temp_base = std::tmpnam(nullptr);
-  std::string log_dir = std::string(temp_base) + "_logs/subdir1/subdir2";
+  std::string temp_base = GenerateTempFilePath();
+  std::string log_dir = temp_base + "_logs/subdir1/subdir2";
   std::string log_file = log_dir + "/nested.log";
 
-  std::filesystem::remove_all(std::string(temp_base) + "_logs");
+  std::filesystem::remove_all(temp_base + "_logs");
 
   try {
     // Create nested directories
@@ -167,7 +184,7 @@ TEST(FileLoggingTest, NestedDirectoryPath) {
 
     // Cleanup
     spdlog::drop("test_logger_nested");
-    std::filesystem::remove_all(std::string(temp_base) + "_logs");
+    std::filesystem::remove_all(temp_base + "_logs");
   } catch (const spdlog::spdlog_ex& ex) {
     FAIL() << "spdlog exception: " << ex.what();
   }
@@ -177,8 +194,8 @@ TEST(FileLoggingTest, NestedDirectoryPath) {
  * @brief Test switching from stdout to file logger
  */
 TEST(FileLoggingTest, SwitchToFileLogger) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string log_file = std::string(temp_file) + ".log";
+  std::string temp_file = GenerateTempFilePath();
+  std::string log_file = temp_file + ".log";
 
   std::filesystem::remove(log_file);
 

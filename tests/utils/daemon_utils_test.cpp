@@ -17,19 +17,37 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #endif
 
 using namespace mygramdb::utils;
 
 #ifndef _WIN32
 
+namespace {
+/**
+ * @brief Generate a unique temporary file path using mkstemp
+ * @return Temporary file path
+ */
+std::string GenerateTempFilePath() {
+  char temp_template[] = "/tmp/mygramdb_test_XXXXXX";
+  int fd = mkstemp(temp_template);
+  if (fd == -1) {
+    throw std::runtime_error("Failed to create temporary file");
+  }
+  close(fd);
+  unlink(temp_template);  // Remove the file, we just need the path
+  return std::string(temp_template);
+}
+}  // namespace
+
 /**
  * @brief Test that Daemonize() successfully creates a background process
  */
 TEST(DaemonUtilsTest, DaemonizeSuccess) {
   // Create a test file to verify daemon execution
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string test_file = std::string(temp_file) + ".daemon_test";
+  std::string temp_file = GenerateTempFilePath();
+  std::string test_file = temp_file + ".daemon_test";
 
   // Remove if exists
   std::filesystem::remove(test_file);
@@ -81,8 +99,8 @@ TEST(DaemonUtilsTest, DaemonizeSuccess) {
  * @brief Test that daemon process has no controlling terminal
  */
 TEST(DaemonUtilsTest, NoControllingTerminal) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string test_file = std::string(temp_file) + ".ctty_test";
+  std::string temp_file = GenerateTempFilePath();
+  std::string test_file = temp_file + ".ctty_test";
 
   std::filesystem::remove(test_file);
 
@@ -134,8 +152,8 @@ TEST(DaemonUtilsTest, NoControllingTerminal) {
  * @brief Test that daemon process is in a new session
  */
 TEST(DaemonUtilsTest, NewSessionCreated) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string test_file = std::string(temp_file) + ".session_test";
+  std::string temp_file = GenerateTempFilePath();
+  std::string test_file = temp_file + ".session_test";
 
   std::filesystem::remove(test_file);
 
@@ -184,8 +202,8 @@ TEST(DaemonUtilsTest, NewSessionCreated) {
  * @brief Test daemon working directory is root
  */
 TEST(DaemonUtilsTest, WorkingDirectoryIsRoot) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string test_file = std::string(temp_file) + ".cwd_test";
+  std::string temp_file = GenerateTempFilePath();
+  std::string test_file = temp_file + ".cwd_test";
 
   std::filesystem::remove(test_file);
 
