@@ -74,13 +74,13 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   }
 
   // Capture GTID at this point (represents snapshot state)
-  MYSQL_RES* gtid_result = connection_.Execute("SELECT @@global.gtid_executed");
-  if (gtid_result != nullptr) {
-    MYSQL_ROW row = mysql_fetch_row(gtid_result);
+  mysql::MySQLResult gtid_result = connection_.Execute("SELECT @@global.gtid_executed");
+  if (gtid_result) {
+    MYSQL_ROW row = mysql_fetch_row(gtid_result.get());
     if (row != nullptr && row[0] != nullptr) {
       snapshot_gtid_ = std::string(row[0]);
     }
-    mysql_free_result(gtid_result);
+    // gtid_result automatically freed by MySQLResult destructor
   }
 
   // GTID must not be empty for replication to work
@@ -107,8 +107,8 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   auto start_time = std::chrono::steady_clock::now();
 
   // Execute query (within the consistent snapshot transaction)
-  MYSQL_RES* result = connection_.Execute(query);
-  if (result == nullptr) {
+  mysql::MySQLResult result = connection_.Execute(query);
+  if (!result) {
     last_error_ = "Failed to execute SELECT query: " + connection_.GetLastError();
     spdlog::error(last_error_);
     connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
@@ -116,11 +116,11 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   }
 
   // Get field metadata
-  unsigned int num_fields = mysql_num_fields(result);
-  MYSQL_FIELD* fields = mysql_fetch_fields(result);
+  unsigned int num_fields = mysql_num_fields(result.get());
+  MYSQL_FIELD* fields = mysql_fetch_fields(result.get());
 
   // Get total row count (approximate from result)
-  uint64_t total_rows = mysql_num_rows(result);
+  uint64_t total_rows = mysql_num_rows(result.get());
 
   spdlog::info("Processing {} rows from table {}", total_rows, table_config_.name);
 
@@ -136,13 +136,13 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   doc_batch.reserve(batch_size);
   index_batch.reserve(batch_size);
 
-  while ((row = mysql_fetch_row(result)) != nullptr && !cancelled_) {
+  while ((row = mysql_fetch_row(result.get())) != nullptr && !cancelled_) {
     // Extract primary key
     std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
     if (primary_key.empty()) {
       last_error_ = "Failed to extract primary key";
       spdlog::error(last_error_);
-      mysql_free_result(result);
+      // result automatically freed by MySQLResult destructor
       connection_.ExecuteUpdate("ROLLBACK");
       return false;
     }
@@ -215,7 +215,7 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
     processed_rows_ += doc_batch.size();
   }
 
-  mysql_free_result(result);
+  // result automatically freed by MySQLResult destructor
 
   // Commit the transaction (releases the snapshot)
   if (!connection_.ExecuteUpdate("COMMIT")) {

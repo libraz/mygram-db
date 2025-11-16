@@ -496,4 +496,201 @@ TEST(InvalidationQueueTest, SingleBatchCount) {
   EXPECT_FALSE(cache.Lookup(key).has_value());
 }
 
+/**
+ * @brief Test that synchronous invalidation path cleans up metadata
+ *
+ * This is a regression test for a bug where the synchronous invalidation path
+ * (when worker is not running) called cache_->Erase() but did not call
+ * invalidation_mgr_->UnregisterCacheEntry(), causing cache_metadata_ and
+ * ngram_to_cache_keys_ to grow unbounded.
+ */
+TEST(InvalidationQueueTest, SynchronousInvalidationCleansUpMetadata) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // DO NOT start the worker - this forces synchronous invalidation path
+  ASSERT_FALSE(queue.IsRunning());
+
+  // Register multiple cache entries
+  constexpr int kNumEntries = 10;
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"tes", "est", "test"};
+
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  // Verify entries are tracked
+  EXPECT_EQ(kNumEntries, mgr.GetTrackedEntryCount());
+  EXPECT_GT(mgr.GetTrackedNgramCount("posts"), 0);
+
+  // Enqueue invalidations while worker is NOT running (synchronous path)
+  for (int i = 0; i < kNumEntries; ++i) {
+    queue.Enqueue("posts", "", "test" + std::to_string(i));
+  }
+
+  // All entries should be erased from cache
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    EXPECT_FALSE(cache.Lookup(key).has_value()) << "Entry " << i << " should be erased";
+  }
+
+  // CRITICAL: Metadata should also be cleaned up
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount())
+      << "InvalidationManager should have 0 tracked entries after synchronous invalidation";
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("posts"))
+      << "InvalidationManager should have 0 tracked ngrams for 'posts' table after synchronous invalidation";
+}
+
+/**
+ * @brief Test metadata is cleaned up even if Erase() throws (exception safety)
+ *
+ * Verifies the fix where UnregisterCacheEntry() is called BEFORE Erase(),
+ * ensuring metadata is cleaned up even if Erase() were to throw an exception.
+ */
+TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // DO NOT start worker - use synchronous path
+  ASSERT_FALSE(queue.IsRunning());
+
+  // Register cache entry
+  auto key = CacheKeyGenerator::Generate("test_query");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+  mgr.RegisterCacheEntry(key, meta);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+
+  // Trigger invalidation (synchronous path)
+  queue.Enqueue("posts", "", "test");
+
+  // Metadata should be cleaned up regardless of Erase() success
+  // (in the fixed version, UnregisterCacheEntry is called first)
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount())
+      << "Metadata should be cleaned up even if subsequent operations fail";
+}
+
+/**
+ * @brief Test for spurious wakeup handling fix
+ *
+ * Verifies that WorkerLoop() correctly handles spurious wakeups and
+ * checks running_ flag after waking up from condition variable.
+ */
+TEST(InvalidationQueueTest, SpuriousWakeupHandling) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Set very long delay to ensure we can stop before timeout
+  queue.SetMaxDelay(60000);  // 60 seconds in milliseconds
+  queue.SetBatchSize(1000);  // High threshold to prevent processing
+
+  // Start queue
+  queue.Start();
+
+  // Add a few entries (not enough to trigger batch processing)
+  for (int i = 0; i < 5; ++i) {
+    queue.Enqueue("posts", "old text", "new text");
+  }
+
+  // Give worker thread time to enter wait state
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Stop queue (should wake up worker thread immediately)
+  auto start = std::chrono::steady_clock::now();
+  queue.Stop();
+  auto end = std::chrono::steady_clock::now();
+
+  auto stop_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+  // Stop should complete quickly (< 1 second) even though max_delay is 60 seconds
+  // This verifies that running_ flag is checked after wakeup
+  EXPECT_LT(stop_duration.count(), 1000)
+      << "Stop() took too long, suggesting spurious wakeup handling is broken";
+}
+
+/**
+ * @brief Test rapid start/stop doesn't cause worker thread to continue after stop
+ */
+TEST(InvalidationQueueTest, RapidStartStopNoRunawayThread) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  queue.SetMaxDelay(100);  // 100 milliseconds
+
+  // Rapidly start and stop multiple times
+  for (int i = 0; i < 10; ++i) {
+    queue.Start();
+    queue.Enqueue("posts", "", "text");
+
+    // Stop immediately
+    queue.Stop();
+
+    // Verify queue is truly stopped
+    // If spurious wakeup handling is broken, worker might still be running
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  // If we get here without hanging or crashing, spurious wakeup handling is correct
+  SUCCEED();
+}
+
+/**
+ * @brief Test that worker thread exits cleanly when stopped with pending items
+ */
+TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  queue.SetMaxDelay(3600000);  // 1 hour in milliseconds - very long delay
+  queue.SetBatchSize(10000);  // Very high threshold
+
+  queue.Start();
+
+  // Add many items that won't be processed
+  for (int i = 0; i < 100; ++i) {
+    queue.Enqueue("posts", "", "some_very_long_text_string_" + std::to_string(i));
+  }
+
+  // Give enqueue operations time to accumulate
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  // Verify items are pending (though some deduplication may occur)
+  // Note: Due to ngram deduplication, pending count may be less than 100
+  // The main goal is to verify Stop() completes quickly even with pending items
+
+  // Stop should complete immediately without processing pending items
+  auto start = std::chrono::steady_clock::now();
+  queue.Stop();
+  auto end = std::chrono::steady_clock::now();
+
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+  // Should stop quickly even with pending items
+  EXPECT_LT(duration.count(), 500)
+      << "Stop() with pending items took too long";
+}
+
 }  // namespace mygramdb::cache

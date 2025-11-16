@@ -192,7 +192,7 @@ void Connection::Close() {
   }
 }
 
-MYSQL_RES* Connection::Execute(const std::string& query) {
+MySQLResult Connection::Execute(const std::string& query) {
   if (mysql_ == nullptr) {
     last_error_ = "Not connected";
     return nullptr;
@@ -213,7 +213,7 @@ MYSQL_RES* Connection::Execute(const std::string& query) {
     return nullptr;
   }
 
-  return result;
+  return MySQLResult(result);
 }
 
 bool Connection::ExecuteUpdate(const std::string& query) {
@@ -234,38 +234,36 @@ bool Connection::ExecuteUpdate(const std::string& query) {
 }
 
 std::optional<std::string> Connection::GetExecutedGTID() {
-  MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_executed");
-  if (result == nullptr) {
+  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_executed");
+  if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    mysql_free_result(result);
     return std::nullopt;
   }
 
   std::string gtid(row[0]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   spdlog::debug("Executed GTID: {}", gtid);
   return gtid;
 }
 
 std::optional<std::string> Connection::GetPurgedGTID() {
-  MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_purged");
-  if (result == nullptr) {
+  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_purged");
+  if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    mysql_free_result(result);
     return std::nullopt;
   }
 
   std::string gtid(row[0]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   spdlog::debug("Purged GTID: {}", gtid);
   return gtid;
@@ -277,39 +275,37 @@ bool Connection::SetGTIDNext(const std::string& gtid) {
 }
 
 std::optional<std::string> Connection::GetServerUUID() {
-  MYSQL_RES* result = Execute("SELECT @@GLOBAL.server_uuid");
-  if (result == nullptr) {
+  MySQLResult result = Execute("SELECT @@GLOBAL.server_uuid");
+  if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    mysql_free_result(result);
     return std::nullopt;
   }
 
   std::string uuid(row[0]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   spdlog::debug("Server UUID: {}", uuid);
   return uuid;
 }
 
 bool Connection::IsGTIDModeEnabled() {
-  MYSQL_RES* result = Execute("SELECT @@GLOBAL.gtid_mode");
-  if (result == nullptr) {
+  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_mode");
+  if (!result) {
     spdlog::warn("Failed to query GTID mode");
     return false;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    mysql_free_result(result);
     return false;
   }
 
   std::string mode(row[0]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   spdlog::debug("GTID mode: {}", mode);
 
@@ -320,22 +316,22 @@ bool Connection::IsGTIDModeEnabled() {
 
 std::optional<std::string> Connection::GetLatestGTID() {
   // Try new syntax first (MySQL 8.0.23+)
-  MYSQL_RES* result = Execute("SHOW BINARY LOG STATUS");
+  MySQLResult result = Execute("SHOW BINARY LOG STATUS");
 
   // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
-  if (result == nullptr) {
+  if (!result) {
     spdlog::debug("SHOW BINARY LOG STATUS failed, trying SHOW MASTER STATUS");
     result = Execute("SHOW MASTER STATUS");
   }
 
-  if (result == nullptr) {
+  if (!result) {
     spdlog::error("Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS");
     return std::nullopt;
   }
 
   // Get field names
-  unsigned int num_fields = mysql_num_fields(result);
-  MYSQL_FIELD* fields = mysql_fetch_fields(result);
+  unsigned int num_fields = mysql_num_fields(result.get());
+  MYSQL_FIELD* fields = mysql_fetch_fields(result.get());
 
   // Find the Executed_Gtid_Set column index
   int gtid_column_index = -1;
@@ -348,19 +344,17 @@ std::optional<std::string> Connection::GetLatestGTID() {
 
   if (gtid_column_index == -1) {
     spdlog::warn("Executed_Gtid_Set column not found in SHOW BINARY LOG STATUS");
-    mysql_free_result(result);
     return std::nullopt;
   }
 
   // Fetch the row
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[gtid_column_index] == nullptr)) {
-    mysql_free_result(result);
     return std::nullopt;
   }
 
   std::string gtid_set(row[gtid_column_index]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   // The GTID set may be empty or contain multiple ranges
   // For simplicity, we'll return the entire set as-is
@@ -390,21 +384,20 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
       "WHERE TABLE_SCHEMA = '" +
       database + "' AND TABLE_NAME = '" + table + "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
-  MYSQL_RES* result = Execute(query);
-  if (result == nullptr) {
+  MySQLResult result = Execute(query);
+  if (!result) {
     error_message = "Failed to query table schema: " + GetLastError();
     return false;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result);
+  MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    mysql_free_result(result);
     error_message = "Failed to fetch result for unique column validation";
     return false;
   }
 
   int count = std::stoi(row[0]);
-  mysql_free_result(result);
+  // result is automatically freed by MySQLResult destructor
 
   if (count == 0) {
     // Column is not a single-column PRIMARY KEY or UNIQUE KEY
@@ -414,15 +407,14 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
         "WHERE TABLE_SCHEMA = '" +
         database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column + "'";
 
-    MYSQL_RES* col_result = Execute(column_check_query);
-    if (col_result != nullptr) {
-      MYSQL_ROW col_row = mysql_fetch_row(col_result);
+    MySQLResult col_result = Execute(column_check_query);
+    if (col_result) {
+      MYSQL_ROW col_row = mysql_fetch_row(col_result.get());
       if ((col_row != nullptr) && (col_row[0] != nullptr) && std::stoi(col_row[0]) == 0) {
         error_message = "Column '" + column + "' does not exist in table '" + database + "." + table + "'";
-        mysql_free_result(col_result);
         return false;
       }
-      mysql_free_result(col_result);
+      // col_result is automatically freed by MySQLResult destructor
     }
 
     // Column exists but is not unique

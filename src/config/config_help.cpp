@@ -210,7 +210,7 @@ nlohmann::json ConfigToJson(const Config& config) {
   // Cache configuration
   json["cache"] = {
       {"enabled", config.cache.enabled},
-      {"max_memory_mb", config.cache.max_memory_mb},
+      {"max_memory_mb", config.cache.max_memory_bytes / (1024 * 1024)},  // Convert bytes to MB for display
       {"min_query_cost_ms", config.cache.min_query_cost_ms},
       {"ttl_seconds", config.cache.ttl_seconds},
       {"invalidation_strategy", config.cache.invalidation_strategy},

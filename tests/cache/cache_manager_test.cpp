@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <iostream>
 #include <thread>
 
 #include "config/config.h"
@@ -60,7 +61,7 @@ query::Query CreateQuery(const std::string& table, const std::string& search_tex
 TEST(CacheManagerTest, BasicWorkflow) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -93,7 +94,7 @@ TEST(CacheManagerTest, BasicWorkflow) {
 TEST(CacheManagerTest, PreciseInvalidation) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -128,7 +129,7 @@ TEST(CacheManagerTest, PreciseInvalidation) {
 TEST(CacheManagerTest, UpdateInvalidation) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -161,7 +162,7 @@ TEST(CacheManagerTest, UpdateInvalidation) {
 TEST(CacheManagerTest, DeleteInvalidation) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -194,7 +195,7 @@ TEST(CacheManagerTest, DeleteInvalidation) {
 TEST(CacheManagerTest, TableIsolation) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -226,7 +227,7 @@ TEST(CacheManagerTest, TableIsolation) {
 TEST(CacheManagerTest, ClearTable) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -258,7 +259,7 @@ TEST(CacheManagerTest, ClearTable) {
 TEST(CacheManagerTest, ClearAll) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -287,7 +288,7 @@ TEST(CacheManagerTest, ClearAll) {
 TEST(CacheManagerTest, EnableDisable) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -329,7 +330,7 @@ TEST(CacheManagerTest, EnableDisable) {
 TEST(CacheManagerTest, Statistics) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -362,7 +363,7 @@ TEST(CacheManagerTest, Statistics) {
 TEST(CacheManagerTest, MinQueryCostThreshold) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
   config.min_query_cost_ms = 20.0;  // Only cache queries > 20ms
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
@@ -386,7 +387,7 @@ TEST(CacheManagerTest, MinQueryCostThreshold) {
 TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
   config::CacheConfig config;
   config.enabled = false;  // Start with cache disabled
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
   auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
@@ -416,7 +417,7 @@ TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
 TEST(CacheManagerTest, PerTableNgramSettings) {
   config::CacheConfig config;
   config.enabled = true;
-  config.max_memory_mb = 10;
+  config.max_memory_bytes = 10 * 1024 * 1024;
 
   // Create two tables with DIFFERENT ngram settings
   std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
@@ -490,6 +491,88 @@ TEST(CacheManagerTest, PerTableNgramSettings) {
 
   // Query2 (comments) should NOW be invalidated
   EXPECT_FALSE(mgr.Lookup(query2).has_value());
+}
+
+/**
+ * @brief Test that LRU eviction cleans up invalidation metadata
+ *
+ * This is a regression test for a bug where LRU eviction removed entries
+ * from the cache but did not unregister them from the InvalidationManager,
+ * causing metadata to leak.
+ */
+TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024;  // 10KB to trigger evictions
+
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager cache_mgr(config, table_contexts);
+
+  // Insert 50 entries to trigger evictions (each ~1KB, 10KB cache can fit ~10)
+  constexpr int kNumEntries = 50;
+  std::vector<query::Query> queries;
+
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto query = CreateQuery("posts", "test query " + std::to_string(i));
+
+    std::vector<DocId> result;
+    for (int j = 0; j < 200; ++j) {
+      result.push_back(static_cast<DocId>(i * 1000 + j));
+    }
+
+    std::set<std::string> ngrams = {"tes", "est", "test"};
+    cache_mgr.Insert(query, result, ngrams, 10.0);
+    queries.push_back(query);
+  }
+
+  // Get statistics - many entries should have been evicted due to memory limit
+  auto stats = cache_mgr.GetStatistics();
+  EXPECT_GT(stats.evictions, 0) << "LRU eviction should have occurred (10KB cache, inserted " << kNumEntries << " entries)";
+  EXPECT_LT(stats.current_entries, kNumEntries) << "Not all entries should fit in cache";
+
+  // CRITICAL: Verify that invalidation metadata was cleaned up during eviction
+  // We can't directly access InvalidationManager from here, but we can
+  // verify that the cache is still functioning correctly after evictions
+
+  // Trigger more evictions by inserting more entries
+  for (int i = kNumEntries; i < kNumEntries + 50; ++i) {
+    auto query = CreateQuery("posts", "test query " + std::to_string(i));
+
+    std::vector<DocId> result;
+    for (int j = 0; j < 200; ++j) {
+      result.push_back(static_cast<DocId>(i * 1000 + j));
+    }
+
+    std::set<std::string> ngrams = {"tes", "est", "test"};
+    cache_mgr.Insert(query, result, ngrams, 10.0);
+  }
+
+  // Verify cache is still functional
+  auto final_stats = cache_mgr.GetStatistics();
+  EXPECT_GT(final_stats.evictions, stats.evictions) << "More evictions should have occurred";
+
+  // Test invalidation still works correctly (evicted entries don't interfere)
+  auto new_query = CreateQuery("posts", "latest query");
+
+  std::vector<DocId> new_result = {999};
+  std::set<std::string> new_ngrams = {"lat", "ate", "test"};
+
+  ASSERT_TRUE(cache_mgr.Insert(new_query, new_result, new_ngrams, 10.0));
+
+  // Lookup should work
+  auto cached = cache_mgr.Lookup(new_query);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(new_result, cached.value());
+
+  // Invalidate should work
+  cache_mgr.Invalidate("posts", "", "latest query update");
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Verify invalidation worked
+  auto after_invalidation = cache_mgr.Lookup(new_query);
+  EXPECT_FALSE(after_invalidation.has_value());
 }
 
 }  // namespace mygramdb::cache

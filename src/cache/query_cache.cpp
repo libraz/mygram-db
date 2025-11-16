@@ -77,16 +77,17 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     return std::nullopt;
   }
 
-  // Copy query_cost_ms before releasing lock to avoid use-after-free
+  // Copy query_cost_ms and created_at before releasing lock to avoid use-after-free
   const double query_cost_ms = entry.query_cost_ms;
+  const auto created_at = entry.metadata.created_at;
 
   // Update access time (need to upgrade to unique lock)
   lock.unlock();
   std::unique_lock write_lock(mutex_);
 
-  // Re-check existence (might have been evicted)
+  // Re-check existence and verify it's the same entry (not a new entry with same key)
   iter = cache_map_.find(key);
-  if (iter != cache_map_.end()) {
+  if (iter != cache_map_.end() && iter->second.first.metadata.created_at == created_at) {
     Touch(key);
     iter->second.first.metadata.last_accessed = std::chrono::steady_clock::now();
     iter->second.first.metadata.access_count++;
@@ -119,14 +120,14 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     return false;
   }
 
-  // Calculate memory usage
+  // Create cache entry to calculate accurate memory usage
+  CacheEntry temp_entry;
+  temp_entry.compressed = std::move(compressed);
+  temp_entry.metadata = metadata;
+
   const size_t original_count = result.size();  // Number of DocId elements, not bytes
-  const size_t compressed_size = compressed.size();
-  size_t ngrams_size = 0;
-  for (const auto& ngram : metadata.ngrams) {
-    ngrams_size += ngram.capacity();
-  }
-  const size_t entry_memory = sizeof(CacheEntry) + compressed_size + ngrams_size;
+  const size_t compressed_size = temp_entry.compressed.size();
+  const size_t entry_memory = temp_entry.MemoryUsage();
 
   // Don't cache if entry is too large
   if (entry_memory > max_memory_bytes_) {
@@ -148,24 +149,21 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     }
   }
 
-  // Create cache entry
-  CacheEntry entry;
-  entry.key = key;
-  entry.compressed = std::move(compressed);
-  entry.original_size = original_count;  // Store count, not bytes
-  entry.compressed_size = compressed_size;
-  entry.query_cost_ms = query_cost_ms;
-  entry.metadata = metadata;
-  entry.metadata.created_at = std::chrono::steady_clock::now();
-  entry.metadata.last_accessed = entry.metadata.created_at;
-  entry.invalidated.store(false);
+  // Complete cache entry (reuse temp_entry to maintain consistent memory calculation)
+  temp_entry.key = key;
+  temp_entry.original_size = original_count;  // Store count, not bytes
+  temp_entry.compressed_size = compressed_size;
+  temp_entry.query_cost_ms = query_cost_ms;
+  temp_entry.metadata.created_at = std::chrono::steady_clock::now();
+  temp_entry.metadata.last_accessed = temp_entry.metadata.created_at;
+  temp_entry.invalidated.store(false);
 
   // Insert into LRU list (front = most recent)
   lru_list_.push_front(key);
   auto lru_it = lru_list_.begin();
 
   // Insert into cache map using emplace to avoid copy
-  cache_map_.emplace(key, std::make_pair(std::move(entry), lru_it));
+  cache_map_.emplace(key, std::make_pair(std::move(temp_entry), lru_it));
 
   // Update memory tracking
   total_memory_bytes_ += entry_memory;
@@ -278,6 +276,11 @@ bool QueryCache::EvictForSpace(size_t required_bytes) {
     const size_t entry_memory = iter->second.first.MemoryUsage();
     lru_list_.pop_back();
     cache_map_.erase(iter);
+
+    // Notify eviction callback (for InvalidationManager cleanup)
+    if (eviction_callback_) {
+      eviction_callback_(lru_key);
+    }
 
     // Update memory tracking
     total_memory_bytes_ -= entry_memory;

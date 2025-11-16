@@ -121,6 +121,13 @@ class InvalidationManager {
   mutable std::shared_mutex mutex_;
 
   /**
+   * @brief Internal helper: unregister cache entry without locking
+   * @param key Cache key to unregister
+   * @note Assumes mutex_ is already held by caller
+   */
+  void UnregisterCacheEntryUnlocked(const CacheKey& key);
+
+  /**
    * @brief Extract ngrams from text
    * @param text Text to extract ngrams from
    * @param ngram_size N-gram size (for ASCII/alphanumeric)

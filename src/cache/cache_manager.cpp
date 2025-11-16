@@ -15,11 +15,17 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config,
     : enabled_(cache_config.enabled) {
   if (enabled_) {
     // Create query cache
-    const size_t max_memory_bytes = static_cast<size_t>(cache_config.max_memory_mb) * 1024 * 1024;
-    query_cache_ = std::make_unique<QueryCache>(max_memory_bytes, cache_config.min_query_cost_ms);
+    query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms);
 
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
+
+    // Set eviction callback to clean up invalidation metadata
+    query_cache_->SetEvictionCallback([this](const CacheKey& key) {
+      if (invalidation_mgr_) {
+        invalidation_mgr_->UnregisterCacheEntry(key);
+      }
+    });
 
     // Create invalidation queue with table_contexts for per-table ngram settings
     invalidation_queue_ =

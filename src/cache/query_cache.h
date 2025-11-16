@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -114,6 +115,12 @@ struct CacheStatistics {
 class QueryCache {
  public:
   /**
+   * @brief Callback type for eviction notifications
+   * @param key The cache key being evicted
+   */
+  using EvictionCallback = std::function<void(const CacheKey&)>;
+
+  /**
    * @brief Constructor
    * @param max_memory_bytes Maximum memory usage in bytes
    * @param min_query_cost_ms Minimum query cost to cache (ms)
@@ -213,6 +220,12 @@ class QueryCache {
    */
   void IncrementInvalidationBatches() { stats_.invalidations_batches++; }
 
+  /**
+   * @brief Set callback to be notified when entries are evicted
+   * @param callback Function to call when an entry is evicted via LRU
+   */
+  void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
@@ -232,6 +245,9 @@ class QueryCache {
 
   // Statistics
   CacheStatistics stats_;
+
+  // Eviction callback
+  EvictionCallback eviction_callback_;
 
   /**
    * @brief Evict entries to make room for new entry

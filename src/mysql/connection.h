@@ -40,6 +40,22 @@ struct GTID {
 };
 
 /**
+ * @brief RAII wrapper for MYSQL_RES* to prevent memory leaks
+ *
+ * Custom deleter for std::unique_ptr that calls mysql_free_result
+ */
+struct MySQLResultDeleter {
+  void operator()(MYSQL_RES* res) const {
+    if (res != nullptr) {
+      mysql_free_result(res);
+    }
+  }
+};
+
+/// Type alias for RAII-managed MYSQL_RES*
+using MySQLResult = std::unique_ptr<MYSQL_RES, MySQLResultDeleter>;
+
+/**
  * @brief MySQL connection wrapper
  *
  * Provides RAII wrapper around MySQL connection with GTID support
@@ -119,9 +135,9 @@ class Connection {
   /**
    * @brief Execute SQL query
    * @param query SQL query string
-   * @return MySQL result set (caller must free)
+   * @return RAII-managed MySQL result set (automatically freed)
    */
-  MYSQL_RES* Execute(const std::string& query);
+  MySQLResult Execute(const std::string& query);
 
   /**
    * @brief Execute SQL query without result set (INSERT/UPDATE/DELETE)

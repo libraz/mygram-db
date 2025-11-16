@@ -1154,7 +1154,7 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
 
   // Enable cache in config
   config_->cache.enabled = true;
-  config_->cache.max_memory_mb = 10;
+  config_->cache.max_memory_bytes = 10 * 1024 * 1024;
 
   TcpServer tcp_server(tcp_config, table_contexts_, "./dumps", config_.get(), nullptr);
   ASSERT_TRUE(tcp_server.Start());

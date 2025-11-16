@@ -234,3 +234,111 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
   EXPECT_GE(final_size, 0);
   EXPECT_LT(final_size, 10000);
 }
+
+/**
+ * @brief Test for next_doc_id_ double setting fix
+ *
+ * Verifies that LoadFromFile() and LoadFromStream() only set next_doc_id_ once
+ * under lock, preventing race conditions in multi-threaded environments.
+ */
+TEST(DocumentStoreConcurrentTest, LoadFromFileNoDoubleSettingRace) {
+  DocumentStore store;
+
+  // Add some documents
+  const int num_docs = 100;
+  for (int i = 0; i < num_docs; ++i) {
+    DocId doc_id = store.AddDocument("key_" + std::to_string(i));
+    ASSERT_GT(doc_id, 0);
+  }
+
+  // Save to file
+  std::string filepath = "/tmp/docstore_concurrent_test.bin";
+  ASSERT_TRUE(store.SaveToFile(filepath));
+
+  // Concurrent loads from different threads
+  std::vector<std::thread> threads;
+  std::atomic<int> successful_loads{0};
+  std::atomic<int> load_attempts{0};
+
+  for (int t = 0; t < 5; ++t) {
+    threads.emplace_back([&]() {
+      DocumentStore local_store;
+      load_attempts++;
+
+      try {
+        std::string gtid;
+        if (local_store.LoadFromFile(filepath, &gtid)) {
+          successful_loads++;
+
+          // Verify next_doc_id is set correctly (should be num_docs + 1)
+          // Try adding a new document to check ID continuity
+          DocId new_id = local_store.AddDocument("new_key");
+          EXPECT_GT(new_id, 0);
+          EXPECT_GE(new_id, static_cast<DocId>(num_docs));
+        }
+      } catch (const std::exception& e) {
+        // Load might fail if file is being written concurrently, that's ok
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // At least some loads should succeed
+  EXPECT_GT(successful_loads.load(), 0);
+  EXPECT_EQ(load_attempts.load(), 5);
+
+  // Clean up
+  std::remove(filepath.c_str());
+}
+
+/**
+ * @brief Test concurrent LoadFromStream() doesn't cause next_doc_id_ corruption
+ */
+TEST(DocumentStoreConcurrentTest, LoadFromStreamNoIDCorruption) {
+  DocumentStore store;
+
+  // Add documents
+  for (int i = 0; i < 50; ++i) {
+    store.AddDocument("doc_" + std::to_string(i));
+  }
+
+  // Save to stream
+  std::ostringstream oss;
+  ASSERT_TRUE(store.SaveToStream(oss, ""));
+
+  std::string serialized_data = oss.str();
+
+  // Multiple threads load from stream simultaneously
+  std::vector<std::thread> threads;
+  std::atomic<int> successful_loads{0};
+
+  for (int t = 0; t < 3; ++t) {
+    threads.emplace_back([&]() {
+      DocumentStore local_store;
+      std::istringstream iss(serialized_data);
+
+      std::string gtid;
+      if (local_store.LoadFromStream(iss, &gtid)) {
+        successful_loads++;
+
+        // Verify document count
+        EXPECT_EQ(50, local_store.Size());
+
+        // Add new document to verify ID is correctly set
+        DocId new_id = local_store.AddDocument("new");
+        EXPECT_GT(new_id, 0);
+        EXPECT_GE(new_id, 50);
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All loads should succeed
+  EXPECT_EQ(3, successful_loads.load());
+}

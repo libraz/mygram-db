@@ -395,3 +395,118 @@ TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
   // What matters is that all 200 documents are safely added without crashes.
   (void)additions_during_optimize;  // Timing-dependent, not critical for correctness
 }
+
+/**
+ * @brief Test for thread-unsafe Optimize() fix
+ *
+ * Verifies that Optimize() acquires proper locking to prevent concurrent
+ * modifications to term_postings_ during optimization.
+ */
+TEST(IndexConcurrentTest, OptimizeThreadSafety) {
+  Index index;
+  const int num_docs = 1000;
+
+  // Add initial documents
+  for (int i = 0; i < num_docs; ++i) {
+    std::string text = "document " + std::to_string(i) + " content";
+    index.AddDocument(static_cast<DocId>(i), text);
+  }
+
+  std::atomic<bool> optimization_running{false};
+  std::atomic<bool> test_passed{true};
+
+  // Thread 1: Call Optimize()
+  std::thread optimize_thread([&]() {
+    optimization_running = true;
+    try {
+      index.Optimize(num_docs);
+    } catch (...) {
+      test_passed = false;
+    }
+    optimization_running = false;
+  });
+
+  // Thread 2: Perform concurrent searches and additions
+  std::thread modify_thread([&]() {
+    // Wait for optimization to start
+    while (!optimization_running.load()) {
+      std::this_thread::yield();
+    }
+
+    try {
+      // Perform searches (shared access)
+      // Note: Some searches may return varying results during optimization
+      // The key is that they don't crash
+      for (int i = 0; i < 100; ++i) {
+        auto results = index.SearchAnd({"do"});  // Search for bigram "do" from "document"
+        // Don't fail if empty - optimization may affect results temporarily
+        (void)results;
+      }
+
+      // Add new documents (write access)
+      for (int i = num_docs; i < num_docs + 100; ++i) {
+        std::string text = "new document " + std::to_string(i);
+        index.AddDocument(static_cast<DocId>(i), text);
+      }
+    } catch (...) {
+      test_passed = false;
+    }
+  });
+
+  optimize_thread.join();
+  modify_thread.join();
+
+  // Verify test passed without crashes or data corruption
+  EXPECT_TRUE(test_passed.load()) << "Thread safety violation detected during Optimize()";
+
+  // Verify index is still functional (search for bigram "do" which appears in all documents)
+  auto results = index.SearchAnd({"do"});
+  EXPECT_GT(results.size(), static_cast<size_t>(num_docs)) << "Index corrupted after concurrent Optimize()";
+}
+
+/**
+ * @brief Test concurrent Optimize() and OptimizeInBatches() calls
+ */
+TEST(IndexConcurrentTest, ConcurrentOptimizeCalls) {
+  Index index;
+  const int num_docs = 500;
+
+  // Add documents
+  for (int i = 0; i < num_docs; ++i) {
+    std::string text = "test content " + std::to_string(i);
+    index.AddDocument(static_cast<DocId>(i), text);
+  }
+
+  std::atomic<int> successful_optimizations{0};
+  std::vector<std::thread> threads;
+
+  // Launch multiple optimization threads
+  for (int t = 0; t < 5; ++t) {
+    threads.emplace_back([&, t]() {
+      try {
+        if (t % 2 == 0) {
+          index.Optimize(num_docs);
+        } else {
+          index.OptimizeInBatches(num_docs, 50);
+        }
+        successful_optimizations++;
+      } catch (const std::exception& e) {
+        // OptimizeInBatches may skip if already optimizing, which is expected
+        if (std::string(e.what()).find("already in progress") == std::string::npos) {
+          FAIL() << "Unexpected exception during optimization: " << e.what();
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // At least some optimizations should succeed
+  EXPECT_GT(successful_optimizations.load(), 0);
+
+  // Index should still be functional (search for bigram "te" which appears in all "test" documents)
+  auto results = index.SearchAnd({"te"});
+  EXPECT_EQ(results.size(), static_cast<size_t>(num_docs)) << "Index corrupted after concurrent Optimize() calls";
+}

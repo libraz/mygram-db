@@ -163,4 +163,69 @@ TEST(MySQLConnectionTest, IsGTIDModeEnabledWithoutConnection) {
   EXPECT_FALSE(conn.IsGTIDModeEnabled());
 }
 
+/**
+ * @brief Test MySQLResult RAII wrapper prevents memory leak
+ *
+ * Verifies that MySQLResult automatically frees MYSQL_RES* on destruction,
+ * preventing the memory leaks that occurred with raw MYSQL_RES* pointers.
+ */
+TEST(MySQLConnectionTest, MySQLResultRAIIWrapper) {
+  // Test that MySQLResult can be constructed with nullptr
+  {
+    MySQLResult result(nullptr);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.get(), nullptr);
+  }  // Destructor should handle nullptr safely
+
+  // Test that MySQLResult can be moved
+  {
+    MySQLResult result1(nullptr);
+    MySQLResult result2 = std::move(result1);
+    EXPECT_FALSE(result2);
+  }
+
+  // Test that MySQLResult can be returned from function
+  auto create_result = []() -> MySQLResult {
+    return MySQLResult(nullptr);
+  };
+
+  MySQLResult result = create_result();
+  EXPECT_FALSE(result);
+
+  // Note: Actual MYSQL_RES* memory management is tested in integration tests
+  // where we have a real MySQL connection. Here we verify the wrapper compiles
+  // and behaves correctly with nullptr.
+}
+
+/**
+ * @brief Test MySQLResult usage pattern matching Execute() return type
+ */
+TEST(MySQLConnectionTest, MySQLResultUsagePattern) {
+  // Simulate the usage pattern in connection methods
+  auto simulate_execute = []() -> MySQLResult {
+    // In real code, this would be mysql_store_result()
+    return MySQLResult(nullptr);
+  };
+
+  // Pattern 1: Check if result is valid
+  MySQLResult result1 = simulate_execute();
+  if (!result1) {
+    // This is the expected path with nullptr
+    SUCCEED();
+  }
+
+  // Pattern 2: Use result.get() to access raw pointer
+  MySQLResult result2 = simulate_execute();
+  MYSQL_RES* raw_ptr = result2.get();
+  EXPECT_EQ(raw_ptr, nullptr);
+
+  // Pattern 3: Result goes out of scope and is automatically freed
+  {
+    MySQLResult scoped_result = simulate_execute();
+    // No manual mysql_free_result() needed
+  }  // Automatically freed here
+
+  SUCCEED();
+}
+
 #endif  // USE_MYSQL

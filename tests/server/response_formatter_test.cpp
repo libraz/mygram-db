@@ -66,7 +66,7 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
   // Create cache manager
   config::CacheConfig cache_config;
   cache_config.enabled = true;
-  cache_config.max_memory_mb = 100;
+  cache_config.max_memory_bytes = 100 * 1024 * 1024;
   cache_config.min_query_cost_ms = 1.0;
 
   cache::CacheManager cache_manager(cache_config, table_contexts_);
@@ -109,7 +109,7 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManagerDisabled) {
   // Create cache manager but disabled
   config::CacheConfig cache_config;
   cache_config.enabled = false;
-  cache_config.max_memory_mb = 100;
+  cache_config.max_memory_bytes = 100 * 1024 * 1024;
 
   cache::CacheManager cache_manager(cache_config, table_contexts_);
   cache_manager.Disable();

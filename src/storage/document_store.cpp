@@ -459,10 +459,9 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       return false;
     }
 
-    // Read next_doc_id
+    // Read next_doc_id (will be set later under lock)
     uint32_t next_id = 0;
     ReadBinary(ifs, next_id);
-    next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
     constexpr uint32_t kMaxGTIDLength = 1024;
@@ -776,10 +775,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
       return false;
     }
 
-    // Read next_doc_id
+    // Read next_doc_id (will be set later under lock)
     uint32_t next_id = 0;
     ReadBinary(input_stream, next_id);
-    next_doc_id_ = static_cast<DocId>(next_id);
 
     // Read GTID (for replication position)
     constexpr uint32_t kMaxGTIDLength = 1024;

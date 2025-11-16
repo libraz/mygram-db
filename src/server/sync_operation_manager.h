@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -127,6 +128,10 @@ class SyncOperationManager {
 
   std::unordered_map<std::string, storage::SnapshotBuilder*> active_builders_;
   mutable std::mutex builders_mutex_;
+
+  // Sync threads tracking (non-detached for proper cleanup)
+  std::unordered_map<std::string, std::thread> sync_threads_;
+  mutable std::mutex sync_threads_mutex_;
 
   std::atomic<bool> shutdown_requested_{false};
 

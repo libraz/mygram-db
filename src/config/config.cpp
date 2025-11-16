@@ -569,7 +569,8 @@ Config ParseConfigFromJson(const json& root) {
       config.cache.enabled = cache["enabled"].get<bool>();
     }
     if (cache.contains("max_memory_mb")) {
-      config.cache.max_memory_mb = cache["max_memory_mb"].get<int>();
+      int max_memory_mb = cache["max_memory_mb"].get<int>();
+      config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * 1024 * 1024;
     }
     if (cache.contains("min_query_cost_ms")) {
       config.cache.min_query_cost_ms = cache["min_query_cost_ms"].get<double>();

@@ -71,9 +71,8 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(cons
   return affected_keys;
 }
 
-void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
-  std::unique_lock lock(mutex_);
-
+// Internal helper: unregister cache entry without locking (assumes mutex is already held)
+void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
   // Find metadata
   auto metadata_it = cache_metadata_.find(key);
   if (metadata_it == cache_metadata_.end()) {
@@ -107,6 +106,11 @@ void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
   cache_metadata_.erase(metadata_it);
 }
 
+void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
+  std::unique_lock lock(mutex_);
+  UnregisterCacheEntryUnlocked(key);
+}
+
 void InvalidationManager::ClearTable(const std::string& table_name) {
   std::unique_lock lock(mutex_);
 
@@ -118,14 +122,12 @@ void InvalidationManager::ClearTable(const std::string& table_name) {
     }
   }
 
-  // Remove entries
-  lock.unlock();
+  // Remove entries while holding lock (use unlocked version to avoid deadlock)
   for (const auto& key : to_remove) {
-    UnregisterCacheEntry(key);
+    UnregisterCacheEntryUnlocked(key);
   }
 
-  // Remove table from reverse index
-  lock.lock();
+  // Remove table from reverse index (already holding lock)
   ngram_to_cache_keys_.erase(table_name);
 }
 

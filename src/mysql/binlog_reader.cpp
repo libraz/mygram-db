@@ -245,12 +245,19 @@ void BinlogReader::ReaderThreadFunc() {
       spdlog::info("[binlog worker] Will retry connection in {} ms", config_.reconnect_delay_ms);
       std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
 
+      // Check if stop was requested during sleep
+      if (should_stop_) {
+        spdlog::debug("Stop requested during retry delay, exiting");
+        break;
+      }
+
       // Reconnect
       if (!binlog_connection_->Connect("binlog worker")) {
         spdlog::error("[binlog worker] Failed to reconnect: {}", binlog_connection_->GetLastError());
         continue;
       }
       spdlog::info("[binlog worker] Reconnected successfully");
+      reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       continue;
     }
     spdlog::info("Binlog checksums disabled for replication");
@@ -295,9 +302,17 @@ void BinlogReader::ReaderThreadFunc() {
       spdlog::info("Will retry connection in {} ms", config_.reconnect_delay_ms);
       std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
 
+      // Check if stop was requested during sleep
+      if (should_stop_) {
+        spdlog::debug("Stop requested during retry delay, exiting");
+        break;
+      }
+
       // Reconnect
       if (!binlog_connection_->Connect()) {
         spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+      } else {
+        reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       }
       continue;
     }
@@ -313,6 +328,13 @@ void BinlogReader::ReaderThreadFunc() {
       // Fetch next binlog event
       spdlog::debug("Calling mysql_binlog_fetch...");
       int result = mysql_binlog_fetch(binlog_connection_->GetHandle(), &rpl);
+
+      // Check should_stop_ immediately after blocking call to avoid use-after-free
+      // (Stop() may have closed the connection while we were blocked)
+      if (should_stop_) {
+        spdlog::debug("Stop requested, exiting reader loop");
+        break;
+      }
 
       if (result != 0) {
         unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
@@ -335,9 +357,17 @@ void BinlogReader::ReaderThreadFunc() {
           spdlog::info("Reconnect attempt #{}, waiting {} ms", reconnect_attempt, delay_ms);
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
+          // Check again before reconnecting
+          if (should_stop_) {
+            spdlog::debug("Stop requested during reconnect delay, exiting");
+            break;
+          }
+
           // Reconnect
           if (!binlog_connection_->Connect()) {
             spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+          } else {
+            reconnect_attempt = 0;  // Reset delay counter after successful reconnection
           }
           break;  // Exit inner loop to retry from outer loop
         }
@@ -1345,8 +1375,8 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
   std::string query = "SHOW COLUMNS FROM `" + metadata.database_name + "`.`" + metadata.table_name + "`";
 
-  MYSQL_RES* result = connection_.Execute(query);
-  if (result == nullptr) {
+  MySQLResult result = connection_.Execute(query);
+  if (!result) {
     spdlog::error("Failed to query column names for {}.{}: {}", metadata.database_name, metadata.table_name,
                   connection_.GetLastError());
     return false;
@@ -1356,11 +1386,11 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   column_names.reserve(metadata.columns.size());
 
   MYSQL_ROW row = nullptr;
-  while ((row = mysql_fetch_row(result)) != nullptr) {
+  while ((row = mysql_fetch_row(result.get())) != nullptr) {
     column_names.emplace_back(row[0]);
   }
 
-  mysql_free_result(result);
+  // result automatically freed by MySQLResult destructor
 
   if (column_names.size() != metadata.columns.size()) {
     spdlog::error("Column count mismatch for {}.{}: SHOW COLUMNS returned {}, binlog has {}", metadata.database_name,

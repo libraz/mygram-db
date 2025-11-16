@@ -445,12 +445,41 @@ Index::IndexStatistics Index::GetStatistics() const {
 }
 
 void Index::Optimize(uint64_t total_docs) {
-  for (auto& [term, posting] : term_postings_) {
+  // Check if already optimizing (prevent concurrent Optimize() calls)
+  bool expected = false;
+  if (!is_optimizing_.compare_exchange_strong(expected, true)) {
+    spdlog::warn("Optimization already in progress, ignoring Optimize() request");
+    return;
+  }
+
+  // RAII guard to ensure flag is cleared
+  struct OptimizationGuard {
+    std::atomic<bool>& flag;
+    explicit OptimizationGuard(std::atomic<bool>& f) : flag(f) {}
+    ~OptimizationGuard() { flag = false; }
+    OptimizationGuard(const OptimizationGuard&) = delete;
+    OptimizationGuard& operator=(const OptimizationGuard&) = delete;
+  };
+  OptimizationGuard guard(is_optimizing_);
+
+  // Take snapshot to prevent iterator invalidation while allowing concurrent searches
+  std::vector<std::pair<std::string, PostingList*>> postings_snapshot;
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    postings_snapshot.reserve(term_postings_.size());
+    for (const auto& [term, posting] : term_postings_) {
+      postings_snapshot.emplace_back(term, posting.get());
+    }
+  }
+
+  // Optimize each posting
+  for (const auto& [term, posting] : postings_snapshot) {
     posting->Optimize(total_docs);
   }
+
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   // 1024: Standard conversion factor for bytes to KB to MB
-  spdlog::info("Optimized index: {} terms, {} MB", term_postings_.size(), MemoryUsage() / (1024 * 1024));
+  spdlog::info("Optimized index: {} terms, {} MB", postings_snapshot.size(), MemoryUsage() / (1024 * 1024));
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 }
 

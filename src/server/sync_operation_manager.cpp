@@ -33,6 +33,16 @@ SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string,
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();
   WaitForCompletion(kDefaultSyncWaitTimeoutSec);
+
+  // Join all sync threads to ensure clean shutdown
+  std::lock_guard<std::mutex> thread_lock(sync_threads_mutex_);
+  for (auto& [table_name, thread] : sync_threads_) {
+    if (thread.joinable()) {
+      spdlog::debug("Joining sync thread for table: {}", table_name);
+      thread.join();
+    }
+  }
+  sync_threads_.clear();
 }
 
 std::string SyncOperationManager::StartSync(const std::string& table_name) {
@@ -67,8 +77,16 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
   sync_states_[table_name].processed_rows = 0;
   sync_states_[table_name].error_message.clear();
 
-  // Launch async build
-  std::thread([this, table_name]() { BuildSnapshotAsync(table_name); }).detach();
+  // Clean up old thread if it exists and is joinable
+  {
+    std::lock_guard<std::mutex> thread_lock(sync_threads_mutex_);
+    auto it = sync_threads_.find(table_name);
+    if (it != sync_threads_.end() && it->second.joinable()) {
+      it->second.join();
+    }
+    // Launch async build (store thread instead of detaching)
+    sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  }
 
   return "OK SYNC STARTED table=" + table_name + " job_id=1";
 }

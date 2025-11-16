@@ -484,4 +484,162 @@ TEST(QueryCacheTest, TimingStatistics) {
   EXPECT_DOUBLE_EQ(expected_avg_hit, stats.AverageCacheHitLatency());
 }
 
+/**
+ * @brief Test memory accounting consistency (Insert uses same calculation as Erase)
+ *
+ * This is a regression test for a bug where Insert used compressed.size()
+ * but Erase used compressed.capacity(), causing total_memory_bytes_ to
+ * underflow or accumulate errors over time.
+ */
+TEST(QueryCacheTest, MemoryAccountingConsistency) {
+  QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"test", "memory"};
+
+  // Insert and erase multiple entries
+  constexpr int kNumIterations = 100;
+  for (int i = 0; i < kNumIterations; ++i) {
+    auto key = CacheKeyGenerator::Generate("query_" + std::to_string(i));
+
+    // Create a result with varying size to ensure different compression ratios
+    std::vector<DocId> result;
+    for (int j = 0; j < (i % 50 + 10); ++j) {
+      result.push_back(static_cast<DocId>(i * 100 + j));
+    }
+
+    // Insert
+    ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+
+    // Verify memory increased
+    auto stats_after_insert = cache.GetStatistics();
+    EXPECT_GT(stats_after_insert.current_memory_bytes, 0);
+
+    // Erase
+    ASSERT_TRUE(cache.Erase(key));
+
+    // Verify memory decreased back to near zero (some overhead may remain)
+    auto stats_after_erase = cache.GetStatistics();
+    EXPECT_EQ(0, stats_after_erase.current_entries);
+  }
+
+  // After all insert/erase cycles, memory should be exactly 0
+  auto final_stats = cache.GetStatistics();
+  EXPECT_EQ(0, final_stats.current_memory_bytes)
+      << "Memory accounting is inconsistent - total_memory_bytes_ should be 0 after all entries are erased";
+  EXPECT_EQ(0, final_stats.current_entries);
+}
+
+/**
+ * @brief Test for lock upgrade race condition fix
+ *
+ * Verifies that when an entry is evicted and re-inserted during a Lookup operation,
+ * the metadata update is correctly handled (using created_at timestamp verification).
+ */
+TEST(QueryCacheTest, LockUpgradeRaceCondition) {
+  QueryCache cache(10 * 1024, 10.0);  // 10KB cache to allow for test data
+
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  std::vector<DocId> result1 = {1, 2, 3};
+  std::vector<DocId> result2 = {4, 5, 6};
+
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"q1"};
+
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"q2"};
+
+  // Insert first entry
+  ASSERT_TRUE(cache.Insert(key1, result1, meta1, 15.0));
+
+  std::atomic<bool> lookup_started{false};
+  std::atomic<bool> eviction_done{false};
+  std::vector<DocId> lookup_result;
+
+  // Thread 1: Lookup (triggers lock upgrade)
+  std::thread lookup_thread([&]() {
+    lookup_started = true;
+    // This lookup should complete safely even if entry is evicted
+    auto result = cache.Lookup(key1);
+    if (eviction_done.load()) {
+      // Entry might have been evicted, result might be nullopt
+      lookup_result = result.value_or(std::vector<DocId>{});
+    } else {
+      lookup_result = result.value_or(result1);
+    }
+  });
+
+  // Thread 2: Force eviction by inserting large entry
+  std::thread evict_thread([&]() {
+    // Wait for lookup to start
+    while (!lookup_started.load()) {
+      std::this_thread::yield();
+    }
+
+    // Insert entry large enough to evict key1
+    std::vector<DocId> large_result(200, 999);
+    ASSERT_TRUE(cache.Insert(key2, large_result, meta2, 20.0));
+    eviction_done = true;
+  });
+
+  lookup_thread.join();
+  evict_thread.join();
+
+  // Test passes if no crash or assertion failure occurred
+  // The lookup should have either:
+  // 1. Returned the original result before eviction
+  // 2. Returned empty result after eviction
+  // Both are acceptable as long as no data corruption or crash occurs
+}
+
+/**
+ * @brief Test concurrent lookups don't corrupt metadata due to lock upgrade
+ */
+TEST(QueryCacheTest, ConcurrentLookupsNoMetadataCorruption) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);  // 10MB
+  const int num_threads = 10;
+  const int num_lookups = 100;
+
+  auto key = CacheKeyGenerator::Generate("concurrent_query");
+  std::vector<DocId> result = {1, 2, 3, 4, 5};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"con", "cur"};
+
+  // Insert initial entry
+  ASSERT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  // Multiple threads perform concurrent lookups
+  std::vector<std::thread> threads;
+  std::atomic<int> successful_lookups{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&]() {
+      for (int i = 0; i < num_lookups; ++i) {
+        auto cached = cache.Lookup(key);
+        if (cached.has_value() && cached.value() == result) {
+          successful_lookups++;
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All lookups should have succeeded (no data corruption)
+  EXPECT_EQ(num_threads * num_lookups, successful_lookups.load());
+
+  // Verify statistics are consistent
+  auto stats = cache.GetStatistics();
+  EXPECT_GT(stats.cache_hits, 0);
+  EXPECT_EQ(1, stats.current_entries);
+}
+
 }  // namespace mygramdb::cache

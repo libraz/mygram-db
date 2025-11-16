@@ -78,7 +78,9 @@ target_link_libraries(http_server_test
 
 target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
-gtest_discover_tests(http_server_test)
+gtest_discover_tests(http_server_test
+  PROPERTIES RESOURCE_LOCK http_server_port
+)
 
 # DumpHandler tests
 

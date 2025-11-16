@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <thread>
+
 #include "cache/cache_key.h"
 #include "cache/query_cache.h"
 
@@ -311,6 +313,91 @@ TEST(InvalidationManagerTest, MultipleQueriesSameNgrams) {
   EXPECT_EQ(2, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
   EXPECT_TRUE(invalidated.find(key2) != invalidated.end());
+}
+
+/**
+ * @brief Test for deadlock risk fix in ClearTable()
+ *
+ * Verifies that ClearTable() uses internal unlocked helper to avoid deadlock
+ * when calling UnregisterCacheEntry() while holding the mutex.
+ */
+TEST(InvalidationManagerTest, ClearTableNoDeadlock) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  const int num_entries = 100;
+  std::vector<CacheKey> keys;
+
+  // Register many cache entries for the same table
+  for (int i = 0; i < num_entries; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    keys.push_back(key);
+
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"ngram" + std::to_string(i)};
+
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  // Verify entries are registered
+  EXPECT_EQ(static_cast<size_t>(num_entries), mgr.GetTrackedEntryCount());
+
+  // ClearTable should complete without deadlock
+  mgr.ClearTable("posts");
+
+  // All entries should be removed
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("posts"));
+}
+
+/**
+ * @brief Test concurrent ClearTable() calls don't cause deadlock
+ */
+TEST(InvalidationManagerTest, ConcurrentClearTableNoDeadlock) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  const int num_threads = 5;
+  const int entries_per_table = 50;
+
+  // Register entries for multiple tables
+  for (int t = 0; t < num_threads; ++t) {
+    std::string table = "table" + std::to_string(t);
+    for (int i = 0; i < entries_per_table; ++i) {
+      auto key = CacheKeyGenerator::Generate(table + "_query" + std::to_string(i));
+      CacheMetadata meta;
+      meta.table = table;
+      meta.ngrams = {"ng" + std::to_string(i)};
+      mgr.RegisterCacheEntry(key, meta);
+    }
+  }
+
+  // Concurrent ClearTable calls for different tables
+  std::vector<std::thread> threads;
+  std::atomic<int> successful_clears{0};
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&, t]() {
+      std::string table = "table" + std::to_string(t);
+      try {
+        mgr.ClearTable(table);
+        successful_clears++;
+      } catch (...) {
+        // Should not throw
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All clears should succeed
+  EXPECT_EQ(num_threads, successful_clears.load());
+
+  // All entries should be removed
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount());
 }
 
 }  // namespace mygramdb::cache

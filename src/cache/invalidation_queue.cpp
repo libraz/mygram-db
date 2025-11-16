@@ -38,6 +38,9 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
 
       // Phase 2: Erase from cache immediately (no queuing)
       for (const auto& key : affected_keys) {
+        // Unregister metadata first to prevent memory leak even if Erase throws
+        invalidation_mgr_->UnregisterCacheEntry(key);
+
         if (cache_ != nullptr) {
           cache_->Erase(key);
         }
@@ -119,6 +122,11 @@ void InvalidationQueue::WorkerLoop() {
     const auto time_since_oldest = now - oldest_timestamp;
 
     if (pending_ngrams_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
+      // Check running_ before processing to handle spurious wakeup and shutdown
+      if (!running_.load()) {
+        break;
+      }
+
       // Process batch
       lock.unlock();
       ProcessBatch();
@@ -127,6 +135,11 @@ void InvalidationQueue::WorkerLoop() {
       const auto remaining_delay = max_delay_ - time_since_oldest;
       queue_cv_.wait_for(lock, remaining_delay,
                          [this] { return !running_.load() || pending_ngrams_.size() >= batch_size_; });
+
+      // After wakeup, check running_ before continuing
+      if (!running_.load()) {
+        break;
+      }
     }
   }
 }
