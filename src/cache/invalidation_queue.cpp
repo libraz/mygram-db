@@ -108,33 +108,41 @@ void InvalidationQueue::WorkerLoop() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
 
     // Wait for trigger: batch size reached or max delay elapsed
-    auto oldest_timestamp = std::chrono::steady_clock::time_point::max();
     if (!pending_ngrams_.empty()) {
       // Find oldest entry
+      auto oldest_timestamp = std::chrono::steady_clock::time_point::max();
       for (const auto& [key, timestamp] : pending_ngrams_) {
         if (timestamp < oldest_timestamp) {
           oldest_timestamp = timestamp;
         }
       }
-    }
 
-    const auto now = std::chrono::steady_clock::now();
-    const auto time_since_oldest = now - oldest_timestamp;
+      const auto now = std::chrono::steady_clock::now();
+      const auto time_since_oldest = now - oldest_timestamp;
 
-    if (pending_ngrams_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
-      // Check running_ before processing to handle spurious wakeup and shutdown
-      if (!running_.load()) {
-        break;
+      if (pending_ngrams_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
+        // Check running_ before processing to handle spurious wakeup and shutdown
+        if (!running_.load()) {
+          break;
+        }
+
+        // Process batch
+        lock.unlock();
+        ProcessBatch();
+      } else {
+        // Wait for signal or timeout
+        const auto remaining_delay = max_delay_ - time_since_oldest;
+        queue_cv_.wait_for(lock, remaining_delay,
+                           [this] { return !running_.load() || pending_ngrams_.size() >= batch_size_; });
+
+        // After wakeup, check running_ before continuing
+        if (!running_.load()) {
+          break;
+        }
       }
-
-      // Process batch
-      lock.unlock();
-      ProcessBatch();
     } else {
-      // Wait for signal or timeout
-      const auto remaining_delay = max_delay_ - time_since_oldest;
-      queue_cv_.wait_for(lock, remaining_delay,
-                         [this] { return !running_.load() || pending_ngrams_.size() >= batch_size_; });
+      // Queue is empty: wait indefinitely for new items
+      queue_cv_.wait(lock, [this] { return !running_.load() || !pending_ngrams_.empty(); });
 
       // After wakeup, check running_ before continuing
       if (!running_.load()) {
@@ -191,11 +199,13 @@ void InvalidationQueue::ProcessBatch() {
 
   // Erase entries from cache
   for (const auto& key : keys_to_erase) {
-    if (cache_ != nullptr) {
-      cache_->Erase(key);
-    }
+    // Unregister metadata first, then erase from cache
+    // This ensures metadata is cleaned up even if Erase() throws
     if (invalidation_mgr_ != nullptr) {
       invalidation_mgr_->UnregisterCacheEntry(key);
+    }
+    if (cache_ != nullptr) {
+      cache_->Erase(key);
     }
   }
 

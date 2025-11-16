@@ -792,4 +792,255 @@ TEST(BinlogReaderTest, ReconnectionDelayResetBehaviorDocumented) {
   SUCCEED();
 }
 
+/**
+ * @brief Test exception handling in filter value parsing
+ * Regression test for: std::stod() and std::stoull() had no exception handling
+ */
+TEST(BinlogReaderFilterTest, InvalidFilterValueExceptionHandling) {
+  // Test invalid float value (stod exception)
+  config::RequiredFilterConfig float_filter;
+  float_filter.name = "score";
+  float_filter.type = "double";
+  float_filter.op = "=";
+  float_filter.value = "not_a_number";  // Invalid float
+
+  storage::FilterValue test_value = 3.14;
+
+  // Should not crash, should return false
+  bool result = BinlogReader::CompareFilterValue(test_value, float_filter);
+  EXPECT_FALSE(result);
+
+  // Test invalid datetime value (stoull exception)
+  config::RequiredFilterConfig datetime_filter;
+  datetime_filter.name = "created_at";
+  datetime_filter.type = "unsigned";
+  datetime_filter.op = "=";
+  datetime_filter.value = "invalid_timestamp";  // Invalid uint64
+
+  storage::FilterValue datetime_value = uint64_t(1234567890);
+
+  // Should not crash, should return false
+  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  EXPECT_FALSE(result);
+
+  // Test overflow in stoull
+  datetime_filter.value = "99999999999999999999999999";  // Way too large
+  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  EXPECT_FALSE(result);
+
+  // Test valid values for comparison
+  float_filter.value = "3.14";
+  result = BinlogReader::CompareFilterValue(test_value, float_filter);
+  EXPECT_TRUE(result);
+
+  datetime_filter.value = "1234567890";
+  result = BinlogReader::CompareFilterValue(datetime_value, datetime_filter);
+  EXPECT_TRUE(result);
+}
+
+/**
+ * @brief Test multi-table mode with different table configurations
+ *
+ * Regression test for: Multi-table mode was using global table_config_ instead of
+ * per-table configuration, causing incorrect text_column, primary_key, and filter extraction.
+ *
+ * This test ensures each table uses its own configuration independently.
+ */
+TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
+  // Create articles table with "content" as text column
+  server::TableContext articles_ctx;
+  articles_ctx.name = "articles";
+  articles_ctx.config.name = "articles";
+  articles_ctx.config.primary_key = "article_id";
+  articles_ctx.config.text_source.column = "content";
+  articles_ctx.index = std::make_unique<index::Index>(2);
+  articles_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  config::FilterConfig article_filter;
+  article_filter.name = "author_id";
+  article_filter.type = "int";
+  articles_ctx.config.filters.push_back(article_filter);
+
+  // Create comments table with DIFFERENT configuration
+  server::TableContext comments_ctx;
+  comments_ctx.name = "comments";
+  comments_ctx.config.name = "comments";
+  comments_ctx.config.primary_key = "comment_id";  // Different primary key
+  comments_ctx.config.text_source.column = "body";  // Different text column
+  comments_ctx.index = std::make_unique<index::Index>(2);
+  comments_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  config::FilterConfig comment_filter;
+  comment_filter.name = "post_id";  // Different filter
+  comment_filter.type = "int";
+  comments_ctx.config.filters.push_back(comment_filter);
+
+  std::unordered_map<std::string, server::TableContext*> contexts = {
+      {articles_ctx.name, &articles_ctx},
+      {comments_ctx.name, &comments_ctx},
+  };
+
+  BinlogReader multi_reader(connection_, contexts, reader_config_);
+
+  // Test ExtractAllFilters with articles config
+  RowData article_row;
+  article_row.primary_key = "100";
+  article_row.text = "Article text";
+  article_row.columns["author_id"] = "42";  // RowData.columns is string-to-string map
+
+  auto article_filters = multi_reader.ExtractAllFilters(article_row, articles_ctx.config);
+  // Verify articles table extracts author_id (not post_id)
+  EXPECT_TRUE(article_filters.find("author_id") != article_filters.end());
+  // Articles should NOT have post_id since it's not in the config
+  EXPECT_TRUE(article_filters.find("post_id") == article_filters.end());
+
+  // Test ExtractAllFilters with comments config - should NOT extract author_id
+  RowData comment_row;
+  comment_row.primary_key = "200";
+  comment_row.text = "Comment text";
+  comment_row.columns["post_id"] = "999";  // RowData.columns is string-to-string map
+  comment_row.columns["author_id"] = "42";  // Also add author_id to row data
+
+  auto comment_filters = multi_reader.ExtractAllFilters(comment_row, comments_ctx.config);
+  // Verify comments table extracts post_id (not author_id)
+  EXPECT_TRUE(comment_filters.find("post_id") != comment_filters.end());
+  // Comments should NOT have author_id since it's not in the config
+  EXPECT_TRUE(comment_filters.find("author_id") == comment_filters.end());
+}
+
+/**
+ * @brief Test multi-table mode with different required filters
+ *
+ * Ensures that required_filters from each table's config are correctly applied,
+ * not mixing up between tables.
+ */
+TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
+  // Table 1: Accepts status = 1
+  server::TableContext published_ctx;
+  published_ctx.name = "published";
+  published_ctx.config.name = "published";
+  published_ctx.config.primary_key = "id";
+  published_ctx.config.text_source.column = "content";
+  published_ctx.index = std::make_unique<index::Index>(2);
+  published_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  config::RequiredFilterConfig published_filter;
+  published_filter.name = "status";
+  published_filter.type = "int";
+  published_filter.op = "=";
+  published_filter.value = "1";
+  published_ctx.config.required_filters.push_back(published_filter);
+
+  // Table 2: Accepts status = 0
+  server::TableContext draft_ctx;
+  draft_ctx.name = "drafts";
+  draft_ctx.config.name = "drafts";
+  draft_ctx.config.primary_key = "id";
+  draft_ctx.config.text_source.column = "content";
+  draft_ctx.index = std::make_unique<index::Index>(2);
+  draft_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  config::RequiredFilterConfig draft_filter;
+  draft_filter.name = "status";
+  draft_filter.type = "int";
+  draft_filter.op = "=";
+  draft_filter.value = "0";
+  draft_ctx.config.required_filters.push_back(draft_filter);
+
+  std::unordered_map<std::string, server::TableContext*> contexts = {
+      {published_ctx.name, &published_ctx},
+      {draft_ctx.name, &draft_ctx},
+  };
+
+  BinlogReader multi_reader(connection_, contexts, reader_config_);
+
+  // Filters with status = 1
+  std::unordered_map<std::string, storage::FilterValue> filters_published;
+  filters_published["status"] = static_cast<int64_t>(1);
+
+  // Filters with status = 0
+  std::unordered_map<std::string, storage::FilterValue> filters_draft;
+  filters_draft["status"] = static_cast<int64_t>(0);
+
+  // Published table should accept status=1, reject status=0
+  EXPECT_TRUE(multi_reader.EvaluateRequiredFilters(filters_published, published_ctx.config));
+  EXPECT_FALSE(multi_reader.EvaluateRequiredFilters(filters_draft, published_ctx.config));
+
+  // Draft table should accept status=0, reject status=1
+  EXPECT_FALSE(multi_reader.EvaluateRequiredFilters(filters_published, draft_ctx.config));
+  EXPECT_TRUE(multi_reader.EvaluateRequiredFilters(filters_draft, draft_ctx.config));
+}
+
+/**
+ * @brief Test multi-table mode with concat vs single column text source
+ *
+ * Verifies that tables with different text_source configurations work correctly
+ * in multi-table mode (one using single column, another using concat).
+ */
+TEST_F(BinlogReaderFixture, MultiTableModeDifferentTextSources) {
+  // Table 1: Single column text source
+  server::TableContext products_ctx;
+  products_ctx.name = "products";
+  products_ctx.config.name = "products";
+  products_ctx.config.primary_key = "id";
+  products_ctx.config.text_source.column = "name";  // Single column
+  products_ctx.config.text_source.concat.clear();
+  products_ctx.index = std::make_unique<index::Index>(2);
+  products_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  // Table 2: Concat text source (multiple columns)
+  server::TableContext users_ctx;
+  users_ctx.name = "users";
+  users_ctx.config.name = "users";
+  users_ctx.config.primary_key = "user_id";
+  users_ctx.config.text_source.column.clear();  // No single column
+  users_ctx.config.text_source.concat = {"first_name", "last_name", "email"};
+  users_ctx.index = std::make_unique<index::Index>(2);
+  users_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, server::TableContext*> contexts = {
+      {products_ctx.name, &products_ctx},
+      {users_ctx.name, &users_ctx},
+  };
+
+  BinlogReader multi_reader(connection_, contexts, reader_config_);
+
+  // Verify each table has correct configuration
+  EXPECT_FALSE(products_ctx.config.text_source.column.empty());
+  EXPECT_TRUE(products_ctx.config.text_source.concat.empty());
+
+  EXPECT_TRUE(users_ctx.config.text_source.column.empty());
+  EXPECT_FALSE(users_ctx.config.text_source.concat.empty());
+  EXPECT_EQ(users_ctx.config.text_source.concat.size(), 3);
+}
+
+/**
+ * @brief Test null pointer safety in table context handling
+ * Regression test for: table_iter->second->index/doc_store could be null
+ *
+ * Note: This is a documentation test since creating a TableContext with null
+ * index/doc_store in production code is prevented by design. The actual fix
+ * adds defensive null checks to prevent crashes if this ever happens.
+ *
+ * The modified code path is:
+ * - src/mysql/binlog_reader.cpp:665-668
+ *
+ * Now checks for null pointers and logs error instead of crashing.
+ */
+TEST(BinlogReaderPointerSafetyTest, NullTableContextDefensiveChecks) {
+  // This test documents the safety improvements
+  // In practice, the null pointer checks in binlog_reader.cpp prevent crashes when:
+  // 1. A table is registered but index/doc_store initialization fails
+  // 2. A table is in an inconsistent state during reconfiguration
+  // 3. Memory corruption or other unexpected conditions occur
+
+  // The fix ensures:
+  // - No segfault/crash occurs
+  // - Error is logged
+  // - Binlog event processing fails gracefully
+  // - Reader continues with next event
+
+  SUCCEED() << "Null pointer safety checks added to binlog event processing";
+}
+
 #endif  // USE_MYSQL

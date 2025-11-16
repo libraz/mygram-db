@@ -59,7 +59,10 @@ target_link_libraries(invalidation_manager_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(invalidation_manager_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid invalidation manager state conflicts
+gtest_discover_tests(invalidation_manager_test
+  PROPERTIES RESOURCE_LOCK cache_state
+)
 
 # QueryCache test
 add_executable(query_cache_test
@@ -71,7 +74,10 @@ target_link_libraries(query_cache_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(query_cache_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+gtest_discover_tests(query_cache_test
+  PROPERTIES RESOURCE_LOCK cache_state
+)
 
 # CacheManager test
 add_executable(cache_manager_test
@@ -85,7 +91,10 @@ target_link_libraries(cache_manager_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(cache_manager_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+gtest_discover_tests(cache_manager_test
+  PROPERTIES RESOURCE_LOCK cache_state
+)
 
 # InvalidationQueue test
 add_executable(invalidation_queue_test
@@ -97,4 +106,7 @@ target_link_libraries(invalidation_queue_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(invalidation_queue_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid invalidation queue conflicts
+gtest_discover_tests(invalidation_queue_test
+  PROPERTIES RESOURCE_LOCK cache_state
+)

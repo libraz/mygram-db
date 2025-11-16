@@ -270,6 +270,12 @@ std::optional<std::string> Connection::GetPurgedGTID() {
 }
 
 bool Connection::SetGTIDNext(const std::string& gtid) {
+  // Validate GTID format using existing parser
+  if (gtid != "AUTOMATIC" && !GTID::Parse(gtid).has_value()) {
+    spdlog::error("Invalid GTID format: {}", gtid);
+    return false;
+  }
+
   std::string query = "SET GTID_NEXT = '" + gtid + "'";
   return ExecuteUpdate(query);
 }
@@ -370,19 +376,29 @@ std::optional<std::string> Connection::GetLatestGTID() {
 
 bool Connection::ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
                                       std::string& error_message) {
+  // Escape parameters to prevent SQL injection
+  std::vector<char> escaped_db(database.length() * 2 + 1);
+  std::vector<char> escaped_table(table.length() * 2 + 1);
+  std::vector<char> escaped_column(column.length() * 2 + 1);
+  mysql_real_escape_string(mysql_, escaped_db.data(), database.c_str(), database.length());
+  mysql_real_escape_string(mysql_, escaped_table.data(), table.c_str(), table.length());
+  mysql_real_escape_string(mysql_, escaped_column.data(), column.c_str(), column.length());
+
   // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
   std::string query =
       "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = '" +
-      database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column +
+      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
+      "' AND COLUMN_NAME = '" + std::string(escaped_column.data()) +
       "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
       "WHERE TABLE_SCHEMA = '" +
-      database + "' AND TABLE_NAME = '" + table +
+      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
       "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = '" +
-      database + "' AND TABLE_NAME = '" + table + "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
+      "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
   MySQLResult result = Execute(query);
   if (!result) {
@@ -396,7 +412,16 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
     return false;
   }
 
-  int count = std::stoi(row[0]);
+  int count;
+  try {
+    count = std::stoi(row[0]);
+  } catch (const std::invalid_argument& e) {
+    error_message = "Invalid count value in unique column validation";
+    return false;
+  } catch (const std::out_of_range& e) {
+    error_message = "Count value out of range in unique column validation";
+    return false;
+  }
   // result is automatically freed by MySQLResult destructor
 
   if (count == 0) {
@@ -405,14 +430,22 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
     std::string column_check_query =
         "SELECT COUNT(*) FROM information_schema.COLUMNS "
         "WHERE TABLE_SCHEMA = '" +
-        database + "' AND TABLE_NAME = '" + table + "' AND COLUMN_NAME = '" + column + "'";
+        std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
+        "' AND COLUMN_NAME = '" + std::string(escaped_column.data()) + "'";
 
     MySQLResult col_result = Execute(column_check_query);
     if (col_result) {
       MYSQL_ROW col_row = mysql_fetch_row(col_result.get());
-      if ((col_row != nullptr) && (col_row[0] != nullptr) && std::stoi(col_row[0]) == 0) {
-        error_message = "Column '" + column + "' does not exist in table '" + database + "." + table + "'";
-        return false;
+      if ((col_row != nullptr) && (col_row[0] != nullptr)) {
+        try {
+          if (std::stoi(col_row[0]) == 0) {
+            error_message = "Column '" + column + "' does not exist in table '" + database + "." + table + "'";
+            return false;
+          }
+        } catch (const std::exception& e) {
+          error_message = "Invalid column count value";
+          return false;
+        }
       }
       // col_result is automatically freed by MySQLResult destructor
     }

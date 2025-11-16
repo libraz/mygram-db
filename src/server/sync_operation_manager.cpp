@@ -269,6 +269,16 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     auto* ctx = table_iter->second;
 
+    // Check for null pointers
+    if (!ctx->index || !ctx->doc_store) {
+      update_state([](SyncState& state) {
+        state.status = "FAILED";
+        state.error_message = "Table context has null index or doc_store";
+        state.is_running = false;
+      });
+      return;
+    }
+
     // Build snapshot
     storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->build);
 

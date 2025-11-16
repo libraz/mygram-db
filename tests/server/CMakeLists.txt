@@ -9,7 +9,10 @@ target_link_libraries(server_stats_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(server_stats_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid server stats state conflicts
+gtest_discover_tests(server_stats_test
+  PROPERTIES RESOURCE_LOCK server_state
+)
 
 # ResponseFormatter tests
 
@@ -22,7 +25,10 @@ target_link_libraries(response_formatter_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(response_formatter_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid formatter state conflicts
+gtest_discover_tests(response_formatter_test
+  PROPERTIES RESOURCE_LOCK server_state
+)
 
 # TCP Server tests
 
@@ -35,7 +41,10 @@ target_link_libraries(tcp_server_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(tcp_server_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(tcp_server_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
 
 # TCP Server Multi-Table tests
 
@@ -48,7 +57,10 @@ target_link_libraries(tcp_server_multi_table_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(tcp_server_multi_table_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(tcp_server_multi_table_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
 
 # Thread Pool tests
 
@@ -61,7 +73,10 @@ target_link_libraries(thread_pool_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(thread_pool_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
+gtest_discover_tests(thread_pool_test
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
 
 # HTTP Server tests
 
@@ -78,8 +93,9 @@ target_link_libraries(http_server_test
 
 target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(http_server_test
-  PROPERTIES RESOURCE_LOCK http_server_port
+  PROPERTIES RESOURCE_LOCK server_port
 )
 
 # DumpHandler tests
@@ -93,7 +109,10 @@ target_link_libraries(dump_handler_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(dump_handler_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
+gtest_discover_tests(dump_handler_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # GTID Dump Integration tests
 
@@ -106,7 +125,10 @@ target_link_libraries(gtid_dump_integration_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(gtid_dump_integration_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
+gtest_discover_tests(gtid_dump_integration_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # Dump Auto-Save tests
 
@@ -119,7 +141,10 @@ target_link_libraries(dump_auto_save_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(dump_auto_save_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
+gtest_discover_tests(dump_auto_save_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # SyncHandler tests
 
@@ -133,7 +158,10 @@ target_link_libraries(sync_handler_test
   GTest::gmock
 )
 
-gtest_discover_tests(sync_handler_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
+gtest_discover_tests(sync_handler_test
+  PROPERTIES RESOURCE_LOCK mysql_connection
+)
 
 # Config Handler tests
 
@@ -146,7 +174,10 @@ target_link_libraries(config_handler_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(config_handler_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid server state conflicts
+gtest_discover_tests(config_handler_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
 
 # ConnectionIOHandler tests
 
@@ -159,7 +190,10 @@ target_link_libraries(connection_io_handler_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(connection_io_handler_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid I/O handler conflicts
+gtest_discover_tests(connection_io_handler_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
 
 # RequestDispatcher tests
 
@@ -172,4 +206,7 @@ target_link_libraries(request_dispatcher_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(request_dispatcher_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid request dispatcher conflicts
+gtest_discover_tests(request_dispatcher_test
+  PROPERTIES RESOURCE_LOCK server_port
+)

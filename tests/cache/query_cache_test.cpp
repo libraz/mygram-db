@@ -642,4 +642,53 @@ TEST(QueryCacheTest, ConcurrentLookupsNoMetadataCorruption) {
   EXPECT_EQ(1, stats.current_entries);
 }
 
+/**
+ * @brief Test that stats_.total_queries is accurately counted under concurrent access
+ * Regression test for: stats_.total_queries++ was incremented before mutex lock
+ */
+TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);  // 10MB
+
+  // Insert some test data
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  std::vector<DocId> result1 = {1, 2, 3};
+  std::vector<DocId> result2 = {4, 5, 6};
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"tes", "est"};
+
+  cache.Insert(key1, result1, meta, 15.0);
+  cache.Insert(key2, result2, meta, 15.0);
+
+  // Concurrent lookups from multiple threads
+  const int num_threads = 10;
+  const int lookups_per_thread = 1000;
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&cache, &key1, &key2, lookups_per_thread]() {
+      for (int j = 0; j < lookups_per_thread; ++j) {
+        // Alternate between two keys
+        auto key = (j % 2 == 0) ? key1 : key2;
+        [[maybe_unused]] auto result = cache.Lookup(key);
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Verify total_queries is exactly what we expect
+  // Before the fix: this could be less than expected due to race condition
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(num_threads * lookups_per_thread, stats.total_queries);
+
+  // All queries should be cache hits
+  EXPECT_EQ(num_threads * lookups_per_thread, stats.cache_hits);
+  EXPECT_EQ(0, stats.cache_misses);
+}
+
 }  // namespace mygramdb::cache

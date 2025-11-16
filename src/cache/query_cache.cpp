@@ -17,10 +17,10 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Start timing
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  stats_.total_queries++;
-
   // Shared lock for read
   std::shared_lock lock(mutex_);
+
+  stats_.total_queries++;
 
   auto iter = cache_map_.find(key);
   if (iter == cache_map_.end()) {

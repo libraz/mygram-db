@@ -10,7 +10,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gtest_main
   )
 
-  gtest_discover_tests(mysql_connection_test)
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(mysql_connection_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 
   # Binlog reader tests
   add_executable(mysql_binlog_reader_test
@@ -23,7 +26,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gmock
   )
 
-  gtest_discover_tests(mysql_binlog_reader_test)
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(mysql_binlog_reader_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 
   # Rows parser tests
   add_executable(rows_parser_test
@@ -35,7 +41,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gtest_main
   )
 
-  gtest_discover_tests(rows_parser_test)
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(rows_parser_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 
   # Connection validation tests
   add_executable(connection_validate_test
@@ -48,7 +57,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gmock
   )
 
-  gtest_discover_tests(connection_validate_test)
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(connection_validate_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 
   # Binlog parsing tests (MySQL 8.0 compatibility)
   add_executable(binlog_parsing_test
@@ -60,7 +72,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gtest_main
   )
 
-  gtest_discover_tests(binlog_parsing_test)
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(binlog_parsing_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 
   # Integration tests (disabled by default, require MySQL server)
   add_executable(mysql_connection_integration_test

@@ -9,7 +9,10 @@ target_link_libraries(document_store_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(document_store_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(document_store_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # DocumentStore concurrent tests
 add_executable(document_store_concurrent_test
@@ -21,7 +24,10 @@ target_link_libraries(document_store_concurrent_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(document_store_concurrent_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(document_store_concurrent_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # DocumentStore serialization tests
 add_executable(document_store_serialization_test
@@ -33,7 +39,10 @@ target_link_libraries(document_store_serialization_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(document_store_serialization_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(document_store_serialization_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # Dump commands tests (DUMP SAVE/LOAD/VERIFY/INFO)
 add_executable(dump_commands_test
@@ -45,7 +54,10 @@ target_link_libraries(dump_commands_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(dump_commands_test)
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(dump_commands_test
+  PROPERTIES RESOURCE_LOCK storage_io
+)
 
 # Dump save/load integration test (MySQL only)
 if(USE_MYSQL AND MYSQL_FOUND)

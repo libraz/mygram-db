@@ -10,6 +10,8 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "utils/memory_utils.h"
+
 using namespace mygramdb::config;
 using json = nlohmann::json;
 
@@ -547,4 +549,113 @@ TEST(ConfigTest, MysqlSslPartialConfiguration) {
   EXPECT_TRUE(config.mysql.ssl_cert.empty());
   EXPECT_TRUE(config.mysql.ssl_key.empty());
   EXPECT_TRUE(config.mysql.ssl_verify_server_cert);  // default
+}
+
+/**
+ * @brief Test cache memory exceeding 50% of physical memory
+ */
+TEST(ConfigTest, CacheMemoryExceedsPhysicalMemoryLimit) {
+  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  if (!system_info) {
+    GTEST_SKIP() << "Cannot get system memory info, skipping test";
+  }
+
+  // Calculate more than 50% of physical memory in MB
+  uint64_t physical_memory_mb = system_info->total_physical_bytes / 1024 / 1024;
+  uint64_t excessive_cache_mb = static_cast<uint64_t>(physical_memory_mb * 0.6);  // 60% > 50%
+
+  std::ofstream f("cache_excessive.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "cache:\n";
+  f << "  enabled: true\n";
+  f << "  max_memory_mb: " << excessive_cache_mb << "\n";
+  f.close();
+
+  EXPECT_THROW(
+      {
+        try {
+          LoadConfig("cache_excessive.yaml");
+        } catch (const std::runtime_error& e) {
+          std::string error_msg(e.what());
+          EXPECT_TRUE(error_msg.find("Cache configuration error") != std::string::npos);
+          EXPECT_TRUE(error_msg.find("exceeds safe limit") != std::string::npos);
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+/**
+ * @brief Test cache memory within 50% of physical memory
+ */
+TEST(ConfigTest, CacheMemoryWithinPhysicalMemoryLimit) {
+  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  if (!system_info) {
+    GTEST_SKIP() << "Cannot get system memory info, skipping test";
+  }
+
+  // Calculate less than 50% of physical memory in MB
+  uint64_t physical_memory_mb = system_info->total_physical_bytes / 1024 / 1024;
+  uint64_t safe_cache_mb = static_cast<uint64_t>(physical_memory_mb * 0.3);  // 30% < 50%
+
+  std::ofstream f("cache_safe.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "cache:\n";
+  f << "  enabled: true\n";
+  f << "  max_memory_mb: " << safe_cache_mb << "\n";
+  f.close();
+
+  // Should load successfully
+  Config config = LoadConfig("cache_safe.yaml");
+  EXPECT_TRUE(config.cache.enabled);
+  EXPECT_EQ(config.cache.max_memory_bytes, safe_cache_mb * 1024 * 1024);
+}
+
+/**
+ * @brief Test cache disabled does not trigger memory validation
+ */
+TEST(ConfigTest, CacheDisabledNoMemoryValidation) {
+  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  if (!system_info) {
+    GTEST_SKIP() << "Cannot get system memory info, skipping test";
+  }
+
+  // Even with excessive memory setting, disabled cache should not fail
+  uint64_t physical_memory_mb = system_info->total_physical_bytes / 1024 / 1024;
+  uint64_t excessive_cache_mb = static_cast<uint64_t>(physical_memory_mb * 0.9);  // 90% > 50%
+
+  std::ofstream f("cache_disabled.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "cache:\n";
+  f << "  enabled: false\n";
+  f << "  max_memory_mb: " << excessive_cache_mb << "\n";
+  f.close();
+
+  // Should load successfully because cache is disabled
+  Config config = LoadConfig("cache_disabled.yaml");
+  EXPECT_FALSE(config.cache.enabled);
 }

@@ -501,12 +501,13 @@ bool BinlogReader::EvaluateRequiredFilters(const std::unordered_map<std::string,
                      });
 }
 
-std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFilters(const RowData& row_data) const {
+std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFilters(
+    const RowData& row_data, const config::TableConfig& table_config) const {
   std::unordered_map<std::string, storage::FilterValue> all_filters;
 
   // Convert required_filters to FilterConfig format for extraction
   std::vector<config::FilterConfig> required_as_filters;
-  for (const auto& req_filter : table_config_.required_filters) {
+  for (const auto& req_filter : table_config.required_filters) {
     config::FilterConfig filter_config;
     filter_config.name = req_filter.name;
     filter_config.type = req_filter.type;
@@ -520,10 +521,14 @@ std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFi
   all_filters.insert(required_filters.begin(), required_filters.end());
 
   // Extract optional filters columns
-  auto optional_filters = ExtractFilters(row_data, table_config_.filters);
+  auto optional_filters = ExtractFilters(row_data, table_config.filters);
   all_filters.insert(optional_filters.begin(), optional_filters.end());
 
   return all_filters;
+}
+
+std::unordered_map<std::string, storage::FilterValue> BinlogReader::ExtractAllFilters(const RowData& row_data) const {
+  return ExtractAllFilters(row_data, table_config_);
 }
 
 bool BinlogReader::CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter) {
@@ -568,7 +573,13 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value, const c
   } else if (std::holds_alternative<double>(value)) {
     // Float comparison
     double val = std::get<double>(value);
-    double target = std::stod(filter.value);
+    double target;
+    try {
+      target = std::stod(filter.value);
+    } catch (const std::exception& e) {
+      spdlog::warn("Invalid float value in filter: {}", filter.value);
+      return false;
+    }
 
     if (filter.op == "=") {
       return std::abs(val - target) < 1e-9;
@@ -620,7 +631,13 @@ bool BinlogReader::CompareFilterValue(const storage::FilterValue& value, const c
     // For datetime comparison, we need to parse target value
     // For now, assume target is numeric (epoch timestamp)
     // TODO: Add proper datetime parsing if needed
-    uint64_t target = std::stoull(filter.value);
+    uint64_t target;
+    try {
+      target = std::stoull(filter.value);
+    } catch (const std::exception& e) {
+      spdlog::warn("Invalid datetime value in filter: {}", filter.value);
+      return false;
+    }
 
     if (filter.op == "=") {
       return val == target;
@@ -661,6 +678,10 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
         server_stats_->IncrementReplEventsSkippedOtherTables();
       }
       return true;
+    }
+    if (!table_iter->second->index || !table_iter->second->doc_store) {
+      spdlog::error("Table context for '{}' has null index or doc_store", event.table_name);
+      return false;
     }
     current_index = table_iter->second->index.get();
     current_doc_store = table_iter->second->doc_store.get();
@@ -921,17 +942,30 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       }
 
       // Parse rows using rows_parser
-      // Determine text column from config
+      // Determine text column and primary key from config
+      // In multi-table mode, get config from table_contexts_; otherwise use table_config_
+      const config::TableConfig* current_config = nullptr;
+      if (multi_table_mode_) {
+        auto table_iter = table_contexts_.find(table_meta->table_name);
+        if (table_iter == table_contexts_.end()) {
+          spdlog::warn("WRITE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          return std::nullopt;
+        }
+        current_config = &table_iter->second->config;
+      } else {
+        current_config = &table_config_;
+      }
+
       std::string text_column;
-      if (!table_config_.text_source.column.empty()) {
-        text_column = table_config_.text_source.column;
-      } else if (!table_config_.text_source.concat.empty()) {
-        text_column = table_config_.text_source.concat[0];
+      if (!current_config->text_source.column.empty()) {
+        text_column = current_config->text_source.column;
+      } else if (!current_config->text_source.concat.empty()) {
+        text_column = current_config->text_source.concat[0];
       } else {
         text_column = "";
       }
 
-      auto rows_opt = ParseWriteRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
+      auto rows_opt = ParseWriteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return std::nullopt;
@@ -946,8 +980,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // Extract all filters (required + optional) from row data
-      event.filters = ExtractAllFilters(row);
+      // Extract all filters (required + optional) from row data using the correct config
+      event.filters = ExtractAllFilters(row, *current_config);
 
       spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
                     event.filters.size());
@@ -973,18 +1007,31 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
         return std::nullopt;
       }
 
-      // Determine text column from config
+      // Determine text column and primary key from config
+      // In multi-table mode, get config from table_contexts_; otherwise use table_config_
+      const config::TableConfig* current_config = nullptr;
+      if (multi_table_mode_) {
+        auto table_iter = table_contexts_.find(table_meta->table_name);
+        if (table_iter == table_contexts_.end()) {
+          spdlog::warn("UPDATE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          return std::nullopt;
+        }
+        current_config = &table_iter->second->config;
+      } else {
+        current_config = &table_config_;
+      }
+
       std::string text_column;
-      if (!table_config_.text_source.column.empty()) {
-        text_column = table_config_.text_source.column;
-      } else if (!table_config_.text_source.concat.empty()) {
-        text_column = table_config_.text_source.concat[0];
+      if (!current_config->text_source.column.empty()) {
+        text_column = current_config->text_source.column;
+      } else if (!current_config->text_source.concat.empty()) {
+        text_column = current_config->text_source.concat[0];
       } else {
         text_column = "";
       }
 
       // Parse rows using rows_parser
-      auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
+      auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!row_pairs_opt || row_pairs_opt->empty()) {
         return std::nullopt;
@@ -1001,8 +1048,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       event.text = after_row.text;
       event.gtid = current_gtid_;
 
-      // Extract all filters (required + optional) from after image
-      event.filters = ExtractAllFilters(after_row);
+      // Extract all filters (required + optional) from after image using the correct config
+      event.filters = ExtractAllFilters(after_row, *current_config);
 
       // Note: For proper index update, we should use before image text
       // to remove old n-grams. For now, simplified implementation.
@@ -1031,18 +1078,31 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
         return std::nullopt;
       }
 
-      // Determine text column from config
+      // Determine text column and primary key from config
+      // In multi-table mode, get config from table_contexts_; otherwise use table_config_
+      const config::TableConfig* current_config = nullptr;
+      if (multi_table_mode_) {
+        auto table_iter = table_contexts_.find(table_meta->table_name);
+        if (table_iter == table_contexts_.end()) {
+          spdlog::warn("DELETE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          return std::nullopt;
+        }
+        current_config = &table_iter->second->config;
+      } else {
+        current_config = &table_config_;
+      }
+
       std::string text_column;
-      if (!table_config_.text_source.column.empty()) {
-        text_column = table_config_.text_source.column;
-      } else if (!table_config_.text_source.concat.empty()) {
-        text_column = table_config_.text_source.concat[0];
+      if (!current_config->text_source.column.empty()) {
+        text_column = current_config->text_source.column;
+      } else if (!current_config->text_source.concat.empty()) {
+        text_column = current_config->text_source.concat[0];
       } else {
         text_column = "";
       }
 
       // Parse rows using rows_parser
-      auto rows_opt = ParseDeleteRowsEvent(buffer, length, table_meta, table_config_.primary_key, text_column);
+      auto rows_opt = ParseDeleteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return std::nullopt;
@@ -1057,8 +1117,8 @@ std::optional<BinlogEvent> BinlogReader::ParseBinlogEvent(const unsigned char* b
       event.text = row.text;
       event.gtid = current_gtid_;
 
-      // Extract all filters (required + optional) from row data (before image for DELETE)
-      event.filters = ExtractAllFilters(row);
+      // Extract all filters (required + optional) from row data (before image for DELETE) using the correct config
+      event.filters = ExtractAllFilters(row, *current_config);
 
       spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
                     event.filters.size());
@@ -1373,7 +1433,22 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   }
 
   // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
-  std::string query = "SHOW COLUMNS FROM `" + metadata.database_name + "`.`" + metadata.table_name + "`";
+  // Escape backticks in identifier names
+  auto escape_identifier = [](const std::string& id) {
+    std::string escaped;
+    escaped.reserve(id.length());
+    for (char c : id) {
+      if (c == '`') {
+        escaped += "``";  // Double backtick for escaping
+      } else {
+        escaped += c;
+      }
+    }
+    return escaped;
+  };
+
+  std::string query = "SHOW COLUMNS FROM `" + escape_identifier(metadata.database_name) + "`.`" +
+                      escape_identifier(metadata.table_name) + "`";
 
   MySQLResult result = connection_.Execute(query);
   if (!result) {

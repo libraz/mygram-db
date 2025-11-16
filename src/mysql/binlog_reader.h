@@ -250,7 +250,17 @@ class BinlogReader {
   /**
    * @brief Extract all filter columns (both required and optional) from row data
    * @param row_data Row data from binlog
+   * @param table_config Table configuration to use for filter extraction
    * @return Map of filter name to FilterValue
+   */
+  std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
+      const RowData& row_data, const config::TableConfig& table_config) const;
+
+  /**
+   * @brief Extract all filter columns using default table_config_ (single-table mode)
+   * @param row_data Row data from binlog
+   * @return Map of filter name to FilterValue
+   * @deprecated Use the version with explicit table_config parameter
    */
   std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(const RowData& row_data) const;
 

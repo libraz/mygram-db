@@ -16,6 +16,8 @@
 #include <stdexcept>
 
 #include "config_schema_embedded.h"  // Auto-generated embedded schema
+#include "utils/memory_utils.h"
+#include "utils/string_utils.h"
 
 #ifdef USE_MYSQL
 #include "mysql/connection.h"
@@ -594,6 +596,34 @@ Config ParseConfigFromJson(const json& root) {
       }
       if (invalidation.contains("max_delay_ms")) {
         config.cache.invalidation.max_delay_ms = invalidation["max_delay_ms"].get<int>();
+      }
+    }
+
+    // Validate cache memory against physical memory
+    if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
+      auto system_info = utils::GetSystemMemoryInfo();
+      if (system_info) {
+        constexpr double kMaxCacheRatio = 0.5;  // Maximum 50% of physical memory
+        uint64_t max_allowed_cache = static_cast<uint64_t>(
+            static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
+
+        if (config.cache.max_memory_bytes > max_allowed_cache) {
+          std::stringstream err_msg;
+          err_msg << "Cache configuration error: max_memory_mb exceeds safe limit\n";
+          err_msg << "  Configured cache size: " << utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
+          err_msg << "  Physical memory: " << utils::FormatBytes(system_info->total_physical_bytes) << "\n";
+          err_msg << "  Maximum allowed (50% of physical memory): " << utils::FormatBytes(max_allowed_cache) << "\n";
+          err_msg << "  Recommendation:\n";
+          err_msg << "    - Set cache.max_memory_mb to at most "
+                  << (max_allowed_cache / 1024 / 1024) << " MB\n";
+          err_msg << "    - Consider system memory requirements for index and operations\n";
+          err_msg << "  Example:\n";
+          err_msg << "    cache:\n";
+          err_msg << "      max_memory_mb: " << (max_allowed_cache / 1024 / 1024);
+          throw std::runtime_error(err_msg.str());
+        }
+      } else {
+        spdlog::warn("Unable to validate cache memory against physical memory (could not get system memory info)");
       }
     }
   }

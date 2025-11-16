@@ -259,6 +259,10 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       SendError(res, kHttpNotFound, "Table not found: " + table);
       return;
     }
+    if (!table_iter->second->index || !table_iter->second->doc_store) {
+      SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
+      return;
+    }
     auto* current_index = table_iter->second->index.get();
     auto* current_doc_store = table_iter->second->doc_store.get();
 
@@ -728,6 +732,10 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     auto table_iter = table_contexts_.find(table);
     if (table_iter == table_contexts_.end()) {
       SendError(res, kHttpNotFound, "Table not found: " + table);
+      return;
+    }
+    if (!table_iter->second->doc_store) {
+      SendError(res, kHttpInternalServerError, "Table context has null doc_store");
       return;
     }
     auto* current_doc_store = table_iter->second->doc_store.get();

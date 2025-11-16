@@ -693,4 +693,75 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
       << "Stop() with pending items took too long";
 }
 
+/**
+ * @brief Test empty queue handling (time calculation bug regression test)
+ * Regression test for: pending_ngrams_ empty caused negative time calculation
+ */
+TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Start with empty queue - should not crash or cause undefined behavior
+  queue.Start();
+
+  // Wait a bit to ensure worker thread is in wait state
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Now enqueue an item - should wake up the worker thread
+  queue.Enqueue("posts", "", "test ngram");
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+  queue.Stop();
+
+  // Test passed if no crash occurred
+  SUCCEED();
+}
+
+/**
+ * @brief Test resource cleanup order (Unregister before Erase)
+ * Regression test for: Erase() exception could prevent UnregisterCacheEntry()
+ */
+TEST(InvalidationQueueTest, ResourceCleanupOrder) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Insert some data into cache and register with invalidation manager
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+
+  std::vector<DocId> result = {1, 2, 3};
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est", "st_"};
+
+  cache.Insert(key1, result, meta, 15.0);
+  cache.Insert(key2, result, meta, 15.0);
+
+  // Register with invalidation manager
+  mgr.RegisterCacheEntry(key1, meta);
+  mgr.RegisterCacheEntry(key2, meta);
+
+  queue.Start();
+
+  // Enqueue invalidations to trigger cleanup
+  queue.Enqueue("posts", "", "test text");
+
+  // Wait for processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  queue.Stop();
+
+  // The important part is no crash occurred during cleanup
+  // (even if Erase() might throw, Unregister should happen first)
+  SUCCEED();
+}
+
 }  // namespace mygramdb::cache

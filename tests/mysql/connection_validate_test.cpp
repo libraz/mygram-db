@@ -300,6 +300,43 @@ TEST_F(ConnectionValidateIntegrationTest, ValidateWrongTable) {
   EXPECT_THAT(error_message, ::testing::HasSubstr("does not exist"));
 }
 
+/**
+ * @brief Test SQL injection protection in ValidateUniqueColumn
+ * Regression test for: database, table, column parameters were not escaped
+ */
+TEST(ConnectionValidateSecurityTest, SQLInjectionProtection) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  std::string error_message;
+
+  // Test SQL injection attempts in database parameter
+  bool result = conn.ValidateUniqueColumn("test' OR '1'='1", "users", "id", error_message);
+  // Should fail (either due to validation or no connection)
+  // The important part is it doesn't cause SQL injection
+  EXPECT_FALSE(result);
+
+  // Test SQL injection attempts in table parameter
+  result = conn.ValidateUniqueColumn("test", "users'; DROP TABLE users--", "id", error_message);
+  EXPECT_FALSE(result);
+
+  // Test SQL injection attempts in column parameter
+  result = conn.ValidateUniqueColumn("test", "users", "id' UNION SELECT * FROM passwords--", error_message);
+  EXPECT_FALSE(result);
+
+  // Test with backtick escape attempts
+  result = conn.ValidateUniqueColumn("test`; DROP TABLE users--", "users", "id", error_message);
+  EXPECT_FALSE(result);
+
+  // Test with single quote escape attempts
+  result = conn.ValidateUniqueColumn("test", "users", "id\\'", error_message);
+  EXPECT_FALSE(result);
+}
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

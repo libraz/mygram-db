@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
+.PHONY: help build test test-parallel-full test-parallel-2 test-verbose test-sequential test-debug clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
 
 # Build directory
 BUILD_DIR := build
@@ -20,7 +20,12 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make build     - Build the project (default)"
-	@echo "  make test      - Run all tests"
+	@echo "  make test      - Run all tests (limited parallelism j=4, recommended)"
+	@echo "  make test-parallel-2      - Run tests with j=2 (safer)"
+	@echo "  make test-parallel-full   - Run tests with full parallelism (may hang)"
+	@echo "  make test-verbose         - Run tests with verbose output (for debugging hangs)"
+	@echo "  make test-sequential      - Run tests sequentially (for identifying hanging tests)"
+	@echo "  make test-debug           - Run tests with debug output"
 	@echo "  make clean     - Clean build directory"
 	@echo "  make rebuild   - Clean and rebuild"
 	@echo "  make install   - Install binaries and files"
@@ -42,6 +47,7 @@ help:
 	@echo "Examples:"
 	@echo "  make                    # Build the project"
 	@echo "  make test               # Run tests"
+	@echo "  make test-sequential    # Run tests one at a time to identify hangs"
 	@echo "  make install            # Install to $(PREFIX) (default: /usr/local)"
 	@echo "  make PREFIX=/opt/mygramdb install  # Install to custom location"
 	@echo "  make CMAKE_OPTIONS=\"-DENABLE_ASAN=ON\" configure  # Enable AddressSanitizer"
@@ -60,10 +66,43 @@ build: configure
 	$(MAKE) -C $(BUILD_DIR) -j$$(nproc)
 	@echo "Build complete!"
 
-# Run tests
+# Run tests (limited parallelism to avoid resource conflicts)
 test: build
-	@echo "Running tests..."
+	@echo "Running tests with limited parallelism (j=4)..."
+	cd $(BUILD_DIR) && ctest --output-on-failure --parallel 4
+	@echo "Tests complete!"
+
+# Run tests with maximum parallelism (may hang due to resource conflicts)
+test-parallel-full: build
+	@echo "Running tests with full parallelism (j=$$(nproc))..."
+	@echo "WARNING: This may hang due to resource conflicts"
 	cd $(BUILD_DIR) && ctest --output-on-failure --parallel $$(nproc)
+	@echo "Tests complete!"
+
+# Run tests with minimal parallelism (safer)
+test-parallel-2: build
+	@echo "Running tests with minimal parallelism (j=2)..."
+	cd $(BUILD_DIR) && ctest --output-on-failure --parallel 2
+	@echo "Tests complete!"
+
+# Run tests with verbose output to identify hanging tests
+test-verbose: build
+	@echo "Running tests with verbose output..."
+	@echo "Press Ctrl+C if a test hangs to identify which one"
+	cd $(BUILD_DIR) && ctest --verbose --parallel 4
+	@echo "Tests complete!"
+
+# Run tests sequentially with progress to identify hanging tests
+test-sequential: build
+	@echo "Running tests sequentially (no parallel execution)..."
+	@echo "This will show which test is running when it hangs"
+	cd $(BUILD_DIR) && ctest --verbose --output-on-failure
+	@echo "Tests complete!"
+
+# Run tests with debug output
+test-debug: build
+	@echo "Running tests with debug output..."
+	cd $(BUILD_DIR) && ctest --debug --verbose --output-on-failure --parallel 4
 	@echo "Tests complete!"
 
 # Clean build directory

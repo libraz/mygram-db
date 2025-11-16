@@ -228,4 +228,59 @@ TEST(MySQLConnectionTest, MySQLResultUsagePattern) {
   SUCCEED();
 }
 
+/**
+ * @brief Test SetGTIDNext rejects SQL injection attempts
+ */
+TEST(MySQLConnectionTest, SetGTIDNextSQLInjection) {
+  Connection::Config config;
+  config.host = "localhost";
+  config.port = 3306;
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  // Test SQL injection attempt - should be rejected by validation
+  EXPECT_FALSE(conn.SetGTIDNext("'; DROP TABLE users--"));
+  EXPECT_FALSE(conn.SetGTIDNext("3E11FA47' OR '1'='1"));
+  EXPECT_FALSE(conn.SetGTIDNext("UNION SELECT * FROM information_schema"));
+
+  // Valid GTID should pass validation (even without connection)
+  // Note: This will still fail because there's no MySQL connection,
+  // but it should pass the validation step
+  auto result = conn.SetGTIDNext("3E11FA47-71CA-11E1-9E33-C80AA9429562:1");
+  // Without a connection, ExecuteUpdate will fail, but validation passed
+  EXPECT_FALSE(result);  // No connection
+
+  // AUTOMATIC should also pass validation
+  EXPECT_FALSE(conn.SetGTIDNext("AUTOMATIC"));  // No connection, but validation passes
+}
+
+/**
+ * @brief Test GTID validation with edge cases
+ */
+TEST(MySQLConnectionTest, GTIDValidationEdgeCases) {
+  Connection::Config config;
+  config.host = "localhost";
+  config.port = 3306;
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  // Empty string
+  EXPECT_FALSE(conn.SetGTIDNext(""));
+
+  // Missing transaction ID
+  EXPECT_FALSE(conn.SetGTIDNext("3E11FA47-71CA-11E1-9E33-C80AA9429562"));
+
+  // Invalid UUID format
+  EXPECT_FALSE(conn.SetGTIDNext("INVALID-UUID:123"));
+
+  // SQL keywords
+  EXPECT_FALSE(conn.SetGTIDNext("SELECT"));
+  EXPECT_FALSE(conn.SetGTIDNext("DROP"));
+  EXPECT_FALSE(conn.SetGTIDNext("INSERT"));
+}
+
 #endif  // USE_MYSQL

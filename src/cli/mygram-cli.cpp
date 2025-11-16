@@ -439,7 +439,10 @@ class MygramClient {
         while (std::getline(iss, table, ',')) {
           // Trim whitespace
           table.erase(0, table.find_first_not_of(" \t\r\n"));
-          table.erase(table.find_last_not_of(" \t\r\n") + 1);
+          auto pos = table.find_last_not_of(" \t\r\n");
+          if (pos != std::string::npos) {
+            table.erase(pos + 1);
+          }
           if (!table.empty()) {
             available_tables.push_back(table);
           }
@@ -539,7 +542,10 @@ class MygramClient {
 
       // Trim whitespace
       line.erase(0, line.find_first_not_of(" \t\r\n"));
-      line.erase(line.find_last_not_of(" \t\r\n") + 1);
+      auto pos = line.find_last_not_of(" \t\r\n");
+      if (pos != std::string::npos) {
+        line.erase(pos + 1);
+      }
 
       // Add to history if non-empty
       if (!line.empty()) {
@@ -559,7 +565,10 @@ class MygramClient {
 
       // Trim whitespace
       line.erase(0, line.find_first_not_of(" \t\r\n"));
-      line.erase(line.find_last_not_of(" \t\r\n") + 1);
+      auto pos = line.find_last_not_of(" \t\r\n");
+      if (pos != std::string::npos) {
+        line.erase(pos + 1);
+      }
 #endif
 
       if (line.empty()) {
@@ -822,17 +831,27 @@ int main(int argc, char* argv[]) {
       }
     } else if (arg == "-p") {
       if (i + 1 < argc) {
-        config.port =
-            static_cast<uint16_t>(std::stoi(argv[++i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        try {
+          config.port =
+              static_cast<uint16_t>(std::stoi(argv[++i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid port number" << '\n';
+          return 1;
+        }
       } else {
         std::cerr << "Error: -p requires an argument" << '\n';
         return 1;
       }
     } else if (arg == "--retry") {
       if (i + 1 < argc) {
-        config.retry_count = std::stoi(argv[++i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-        if (config.retry_count < 0) {
-          std::cerr << "Error: --retry value must be non-negative" << '\n';
+        try {
+          config.retry_count = std::stoi(argv[++i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+          if (config.retry_count < 0) {
+            std::cerr << "Error: --retry value must be non-negative" << '\n';
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid retry count" << '\n';
           return 1;
         }
       } else {

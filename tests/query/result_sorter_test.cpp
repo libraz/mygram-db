@@ -386,3 +386,44 @@ TEST_F(ResultSorterTest, MixedNumericAndNonNumericPrimaryKeys) {
   // Lexicographic order: abc < xyz
   EXPECT_TRUE(it_abc < it_xyz);
 }
+
+/**
+ * @brief Test offset + limit overflow handling
+ * Regression test for: offset + limit could overflow uint32_t
+ */
+TEST_F(ResultSorterTest, OffsetLimitOverflow) {
+  // Create test documents
+  std::vector<DocId> doc_ids;
+  for (int i = 1; i <= 100; ++i) {
+    doc_ids.push_back(doc_store_.AddDocument("doc" + std::to_string(i), {{"score", int32_t(i)}}));
+  }
+
+  // Test case 1: offset + limit would overflow uint32_t
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.offset = UINT32_MAX - 50;  // Very large offset
+  query.limit = 100;               // offset + limit > UINT32_MAX
+  query.order_by = OrderByClause{"score", SortOrder::ASC};
+
+  // Should not crash or cause undefined behavior
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // With such a large offset, no results should be returned
+  EXPECT_TRUE(sorted.empty());
+
+  // Test case 2: Maximum possible offset
+  query.offset = UINT32_MAX;
+  query.limit = 1;
+
+  sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  EXPECT_TRUE(sorted.empty());
+
+  // Test case 3: Normal case for comparison
+  query.offset = 10;
+  query.limit = 5;
+
+  sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  EXPECT_EQ(5, sorted.size());
+}
