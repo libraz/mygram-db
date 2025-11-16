@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
