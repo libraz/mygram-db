@@ -44,15 +44,31 @@ jobs:
               - 'examples/**'
               - '.dockerignore'
 
-  code-quality:
-    name: Code Quality Checks
+  linux-test-and-coverage:
+    name: Linux Build, Test and Coverage
     needs: changes
-    if: needs.changes.outputs.src == 'true'
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ccache
+        key: ${{ runner.os }}-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-
 
     - name: Install dependencies
       run: |
@@ -67,7 +83,9 @@ jobs:
           libmysqlclient-dev \
           libicu-dev \
           libreadline-dev \
-          pkg-config
+          pkg-config \
+          lcov \
+          ccache
 
         # Install LLVM/Clang 18 for clang-format and clang-tidy
         wget https://apt.llvm.org/llvm.sh
@@ -80,32 +98,15 @@ jobs:
     - name: Check code formatting
       run: make format-check
 
-    - name: Run clang-tidy
-      run: make lint
-
-  linux-test-and-coverage:
-    name: Linux Build, Test and Coverage
-    needs: [changes, code-quality]
-    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install dependencies
+    - name: Setup ccache
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          cmake \
-          build-essential \
-          libmysqlclient-dev \
-          libicu-dev \
-          libreadline-dev \
-          pkg-config \
-          lcov
+        ccache --set-config=max_size=500M
+        ccache --zero-stats
 
     - name: Configure CMake with coverage
+      env:
+        CC: ccache gcc
+        CXX: ccache g++
       run: |
         mkdir -p build
         cd build
@@ -120,6 +121,12 @@ jobs:
       run: |
         cd build
         make -j$(nproc)
+
+    - name: Show ccache statistics
+      run: ccache --show-stats
+
+    - name: Run clang-tidy
+      run: make lint
 
     - name: Run tests with coverage
       run: |
@@ -164,13 +171,29 @@ jobs:
 
   build-and-test-macos:
     name: Build and Test (macOS)
-    needs: [changes, code-quality]
+    needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true')
     runs-on: macos-latest
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/ccache
+        key: ${{ runner.os }}-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-
 
     - name: Install dependencies (macOS)
       run: |
@@ -179,12 +202,24 @@ jobs:
           mysql-client@8.4 \
           icu4c \
           readline \
-          pkg-config
+          pkg-config \
+          llvm@18 \
+          ccache
+
+    - name: Check code formatting
+      run: |
+        export PATH="/opt/homebrew/opt/llvm@18/bin:$PATH"
+        make CLANG_FORMAT=clang-format format-check
+
+    - name: Setup ccache
+      run: |
+        ccache --set-config=max_size=500M
+        ccache --zero-stats
 
     - name: Configure CMake
       env:
-        CC: clang
-        CXX: clang++
+        CC: ccache clang
+        CXX: ccache clang++
       run: |
         mkdir -p build
         cd build
@@ -199,10 +234,13 @@ jobs:
         cd build
         make -j$(sysctl -n hw.ncpu)
 
+    - name: Show ccache statistics
+      run: ccache --show-stats
+
     - name: Run tests
       run: |
         cd build
-        ctest --output-on-failure --verbose
+        ctest --output-on-failure --parallel $(sysctl -n hw.ncpu)
 
     - name: Test binary
       run: |

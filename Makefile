@@ -63,7 +63,7 @@ build: configure
 # Run tests
 test: build
 	@echo "Running tests..."
-	cd $(BUILD_DIR) && ctest --output-on-failure
+	cd $(BUILD_DIR) && ctest --output-on-failure --parallel $$(nproc)
 	@echo "Tests complete!"
 
 # Clean build directory
@@ -122,7 +122,7 @@ run: build
 # Quick test (useful during development)
 quick-test: build
 	@echo "Running quick test..."
-	cd $(BUILD_DIR) && ctest --output-on-failure -R "StringUtils|Config"
+	cd $(BUILD_DIR) && ctest --output-on-failure --parallel $$(nproc) -R "StringUtils|Config"
 
 # Docker targets
 docker-build:

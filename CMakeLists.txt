@@ -410,11 +410,18 @@ if(ENABLE_COVERAGE)
   find_program(GENHTML_PATH genhtml)
 
   if(LCOV_PATH AND GENHTML_PATH)
+    # Get number of processors for parallel test execution
+    include(ProcessorCount)
+    ProcessorCount(N)
+    if(NOT N EQUAL 0)
+      set(CTEST_PARALLEL_ARGS --parallel ${N})
+    endif()
+
     # Add target to generate HTML coverage report
     add_custom_target(coverage
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
       COMMAND ${LCOV_PATH} --directory . --zerocounters
-      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS}
       COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
       COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
         '${CMAKE_SOURCE_DIR}/src/*'
