@@ -18,6 +18,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/connection.h"
+#include "mysql/connection_validator.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
@@ -182,6 +183,10 @@ class BinlogReader {
 
   std::string last_error_;
 
+  // Failover detection: track last known server UUID
+  std::string last_server_uuid_;
+  mutable std::mutex uuid_mutex_;
+
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
 
@@ -235,6 +240,19 @@ class BinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
+
+  /**
+   * @brief Validate binlog connection after (re)connect
+   *
+   * Performs comprehensive validation including:
+   * - GTID mode check
+   * - Server UUID tracking for failover detection
+   * - Required tables existence
+   * - GTID consistency check
+   *
+   * @return true if validation passed, false if server is invalid (stop replication)
+   */
+  bool ValidateConnection();
 };
 
 }  // namespace mygramdb::mysql

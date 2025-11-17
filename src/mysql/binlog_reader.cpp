@@ -192,6 +192,14 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(connect_result.error());
   }
 
+  // Validate connection before starting replication
+  if (!ValidateConnection()) {
+    mygram::utils::LogBinlogError("validation_failed", current_gtid_, last_error_);
+    // StartupGuard will clean up binlog_connection_
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+  }
+  spdlog::info("Binlog connection validated successfully");
+
   should_stop_ = false;
   // Note: running_ is already set to true by compare_exchange_strong above
 
@@ -303,6 +311,16 @@ void BinlogReader::ReaderThreadFunc() {
         continue;
       }
       spdlog::info("[binlog worker] Reconnected successfully");
+
+      // Validate connection after reconnection (detect failover, invalid servers)
+      if (!ValidateConnection()) {
+        // Validation failed - server is invalid, stop replication
+        spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+        should_stop_ = true;
+        break;
+      }
+      spdlog::info("[binlog worker] Connection validated successfully after reconnect");
+
       // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
       reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       continue;
@@ -365,6 +383,15 @@ void BinlogReader::ReaderThreadFunc() {
         mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), binlog_connection_->GetLastError(),
                                       reconnect_attempt + 1);
       } else {
+        // Validate connection after reconnection (detect failover, invalid servers)
+        if (!ValidateConnection()) {
+          // Validation failed - server is invalid, stop replication
+          spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+          should_stop_ = true;
+          break;
+        }
+        spdlog::info("[binlog worker] Connection validated successfully after reconnect");
+
         // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
         reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       }
@@ -422,6 +449,15 @@ void BinlogReader::ReaderThreadFunc() {
             mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), binlog_connection_->GetLastError(),
                                           reconnect_attempt);
           } else {
+            // Validate connection after reconnection (detect failover, invalid servers)
+            if (!ValidateConnection()) {
+              // Validation failed - server is invalid, stop replication
+              spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+              should_stop_ = true;
+              break;
+            }
+            spdlog::info("[binlog worker] Connection validated successfully after reconnect");
+
             // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
             reconnect_attempt = 0;  // Reset delay counter after successful reconnection
           }
@@ -745,6 +781,59 @@ void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid
   auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
   std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
 }
+
+bool BinlogReader::ValidateConnection() {
+  // Collect required table names from configuration
+  std::vector<std::string> required_tables;
+
+  if (multi_table_mode_) {
+    required_tables.reserve(table_contexts_.size());
+    for (const auto& [table_name, ctx] : table_contexts_) {
+      required_tables.push_back(ctx->config.name);
+    }
+  } else {
+    required_tables.push_back(table_config_.name);
+  }
+
+  // Get expected server UUID (empty on first connection)
+  std::optional<std::string> expected_uuid;
+  {
+    std::lock_guard<std::mutex> lock(uuid_mutex_);
+    if (!last_server_uuid_.empty()) {
+      expected_uuid = last_server_uuid_;
+    }
+  }
+
+  // Validate connection using ConnectionValidator
+  auto result = ConnectionValidator::ValidateServer(*binlog_connection_, required_tables, expected_uuid);
+
+  if (!result.valid) {
+    // Validation failed - server is invalid
+    last_error_ = "Connection validation failed: " + result.error_message;
+    mygram::utils::StructuredLog()
+        .Event("binlog_connection_validation_failed")
+        .Field("gtid", GetCurrentGTID())
+        .Field("error", result.error_message)
+        .Error();
+    return false;
+  }
+
+  // Validation succeeded - update last known server UUID
+  if (result.server_uuid) {
+    std::lock_guard<std::mutex> lock(uuid_mutex_);
+    last_server_uuid_ = *result.server_uuid;
+  }
+
+  // Log warnings if any (e.g., failover detected)
+  if (!result.warnings.empty()) {
+    for (const auto& warning : result.warnings) {
+      spdlog::warn("[binlog validation] {}", warning);
+    }
+  }
+
+  return true;
+}
+
 }  // namespace mygramdb::mysql
 
 // NOLINTEND(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)

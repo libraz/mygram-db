@@ -38,6 +38,8 @@ namespace {
 volatile std::sig_atomic_t g_shutdown_requested = 0;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile std::sig_atomic_t g_cancel_snapshot_requested = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile std::sig_atomic_t g_reload_config_requested = 0;
 
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
 constexpr size_t kGtidPrefixLength = 5;           // "gtid="
@@ -46,7 +48,7 @@ constexpr int kShutdownCheckIntervalMs = 100;     // Shutdown check interval (ms
 constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
 
 /**
- * @brief Signal handler for graceful shutdown
+ * @brief Signal handler for graceful shutdown and config reload
  * @param signal Signal number
  *
  * This handler is async-signal-safe: it only sets atomic flags and performs
@@ -56,6 +58,8 @@ void SignalHandler(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
     g_shutdown_requested = 1;
     g_cancel_snapshot_requested = 1;  // Set flag for main loop to process
+  } else if (signal == SIGHUP) {
+    g_reload_config_requested = 1;  // Set flag for config reload
   }
 }
 
@@ -88,6 +92,7 @@ int main(int argc, char* argv[]) {
   // Setup signal handlers
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
+  std::signal(SIGHUP, SignalHandler);
 
   // Setup logging
   spdlog::set_level(spdlog::level::info);
@@ -520,6 +525,96 @@ int main(int argc, char* argv[]) {
   // Wait for shutdown signal
   while (g_shutdown_requested == 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownCheckIntervalMs));
+
+    // Check for config reload request (SIGHUP)
+    if (g_reload_config_requested != 0) {
+      g_reload_config_requested = 0;  // Reset flag
+      spdlog::info("Configuration reload requested (SIGHUP received)");
+
+      // Reload configuration
+      auto reload_result = mygramdb::config::LoadConfig(config_path, schema_path != nullptr ? schema_path : "");
+      if (!reload_result) {
+        spdlog::error("Failed to reload configuration: {}", reload_result.error().to_string());
+        spdlog::warn("Continuing with current configuration");
+        continue;
+      }
+
+      mygramdb::config::Config new_config = *reload_result;
+
+      // Apply logging level changes
+      if (new_config.logging.level != config.logging.level) {
+        if (new_config.logging.level == "debug") {
+          spdlog::set_level(spdlog::level::debug);
+        } else if (new_config.logging.level == "info") {
+          spdlog::set_level(spdlog::level::info);
+        } else if (new_config.logging.level == "warn") {
+          spdlog::set_level(spdlog::level::warn);
+        } else if (new_config.logging.level == "error") {
+          spdlog::set_level(spdlog::level::err);
+        }
+        spdlog::info("Logging level changed: {} -> {}", config.logging.level, new_config.logging.level);
+      }
+
+#ifdef USE_MYSQL
+      // Check if MySQL connection settings changed
+      bool mysql_changed = (new_config.mysql.host != config.mysql.host) || (new_config.mysql.port != config.mysql.port) ||
+                           (new_config.mysql.user != config.mysql.user) ||
+                           (new_config.mysql.password != config.mysql.password);
+
+      if (mysql_changed && mysql_conn) {
+        spdlog::info("MySQL connection settings changed, reconnecting...");
+
+        // Stop binlog reader if running
+        bool was_running = false;
+        if (binlog_reader && binlog_reader->IsRunning()) {
+          was_running = true;
+          spdlog::info("Stopping binlog reader for reconnection");
+          binlog_reader->Stop();
+        }
+
+        // Update connection config and reconnect
+        mysql_conn->Close();
+        mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mygramdb::mysql::Connection::Config{
+            .host = new_config.mysql.host,
+            .port = static_cast<uint16_t>(new_config.mysql.port),
+            .user = new_config.mysql.user,
+            .password = new_config.mysql.password,
+            .database = new_config.mysql.database,
+            .connect_timeout = static_cast<uint32_t>(new_config.mysql.connect_timeout_ms / kMillisecondsPerSecond),
+            .read_timeout = static_cast<uint32_t>(new_config.mysql.read_timeout_ms / kMillisecondsPerSecond),
+            .write_timeout = static_cast<uint32_t>(new_config.mysql.write_timeout_ms / kMillisecondsPerSecond),
+            .ssl_enable = new_config.mysql.ssl_enable,
+            .ssl_ca = new_config.mysql.ssl_ca,
+            .ssl_cert = new_config.mysql.ssl_cert,
+            .ssl_key = new_config.mysql.ssl_key,
+            .ssl_verify_server_cert = new_config.mysql.ssl_verify_server_cert,
+        });
+
+        auto connect_result = mysql_conn->Connect("config-reload");
+        if (!connect_result) {
+          spdlog::error("Failed to reconnect to MySQL after config reload: {}", connect_result.error().to_string());
+          spdlog::warn("Binlog replication will remain stopped until manual restart");
+        } else {
+          spdlog::info("Successfully reconnected to MySQL: {}@{}:{}", new_config.mysql.user, new_config.mysql.host,
+                       new_config.mysql.port);
+
+          // Restart binlog reader if it was running
+          if (was_running && binlog_reader) {
+            auto start_result = binlog_reader->Start();
+            if (!start_result) {
+              spdlog::error("Failed to restart binlog reader: {}", start_result.error().to_string());
+            } else {
+              spdlog::info("Binlog reader restarted successfully");
+            }
+          }
+        }
+      }
+#endif
+
+      // Update config reference
+      config = new_config;
+      spdlog::info("Configuration reload completed successfully");
+    }
   }
 
   spdlog::info("Shutdown requested, cleaning up...");

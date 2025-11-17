@@ -131,6 +131,8 @@ GET articles 12345
 
 - **高速**: MySQL FULLTEXT より25〜200倍高速
 - **MySQL レプリケーション**: GTID ベースのリアルタイム binlog ストリーミング
+- **設定ホットリロード**: SIGHUP シグナルでサーバー再起動なしに設定変更が可能
+- **フェイルオーバー対応**: MySQL マスター切り替えを自動検出し、無効なサーバーへのレプリケーションを防止
 - **複数テーブル対応**: 単一インスタンスで複数テーブルのインデックス化
 - **デュアルプロトコル**: TCP（memcachedスタイル）と HTTP/REST API
 - **高並行性**: 10,000以上の同時接続をサポートするスレッドプール
@@ -175,6 +177,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - [HTTP API リファレンス](docs/ja/http-api.md) - REST API ドキュメント
 - [パフォーマンスガイド](docs/ja/performance.md) - ベンチマークと最適化
 - [レプリケーションガイド](docs/ja/replication.md) - MySQL レプリケーション設定
+- [運用ガイド](docs/ja/operations.md) - 設定ホットリロードとフェイルオーバー検出
 - [インストールガイド](docs/ja/installation.md) - ソースからビルド
 - [開発ガイド](docs/ja/development.md) - コントリビューションガイドライン
 - [クライアントライブラリ](docs/ja/libmygramclient.md) - C/C++ クライアントライブラリ

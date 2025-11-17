@@ -102,6 +102,24 @@ if(USE_MYSQL AND MYSQL_FOUND)
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
+  # Connection validator tests (failover detection)
+  add_executable(connection_validator_test
+    connection_validator_test.cpp
+  )
+
+  target_link_libraries(connection_validator_test
+    mygramdb_mysql
+    GTest::gtest_main
+    GTest::gmock
+  )
+
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
+  gtest_discover_tests(connection_validator_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
+
   # Binlog parsing tests (MySQL 8.0 compatibility)
   add_executable(binlog_parsing_test
     binlog_parsing_test.cpp
