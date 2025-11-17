@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -213,7 +214,7 @@ class QueryParser {
    * @param query_str Query string
    * @return Expected<Query, Error> - Parsed query or error
    */
-  mygram::utils::Expected<Query, mygram::utils::Error> Parse(const std::string& query_str);
+  mygram::utils::Expected<Query, mygram::utils::Error> Parse(std::string_view query_str);
 
   /**
    * @brief Get last error message
@@ -283,17 +284,17 @@ class QueryParser {
   /**
    * @brief Tokenize query string
    */
-  std::vector<std::string> Tokenize(const std::string& str);
+  std::vector<std::string> Tokenize(std::string_view str);
 
   /**
    * @brief Parse filter operator
    */
-  static std::optional<FilterOp> ParseFilterOp(const std::string& op_str);
+  static std::optional<FilterOp> ParseFilterOp(std::string_view op_str);
 
   /**
    * @brief Set error message
    */
-  void SetError(const std::string& msg) { error_ = msg; }
+  void SetError(std::string_view msg) { error_ = std::string(msg); }
 
   /**
    * @brief Validate query length against configured limit

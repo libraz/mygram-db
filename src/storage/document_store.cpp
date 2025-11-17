@@ -88,12 +88,13 @@ inline void ReadBinary(std::istream& input_stream, T& data) {
 
 }  // namespace
 
-Expected<DocId, Error> DocumentStore::AddDocument(const std::string& primary_key,
+Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
                                                   const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
 
-  // Check if primary key already exists
-  auto iterator = pk_to_doc_id_.find(primary_key);
+  // Check if primary key already exists (convert string_view to string for unordered_map lookup)
+  std::string primary_key_str(primary_key);
+  auto iterator = pk_to_doc_id_.find(primary_key_str);
   if (iterator != pk_to_doc_id_.end()) {
     mygram::utils::StructuredLog()
         .Event("storage_warning")
@@ -114,8 +115,8 @@ Expected<DocId, Error> DocumentStore::AddDocument(const std::string& primary_key
   DocId doc_id = next_doc_id_++;
 
   // Store mappings
-  doc_id_to_pk_[doc_id] = primary_key;
-  pk_to_doc_id_[primary_key] = doc_id;
+  doc_id_to_pk_[doc_id] = primary_key_str;
+  pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
 
   // Store filters
   if (!filters.empty()) {
@@ -244,9 +245,10 @@ std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
   return doc;
 }
 
-std::optional<DocId> DocumentStore::GetDocId(const std::string& primary_key) const {
+std::optional<DocId> DocumentStore::GetDocId(std::string_view primary_key) const {
   std::shared_lock lock(mutex_);
-  auto iterator = pk_to_doc_id_.find(primary_key);
+  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
+  auto iterator = pk_to_doc_id_.find(std::string(primary_key));
   if (iterator == pk_to_doc_id_.end()) {
     return std::nullopt;
   }
@@ -262,14 +264,15 @@ std::optional<std::string> DocumentStore::GetPrimaryKey(DocId doc_id) const {
   return iterator->second;
 }
 
-std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, const std::string& filter_name) const {
+std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
   auto doc_it = doc_filters_.find(doc_id);
   if (doc_it == doc_filters_.end()) {
     return std::nullopt;
   }
 
-  auto filter_it = doc_it->second.find(filter_name);
+  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
+  auto filter_it = doc_it->second.find(std::string(filter_name));
   if (filter_it == doc_it->second.end()) {
     return std::nullopt;
   }
@@ -277,12 +280,14 @@ std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, const std
   return filter_it->second;
 }
 
-std::vector<DocId> DocumentStore::FilterByValue(const std::string& filter_name, const FilterValue& value) const {
+std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, const FilterValue& value) const {
   std::shared_lock lock(mutex_);
   std::vector<DocId> results;
 
+  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
+  std::string filter_name_str(filter_name);
   for (const auto& [doc_id, filters] : doc_filters_) {
-    auto iterator = filters.find(filter_name);
+    auto iterator = filters.find(filter_name_str);
     if (iterator != filters.end() && iterator->second == value) {
       results.push_back(doc_id);
     }
@@ -310,12 +315,14 @@ std::vector<DocId> DocumentStore::GetAllDocIds() const {
   return results;
 }
 
-bool DocumentStore::HasFilterColumn(const std::string& filter_name) const {
+bool DocumentStore::HasFilterColumn(std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
 
+  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
+  std::string filter_name_str(filter_name);
   // Check if any document has this filter column
-  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name](const auto& doc_filter) {
-    return doc_filter.second.find(filter_name) != doc_filter.second.end();
+  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name_str](const auto& doc_filter) {
+    return doc_filter.second.find(filter_name_str) != doc_filter.second.end();
   });
 }
 

@@ -22,7 +22,7 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
       kanji_ngram_size_(kanji_ngram_size > 0 ? kanji_ngram_size : ngram_size),
       roaring_threshold_(roaring_threshold) {}
 
-void Index::AddDocument(DocId doc_id, const std::string& text) {
+void Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
@@ -82,7 +82,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   }
 }
 
-void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text) {
+void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_view new_text) {
   // Generate n-grams for both texts (no lock needed for CPU-intensive operation)
   std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
   std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
@@ -120,7 +120,7 @@ void Index::UpdateDocument(DocId doc_id, const std::string& old_text, const std:
   spdlog::debug("Updated document {}", doc_id);
 }
 
-void Index::RemoveDocument(DocId doc_id, const std::string& text) {
+void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
 
@@ -397,7 +397,7 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   return result;
 }
 
-uint64_t Index::Count(const std::string& term) const {
+uint64_t Index::Count(std::string_view term) const {
   // Acquire shared lock for read-only access (allows concurrent readers)
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   const auto* posting = GetPostingList(term);
@@ -705,8 +705,10 @@ void Index::Clear() {
   spdlog::info("Cleared index");
 }
 
-PostingList* Index::GetOrCreatePostingList(const std::string& term) {
-  auto iterator = term_postings_.find(term);
+PostingList* Index::GetOrCreatePostingList(std::string_view term) {
+  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
+  std::string term_str(term);
+  auto iterator = term_postings_.find(term_str);
   if (iterator != term_postings_.end()) {
     return iterator->second.get();
   }
@@ -714,13 +716,14 @@ PostingList* Index::GetOrCreatePostingList(const std::string& term) {
   // Create new posting list
   auto posting = std::make_shared<PostingList>(roaring_threshold_);
   auto* ptr = posting.get();
-  term_postings_[term] = std::move(posting);
+  term_postings_[std::move(term_str)] = std::move(posting);
   return ptr;
 }
 
-const PostingList* Index::GetPostingList(const std::string& term) const {
+const PostingList* Index::GetPostingList(std::string_view term) const {
   // NOTE: This method assumes postings_mutex_ is already locked by the caller
-  auto iterator = term_postings_.find(term);
+  // C++17: unordered_map doesn't support heterogeneous lookup, so we convert to std::string
+  auto iterator = term_postings_.find(std::string(term));
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }
 

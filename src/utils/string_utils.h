@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mygramdb::utils {
@@ -23,7 +24,7 @@ namespace mygramdb::utils {
  * @param lower Convert to lowercase
  * @return Normalized text
  */
-std::string NormalizeText(const std::string& text, bool nfkc = true, const std::string& width = "narrow",
+std::string NormalizeText(std::string_view text, bool nfkc = true, std::string_view width = "narrow",
                           bool lower = false);
 
 #ifdef USE_ICU
@@ -36,7 +37,7 @@ std::string NormalizeText(const std::string& text, bool nfkc = true, const std::
  * @param lower Convert to lowercase
  * @return Normalized text
  */
-std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width, bool lower);
+std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view width, bool lower);
 #endif
 
 /**
@@ -46,7 +47,7 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::stri
  * @param n N-gram size (typically 1 for unigrams)
  * @return Vector of n-gram strings
  */
-std::vector<std::string> GenerateNgrams(const std::string& text, int n = 1);
+std::vector<std::string> GenerateNgrams(std::string_view text, int n = 1);
 
 /**
  * @brief Generate hybrid n-grams with configurable sizes
@@ -60,7 +61,7 @@ std::vector<std::string> GenerateNgrams(const std::string& text, int n = 1);
  * @param kanji_ngram_size N-gram size for CJK characters (default: 1)
  * @return Vector of n-gram strings
  */
-std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii_ngram_size = 2,
+std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size = 2,
                                               int kanji_ngram_size = 1);
 
 /**
@@ -69,7 +70,7 @@ std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii
  * @param text UTF-8 encoded string
  * @return Vector of Unicode codepoints
  */
-std::vector<uint32_t> Utf8ToCodepoints(const std::string& text);
+std::vector<uint32_t> Utf8ToCodepoints(std::string_view text);
 
 /**
  * @brief Convert codepoint vector to UTF-8 string

@@ -91,7 +91,7 @@ int Utf8CharLength(unsigned char first_byte) {
 
 }  // namespace
 
-std::vector<uint32_t> Utf8ToCodepoints(const std::string& text) {
+std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
   std::vector<uint32_t> codepoints;
   codepoints.reserve(text.size());  // Over-allocate for ASCII
 
@@ -156,11 +156,11 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
 }
 
 #ifdef USE_ICU
-std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::string& width, bool lower) {
+std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view width, bool lower) {
   UErrorCode status = U_ZERO_ERROR;
 
   // Convert UTF-8 to UnicodeString
-  icu::UnicodeString ustr = icu::UnicodeString::fromUTF8(text);
+  icu::UnicodeString ustr = icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), static_cast<int32_t>(text.size())));
 
   // NFKC normalization
   if (nfkc) {
@@ -203,12 +203,12 @@ std::string NormalizeTextICU(const std::string& text, bool nfkc, const std::stri
 }
 #endif
 
-std::string NormalizeText(const std::string& text, bool nfkc, const std::string& width, bool lower) {
+std::string NormalizeText(std::string_view text, bool nfkc, std::string_view width, bool lower) {
 #ifdef USE_ICU
   return NormalizeTextICU(text, nfkc, width, lower);
 #else
   // Fallback implementation: simple lowercasing only
-  std::string result = text;
+  std::string result(text);
 
   if (lower) {
     std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -218,7 +218,7 @@ std::string NormalizeText(const std::string& text, bool nfkc, const std::string&
 #endif
 }
 
-std::vector<std::string> GenerateNgrams(const std::string& text, int n) {
+std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level n-grams
@@ -279,7 +279,7 @@ bool IsCJKIdeograph(uint32_t codepoint) {
 
 }  // namespace
 
-std::vector<std::string> GenerateHybridNgrams(const std::string& text, int ascii_ngram_size, int kanji_ngram_size) {
+std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size, int kanji_ngram_size) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level processing

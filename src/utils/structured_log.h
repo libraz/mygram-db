@@ -59,6 +59,14 @@ class StructuredLog {
   }
 
   /**
+   * @brief Add string field (std::string_view)
+   */
+  StructuredLog& Field(const std::string& key, std::string_view value) {
+    fields_.push_back(MakeField(key, Escape(std::string(value))));
+    return *this;
+  }
+
+  /**
    * @brief Add integer field
    */
   StructuredLog& Field(const std::string& key, int64_t value) {

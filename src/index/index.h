@@ -12,6 +12,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -66,7 +67,7 @@ class Index {
    * @param doc_id Document ID
    * @param text Normalized text content
    */
-  void AddDocument(DocId doc_id, const std::string& text);
+  void AddDocument(DocId doc_id, std::string_view text);
 
   /**
    * @brief Add multiple documents to index (batch operation, thread-safe)
@@ -87,7 +88,7 @@ class Index {
    * @param old_text Old text content
    * @param new_text New text content
    */
-  void UpdateDocument(DocId doc_id, const std::string& old_text, const std::string& new_text);
+  void UpdateDocument(DocId doc_id, std::string_view old_text, std::string_view new_text);
 
   /**
    * @brief Remove document from index
@@ -95,7 +96,7 @@ class Index {
    * @param doc_id Document ID
    * @param text Text content
    */
-  void RemoveDocument(DocId doc_id, const std::string& text);
+  void RemoveDocument(DocId doc_id, std::string_view text);
 
   /**
    * @brief Search for documents containing all terms (AND)
@@ -132,7 +133,7 @@ class Index {
    * @param term Search term
    * @return Document count
    */
-  [[nodiscard]] uint64_t Count(const std::string& term) const;
+  [[nodiscard]] uint64_t Count(std::string_view term) const;
 
   /**
    * @brief Get total number of unique terms
@@ -218,7 +219,7 @@ class Index {
    * @param term Search term
    * @return Pointer to posting list, or nullptr if not found
    */
-  [[nodiscard]] const PostingList* GetPostingList(const std::string& term) const;
+  [[nodiscard]] const PostingList* GetPostingList(std::string_view term) const;
 
   /**
    * @brief Get n-gram size for regular text
@@ -253,7 +254,7 @@ class Index {
   /**
    * @brief Get or create posting list for term
    */
-  PostingList* GetOrCreatePostingList(const std::string& term);
+  PostingList* GetOrCreatePostingList(std::string_view term);
 
   /**
    * @brief Internal search methods (no locking, assumes caller holds lock)

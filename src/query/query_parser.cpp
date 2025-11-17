@@ -46,8 +46,8 @@ size_t CalculateQueryExpressionLength(const Query& query) {
 /**
  * @brief Convert string to uppercase
  */
-std::string ToUpper(const std::string& str) {
-  std::string result = str;
+std::string ToUpper(std::string_view str) {
+  std::string result(str);
   std::transform(result.begin(), result.end(), result.begin(),
                  [](unsigned char character) { return std::toupper(character); });
   return result;
@@ -94,7 +94,7 @@ bool Query::IsValid() const {
   return true;
 }
 
-mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(const std::string& query_str) {
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::string_view query_str) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -1089,7 +1089,7 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   return true;
 }
 
-std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
+std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
   std::vector<std::string> tokens;
   std::string token;
   char quote_char = '\0';  // '\0' = not in quotes, '"' or '\'' = in quotes
@@ -1183,7 +1183,7 @@ std::vector<std::string> QueryParser::Tokenize(const std::string& str) {
   return tokens;
 }
 
-std::optional<FilterOp> QueryParser::ParseFilterOp(const std::string& op_str) {
+std::optional<FilterOp> QueryParser::ParseFilterOp(std::string_view op_str) {
   std::string normalized_op = ToUpper(op_str);
 
   if (normalized_op == "=" || normalized_op == "EQ") {

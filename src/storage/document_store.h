@@ -10,6 +10,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -97,7 +98,7 @@ class DocumentStore {
    * @param filters Filter column values
    * @return Expected<DocId, Error> Assigned DocID or error (e.g., DocID exhausted)
    */
-  [[nodiscard]] Expected<DocId, Error> AddDocument(const std::string& primary_key,
+  [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key,
                                                    const std::unordered_map<std::string, FilterValue>& filters = {});
 
   /**
@@ -143,7 +144,7 @@ class DocumentStore {
    * @param primary_key Primary key
    * @return DocID if exists
    */
-  [[nodiscard]] std::optional<DocId> GetDocId(const std::string& primary_key) const;
+  [[nodiscard]] std::optional<DocId> GetDocId(std::string_view primary_key) const;
 
   /**
    * @brief Get primary key by DocID
@@ -160,7 +161,7 @@ class DocumentStore {
    * @param filter_name Filter column name
    * @return Filter value if exists
    */
-  [[nodiscard]] std::optional<FilterValue> GetFilterValue(DocId doc_id, const std::string& filter_name) const;
+  [[nodiscard]] std::optional<FilterValue> GetFilterValue(DocId doc_id, std::string_view filter_name) const;
 
   /**
    * @brief Filter documents by value
@@ -169,7 +170,7 @@ class DocumentStore {
    * @param value Filter value
    * @return Vector of matching DocIDs
    */
-  [[nodiscard]] std::vector<DocId> FilterByValue(const std::string& filter_name, const FilterValue& value) const;
+  [[nodiscard]] std::vector<DocId> FilterByValue(std::string_view filter_name, const FilterValue& value) const;
 
   /**
    * @brief Get all document IDs
@@ -187,7 +188,7 @@ class DocumentStore {
    * @param filter_name Filter column name
    * @return true if the column exists in at least one document
    */
-  [[nodiscard]] bool HasFilterColumn(const std::string& filter_name) const;
+  [[nodiscard]] bool HasFilterColumn(std::string_view filter_name) const;
 
   /**
    * @brief Get total document count (thread-safe)
