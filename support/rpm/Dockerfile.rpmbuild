@@ -1,6 +1,15 @@
 # Dockerfile for building RPM packages
 FROM rockylinux:9
 
+# Accept build arguments for multi-arch support
+ARG TARGETARCH
+ARG TARGETPLATFORM
+
+# Log build information
+RUN echo "Building for platform: ${TARGETPLATFORM:-unknown}" && \
+    echo "Target architecture: ${TARGETARCH:-unknown}" && \
+    echo "System architecture: $(uname -m)"
+
 # Install Oracle MySQL 8.0 repository
 RUN dnf -y install \
     https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm && \
@@ -51,6 +60,7 @@ VERSION="${MYGRAMDB_VERSION:-0.0.0}"
 NAME="mygramdb"
 
 echo -e "${YELLOW}Building ${NAME}-${VERSION}${NC}"
+echo -e "${YELLOW}Architecture: $(uname -m)${NC}"
 
 # Create source tarball
 echo -e "${YELLOW}Creating source tarball...${NC}"

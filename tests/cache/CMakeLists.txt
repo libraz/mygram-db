@@ -10,7 +10,10 @@ target_link_libraries(md5_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(md5_test)
+gtest_discover_tests(md5_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # CacheKey test
 add_executable(cache_key_test
@@ -22,7 +25,10 @@ target_link_libraries(cache_key_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(cache_key_test)
+gtest_discover_tests(cache_key_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # QueryNormalizer test
 add_executable(query_normalizer_test
@@ -35,7 +41,10 @@ target_link_libraries(query_normalizer_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(query_normalizer_test)
+gtest_discover_tests(query_normalizer_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # ResultCompressor test
 add_executable(result_compressor_test
@@ -47,7 +56,10 @@ target_link_libraries(result_compressor_test PRIVATE
   GTest::gtest_main
 )
 
-gtest_discover_tests(result_compressor_test)
+gtest_discover_tests(result_compressor_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # InvalidationManager test
 add_executable(invalidation_manager_test
@@ -61,6 +73,8 @@ target_link_libraries(invalidation_manager_test PRIVATE
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid invalidation manager state conflicts
 gtest_discover_tests(invalidation_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
@@ -76,6 +90,8 @@ target_link_libraries(query_cache_test PRIVATE
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
 gtest_discover_tests(query_cache_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
@@ -93,6 +109,8 @@ target_link_libraries(cache_manager_test PRIVATE
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
 gtest_discover_tests(cache_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
@@ -108,6 +126,8 @@ target_link_libraries(invalidation_queue_test PRIVATE
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid invalidation queue conflicts
 gtest_discover_tests(invalidation_queue_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
@@ -123,5 +143,7 @@ target_link_libraries(cache_metrics_test PRIVATE
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
 gtest_discover_tests(cache_metrics_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )

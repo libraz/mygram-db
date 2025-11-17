@@ -1,0 +1,17 @@
+# act configuration file
+# See: https://nektosact.com/usage/index.html
+
+# Use medium-sized Docker images (balance between size and features)
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# For Apple Silicon, use amd64 architecture
+--container-architecture linux/amd64
+
+# Enable verbose output
+-v
+
+# Reuse containers to speed up subsequent runs
+--reuse
+
+# Bind Docker socket for Docker-in-Docker operations
+--container-daemon-socket -

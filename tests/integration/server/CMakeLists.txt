@@ -12,6 +12,8 @@ target_link_libraries(gtid_dump_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
 gtest_discover_tests(gtid_dump_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -27,6 +29,8 @@ target_link_libraries(multi_table_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(multi_table_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -42,6 +46,8 @@ target_link_libraries(end_to_end_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(end_to_end_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -57,5 +63,7 @@ target_link_libraries(stress_test
 
 # Note: Stress tests may take a long time
 gtest_discover_tests(stress_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES TIMEOUT 300  # 5 minutes timeout
 )

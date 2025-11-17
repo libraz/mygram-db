@@ -12,6 +12,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
   gtest_discover_tests(mysql_connection_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -28,6 +30,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(binlog_reader_core_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -42,6 +46,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(binlog_reader_events_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -56,6 +62,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(binlog_reader_multitable_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -71,6 +79,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
   gtest_discover_tests(rows_parser_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -87,6 +97,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
   gtest_discover_tests(connection_validate_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -102,6 +114,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
   gtest_discover_tests(binlog_parsing_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -117,6 +131,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
   gtest_discover_tests(binlog_filter_validation_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
@@ -132,6 +148,8 @@ if(USE_MYSQL AND MYSQL_FOUND)
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
   gtest_discover_tests(binlog_reader_resource_test
+    DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 endif()

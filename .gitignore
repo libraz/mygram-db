@@ -28,6 +28,10 @@ _deps/
 .claude/
 CLAUDE.md
 
+# act (GitHub Actions local runner)
+.secrets
+.act/
+
 # Cache
 .cache/
 

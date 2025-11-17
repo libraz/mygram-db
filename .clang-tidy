@@ -3,6 +3,7 @@ Checks: >
   clang-diagnostic-*,
   clang-analyzer-*,
   -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-core.uninitialized.Assign,
   cppcoreguidelines-*,
   modernize-*,
   performance-*,

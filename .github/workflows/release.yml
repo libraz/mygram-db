@@ -10,14 +10,23 @@ permissions:
 
 jobs:
   build-rpm:
-    name: Build RPM Package
+    name: Build RPM Package (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+      fail-fast: false
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Fetch all history for git describe
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -27,32 +36,97 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
+          echo "Building version: $VERSION for architecture: ${{ matrix.arch }}"
 
-      - name: Build RPM package
+      - name: Set architecture-specific variables
+        id: arch
         run: |
-          cd support/rpm
-          ./test-rpm-build.sh
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            echo "docker_platform=linux/amd64" >> $GITHUB_OUTPUT
+            echo "docker_arch=amd64" >> $GITHUB_OUTPUT
+          else
+            echo "docker_platform=linux/arm64" >> $GITHUB_OUTPUT
+            echo "docker_arch=arm64" >> $GITHUB_OUTPUT
+          fi
 
-      - name: List generated RPMs
+      - name: Build RPM builder Docker image
         run: |
+          docker buildx build \
+            --platform ${{ steps.arch.outputs.docker_platform }} \
+            --load \
+            --cache-from type=gha,scope=rpmbuild-${{ matrix.arch }} \
+            --cache-to type=gha,mode=max,scope=rpmbuild-${{ matrix.arch }} \
+            -f support/rpm/Dockerfile.rpmbuild \
+            -t mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }} \
+            .
+
+      - name: Build RPM packages
+        run: |
+          # Create output directory in workspace
+          mkdir -p "$GITHUB_WORKSPACE/dist/rpm"
+
+          # Run RPM build with absolute paths
+          docker run --rm \
+            --platform ${{ steps.arch.outputs.docker_platform }} \
+            -e MYGRAMDB_VERSION="${{ steps.version.outputs.version }}" \
+            -v "$GITHUB_WORKSPACE/dist:/workspace/dist" \
+            mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }}
+
+      - name: Verify RPM packages exist
+        run: |
+          if ! ls dist/rpm/*.rpm 1> /dev/null 2>&1; then
+            echo "Error: No RPM packages found in dist/rpm/"
+            ls -la dist/rpm/ || true
+            exit 1
+          fi
           echo "Generated RPM packages:"
           ls -lh dist/rpm/*.rpm
 
       - name: Test RPM installation (AlmaLinux 9)
         run: |
-          docker run --rm -v "$(pwd)/dist:/dist" almalinux:9 bash -c "
+          # Find the main RPM package (not debuginfo/debugsource/devel)
+          MAIN_RPM=$(find dist/rpm -name "mygramdb-${{ steps.version.outputs.version }}-*.el9.${{ matrix.arch }}.rpm" \
+            ! -name "*debuginfo*" ! -name "*debugsource*" ! -name "*devel*" -print -quit)
+
+          if [ -z "$MAIN_RPM" ]; then
+            echo "Error: Main RPM package not found for architecture ${{ matrix.arch }}"
+            echo "Looking for: mygramdb-${{ steps.version.outputs.version }}-*.el9.${{ matrix.arch }}.rpm"
+            echo "Available files:"
+            ls -la dist/rpm/
+            exit 1
+          fi
+
+          echo "Testing RPM: $MAIN_RPM"
+
+          docker run --rm \
+            --platform ${{ steps.arch.outputs.docker_platform }} \
+            -v "$GITHUB_WORKSPACE/dist:/dist" \
+            almalinux:9 bash -c "
+            set -e
             echo '=== Installing Oracle MySQL 8.0 repository ==='
-            dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm > /dev/null 2>&1
-            dnf module disable -y mysql > /dev/null 2>&1
+            dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
+            dnf module disable -y mysql
 
             echo '=== Installing MygramDB RPM ==='
-            dnf install -y /dist/rpm/mygramdb-${{ steps.version.outputs.version }}-*.el9.*.rpm
+            dnf install -y /dist/rpm/$(basename $MAIN_RPM)
 
             echo '=== Verifying installation ==='
+            echo 'Checking binaries exist...'
+            test -x /usr/bin/mygramdb || (echo 'Error: mygramdb binary not found'; exit 1)
+            test -x /usr/bin/mygram-cli || (echo 'Error: mygram-cli binary not found'; exit 1)
+
             echo 'Checking for missing library dependencies...'
-            ldd /usr/bin/mygramdb | grep 'not found' && exit 1 || echo 'mygramdb: OK'
-            ldd /usr/bin/mygram-cli | grep 'not found' && exit 1 || echo 'mygram-cli: OK'
+            if ldd /usr/bin/mygramdb | grep 'not found'; then
+              echo 'Error: mygramdb has missing dependencies'
+              exit 1
+            fi
+            echo 'mygramdb: OK'
+
+            if ldd /usr/bin/mygram-cli | grep 'not found'; then
+              echo 'Error: mygram-cli has missing dependencies'
+              exit 1
+            fi
+            echo 'mygram-cli: OK'
 
             echo '=== Installation test passed! ==='
           "
@@ -60,27 +134,69 @@ jobs:
       - name: Upload RPM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-packages
-          path: |
-            dist/rpm/*.rpm
+          name: rpm-packages-${{ matrix.arch }}
+          path: dist/rpm/*.rpm
           retention-days: 30
+          if-no-files-found: error
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-rpm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/rpm
+          pattern: rpm-packages-*
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded RPM packages:"
+          ls -lh dist/rpm/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            dist/rpm/mygramdb-${{ steps.version.outputs.version }}-*.el9.*.rpm
-            dist/rpm/mygramdb-debuginfo-${{ steps.version.outputs.version }}-*.el9.*.rpm
-            dist/rpm/mygramdb-debugsource-${{ steps.version.outputs.version }}-*.el9.*.rpm
+          files: dist/rpm/*.rpm
+          fail_on_unmatched_files: true
           body: |
             ## MygramDB ${{ steps.version.outputs.version }}
 
             ### Installation (RHEL/AlmaLinux/Rocky Linux 9)
 
+            #### For x86_64 (Intel/AMD):
+            ```bash
+            # Install Oracle MySQL 8.0 repository
+            sudo dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
+            sudo dnf module disable -y mysql
+
+            # Download and install MygramDB RPM
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm
+            sudo dnf install -y ./mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm
+
+            # Configure and start service
+            sudo cp /etc/mygramdb/config.yaml.example /etc/mygramdb/config.yaml
+            sudo vi /etc/mygramdb/config.yaml  # Edit configuration
+            sudo systemctl enable --now mygramdb
+            ```
+
+            #### For aarch64 (ARM64):
             ```bash
             # Install Oracle MySQL 8.0 repository
             sudo dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
@@ -98,7 +214,7 @@ jobs:
 
             ### Package Details
             - **Platform**: RHEL 9 / AlmaLinux 9 / Rocky Linux 9
-            - **Architecture**: aarch64 (ARM64)
+            - **Architectures**: x86_64 (Intel/AMD), aarch64 (ARM64)
             - **Build Type**: Static linking (minimal dependencies)
             - **Dependencies**: libicu, MySQL client libraries (auto-installed)
 
@@ -108,3 +224,8 @@ jobs:
             - Systemd service: `/usr/lib/systemd/system/mygramdb.service`
             - Config example: `/etc/mygramdb/config.yaml.example`
             - Data directory: `/var/lib/mygramdb`
+
+            ### Available Packages
+            - `mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm` - Main package (x86_64)
+            - `mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm` - Main package (aarch64)
+            - Debug packages available for both architectures

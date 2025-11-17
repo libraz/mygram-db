@@ -148,13 +148,13 @@ uninstall:
 # Format code with clang-format
 format:
 	@echo "Formatting code..."
-	@find src tests -name "*.cpp" -o -name "*.h" | xargs $(CLANG_FORMAT) -i
+	@find src tests -type f \( -name "*.cpp" -o -name "*.h" \) ! -path "*/build/*" | xargs $(CLANG_FORMAT) -i
 	@echo "Format complete!"
 
 # Check code formatting (CI mode - fails on formatting issues)
 format-check:
 	@echo "Checking code formatting..."
-	@find src tests -name "*.cpp" -o -name "*.h" | xargs $(CLANG_FORMAT) --dry-run --Werror
+	@find src tests -type f \( -name "*.cpp" -o -name "*.h" \) ! -path "*/build/*" | xargs $(CLANG_FORMAT) --dry-run --Werror
 	@echo "Format check passed!"
 
 # Check code with clang-tidy
@@ -270,7 +270,7 @@ docker-lint-linux: docker-build-linux
 docker-format-check-linux: docker-dev-build
 	@echo "Checking code formatting in Linux container..."
 	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
-		bash -c "find src tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror"
+		bash -c "find src tests -type f \( -name '*.cpp' -o -name '*.h' \) ! -path '*/build/*' | xargs clang-format --dry-run --Werror"
 	@echo "Format check passed!"
 
 # Clean build directory in Linux container

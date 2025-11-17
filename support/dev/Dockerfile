@@ -47,8 +47,8 @@ RUN ccache --set-config=max_size=500M
 WORKDIR /workspace
 
 # Default compiler (matching CI)
-ENV CC=ccache gcc
-ENV CXX=ccache g++
+ENV CC="ccache gcc"
+ENV CXX="ccache g++"
 
 # Default command: show help
 CMD ["bash", "-c", "echo 'MygramDB Linux Development Environment'; \

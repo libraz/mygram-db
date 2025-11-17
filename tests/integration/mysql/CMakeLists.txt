@@ -12,5 +12,7 @@ target_link_libraries(mysql_connection_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
 gtest_discover_tests(mysql_connection_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK mysql_connection
 )

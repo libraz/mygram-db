@@ -5,7 +5,10 @@ include(GoogleTest)
 # Signal handler safety tests
 add_executable(signal_handler_test signal_handler_test.cpp)
 target_link_libraries(signal_handler_test PRIVATE GTest::gtest_main)
-gtest_discover_tests(signal_handler_test)
+gtest_discover_tests(signal_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # Unit test subdirectories
 add_subdirectory(utils)

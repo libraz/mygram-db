@@ -13,6 +13,8 @@ target_link_libraries(cache_pagination_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
 gtest_discover_tests(cache_pagination_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -29,5 +31,7 @@ target_link_libraries(cache_count_integration_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding and cache state conflicts
 gtest_discover_tests(cache_count_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )

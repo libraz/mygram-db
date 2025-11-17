@@ -11,6 +11,8 @@ target_link_libraries(document_store_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
 gtest_discover_tests(document_store_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -26,6 +28,8 @@ target_link_libraries(document_store_concurrent_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
 gtest_discover_tests(document_store_concurrent_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -41,6 +45,8 @@ target_link_libraries(document_store_serialization_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
 gtest_discover_tests(document_store_serialization_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -54,7 +60,10 @@ target_link_libraries(document_store_docid_overflow_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(document_store_docid_overflow_test)
+gtest_discover_tests(document_store_docid_overflow_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # Dump commands tests (DUMP SAVE/LOAD/VERIFY/INFO)
 add_executable(dump_commands_test
@@ -68,6 +77,8 @@ target_link_libraries(dump_commands_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
 gtest_discover_tests(dump_commands_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -84,6 +95,8 @@ target_link_libraries(dump_security_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
 gtest_discover_tests(dump_security_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 

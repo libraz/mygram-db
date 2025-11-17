@@ -11,6 +11,8 @@ target_link_libraries(server_stats_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server stats state conflicts
 gtest_discover_tests(server_stats_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_state
 )
 
@@ -27,6 +29,8 @@ target_link_libraries(response_formatter_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid formatter state conflicts
 gtest_discover_tests(response_formatter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_state
 )
 
@@ -42,6 +46,8 @@ target_link_libraries(tcp_server_basic_test
 )
 
 gtest_discover_tests(tcp_server_basic_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -55,6 +61,8 @@ target_link_libraries(tcp_server_search_test
 )
 
 gtest_discover_tests(tcp_server_search_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -68,6 +76,8 @@ target_link_libraries(tcp_server_commands_test
 )
 
 gtest_discover_tests(tcp_server_commands_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -81,6 +91,8 @@ target_link_libraries(tcp_server_advanced_test
 )
 
 gtest_discover_tests(tcp_server_advanced_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -97,6 +109,8 @@ target_link_libraries(thread_pool_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
 gtest_discover_tests(thread_pool_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
@@ -113,6 +127,8 @@ target_link_libraries(thread_pool_shutdown_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
 gtest_discover_tests(thread_pool_shutdown_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
@@ -132,6 +148,8 @@ target_link_libraries(http_server_basic_test
 target_include_directories(http_server_basic_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_basic_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -149,6 +167,8 @@ target_link_libraries(http_server_search_test
 target_include_directories(http_server_search_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_search_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -166,6 +186,8 @@ target_link_libraries(http_server_document_test
 target_include_directories(http_server_document_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_document_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -183,6 +205,8 @@ target_link_libraries(http_server_features_test
 target_include_directories(http_server_features_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_features_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -199,6 +223,8 @@ target_link_libraries(dump_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
 gtest_discover_tests(dump_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -215,6 +241,8 @@ target_link_libraries(dump_auto_save_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
 gtest_discover_tests(dump_auto_save_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
@@ -232,6 +260,8 @@ target_link_libraries(sync_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
 gtest_discover_tests(sync_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK mysql_connection
 )
 
@@ -248,6 +278,8 @@ target_link_libraries(config_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server state conflicts
 gtest_discover_tests(config_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -264,6 +296,8 @@ target_link_libraries(connection_io_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid I/O handler conflicts
 gtest_discover_tests(connection_io_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -280,6 +314,8 @@ target_link_libraries(request_dispatcher_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid request dispatcher conflicts
 gtest_discover_tests(request_dispatcher_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -296,6 +332,8 @@ target_link_libraries(sync_operation_manager_deadlock_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
 gtest_discover_tests(sync_operation_manager_deadlock_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
@@ -312,6 +350,8 @@ target_link_libraries(rate_limiter_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
 gtest_discover_tests(rate_limiter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
@@ -328,6 +368,8 @@ target_link_libraries(rate_limiter_cleanup_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
 gtest_discover_tests(rate_limiter_cleanup_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
@@ -344,6 +386,8 @@ target_link_libraries(connection_limit_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(connection_limit_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 
@@ -364,6 +408,8 @@ target_include_directories(health_endpoint_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(health_endpoint_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
 )
 

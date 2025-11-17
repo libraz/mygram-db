@@ -74,6 +74,10 @@ TEST_F(ThreadPoolShutdownTest, ImmediateShutdownMaySkipTasks) {
     });
   }
 
+  // Give thread pool a moment to start processing at least some tasks
+  // This is especially important in slower environments (e.g., Docker/QEMU)
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
   // Immediate shutdown may not complete all tasks
   pool_->Shutdown(/*graceful=*/false);
 

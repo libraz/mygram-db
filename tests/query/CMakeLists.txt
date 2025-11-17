@@ -9,7 +9,10 @@ target_link_libraries(query_parser_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(query_parser_test)
+gtest_discover_tests(query_parser_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # Query AST tests
 
@@ -22,7 +25,10 @@ target_link_libraries(query_ast_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(query_ast_test)
+gtest_discover_tests(query_ast_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # Result sorter tests
 
@@ -35,4 +41,7 @@ target_link_libraries(result_sorter_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(result_sorter_test)
+gtest_discover_tests(result_sorter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

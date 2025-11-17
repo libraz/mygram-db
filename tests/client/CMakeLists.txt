@@ -12,6 +12,8 @@ target_link_libraries(mygramclient_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server connection conflicts
 gtest_discover_tests(mygramclient_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK client_server_connection
 )
 
@@ -26,4 +28,7 @@ target_link_libraries(search_expression_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(search_expression_test)
+gtest_discover_tests(search_expression_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
