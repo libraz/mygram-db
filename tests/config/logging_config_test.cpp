@@ -59,7 +59,9 @@ TEST(LoggingConfigTest, DefaultStdout) {
       "  json: true\n"
       "  file: \"\"\n");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "info");
   EXPECT_TRUE(config.logging.json);
@@ -78,7 +80,9 @@ TEST(LoggingConfigTest, FileLogging) {
       "  json: false\n"
       "  file: \"/var/log/mygramdb/mygramdb.log\"\n");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "debug");
   EXPECT_FALSE(config.logging.json);
@@ -95,7 +99,9 @@ TEST(LoggingConfigTest, OnlyLevel) {
       "logging:\n"
       "  level: \"warn\"\n");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "warn");
   EXPECT_TRUE(config.logging.json);    // Default
@@ -116,7 +122,9 @@ TEST(LoggingConfigTest, AllLogLevels) {
         "  level: \"" +
         level + "\"\n");
 
-    Config config = LoadConfig(config_path);
+    auto config_result = LoadConfig(config_path);
+    ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+    Config config = *config_result;
     EXPECT_EQ(config.logging.level, level);
 
     std::filesystem::remove(config_path);
@@ -129,7 +137,9 @@ TEST(LoggingConfigTest, AllLogLevels) {
 TEST(LoggingConfigTest, NoLoggingSection) {
   std::string config_path = CreateTempConfig("");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "info");  // Default
   EXPECT_TRUE(config.logging.json);         // Default
@@ -147,7 +157,9 @@ TEST(LoggingConfigTest, RelativeFilePath) {
       "  level: \"info\"\n"
       "  file: \"./logs/mygramdb.log\"\n");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.file, "./logs/mygramdb.log");
 
@@ -163,7 +175,9 @@ TEST(LoggingConfigTest, AbsoluteFilePath) {
       "  level: \"info\"\n"
       "  file: \"/tmp/test-mygramdb.log\"\n");
 
-  Config config = LoadConfig(config_path);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_EQ(config.logging.file, "/tmp/test-mygramdb.log");
 
@@ -182,7 +196,9 @@ TEST(LoggingConfigTest, JsonFormatCombinations) {
         "  json: true\n"
         "  file: \"/tmp/test.log\"\n");
 
-    Config config = LoadConfig(config_path);
+    auto config_result = LoadConfig(config_path);
+    ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+    Config config = *config_result;
     EXPECT_TRUE(config.logging.json);
     EXPECT_EQ(config.logging.file, "/tmp/test.log");
 
@@ -197,7 +213,9 @@ TEST(LoggingConfigTest, JsonFormatCombinations) {
         "  json: false\n"
         "  file: \"\"\n");
 
-    Config config = LoadConfig(config_path);
+    auto config_result = LoadConfig(config_path);
+    ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+    Config config = *config_result;
     EXPECT_FALSE(config.logging.json);
     EXPECT_EQ(config.logging.file, "");
 

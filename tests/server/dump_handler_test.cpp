@@ -93,13 +93,13 @@ class DumpHandlerTest : public ::testing::Test {
   void AddTestData() {
     // Add documents to index and doc_store
     auto doc_id1 = table_ctx_->doc_store->AddDocument("1", {{"content", "hello world"}});
-    table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
     auto doc_id2 = table_ctx_->doc_store->AddDocument("2", {{"content", "test document"}});
-    table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id2), "test document");
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id2), "test document");
 
     auto doc_id3 = table_ctx_->doc_store->AddDocument("3", {{"content", "another test"}});
-    table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id3), "another test");
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id3), "another test");
   }
 
   std::unique_ptr<TableContext> table_ctx_;
@@ -414,7 +414,7 @@ TEST_F(DumpHandlerTest, SaveLoadRoundTripPreservesAllData) {
   for (int i = 4; i <= 100; ++i) {
     std::string content = "document " + std::to_string(i);
     auto doc_id = table_ctx_->doc_store->AddDocument(std::to_string(i), {{"content", content}});
-    table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id), content);
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), content);
   }
 
   // Save

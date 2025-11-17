@@ -58,8 +58,15 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "storage/dump_format.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::storage::dump_v1 {
+
+using mygram::utils::Error;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
 
 /**
  * @brief Version 1 dump header
@@ -91,65 +98,65 @@ struct HeaderV1 {
  * @brief Serialize Config to output stream
  * @param output_stream Output stream
  * @param config Configuration to serialize
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool SerializeConfig(std::ostream& output_stream, const config::Config& config);
+Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config::Config& config);
 
 /**
  * @brief Deserialize Config from input stream
  * @param input_stream Input stream
  * @param config Configuration to deserialize into
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool DeserializeConfig(std::istream& input_stream, config::Config& config);
+Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config);
 
 /**
  * @brief Serialize DumpStatistics to output stream
  * @param output_stream Output stream
  * @param stats Statistics to serialize
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool SerializeStatistics(std::ostream& output_stream, const DumpStatistics& stats);
+Expected<void, Error> SerializeStatistics(std::ostream& output_stream, const DumpStatistics& stats);
 
 /**
  * @brief Deserialize DumpStatistics from input stream
  * @param input_stream Input stream
  * @param stats Statistics to deserialize into
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool DeserializeStatistics(std::istream& input_stream, DumpStatistics& stats);
+Expected<void, Error> DeserializeStatistics(std::istream& input_stream, DumpStatistics& stats);
 
 /**
  * @brief Serialize TableStatistics to output stream
  * @param output_stream Output stream
  * @param stats Table statistics to serialize
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool SerializeTableStatistics(std::ostream& output_stream, const TableStatistics& stats);
+Expected<void, Error> SerializeTableStatistics(std::ostream& output_stream, const TableStatistics& stats);
 
 /**
  * @brief Deserialize TableStatistics from input stream
  * @param input_stream Input stream
  * @param stats Table statistics to deserialize into
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool DeserializeTableStatistics(std::istream& input_stream, TableStatistics& stats);
+Expected<void, Error> DeserializeTableStatistics(std::istream& input_stream, TableStatistics& stats);
 
 /**
  * @brief Write Version 1 dump header
  * @param output_stream Output stream
  * @param header Header to write
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool WriteHeaderV1(std::ostream& output_stream, const HeaderV1& header);
+Expected<void, Error> WriteHeaderV1(std::ostream& output_stream, const HeaderV1& header);
 
 /**
  * @brief Read Version 1 dump header
  * @param input_stream Input stream
  * @param header Header to read into
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool ReadHeaderV1(std::istream& input_stream, HeaderV1& header);
+Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header);
 
 /**
  * @brief Write complete dump to file (Version 1 format)
@@ -186,16 +193,17 @@ bool ReadHeaderV1(std::istream& input_stream, HeaderV1& header);
  * @param table_contexts Map of table name to (Index*, DocumentStore*) pairs
  * @param stats Optional dump-level statistics (total documents, terms, bytes)
  * @param table_stats Optional per-table statistics map
- * @return true if successful, false on error (logged via spdlog)
+ * @return Expected<void, Error> Success or error with details (context: filepath)
  *
  * @note Writes to temporary file first (.tmp suffix), then atomic rename
  * @note All data is written in little-endian format
  * @note CRC32 uses zlib implementation (polynomial: 0xEDB88320)
  */
-bool WriteDumpV1(const std::string& filepath, const std::string& gtid, const config::Config& config,
-                 const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
-                 const DumpStatistics* stats = nullptr,
-                 const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr);
+Expected<void, Error> WriteDumpV1(
+    const std::string& filepath, const std::string& gtid, const config::Config& config,
+    const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
+    const DumpStatistics* stats = nullptr,
+    const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr);
 
 /**
  * @brief Read complete dump from file (Version 1 format)
@@ -232,18 +240,18 @@ bool WriteDumpV1(const std::string& filepath, const std::string& gtid, const con
  * @param stats Optional output for dump-level statistics
  * @param table_stats Optional output for per-table statistics map
  * @param integrity_error Optional output for detailed integrity error information
- * @return true if successful, false on error (logged via spdlog)
+ * @return Expected<void, Error> Success or error with details (context: filepath, section)
  *
  * @note table_contexts MUST contain pre-allocated Index and DocumentStore objects
  * @note All loaded data replaces existing data in the provided objects
  * @note CRC32 verification is always performed
  * @note Little-endian format expected for all multi-byte integers
  */
-bool ReadDumpV1(const std::string& filepath, std::string& gtid, config::Config& config,
-                std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
-                DumpStatistics* stats = nullptr,
-                std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-                dump_format::IntegrityError* integrity_error = nullptr);
+Expected<void, Error> ReadDumpV1(
+    const std::string& filepath, std::string& gtid, config::Config& config,
+    std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
+    DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
+    dump_format::IntegrityError* integrity_error = nullptr);
 
 /**
  * @brief Verify dump file integrity without loading
@@ -265,12 +273,12 @@ bool ReadDumpV1(const std::string& filepath, std::string& gtid, config::Config& 
  *
  * @param filepath Dump file path to verify
  * @param integrity_error Output for detailed error information if verification fails
- * @return true if file passes all integrity checks, false otherwise
+ * @return Expected<void, Error> Success or error with details (context: filepath)
  *
  * @note This is a fast check suitable for cron jobs and health checks
  * @note For full validation, use ReadDumpV1() which verifies all sections
  */
-bool VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error);
+Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error);
 
 /**
  * @brief Calculate CRC32 checksum for data
@@ -292,10 +300,10 @@ uint32_t CalculateCRC32(const std::string& str);
  * @param doc_store Document store containing all documents
  * @param index Index to rebuild
  * @param table_config Table configuration for n-gram settings
- * @return true if successful
+ * @return Expected<void, Error> Success or error with details
  */
-bool RebuildIndexFromDocStore(const DocumentStore& doc_store, index::Index& index,
-                              const config::TableConfig& table_config);
+Expected<void, Error> RebuildIndexFromDocStore(const DocumentStore& doc_store, index::Index& index,
+                                               const config::TableConfig& table_config);
 
 /**
  * @brief Dump file metadata information
@@ -336,11 +344,11 @@ struct DumpInfo {
  *
  * @param filepath Dump file path
  * @param info Output structure for dump metadata
- * @return true if successful, false on error (e.g., file not found, invalid format)
+ * @return Expected<void, Error> Success or error with details (context: filepath)
  *
  * @note This does not validate file integrity - use VerifyDumpIntegrity() for that
  * @note Suitable for listing/browsing dump files
  */
-bool GetDumpInfo(const std::string& filepath, DumpInfo& info);
+Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info);
 
 }  // namespace mygramdb::storage::dump_v1

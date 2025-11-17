@@ -94,7 +94,12 @@ bool Query::IsValid() const {
   return true;
 }
 
-Query QueryParser::Parse(const std::string& query_str) {
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(const std::string& query_str) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   error_.clear();
 
   auto tokens = Tokenize(query_str);
@@ -103,7 +108,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     if (error_.empty()) {
       SetError("Empty query");
     }
-    return Query{};
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   std::string command = ToUpper(tokens[0]);
@@ -150,7 +155,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: DUMP + subcommand
       SetError("DUMP requires a subcommand (SAVE, LOAD, VERIFY, INFO)");
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     std::string subcommand = ToUpper(tokens[1]);
@@ -170,7 +175,7 @@ Query QueryParser::Parse(const std::string& query_str) {
           query.filepath = token;
         } else {
           SetError("Unknown DUMP SAVE flag: " + token);
-          return Query{};
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
         }
       }
     } else if (subcommand == "LOAD") {
@@ -181,7 +186,7 @@ Query QueryParser::Parse(const std::string& query_str) {
         query.filepath = tokens[2];
       } else {
         SetError("DUMP LOAD requires a filepath");
-        return Query{};
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (subcommand == "VERIFY") {
       query.type = QueryType::DUMP_VERIFY;
@@ -191,7 +196,7 @@ Query QueryParser::Parse(const std::string& query_str) {
         query.filepath = tokens[2];
       } else {
         SetError("DUMP VERIFY requires a filepath");
-        return Query{};
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (subcommand == "INFO") {
       query.type = QueryType::DUMP_INFO;
@@ -201,11 +206,11 @@ Query QueryParser::Parse(const std::string& query_str) {
         query.filepath = tokens[2];
       } else {
         SetError("DUMP INFO requires a filepath");
-        return Query{};
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else {
       SetError("Unknown DUMP subcommand: " + subcommand);
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     return query;
@@ -240,11 +245,11 @@ Query QueryParser::Parse(const std::string& query_str) {
           query.filepath = tokens[2];
         } else {
           SetError("CONFIG VERIFY requires a filepath");
-          return Query{};
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
         }
       } else {
         SetError("Unknown CONFIG subcommand: " + subcommand + " (expected HELP, SHOW, or VERIFY)");
-        return Query{};
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else {
       // CONFIG without subcommand defaults to CONFIG SHOW
@@ -258,7 +263,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: REPLICATION + subcommand
       SetError("REPLICATION requires a subcommand (STATUS, STOP, START)");
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     std::string subcommand = ToUpper(tokens[1]);
@@ -273,7 +278,7 @@ Query QueryParser::Parse(const std::string& query_str) {
       query.type = QueryType::REPLICATION_START;
     } else {
       SetError("Unknown REPLICATION subcommand: " + subcommand);
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     return query;
@@ -296,7 +301,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     } else {
       // SYNC without arguments (sync all tables or error)
       SetError("SYNC requires a table name or STATUS subcommand");
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     return query;
@@ -313,7 +318,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: DEBUG + mode (ON/OFF)
       SetError("DEBUG requires ON or OFF");
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     std::string mode = ToUpper(tokens[1]);
@@ -326,7 +331,7 @@ Query QueryParser::Parse(const std::string& query_str) {
       query.type = QueryType::DEBUG_OFF;
     } else {
       SetError("DEBUG requires ON or OFF, got: " + mode);
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     return query;
@@ -336,7 +341,7 @@ Query QueryParser::Parse(const std::string& query_str) {
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: CACHE + subcommand
       SetError("CACHE requires a subcommand (CLEAR, STATS, ENABLE, DISABLE)");
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     std::string subcommand = ToUpper(tokens[1]);
@@ -358,17 +363,21 @@ Query QueryParser::Parse(const std::string& query_str) {
       query.type = QueryType::CACHE_DISABLE;
     } else {
       SetError("Unknown CACHE subcommand: " + subcommand);
-      return Query{};
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     return query;
   }
 
   SetError("Unknown command: " + command);
-  return Query{};
+  return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
 }
 
-Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   Query query;
   query.type = QueryType::SEARCH;
 
@@ -387,7 +396,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
         "Multiple tables not supported. Hint: MygramDB searches a single table at a time. Use separate queries "
         "for multiple tables.");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Helper lambda to count parentheses in a token, respecting quotes
@@ -436,7 +445,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     if (total_paren_depth < 0) {
       SetError("Unmatched closing parenthesis");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
   }
 
@@ -444,7 +453,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   if (total_paren_depth > 0) {
     SetError("Unclosed parenthesis");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Extract search text: consume tokens until we hit a keyword (AND, OR, NOT, FILTER, ORDER, LIMIT,
@@ -473,7 +482,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     if (paren_depth == 0 && upper_token == "ORDER") {
       SetError("ORDER BY is not supported. Use SORT instead. Example: SEARCH table text SORT column DESC");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     search_tokens.push_back(token);
@@ -515,7 +524,7 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   if (is_empty) {
     SetError("SEARCH requires non-empty search text");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Parse optional clauses
@@ -525,42 +534,42 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
     if (keyword == "AND") {
       if (!ParseAnd(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "NOT") {
       if (!ParseNot(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "FILTER") {
       if (!ParseFilters(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "ORDER") {
       // ORDER BY is deprecated, guide users to use SORT
       SetError("ORDER BY is not supported. Use SORT instead. Example: SEARCH table text SORT column DESC");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     } else if (keyword == "SORT") {
       if (!ParseSort(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "LIMIT") {
       if (!ParseLimit(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "OFFSET") {
       if (!ParseOffset(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else {
       SetError("Unknown keyword: " + keyword);
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
   }
 
@@ -568,18 +577,22 @@ Query QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
   if (query.limit > kMaxLimit) {
     SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   if (!ValidateQueryLength(query)) {
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   return query;
 }
 
-Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(const std::vector<std::string>& tokens) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   Query query;
   query.type = QueryType::COUNT;
 
@@ -598,7 +611,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
         "Multiple tables not supported. Hint: MygramDB searches a single table at a time. Use separate queries "
         "for multiple tables.");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Helper lambda to count parentheses in a token, respecting quotes
@@ -647,7 +660,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     if (total_paren_depth < 0) {
       SetError("Unmatched closing parenthesis");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
   }
 
@@ -655,7 +668,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   if (total_paren_depth > 0) {
     SetError("Unclosed parenthesis");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Extract search text: consume tokens until we hit a keyword
@@ -685,7 +698,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     if (paren_depth == 0 && upper_token == "ORDER") {
       SetError("ORDER BY is not supported. Use SORT instead.");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
     search_tokens.push_back(token);
@@ -727,7 +740,7 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
   if (is_empty) {
     SetError("COUNT requires non-empty search text");
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Parse optional clauses
@@ -737,42 +750,46 @@ Query QueryParser::ParseCount(const std::vector<std::string>& tokens) {
     if (keyword == "AND") {
       if (!ParseAnd(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "NOT") {
       if (!ParseNot(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "FILTER") {
       if (!ParseFilters(tokens, pos, query)) {
         query.type = QueryType::UNKNOWN;
-        return query;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
     } else if (keyword == "ORDER") {
       SetError("ORDER BY is not supported. Use SORT instead (note: COUNT does not support sorting).");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     } else if (keyword == "SORT") {
       SetError("COUNT does not support SORT clause. Use SEARCH if you need sorted results.");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     } else {
       SetError("COUNT only supports AND, NOT and FILTER clauses");
       query.type = QueryType::UNKNOWN;
-      return query;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
   }
 
   if (!ValidateQueryLength(query)) {
     query.type = QueryType::UNKNOWN;
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   return query;
 }
 
-Query QueryParser::ParseGet(const std::vector<std::string>& tokens) {
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseGet(const std::vector<std::string>& tokens) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   Query query;
   query.type = QueryType::GET;
 

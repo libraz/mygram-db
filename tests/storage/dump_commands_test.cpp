@@ -61,20 +61,20 @@ class DumpCommandsTest : public ::testing::Test {
     storage::DocumentStore::DocumentItem doc1;
     doc1.primary_key = "1";
     doc1.filters["status"] = 1;
-    doc_store1_->AddDocument(doc1.primary_key, doc1.filters);
+    EXPECT_TRUE(doc_store1_->AddDocument(doc1.primary_key, doc1.filters));
     index1_->AddDocument(1, "hello world");
 
     storage::DocumentStore::DocumentItem doc2;
     doc2.primary_key = "2";
     doc2.filters["status"] = 2;
-    doc_store1_->AddDocument(doc2.primary_key, doc2.filters);
+    EXPECT_TRUE(doc_store1_->AddDocument(doc2.primary_key, doc2.filters));
     index1_->AddDocument(2, "test data");
 
     // Add test data to table2
     storage::DocumentStore::DocumentItem doc3;
     doc3.primary_key = "100";
     doc3.filters["category"] = std::string("news");
-    doc_store2_->AddDocument(doc3.primary_key, doc3.filters);
+    EXPECT_TRUE(doc_store2_->AddDocument(doc3.primary_key, doc3.filters));
     index2_->AddDocument(1, "breaking news");
 
     test_gtid_ = "00000000-0000-0000-0000-000000000000:1-100";
@@ -109,7 +109,7 @@ TEST_F(DumpCommandsTest, BasicSaveAndLoad) {
   contexts["table2"] = std::make_pair(index2_.get(), doc_store2_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Verify file exists
@@ -130,7 +130,7 @@ TEST_F(DumpCommandsTest, BasicSaveAndLoad) {
   // Load snapshot
   std::string loaded_gtid;
   config::Config loaded_config;
-  bool load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
+  auto load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
                                                    nullptr, nullptr);
   ASSERT_TRUE(load_success) << "Failed to load snapshot";
 
@@ -180,7 +180,7 @@ TEST_F(DumpCommandsTest, SaveWithStatistics) {
   table_stats["table1"] = table1_stats;
 
   // Save with statistics
-  bool save_success =
+  auto save_success =
       storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, &stats, &table_stats);
   ASSERT_TRUE(save_success) << "Failed to save snapshot with statistics";
 
@@ -196,7 +196,7 @@ TEST_F(DumpCommandsTest, SaveWithStatistics) {
 
   std::string loaded_gtid;
   config::Config loaded_config;
-  bool load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts,
+  auto load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts,
                                                    &loaded_stats, &loaded_table_stats, nullptr);
   ASSERT_TRUE(load_success) << "Failed to load snapshot";
 
@@ -217,12 +217,12 @@ TEST_F(DumpCommandsTest, VerifySnapshot) {
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Verify snapshot
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_TRUE(verify_success) << "Snapshot verification failed: " << error.message;
   EXPECT_EQ(storage::dump_format::CRCErrorType::None, error.type);
 }
@@ -236,7 +236,7 @@ TEST_F(DumpCommandsTest, VerifyCorruptedSnapshot) {
 
   // Verify should fail
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_FALSE(verify_success) << "Verification should fail for corrupted file";
   EXPECT_NE(storage::dump_format::CRCErrorType::None, error.type);
 }
@@ -248,12 +248,12 @@ TEST_F(DumpCommandsTest, GetDumpInfo) {
   contexts["table2"] = std::make_pair(index2_.get(), doc_store2_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Get snapshot info
   storage::dump_v1::DumpInfo info;
-  bool info_success = storage::dump_v1::GetDumpInfo(test_filepath_, info);
+  auto info_success = storage::dump_v1::GetDumpInfo(test_filepath_, info);
   ASSERT_TRUE(info_success) << "Failed to get snapshot info";
 
   // Verify info
@@ -280,12 +280,12 @@ TEST_F(DumpCommandsTest, VersionCompatibility) {
 
   // Verify should fail
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_FALSE(verify_success) << "Should reject future version";
 
   // Get info should also fail
   storage::dump_v1::DumpInfo info;
-  bool info_success = storage::dump_v1::GetDumpInfo(test_filepath_, info);
+  auto info_success = storage::dump_v1::GetDumpInfo(test_filepath_, info);
   EXPECT_FALSE(info_success) << "Should reject future version";
 }
 
@@ -295,7 +295,7 @@ TEST_F(DumpCommandsTest, DetectCRCCorruption) {
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Manually corrupt the CRC field (at offset 32: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) +
@@ -311,7 +311,7 @@ TEST_F(DumpCommandsTest, DetectCRCCorruption) {
 
   // Verify should fail with CRC mismatch
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_FALSE(verify_success) << "Should detect CRC corruption";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, error.type);
   EXPECT_EQ("CRC32 checksum mismatch", error.message);
@@ -325,7 +325,7 @@ TEST_F(DumpCommandsTest, DetectCRCCorruption) {
   std::string loaded_gtid;
   config::Config loaded_config;
   storage::dump_format::IntegrityError load_error;
-  bool load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
+  auto load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
                                                    nullptr, &load_error);
   EXPECT_FALSE(load_success) << "Load should fail with corrupted CRC";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, load_error.type);
@@ -337,7 +337,7 @@ TEST_F(DumpCommandsTest, DetectFileTruncation) {
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Get original file size
@@ -351,7 +351,7 @@ TEST_F(DumpCommandsTest, DetectFileTruncation) {
 
   // Verify should fail with file size mismatch
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_FALSE(verify_success) << "Should detect file truncation";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, error.type);
   EXPECT_NE(std::string::npos, error.message.find("File size mismatch")) << "Error message should mention size";
@@ -365,7 +365,7 @@ TEST_F(DumpCommandsTest, DetectFileTruncation) {
   std::string loaded_gtid;
   config::Config loaded_config;
   storage::dump_format::IntegrityError load_error;
-  bool load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
+  auto load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
                                                    nullptr, &load_error);
   EXPECT_FALSE(load_success) << "Load should fail with truncated file";
 }
@@ -376,7 +376,7 @@ TEST_F(DumpCommandsTest, DetectDataCorruption) {
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
   // Save snapshot
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Failed to save snapshot";
 
   // Get file size
@@ -396,7 +396,7 @@ TEST_F(DumpCommandsTest, DetectDataCorruption) {
 
   // Verify should fail with CRC mismatch
   storage::dump_format::IntegrityError error;
-  bool verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
+  auto verify_success = storage::dump_v1::VerifyDumpIntegrity(test_filepath_, error);
   EXPECT_FALSE(verify_success) << "Should detect data corruption";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, error.type);
   EXPECT_EQ("CRC32 checksum mismatch", error.message);
@@ -410,7 +410,7 @@ TEST_F(DumpCommandsTest, DetectDataCorruption) {
   std::string loaded_gtid;
   config::Config loaded_config;
   storage::dump_format::IntegrityError load_error;
-  bool load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
+  auto load_success = storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr,
                                                    nullptr, &load_error);
   EXPECT_FALSE(load_success) << "Load should fail with corrupted data";
   EXPECT_EQ(storage::dump_format::CRCErrorType::FileCRC, load_error.type);
@@ -426,7 +426,7 @@ TEST_F(DumpCommandsTest, CredentialsNotPersisted) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Read dump file as binary and check for credentials
@@ -451,7 +451,7 @@ TEST_F(DumpCommandsTest, CredentialsNotLoadedFromDump) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Load dump
@@ -462,7 +462,7 @@ TEST_F(DumpCommandsTest, CredentialsNotLoadedFromDump) {
 
   std::string loaded_gtid;
   config::Config loaded_config;
-  bool load_success =
+  auto load_success =
       storage::dump_v1::ReadDumpV1(test_filepath_, loaded_gtid, loaded_config, load_contexts, nullptr, nullptr);
   ASSERT_TRUE(load_success) << "Dump load should succeed";
 
@@ -482,7 +482,7 @@ TEST_F(DumpCommandsTest, RestrictiveFilePermissions) {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> contexts;
   contexts["table1"] = std::make_pair(index1_.get(), doc_store1_.get());
 
-  bool save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
+  auto save_success = storage::dump_v1::WriteDumpV1(test_filepath_, test_gtid_, config_, contexts, nullptr, nullptr);
   ASSERT_TRUE(save_success) << "Dump save should succeed";
 
   // Check file permissions

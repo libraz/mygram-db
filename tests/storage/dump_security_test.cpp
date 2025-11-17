@@ -52,7 +52,7 @@ TEST(DumpSecurityTest, NormalDumpCreation) {
 
   // Create dump
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
 
   EXPECT_TRUE(success) << "Dump creation should succeed";
   EXPECT_TRUE(std::filesystem::exists(dump_path)) << "Dump file should exist";
@@ -90,7 +90,7 @@ TEST(DumpSecurityTest, RejectSymlinkInPath) {
   // Try to write dump to symlink - should fail with O_NOFOLLOW
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(symlink_path.string(), "test-gtid", config, contexts);
+  auto success = WriteDumpV1(symlink_path.string(), "test-gtid", config, contexts);
 
   EXPECT_FALSE(success) << "Dump creation through symlink should fail";
   EXPECT_FALSE(std::filesystem::exists(target_file)) << "Target file should not be created";
@@ -123,7 +123,7 @@ TEST(DumpSecurityTest, RejectSymlinkDirectory) {
 
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path.string(), "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path.string(), "test-gtid", config, contexts);
 
   EXPECT_FALSE(success) << "Dump creation in symlink directory should fail";
 
@@ -154,7 +154,7 @@ TEST(DumpSecurityTest, OverwriteExistingFile) {
   // Create dump - should overwrite
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
 
   EXPECT_TRUE(success) << "Dump creation should succeed";
   EXPECT_TRUE(std::filesystem::exists(dump_path)) << "Dump file should exist";
@@ -182,7 +182,7 @@ TEST(DumpSecurityTest, CreateDumpDirectory) {
   // Create dump - should create directories
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
 
   EXPECT_TRUE(success) << "Dump creation should succeed";
   EXPECT_TRUE(std::filesystem::exists(temp_dir)) << "Dump directory should be created";
@@ -207,7 +207,7 @@ TEST(DumpSecurityTest, OwnershipVerification) {
   // Create dump normally - should succeed
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
 
   EXPECT_TRUE(success) << "Dump creation should succeed with correct ownership";
 
@@ -240,7 +240,7 @@ TEST(DumpSecurityTest, RelativePathHandling) {
   // Create dump
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
-  bool success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
+  auto success = WriteDumpV1(dump_path, "test-gtid", config, contexts);
 
   EXPECT_TRUE(success) << "Dump creation with relative path should succeed";
   EXPECT_TRUE(std::filesystem::exists(dump_path)) << "Dump file should exist";
@@ -269,10 +269,10 @@ TEST(DumpSecurityTest, ConcurrentDumpCreation) {
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
   auto config = CreateMinimalConfig();
 
-  bool success1 = WriteDumpV1(dump_path, "test-gtid-1", config, contexts);
+  auto success1 = WriteDumpV1(dump_path, "test-gtid-1", config, contexts);
   EXPECT_TRUE(success1) << "First dump creation should succeed";
 
-  bool success2 = WriteDumpV1(dump_path, "test-gtid-2", config, contexts);
+  auto success2 = WriteDumpV1(dump_path, "test-gtid-2", config, contexts);
   EXPECT_TRUE(success2) << "Second dump creation should succeed (file removed and recreated)";
 
   // Cleanup

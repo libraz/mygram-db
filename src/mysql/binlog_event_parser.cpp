@@ -21,6 +21,7 @@
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "server/tcp_server.h"  // For TableContext definition
+#include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
 
@@ -78,7 +79,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::warn("WRITE_ROWS event for unknown table_id {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unknown_table_id")
+            .Field("event_type", "write_rows")
+            .Field("table_id", table_id)
+            .Warn();
         return std::nullopt;
       }
 
@@ -87,7 +93,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::warn("WRITE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "table_not_in_context")
+              .Field("event_type", "write_rows")
+              .Field("table_name", table_meta->table_name)
+              .Warn();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -156,7 +167,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::warn("UPDATE_ROWS event for unknown table_id {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unknown_table_id")
+            .Field("event_type", "update_rows")
+            .Field("table_id", table_id)
+            .Warn();
         return std::nullopt;
       }
 
@@ -165,7 +181,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::warn("UPDATE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "table_not_in_context")
+              .Field("event_type", "update_rows")
+              .Field("table_name", table_meta->table_name)
+              .Warn();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -238,7 +259,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::warn("DELETE_ROWS event for unknown table_id {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unknown_table_id")
+            .Field("event_type", "delete_rows")
+            .Field("table_id", table_id)
+            .Warn();
         return std::nullopt;
       }
 
@@ -247,7 +273,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::warn("DELETE_ROWS event for table '{}' not found in table_contexts_", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "table_not_in_context")
+              .Field("event_type", "delete_rows")
+              .Field("table_name", table_meta->table_name)
+              .Warn();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -464,7 +495,12 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   // SECURITY: Validate column count to prevent integer overflow and excessive allocation
   constexpr uint64_t MAX_COLUMNS = 4096;  // MySQL limit is 4096 columns
   if (column_count > MAX_COLUMNS) {
-    spdlog::warn("Column count {} exceeds maximum {}, rejecting TABLE_MAP event", column_count, MAX_COLUMNS);
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "column_count_exceeds_maximum")
+        .Field("column_count", column_count)
+        .Field("max_columns", MAX_COLUMNS)
+        .Warn();
     return std::nullopt;
   }
 
@@ -603,7 +639,11 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
 
         default:
           // Unknown type - skip metadata
-          spdlog::warn("Unknown column type {} while parsing metadata", static_cast<int>(type));
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "unknown_column_type")
+              .Field("column_type", static_cast<int64_t>(type))
+              .Warn();
           break;
       }
     }

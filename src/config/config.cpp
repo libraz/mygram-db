@@ -426,7 +426,7 @@ Config ParseConfigFromJson(const json& root) {
         std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
 #ifdef USE_MYSQL
         auto gtid = mysql::GTID::Parse(gtid_str);
-        if (!gtid.has_value()) {
+        if (!gtid) {
           std::stringstream err_msg;
           err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
           err_msg << "  Expected format: gtid=UUID:transaction_id\n";
@@ -653,7 +653,12 @@ Config ParseConfigFromJson(const json& root) {
 /**
  * @brief Read file contents as string
  */
-std::string ReadFileToString(const std::string& path) {
+mygram::utils::Expected<std::string, mygram::utils::Error> ReadFileToString(const std::string& path) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Check if file exists
   std::ifstream file(path);
   if (!file.is_open()) {
@@ -671,9 +676,9 @@ std::string ReadFileToString(const std::string& path) {
       err_msg << "    - The file path is correct\n";
       err_msg << "    - The file exists and is readable\n";
       err_msg << "  Example config: examples/config.yaml";
-      throw std::runtime_error(err_msg.str());
+      return MakeUnexpected(MakeError(ErrorCode::kConfigFileNotFound, err_msg.str(), path));
     }
-    throw std::runtime_error("Failed to open file: " + path);
+    return MakeUnexpected(MakeError(ErrorCode::kConfigFileNotFound, "Failed to open file: " + path, path));
   }
   std::stringstream buffer;
   buffer << file.rdbuf();
@@ -685,7 +690,7 @@ std::string ReadFileToString(const std::string& path) {
     err_msg << "Configuration file is empty: " << path << "\n";
     err_msg << "  Please provide a valid configuration file.\n";
     err_msg << "  Example config: examples/config.yaml";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, err_msg.str(), path));
   }
 
   return content;
@@ -716,7 +721,13 @@ FileFormat DetectFileFormat(const std::string& path) {
 
 }  // namespace
 
-void ValidateConfigJson(const std::string& config_json_str, const std::string& schema_json_str) {
+mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std::string& config_json_str,
+                                                                       const std::string& schema_json_str) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   try {
     json config_json = json::parse(config_json_str);
 
@@ -743,26 +754,68 @@ void ValidateConfigJson(const std::string& config_json_str, const std::string& s
       err_msg << "    - Invalid filter operators or types\n\n";
       err_msg << "  Please check your configuration against the schema.\n";
       err_msg << "  Example config: examples/config.yaml";
-      throw std::runtime_error(err_msg.str());
+      return MakeUnexpected(MakeError(ErrorCode::kConfigValidationError, err_msg.str()));
     }
   } catch (const json::parse_error& e) {
-    throw std::runtime_error(std::string("JSON parse error: ") + e.what());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, std::string("JSON parse error: ") + e.what()));
   }
+
+  return {};
 }
 
-Config LoadConfigJson(const std::string& path, const std::string& schema_path) {
-  try {
-    std::string config_str = ReadFileToString(path);
-    json config_json = json::parse(config_str);
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::string& path,
+                                                                     const std::string& schema_path) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
 
-    // Always validate - use embedded schema if no custom schema provided
+  try {
+    // Read config file
+    auto config_str_result = ReadFileToString(path);
+    if (!config_str_result) {
+      return MakeUnexpected(config_str_result.error());
+    }
+    std::string config_str = *config_str_result;
+
+    // Parse JSON
+    json config_json;
+    try {
+      config_json = json::parse(config_str);
+    } catch (const json::parse_error& e) {
+      std::stringstream err_msg;
+      err_msg << "JSON parse error in configuration file: " << path << "\n";
+      err_msg << "  Error details: " << e.what() << "\n";
+      if (e.byte != 0) {
+        err_msg << "  Error position: byte " << e.byte << "\n";
+      }
+      err_msg << "  Common issues:\n";
+      err_msg << "    - Missing or extra commas\n";
+      err_msg << "    - Unquoted string values\n";
+      err_msg << "    - Invalid escape sequences\n";
+      err_msg << "    - Mismatched brackets or braces\n";
+      err_msg << "  Tip: Use a JSON validator to check syntax\n";
+      err_msg << "  Example config: examples/config.yaml";
+      return MakeUnexpected(MakeError(ErrorCode::kConfigJsonError, err_msg.str(), path));
+    }
+
+    // Read schema if provided
     std::string schema_str;
     if (!schema_path.empty()) {
-      schema_str = ReadFileToString(schema_path);
+      auto schema_result = ReadFileToString(schema_path);
+      if (!schema_result) {
+        return MakeUnexpected(schema_result.error());
+      }
+      schema_str = *schema_result;
     }
-    // ValidateConfigJson will use embedded schema if schema_str is empty
-    ValidateConfigJson(config_str, schema_str);
 
+    // Validate config
+    auto validation_result = ValidateConfigJson(config_str, schema_str);
+    if (!validation_result) {
+      return MakeUnexpected(validation_result.error());
+    }
+
+    // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(config_json);
 
     spdlog::info("Configuration loaded successfully from {}", path);
@@ -771,31 +824,23 @@ Config LoadConfigJson(const std::string& path, const std::string& schema_path) {
                  config.mysql.host, config.mysql.port);
 
     return config;
-  } catch (const json::parse_error& e) {
-    std::stringstream err_msg;
-    err_msg << "JSON parse error in configuration file: " << path << "\n";
-    err_msg << "  Error details: " << e.what() << "\n";
-    if (e.byte != 0) {
-      err_msg << "  Error position: byte " << e.byte << "\n";
-    }
-    err_msg << "  Common issues:\n";
-    err_msg << "    - Missing or extra commas\n";
-    err_msg << "    - Unquoted string values\n";
-    err_msg << "    - Invalid escape sequences\n";
-    err_msg << "    - Mismatched brackets or braces\n";
-    err_msg << "  Tip: Use a JSON validator to check syntax\n";
-    err_msg << "  Example config: examples/config.yaml";
-    throw std::runtime_error(err_msg.str());
   } catch (const std::exception& e) {
-    throw std::runtime_error(std::string("Failed to load config from ") + path + ": " + e.what());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigParseError,
+                                    std::string("Failed to load config from ") + path + ": " + e.what(), path));
   }
 }
 
-Config LoadConfigYaml(const std::string& path) {
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::string& path) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   try {
     YAML::Node yaml_root = YAML::LoadFile(path);
     json json_root = YamlToJson(yaml_root);
 
+    // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(json_root);
 
     spdlog::info("Configuration loaded successfully from {}", path);
@@ -818,13 +863,20 @@ Config LoadConfigYaml(const std::string& path) {
     err_msg << "    - Inconsistent list formatting\n";
     err_msg << "  Tip: Check YAML syntax, especially indentation\n";
     err_msg << "  Example config: examples/config.yaml";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigYamlError, err_msg.str(), path));
   } catch (const std::exception& e) {
-    throw std::runtime_error(std::string("Failed to load config from ") + path + ": " + e.what());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigParseError,
+                                    std::string("Failed to load config from ") + path + ": " + e.what(), path));
   }
 }
 
-Config LoadConfig(const std::string& path, const std::string& schema_path) {
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
+                                                                 const std::string& schema_path) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   FileFormat format = DetectFileFormat(path);
 
   switch (format) {
@@ -841,36 +893,45 @@ Config LoadConfig(const std::string& path, const std::string& schema_path) {
         std::string config_json_str = json_root.dump();
         std::string schema_str;
         if (!schema_path.empty()) {
-          schema_str = ReadFileToString(schema_path);
+          auto schema_result = ReadFileToString(schema_path);
+          if (!schema_result) {
+            return MakeUnexpected(schema_result.error());
+          }
+          schema_str = *schema_result;
         }
         // ValidateConfigJson will use embedded schema if schema_str is empty
-        ValidateConfigJson(config_json_str, schema_str);
+        auto validation_result = ValidateConfigJson(config_json_str, schema_str);
+        if (!validation_result) {
+          return MakeUnexpected(validation_result.error());
+        }
       } catch (const std::exception& e) {
-        // Re-throw with original error message (already enhanced)
-        throw;
+        return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, e.what(), path));
       }
       return LoadConfigYaml(path);
 
     case FileFormat::kUnknown:
     default:
       // Try YAML first (legacy default), then JSON
-      try {
-        spdlog::debug("Unknown file format, trying YAML first: {}", path);
-        return LoadConfigYaml(path);
-      } catch (const std::exception& yaml_error) {
-        try {
-          spdlog::debug("YAML parsing failed, trying JSON: {}", path);
-          return LoadConfigJson(path, schema_path);
-        } catch (const std::exception& json_error) {
-          std::stringstream err_msg;
-          err_msg << "Failed to load configuration file: " << path << "\n";
-          err_msg << "  File format could not be determined (.yaml, .yml, or .json expected)\n";
-          err_msg << "  Attempted YAML parsing: " << yaml_error.what() << "\n";
-          err_msg << "  Attempted JSON parsing: " << json_error.what() << "\n";
-          err_msg << "  Please ensure the file has the correct extension and valid syntax.";
-          throw std::runtime_error(err_msg.str());
-        }
+      spdlog::debug("Unknown file format, trying YAML first: {}", path);
+      auto yaml_result = LoadConfigYaml(path);
+      if (yaml_result) {
+        return yaml_result;
       }
+
+      spdlog::debug("YAML parsing failed, trying JSON: {}", path);
+      auto json_result = LoadConfigJson(path, schema_path);
+      if (json_result) {
+        return json_result;
+      }
+
+      // Both failed - return a combined error
+      std::stringstream err_msg;
+      err_msg << "Failed to load configuration file: " << path << "\n";
+      err_msg << "  File format could not be determined (.yaml, .yml, or .json expected)\n";
+      err_msg << "  Attempted YAML parsing: " << yaml_result.error().message() << "\n";
+      err_msg << "  Attempted JSON parsing: " << json_result.error().message() << "\n";
+      err_msg << "  Please ensure the file has the correct extension and valid syntax.";
+      return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, err_msg.str(), path));
   }
 }
 

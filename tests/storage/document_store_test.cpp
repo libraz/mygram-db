@@ -18,12 +18,12 @@ using namespace mygramdb::storage;
 TEST(DocumentStoreTest, AddDocument) {
   DocumentStore store;
 
-  DocId doc_id = store.AddDocument("pk1");
+  DocId doc_id = *store.AddDocument("pk1");
   EXPECT_EQ(doc_id, 1);
   EXPECT_EQ(store.Size(), 1);
 
   // Add another document
-  DocId doc_id2 = store.AddDocument("pk2");
+  DocId doc_id2 = *store.AddDocument("pk2");
   EXPECT_EQ(doc_id2, 2);
   EXPECT_EQ(store.Size(), 2);
 }
@@ -39,7 +39,7 @@ TEST(DocumentStoreTest, AddDocumentWithFilters) {
   filters["category"] = static_cast<int64_t>(10);
   filters["score"] = 95.5;
 
-  DocId doc_id = store.AddDocument("pk1", filters);
+  DocId doc_id = *store.AddDocument("pk1", filters);
   EXPECT_EQ(doc_id, 1);
 
   // Verify filters
@@ -62,8 +62,8 @@ TEST(DocumentStoreTest, AddDocumentWithFilters) {
 TEST(DocumentStoreTest, DuplicatePrimaryKey) {
   DocumentStore store;
 
-  DocId doc_id1 = store.AddDocument("pk1");
-  DocId doc_id2 = store.AddDocument("pk1");  // Duplicate
+  DocId doc_id1 = *store.AddDocument("pk1");
+  DocId doc_id2 = *store.AddDocument("pk1");  // Duplicate
 
   // Should return same DocID
   EXPECT_EQ(doc_id1, doc_id2);
@@ -79,7 +79,7 @@ TEST(DocumentStoreTest, GetDocument) {
   std::unordered_map<std::string, FilterValue> filters;
   filters["status"] = static_cast<int64_t>(1);
 
-  DocId doc_id = store.AddDocument("pk1", filters);
+  DocId doc_id = *store.AddDocument("pk1", filters);
 
   // Get document
   auto doc = store.GetDocument(doc_id);
@@ -106,7 +106,7 @@ TEST(DocumentStoreTest, GetNonExistentDocument) {
 TEST(DocumentStoreTest, GetDocId) {
   DocumentStore store;
 
-  DocId doc_id = store.AddDocument("pk1");
+  DocId doc_id = *store.AddDocument("pk1");
 
   auto found_id = store.GetDocId("pk1");
   ASSERT_TRUE(found_id.has_value());
@@ -123,7 +123,7 @@ TEST(DocumentStoreTest, GetDocId) {
 TEST(DocumentStoreTest, GetPrimaryKey) {
   DocumentStore store;
 
-  DocId doc_id = store.AddDocument("pk1");
+  DocId doc_id = *store.AddDocument("pk1");
 
   auto pk = store.GetPrimaryKey(doc_id);
   ASSERT_TRUE(pk.has_value());
@@ -143,7 +143,7 @@ TEST(DocumentStoreTest, UpdateDocument) {
   std::unordered_map<std::string, FilterValue> filters1;
   filters1["status"] = static_cast<int64_t>(1);
 
-  DocId doc_id = store.AddDocument("pk1", filters1);
+  DocId doc_id = *store.AddDocument("pk1", filters1);
 
   // Update filters
   std::unordered_map<std::string, FilterValue> filters2;
@@ -180,7 +180,7 @@ TEST(DocumentStoreTest, UpdateNonExistentDocument) {
 TEST(DocumentStoreTest, RemoveDocument) {
   DocumentStore store;
 
-  DocId doc_id = store.AddDocument("pk1");
+  DocId doc_id = *store.AddDocument("pk1");
   EXPECT_EQ(store.Size(), 1);
 
   bool removed = store.RemoveDocument(doc_id);
@@ -223,9 +223,9 @@ TEST(DocumentStoreTest, FilterByValueInt) {
   std::unordered_map<std::string, FilterValue> filters3;
   filters3["status"] = static_cast<int64_t>(1);
 
-  store.AddDocument("pk1", filters1);
-  store.AddDocument("pk2", filters2);
-  store.AddDocument("pk3", filters3);
+  EXPECT_TRUE(store.AddDocument("pk1", filters1));
+  EXPECT_TRUE(store.AddDocument("pk2", filters2));
+  EXPECT_TRUE(store.AddDocument("pk3", filters3));
 
   // Filter by status=1
   auto results = store.FilterByValue("status", static_cast<int64_t>(1));
@@ -254,9 +254,9 @@ TEST(DocumentStoreTest, FilterByValueString) {
   std::unordered_map<std::string, FilterValue> filters3;
   filters3["tag"] = std::string("important");
 
-  store.AddDocument("pk1", filters1);
-  store.AddDocument("pk2", filters2);
-  store.AddDocument("pk3", filters3);
+  EXPECT_TRUE(store.AddDocument("pk1", filters1));
+  EXPECT_TRUE(store.AddDocument("pk2", filters2));
+  EXPECT_TRUE(store.AddDocument("pk3", filters3));
 
   // Filter by tag="important"
   auto results = store.FilterByValue("tag", std::string("important"));
@@ -274,7 +274,7 @@ TEST(DocumentStoreTest, FilterByNonExistentColumn) {
   std::unordered_map<std::string, FilterValue> filters;
   filters["status"] = static_cast<int64_t>(1);
 
-  store.AddDocument("pk1", filters);
+  EXPECT_TRUE(store.AddDocument("pk1", filters));
 
   auto results = store.FilterByValue("non_existent", static_cast<int64_t>(1));
   EXPECT_EQ(results.size(), 0);
@@ -291,7 +291,7 @@ TEST(DocumentStoreTest, MemoryUsage) {
   std::unordered_map<std::string, FilterValue> filters;
   filters["status"] = static_cast<int64_t>(1);
 
-  store.AddDocument("pk1", filters);
+  EXPECT_TRUE(store.AddDocument("pk1", filters));
 
   size_t after = store.MemoryUsage();
   EXPECT_GT(after, initial);
@@ -303,8 +303,8 @@ TEST(DocumentStoreTest, MemoryUsage) {
 TEST(DocumentStoreTest, Clear) {
   DocumentStore store;
 
-  store.AddDocument("pk1");
-  store.AddDocument("pk2");
+  EXPECT_TRUE(store.AddDocument("pk1"));
+  EXPECT_TRUE(store.AddDocument("pk2"));
   EXPECT_EQ(store.Size(), 2);
 
   store.Clear();
@@ -330,7 +330,7 @@ TEST(DocumentStoreTest, LargeDocumentSet) {
     std::unordered_map<std::string, FilterValue> filters;
     filters["status"] = static_cast<int64_t>(i % 10);
 
-    DocId doc_id = store.AddDocument(pk, filters);
+    DocId doc_id = *store.AddDocument(pk, filters);
     EXPECT_EQ(doc_id, static_cast<DocId>(i + 1));
   }
 
@@ -360,7 +360,7 @@ TEST(DocumentStoreTest, ConcurrentReads) {
     std::string pk = "pk" + std::to_string(i);
     std::unordered_map<std::string, FilterValue> filters;
     filters["status"] = static_cast<int64_t>(i % 10);
-    store.AddDocument(pk, filters);
+    EXPECT_TRUE(store.AddDocument(pk, filters));
   }
 
   // Simulate concurrent reads
@@ -403,9 +403,9 @@ TEST(DocumentStoreTest, ConcurrentReads) {
 TEST(DocumentStoreTest, DocIdAutoIncrement) {
   DocumentStore store;
 
-  DocId id1 = store.AddDocument("pk1");
-  DocId id2 = store.AddDocument("pk2");
-  DocId id3 = store.AddDocument("pk3");
+  DocId id1 = *store.AddDocument("pk1");
+  DocId id2 = *store.AddDocument("pk2");
+  DocId id3 = *store.AddDocument("pk3");
 
   EXPECT_EQ(id1, 1);
   EXPECT_EQ(id2, 2);
@@ -415,7 +415,7 @@ TEST(DocumentStoreTest, DocIdAutoIncrement) {
   store.RemoveDocument(id2);
 
   // Next ID should still be 4 (not reusing removed IDs)
-  DocId id4 = store.AddDocument("pk4");
+  DocId id4 = *store.AddDocument("pk4");
   EXPECT_EQ(id4, 4);
 }
 
@@ -430,7 +430,7 @@ TEST(DocumentStoreTest, MixedFilterTypes) {
   filters["tag"] = std::string("important");
   filters["score"] = 98.5;
 
-  DocId doc_id = store.AddDocument("pk1", filters);
+  DocId doc_id = *store.AddDocument("pk1", filters);
 
   // Verify all types
   auto status = store.GetFilterValue(doc_id, "status");
@@ -459,7 +459,7 @@ TEST(DocumentStoreTest, AddDocumentBatch) {
   batch.push_back({"pk3", {{"status", static_cast<int32_t>(2)}}});
 
   // Add batch
-  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
 
   // Verify doc_ids were assigned sequentially
   EXPECT_EQ(doc_ids.size(), 3);
@@ -489,7 +489,7 @@ TEST(DocumentStoreTest, AddDocumentBatchEmpty) {
   DocumentStore store;
 
   std::vector<DocumentStore::DocumentItem> batch;
-  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
 
   EXPECT_EQ(doc_ids.size(), 0);
   EXPECT_EQ(store.Size(), 0);
@@ -508,7 +508,7 @@ TEST(DocumentStoreTest, AddDocumentBatchLarge) {
     batch.push_back({pk, {{"index", static_cast<int32_t>(i)}}});
   }
 
-  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
 
   // Verify all documents were added
   EXPECT_EQ(doc_ids.size(), 10000);
@@ -536,14 +536,14 @@ TEST(DocumentStoreTest, AddDocumentBatchDuplicates) {
   DocumentStore store;
 
   // Add initial document
-  store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}});
+  EXPECT_TRUE(store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}}));
 
   // Try to add batch with duplicate primary key
   std::vector<DocumentStore::DocumentItem> batch;
   batch.push_back({"pk1", {{"status", static_cast<int32_t>(2)}}});  // Duplicate
   batch.push_back({"pk2", {{"status", static_cast<int32_t>(3)}}});  // New
 
-  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
 
   // Verify duplicate returns existing doc_id
   EXPECT_EQ(doc_ids[0], 1);  // Existing doc_id
@@ -565,14 +565,14 @@ TEST(DocumentStoreTest, EmojiInDocuments) {
   DocumentStore store;
 
   // Add document with emoji in primary key
-  DocId doc_id1 = store.AddDocument("😀_pk1", {});
+  DocId doc_id1 = *store.AddDocument("😀_pk1", {});
   EXPECT_GT(doc_id1, 0);
 
   // Add document with emoji in filter value (string)
   std::unordered_map<std::string, FilterValue> filters;
   filters["title"] = FilterValue("Tutorial😀🎉");
   filters["category"] = FilterValue("楽しい😀学習");
-  DocId doc_id2 = store.AddDocument("pk2", filters);
+  DocId doc_id2 = *store.AddDocument("pk2", filters);
   EXPECT_GT(doc_id2, 0);
 
   // Verify retrieval
@@ -598,9 +598,9 @@ TEST(DocumentStoreTest, EmojiPrimaryKeyLookup) {
   DocumentStore store;
 
   // Add documents with emoji primary keys
-  store.AddDocument("😀", {});
-  store.AddDocument("🎉", {});
-  store.AddDocument("👍", {});
+  EXPECT_TRUE(store.AddDocument("😀", {}));
+  EXPECT_TRUE(store.AddDocument("🎉", {}));
+  EXPECT_TRUE(store.AddDocument("👍", {}));
 
   // Lookup by emoji
   auto doc_id1 = store.GetDocId("😀");
@@ -633,7 +633,7 @@ TEST(DocumentStoreTest, EmojiFilterValues) {
   filters["rating"] = FilterValue("👍");
   filters["mixed"] = FilterValue("Hello😀World🎉");
 
-  DocId doc_id = store.AddDocument("pk1", filters);
+  DocId doc_id = *store.AddDocument("pk1", filters);
 
   // Verify all emoji filter values
   auto mood = store.GetFilterValue(doc_id, "mood");
@@ -669,7 +669,7 @@ TEST(DocumentStoreTest, EmojiBatchOperations) {
   }
 
   // Add batch
-  std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+  std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
   EXPECT_EQ(doc_ids.size(), 100);
   EXPECT_EQ(store.Size(), 100);
 
@@ -692,7 +692,7 @@ TEST(DocumentStoreTest, ComplexEmoji) {
   filters["thumbs"] = FilterValue("👍🏽");                       // Medium skin tone
   filters["family"] = FilterValue("👨‍👩‍👧‍👦");  // Family with ZWJ
 
-  DocId doc_id = store.AddDocument("complex", filters);
+  DocId doc_id = *store.AddDocument("complex", filters);
 
   // Verify retrieval
   auto thumbs = store.GetFilterValue(doc_id, "thumbs");
@@ -727,7 +727,7 @@ TEST(DocumentStoreTest, ConcurrentWrites) {
         filters["thread_id"] = static_cast<int64_t>(t);
         filters["doc_num"] = static_cast<int64_t>(i);
 
-        DocId doc_id = store.AddDocument(pk, filters);
+        DocId doc_id = *store.AddDocument(pk, filters);
         if (doc_id > 0) {
           success_count++;
         }
@@ -765,7 +765,7 @@ TEST(DocumentStoreTest, ConcurrentReadWrite) {
     std::string pk = "initial_pk" + std::to_string(i);
     std::unordered_map<std::string, FilterValue> filters;
     filters["status"] = static_cast<int64_t>(i % 10);
-    store.AddDocument(pk, filters);
+    EXPECT_TRUE(store.AddDocument(pk, filters));
   }
 
   const int num_reader_threads = 20;
@@ -805,7 +805,7 @@ TEST(DocumentStoreTest, ConcurrentReadWrite) {
         filters["status"] = static_cast<int64_t>(i % 10);
         filters["thread_id"] = static_cast<int64_t>(t);
 
-        DocId doc_id = store.AddDocument(pk, filters);
+        DocId doc_id = *store.AddDocument(pk, filters);
         if (doc_id > 0) {
           write_success++;
         }
@@ -840,7 +840,7 @@ TEST(DocumentStoreTest, ConcurrentUpdates) {
     std::string pk = "pk" + std::to_string(i);
     std::unordered_map<std::string, FilterValue> filters;
     filters["value"] = static_cast<int64_t>(0);
-    doc_ids.push_back(store.AddDocument(pk, filters));
+    doc_ids.push_back(*store.AddDocument(pk, filters));
   }
 
   const int num_threads = 10;
@@ -892,7 +892,7 @@ TEST(DocumentStoreTest, ConcurrentDeletes) {
   std::vector<DocId> doc_ids;
   for (int i = 0; i < 1000; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    doc_ids.push_back(store.AddDocument(pk));
+    doc_ids.push_back(*store.AddDocument(pk));
   }
 
   const int num_threads = 10;
@@ -954,7 +954,7 @@ TEST(DocumentStoreTest, ConcurrentBatchOperations) {
         batch.push_back({pk, filters});
       }
 
-      std::vector<DocId> doc_ids = store.AddDocumentBatch(batch);
+      std::vector<DocId> doc_ids = *store.AddDocumentBatch(batch);
       total_added += doc_ids.size();
     });
   }
@@ -981,7 +981,7 @@ TEST(DocumentStoreTest, ConcurrentFilterOperations) {
     std::string pk = "pk" + std::to_string(i);
     std::unordered_map<std::string, FilterValue> filters;
     filters["category"] = static_cast<int64_t>(i % 20);
-    store.AddDocument(pk, filters);
+    EXPECT_TRUE(store.AddDocument(pk, filters));
   }
 
   const int num_threads = 20;

@@ -49,9 +49,9 @@ class HttpServerTest : public ::testing::Test {
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 
     // Index documents
-    index->AddDocument(doc_id1, "machine learning");
-    index->AddDocument(doc_id2, "breaking news");
-    index->AddDocument(doc_id3, "old article");
+    index->AddDocument(*doc_id1, "machine learning");
+    index->AddDocument(*doc_id2, "breaking news");
+    index->AddDocument(*doc_id3, "old article");
 
     // Create table context
     table_context_.name = "test";
@@ -233,8 +233,8 @@ class HttpServerMultiTableTest : public ::testing::Test {
       filters2["category"] = std::string("tech");
       auto doc_id2 = doc_store->AddDocument("tech_2", filters2);
 
-      index->AddDocument(doc_id1, "machine learning");
-      index->AddDocument(doc_id2, "deep learning");
+      index->AddDocument(*doc_id1, "machine learning");
+      index->AddDocument(*doc_id2, "deep learning");
 
       table_context1_.name = "table1";
       table_context1_.config.ngram_size = 1;
@@ -255,8 +255,8 @@ class HttpServerMultiTableTest : public ::testing::Test {
       filters2["category"] = std::string("news");
       auto doc_id2 = doc_store->AddDocument("news_2", filters2);
 
-      index->AddDocument(doc_id1, "breaking news");
-      index->AddDocument(doc_id2, "world news");
+      index->AddDocument(*doc_id1, "breaking news");
+      index->AddDocument(*doc_id2, "world news");
 
       table_context2_.name = "table2";
       table_context2_.config.ngram_size = 1;
@@ -457,8 +457,8 @@ class HttpServerKanjiTest : public ::testing::Test {
     auto doc_id2 = doc_store->AddDocument("jp_article_2", {});
 
     // Index Japanese documents with kanji_ngram_size=2
-    index->AddDocument(doc_id1, "機械学習");      // Machine learning
-    index->AddDocument(doc_id2, "深層学習技術");  // Deep learning technology
+    index->AddDocument(*doc_id1, "機械学習");      // Machine learning
+    index->AddDocument(*doc_id2, "深層学習技術");  // Deep learning technology
 
     // Create table context with kanji_ngram_size
     table_context_.name = "test_kanji";
@@ -556,7 +556,7 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
 
   // Add test documents
   auto doc_id = table_context.doc_store->AddDocument("test_doc", {});
-  table_context.index->AddDocument(doc_id, "test content");
+  table_context.index->AddDocument(*doc_id, "test content");
 
   std::unordered_map<std::string, TableContext*> table_contexts;
   table_contexts["test"] = &table_context;
@@ -682,7 +682,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   std::unordered_map<std::string, storage::FilterValue> filters1;
   filters1["status"] = static_cast<int64_t>(1);
   auto doc_id1 = ctx1.doc_store->AddDocument("doc1", filters1);
-  ctx1.index->AddDocument(doc_id1, "hello world");
+  ctx1.index->AddDocument(*doc_id1, "hello world");
   table_contexts["my-table"] = &ctx1;
 
   // Table with dot
@@ -693,7 +693,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   std::unordered_map<std::string, storage::FilterValue> filters2;
   filters2["count"] = static_cast<int64_t>(42);
   auto doc_id2 = ctx2.doc_store->AddDocument("doc2", filters2);
-  ctx2.index->AddDocument(doc_id2, "test data");
+  ctx2.index->AddDocument(*doc_id2, "test data");
   table_contexts["table.name"] = &ctx2;
 
   // Table with unicode (Japanese)
@@ -704,7 +704,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   std::unordered_map<std::string, storage::FilterValue> filters3;
   filters3["value"] = std::string("test");
   auto doc_id3 = ctx3.doc_store->AddDocument("doc3", filters3);
-  ctx3.index->AddDocument(doc_id3, "japanese table");
+  ctx3.index->AddDocument(*doc_id3, "japanese table");
   table_contexts["テーブル"] = &ctx3;
 
   HttpServerConfig http_config;
@@ -765,7 +765,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     filters["score"] = static_cast<int64_t>(i * 10);
     filters["name"] = std::string("item_") + std::to_string(i);
     auto doc_id = ctx.doc_store->AddDocument("doc" + std::to_string(i), filters);
-    ctx.index->AddDocument(doc_id, "test document");
+    ctx.index->AddDocument(*doc_id, "test document");
   }
   table_contexts["test"] = &ctx;
 
@@ -898,17 +898,17 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
   std::unordered_map<std::string, storage::FilterValue> filters1;
   filters1["timestamp"] = large_timestamp1;
   auto doc_id1 = ctx.doc_store->AddDocument("doc1", filters1);
-  ctx.index->AddDocument(doc_id1, "test document 1");
+  ctx.index->AddDocument(*doc_id1, "test document 1");
 
   std::unordered_map<std::string, storage::FilterValue> filters2;
   filters2["timestamp"] = large_timestamp2;
   auto doc_id2 = ctx.doc_store->AddDocument("doc2", filters2);
-  ctx.index->AddDocument(doc_id2, "test document 2");
+  ctx.index->AddDocument(*doc_id2, "test document 2");
 
   std::unordered_map<std::string, storage::FilterValue> filters3;
   filters3["timestamp"] = large_timestamp3;
   auto doc_id3 = ctx.doc_store->AddDocument("doc3", filters3);
-  ctx.index->AddDocument(doc_id3, "test document 3");
+  ctx.index->AddDocument(*doc_id3, "test document 3");
 
   table_contexts["test"] = &ctx;
 

@@ -49,7 +49,7 @@ class CacheOffsetLimitIntegrationTest : public ::testing::Test {
     for (int i = 1; i <= 100; ++i) {
       std::string doc_id = std::to_string(i);
       std::string text = "test document " + std::to_string(i);
-      auto internal_doc_id = table_context_.doc_store->AddDocument(doc_id, {});
+      auto internal_doc_id = *table_context_.doc_store->AddDocument(doc_id, {});
       table_context_.index->AddDocument(internal_doc_id, text);
     }
 

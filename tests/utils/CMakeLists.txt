@@ -63,3 +63,40 @@ target_link_libraries(network_acl_security_test PRIVATE
 )
 
 gtest_discover_tests(network_acl_security_test)
+
+add_executable(expected_test
+  expected_test.cpp
+)
+
+target_link_libraries(expected_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(expected_test)
+
+add_executable(error_test
+  error_test.cpp
+)
+
+target_link_libraries(error_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(error_test)
+
+add_executable(structured_log_test
+  structured_log_test.cpp
+)
+
+target_include_directories(structured_log_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(structured_log_test PRIVATE
+  spdlog::spdlog
+  GTest::gtest_main
+)
+
+gtest_discover_tests(structured_log_test)

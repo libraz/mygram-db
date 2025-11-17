@@ -464,12 +464,18 @@ void Index::Optimize(uint64_t total_docs) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  // Phase 1a: Take snapshot of shared_ptrs (brief shared_lock)
-  // Copy shared_ptrs only - this is fast and doesn't block writes for long
+  // Phase 1a: Take snapshot of posting list SIZES and pointers (brief shared_lock)
+  // IMPORTANT: We store both sizes and shared_ptrs:
+  // - shared_ptr copies keep posting lists alive during optimization
+  // - Size snapshots capture state at T0, unaffected by concurrent AddDocument()
   std::unordered_map<std::string, std::shared_ptr<PostingList>> snapshot;
+  std::unordered_map<std::string, size_t> snapshot_sizes;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-    snapshot = term_postings_;  // Copy shared_ptrs (reference counting)
+    for (const auto& [term, posting] : term_postings_) {
+      snapshot[term] = posting;                // Copy shared_ptr (reference counting)
+      snapshot_sizes[term] = posting->Size();  // Capture size at snapshot time
+    }
   }
   // Lock released - AddDocument/RemoveDocument can now proceed
 
@@ -485,6 +491,7 @@ void Index::Optimize(uint64_t total_docs) {
   // Phase 2: Atomically swap the old index with the new optimized index
   // Brief exclusive lock to update the map
   size_t term_count = 0;
+  size_t merged_count = 0;
   {
     std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
@@ -494,14 +501,33 @@ void Index::Optimize(uint64_t total_docs) {
     // This preserves concurrent modifications:
     // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
     // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-    // - Terms modified during Phase 1: will use optimized version from snapshot
+    // - Terms modified during Phase 1: merge new additions with optimized version
     for (auto& [term, optimized_posting] : optimized_postings) {
-      // Only update if term still exists (wasn't removed during Phase 1)
-      if (term_postings_.find(term) != term_postings_.end()) {
-        term_postings_[term] = std::move(optimized_posting);
+      auto current_it = term_postings_.find(term);
+      if (current_it != term_postings_.end()) {
+        const auto& current_posting = current_it->second;
+        auto snapshot_size_it = snapshot_sizes.find(term);
+
+        // Check if documents were added during optimization
+        // IMPORTANT: Compare with snapshot SIZE, not snapshot object's current size
+        // The snapshot shared_ptr points to the same mutable object that AddDocument() modifies
+        if (snapshot_size_it != snapshot_sizes.end() && current_posting->Size() > snapshot_size_it->second) {
+          // New documents were added: merge them with the optimized version
+          auto merged = optimized_posting->Union(*current_posting);
+          merged->Optimize(total_docs);  // Re-optimize after merge
+          term_postings_[term] = std::move(merged);
+          merged_count++;
+        } else {
+          // No changes or only removals: use optimized version as-is
+          term_postings_[term] = std::move(optimized_posting);
+        }
       }
       // If term was removed, don't re-add it
     }
+  }
+
+  if (merged_count > 0) {
+    spdlog::debug("Merged concurrent additions for {} terms during optimization", merged_count);
   }
 
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -540,41 +566,59 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 
   auto start_time = std::chrono::steady_clock::now();
 
-  // Acquire exclusive lock for the entire optimization operation
-  // This blocks all concurrent writes (Add/Update/Remove) during optimization
-  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
-
-  // Collect all term names to iterate over
+  // Collect term names for batch processing
   std::vector<std::string> terms;
-  terms.reserve(term_postings_.size());
-  for (const auto& [term, posting] : term_postings_) {
-    (void)posting;  // Suppress unused variable warning
-    terms.push_back(term);
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    terms.reserve(term_postings_.size());
+    for (const auto& [term, posting] : term_postings_) {
+      (void)posting;  // Suppress unused variable warning
+      terms.push_back(term);
+    }
   }
 
   size_t total_terms = terms.size();
   size_t converted_count = 0;
 
-  // Process in batches
+  // Process in batches to allow periodic updates
   for (size_t i = 0; i < total_terms; i += batch_size) {
     size_t batch_end = std::min(i + batch_size, total_terms);
 
-    // Create optimized copies for this batch
-    std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_batch;
+    // Phase 1a: Take snapshot of posting list SIZES for this batch (brief shared_lock)
+    // IMPORTANT: We only store sizes, not shared_ptrs, because:
+    // - shared_ptr copies would point to the same mutable objects
+    // - AddDocument() modifies the objects in-place, invalidating the "snapshot"
+    // - Storing sizes ensures we can detect concurrent additions accurately
+    std::unordered_map<std::string, size_t> batch_snapshot_sizes;
+    std::unordered_map<std::string, std::shared_ptr<PostingList>> batch_snapshot_ptrs;
+    {
+      std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+      for (size_t j = i; j < batch_end; ++j) {
+        const auto& term = terms[j];
+        auto iter = term_postings_.find(term);
+        if (iter != term_postings_.end()) {
+          batch_snapshot_sizes[term] = iter->second->Size();  // Capture size at snapshot time
+          batch_snapshot_ptrs[term] = iter->second;           // Keep pointer for optimization
+        }
+      }
+    }
+    // Lock released - AddDocument/RemoveDocument can proceed
 
+    // Phase 1b: Create optimized copies for this batch (CPU-intensive, outside lock)
+    std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
     for (size_t j = i; j < batch_end; ++j) {
       const auto& term = terms[j];
 
-      // Find the posting list
-      auto iterator = term_postings_.find(term);
-      if (iterator == term_postings_.end()) {
+      // Find the posting list in batch snapshot
+      auto iterator = batch_snapshot_ptrs.find(term);
+      if (iterator == batch_snapshot_ptrs.end()) {
         continue;  // Term was removed
       }
 
       const auto& posting = iterator->second;
       auto old_strategy = posting->GetStrategy();
 
-      // Clone and optimize
+      // Clone and optimize (CPU-intensive, outside lock)
       auto optimized = posting->Clone(total_docs);
 
       // Track if strategy changed
@@ -582,16 +626,48 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
         converted_count++;
       }
 
-      optimized_batch[term] = std::move(optimized);
+      optimized_postings[term] = std::move(optimized);
     }
 
-    // Swap in the optimized batch
-    for (auto& [term, optimized] : optimized_batch) {
-      auto iterator = term_postings_.find(term);
-      if (iterator != term_postings_.end()) {
-        iterator->second = std::move(optimized);
+    // Phase 2: Atomically swap the optimized batch (brief exclusive lock)
+    {
+      std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+
+      // Update only terms that still exist in the index
+      // This preserves concurrent modifications:
+      // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
+      // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
+      // - Terms modified during Phase 1: merge new additions with optimized version
+      for (size_t j = i; j < batch_end; ++j) {
+        const auto& term = terms[j];
+        auto opt_it = optimized_postings.find(term);
+        if (opt_it == optimized_postings.end()) {
+          continue;  // Term wasn't optimized
+        }
+
+        auto current_it = term_postings_.find(term);
+        if (current_it != term_postings_.end()) {
+          const auto& current_posting = current_it->second;
+          auto snapshot_size_it = batch_snapshot_sizes.find(term);
+
+          // Check if documents were added during this batch's optimization
+          // IMPORTANT: Compare with snapshot SIZE, not snapshot object, because:
+          // - The snapshot shared_ptr points to the same mutable object
+          // - AddDocument() modifies it in-place, invalidating size comparisons
+          if (snapshot_size_it != batch_snapshot_sizes.end() && current_posting->Size() > snapshot_size_it->second) {
+            // New documents were added: merge them with the optimized version
+            auto merged = opt_it->second->Union(*current_posting);
+            merged->Optimize(total_docs);
+            term_postings_[term] = std::move(merged);
+          } else {
+            // No changes or only removals: use optimized version as-is
+            term_postings_[term] = std::move(opt_it->second);
+          }
+        }
+        // If term was removed, don't re-add it
       }
     }
+    // Lock released - brief pause allows other operations to proceed
 
     // Log progress every 10% or at the end
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -608,10 +684,15 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   // 1000.0: Standard conversion factor from milliseconds to seconds
+  size_t final_term_count = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    final_term_count = term_postings_.size();
+  }
   spdlog::info(
-      "Batch optimization completed: {} terms processed, "
+      "Batch optimization completed: {} terms processed, {} terms final, "
       "{} strategy changes, {:.2f}s elapsed",
-      total_terms, converted_count, static_cast<double>(duration) / 1000.0);
+      total_terms, final_term_count, converted_count, static_cast<double>(duration) / 1000.0);
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
   return true;

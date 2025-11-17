@@ -15,7 +15,10 @@
 
 #include "server/server_types.h"
 #include "server/thread_pool.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/network_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -34,7 +37,11 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
 ConnectionAcceptor::ConnectionAcceptor(ServerConfig config, ThreadPool* thread_pool)
     : config_(std::move(config)), thread_pool_(thread_pool) {
   if (thread_pool_ == nullptr) {
-    spdlog::error("ConnectionAcceptor: thread_pool cannot be null");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("component", "connection_acceptor")
+        .Field("error", "thread_pool cannot be null")
+        .Error();
   }
 }
 
@@ -42,25 +49,45 @@ ConnectionAcceptor::~ConnectionAcceptor() {
   Stop();
 }
 
-bool ConnectionAcceptor::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (running_) {
-    last_error_ = "ConnectionAcceptor already running";
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "ConnectionAcceptor already running");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "connection_acceptor_start")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // Create socket
   server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
-    last_error_ = "Failed to create socket: " + std::string(strerror(errno));
-    spdlog::error("{}", last_error_);
-    return false;
+    auto error =
+        MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to create socket: " + std::string(strerror(errno)));
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "socket_create")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // Set socket options
   if (!SetSocketOptions(server_fd_)) {
     close(server_fd_);
     server_fd_ = -1;
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to set socket options");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "socket_set_options")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // Bind
@@ -75,21 +102,32 @@ bool ConnectionAcceptor::Start() {
     bind_addr.s_addr = INADDR_ANY;
   } else {
     if (inet_pton(AF_INET, config_.host.c_str(), &bind_addr) != 1) {
-      last_error_ = "Invalid bind address: " + config_.host;
-      spdlog::error("{}", last_error_);
       close(server_fd_);
       server_fd_ = -1;
-      return false;
+      auto error = MakeError(ErrorCode::kNetworkInvalidBindAddress, "Invalid bind address: " + config_.host);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "socket_bind")
+          .Field("bind_address", config_.host)
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
     }
   }
   address.sin_addr = bind_addr;
 
   if (bind(server_fd_, ToSockaddr(&address), sizeof(address)) < 0) {
-    last_error_ = "Failed to bind to port " + std::to_string(config_.port) + ": " + std::string(strerror(errno));
-    spdlog::error("{}", last_error_);
     close(server_fd_);
     server_fd_ = -1;
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind to port " + std::to_string(config_.port) +
+                                                              ": " + std::string(strerror(errno)));
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "socket_bind")
+        .Field("port", static_cast<uint64_t>(config_.port))
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // Get actual port if port 0 was specified
@@ -104,11 +142,15 @@ bool ConnectionAcceptor::Start() {
 
   // Listen
   if (listen(server_fd_, config_.max_connections) < 0) {
-    last_error_ = "Failed to listen: " + std::string(strerror(errno));
-    spdlog::error("{}", last_error_);
     close(server_fd_);
     server_fd_ = -1;
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkListenFailed, "Failed to listen: " + std::string(strerror(errno)));
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "socket_listen")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   should_stop_ = false;
@@ -118,7 +160,7 @@ bool ConnectionAcceptor::Start() {
   accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
 
   spdlog::info("ConnectionAcceptor listening on {}:{}", config_.host, actual_port_);
-  return true;
+  return {};
 }
 
 void ConnectionAcceptor::Stop() {
@@ -170,7 +212,11 @@ void ConnectionAcceptor::AcceptLoop() {
     int client_fd = accept(server_fd_, ToSockaddr(&client_addr), &client_len);
     if (client_fd < 0) {
       if (!should_stop_) {
-        spdlog::error("Accept failed: {}", strerror(errno));
+        mygram::utils::StructuredLog()
+            .Event("server_error")
+            .Field("operation", "accept")
+            .Field("error", strerror(errno))
+            .Error();
       } else {
         spdlog::debug("Accept interrupted (shutdown in progress)");
       }
@@ -181,8 +227,12 @@ void ConnectionAcceptor::AcceptLoop() {
     {
       std::lock_guard<std::mutex> lock(fds_mutex_);
       if (static_cast<int>(active_fds_.size()) >= config_.max_connections) {
-        spdlog::warn("Connection limit reached ({}/{}), rejecting new connection", active_fds_.size(),
-                     config_.max_connections);
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "connection_limit_reached")
+            .Field("active_connections", static_cast<uint64_t>(active_fds_.size()))
+            .Field("max_connections", static_cast<uint64_t>(config_.max_connections))
+            .Warn();
         close(client_fd);
         continue;
       }
@@ -200,12 +250,15 @@ void ConnectionAcceptor::AcceptLoop() {
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
       client_ip.assign(ip_buffer);
     } else {
-      spdlog::warn("Failed to parse client address while accepting connection");
+      mygram::utils::StructuredLog().Event("server_warning").Field("type", "client_address_parse_failed").Warn();
     }
 
     if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
-      spdlog::warn("Rejected TCP connection from {} (not in network.allow_cidrs)",
-                   client_ip.empty() ? "<unknown>" : client_ip);
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "connection_rejected_acl")
+          .Field("client_ip", client_ip.empty() ? "<unknown>" : client_ip)
+          .Warn();
       close(client_fd);
       continue;
     }
@@ -215,7 +268,12 @@ void ConnectionAcceptor::AcceptLoop() {
     timeout.tv_sec = 1;  // 1 second timeout (short for quick shutdown)
     timeout.tv_usec = 0;
     if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-      spdlog::warn("Failed to set SO_RCVTIMEO: {}", strerror(errno));
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "setsockopt_failed")
+          .Field("option", "SO_RCVTIMEO")
+          .Field("error", strerror(errno))
+          .Warn();
     }
 
     // Track connection
@@ -233,12 +291,20 @@ void ConnectionAcceptor::AcceptLoop() {
 
       if (!submitted) {
         // Queue is full - reject connection to prevent FD leak
-        spdlog::warn("Thread pool queue full, rejecting connection (fd={})", client_fd);
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "thread_pool_queue_full")
+            .Field("client_fd", static_cast<uint64_t>(client_fd))
+            .Warn();
         close(client_fd);
         RemoveConnection(client_fd);
       }
     } else {
-      spdlog::error("No connection handler or thread pool configured");
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("type", "no_connection_handler")
+          .Field("error", "No connection handler or thread pool configured")
+          .Error();
       close(client_fd);
       RemoveConnection(client_fd);
     }
@@ -247,33 +313,53 @@ void ConnectionAcceptor::AcceptLoop() {
   spdlog::info("Accept loop exited");
 }
 
-bool ConnectionAcceptor::SetSocketOptions(int socket_fd) {
+bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {
   // SO_REUSEADDR: Allow reuse of local addresses
   int opt = 1;
   if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    last_error_ = "Failed to set SO_REUSEADDR: " + std::string(strerror(errno));
-    spdlog::error("{}", last_error_);
+    std::string error_msg = "Failed to set SO_REUSEADDR: " + std::string(strerror(errno));
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "setsockopt")
+        .Field("option", "SO_REUSEADDR")
+        .Field("error", error_msg)
+        .Error();
     return false;
   }
 
   // SO_KEEPALIVE: Enable TCP keepalive
   if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) < 0) {
-    last_error_ = "Failed to set SO_KEEPALIVE: " + std::string(strerror(errno));
-    spdlog::error("{}", last_error_);
+    std::string error_msg = "Failed to set SO_KEEPALIVE: " + std::string(strerror(errno));
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "setsockopt")
+        .Field("option", "SO_KEEPALIVE")
+        .Field("error", error_msg)
+        .Error();
     return false;
   }
 
   // SO_RCVBUF: Set receive buffer size
   int rcvbuf = config_.recv_buffer_size;
   if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
-    spdlog::warn("Failed to set SO_RCVBUF: {}", strerror(errno));
+    mygram::utils::StructuredLog()
+        .Event("server_warning")
+        .Field("operation", "setsockopt")
+        .Field("option", "SO_RCVBUF")
+        .Field("error", strerror(errno))
+        .Warn();
     // Non-fatal, continue
   }
 
   // SO_SNDBUF: Set send buffer size
   int sndbuf = config_.send_buffer_size;
   if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
-    spdlog::warn("Failed to set SO_SNDBUF: {}", strerror(errno));
+    mygram::utils::StructuredLog()
+        .Event("server_warning")
+        .Field("operation", "setsockopt")
+        .Field("option", "SO_SNDBUF")
+        .Field("error", strerror(errno))
+        .Warn();
     // Non-fatal, continue
   }
 

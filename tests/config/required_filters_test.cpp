@@ -54,7 +54,9 @@ replication:
   ofs.close();
 
   // Load config
-  auto config = config::LoadConfig(temp_file);
+  auto config_result = config::LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  auto config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -133,7 +135,9 @@ TEST(RequiredFiltersTest, ParseJsonConfig) {
   ofs.close();
 
   // Load config
-  auto config = config::LoadConfig(temp_file);
+  auto config_result = config::LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  auto config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -190,8 +194,9 @@ TEST(RequiredFiltersTest, InvalidOperator) {
   ofs << json_content;
   ofs.close();
 
-  // Should throw exception for invalid operator
-  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
+  // Should fail to load with invalid operator
+  auto config_result = config::LoadConfig(temp_file);
+  EXPECT_FALSE(config_result);
 
   std::remove(temp_file.c_str());
 }
@@ -227,7 +232,8 @@ TEST(RequiredFiltersTest, WhereClauseDeprecated) {
   ofs.close();
 
   // Should throw exception for deprecated where_clause
-  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
+  auto config_result = config::LoadConfig(temp_file);
+  EXPECT_FALSE(config_result);
 
   std::remove(temp_file.c_str());
 }
@@ -277,7 +283,9 @@ TEST(RequiredFiltersTest, AllOperators) {
 
     // Should parse successfully
     EXPECT_NO_THROW({
-      auto config = config::LoadConfig(temp_file);
+      auto config_result = config::LoadConfig(temp_file);
+      ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+      auto config = *config_result;
       ASSERT_EQ(config.tables[0].required_filters.size(), 1);
       EXPECT_EQ(config.tables[0].required_filters[0].op, op);
     }) << "Failed for operator: "
@@ -325,7 +333,8 @@ TEST(RequiredFiltersTest, IsNullShouldNotHaveValue) {
   ofs.close();
 
   // Should throw exception
-  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
+  auto config_result = config::LoadConfig(temp_file);
+  EXPECT_FALSE(config_result);
 
   std::remove(temp_file.c_str());
 }
@@ -367,7 +376,8 @@ TEST(RequiredFiltersTest, ComparisonMustHaveValue) {
   ofs.close();
 
   // Should throw exception
-  EXPECT_THROW({ auto config = config::LoadConfig(temp_file); }, std::runtime_error);
+  auto config_result = config::LoadConfig(temp_file);
+  EXPECT_FALSE(config_result);
 
   std::remove(temp_file.c_str());
 }

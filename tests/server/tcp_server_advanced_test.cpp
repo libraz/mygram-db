@@ -194,11 +194,12 @@ int TcpServerTest::CreateClientSocket(uint16_t port) {
 }
 
 void TcpServerTest::StartServerOrSkip() {
-  if (server_->Start()) {
+  auto result = server_->Start();
+  if (result) {
     return;
   }
 
-  const std::string& error = server_->GetLastError();
+  const std::string error = result.error().to_string();
   if (error.find("Operation not permitted") != std::string::npos ||
       error.find("Permission denied") != std::string::npos) {
     GTEST_SKIP() << "Skipping TcpServerTest: " << error << ". This environment does not allow creating TCP sockets.";
@@ -213,7 +214,7 @@ void TcpServerTest::StartServerOrSkip() {
 TEST_F(TcpServerTest, ConcurrentConnections) {
   // Add document
   auto doc_id = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id), "test");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -261,19 +262,19 @@ TEST_F(TcpServerTest, FilterOperators) {
   filters1["score"] = static_cast<int32_t>(10);
   filters1["status"] = std::string("active");
   auto doc_id1 = doc_store_->AddDocument("doc1", filters1);
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
   std::unordered_map<std::string, storage::FilterValue> filters2;
   filters2["score"] = static_cast<int32_t>(20);
   filters2["status"] = std::string("inactive");
   auto doc_id2 = doc_store_->AddDocument("doc2", filters2);
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "hello world");
 
   std::unordered_map<std::string, storage::FilterValue> filters3;
   filters3["score"] = static_cast<int32_t>(30);
   filters3["status"] = std::string("active");
   auto doc_id3 = doc_store_->AddDocument("doc3", filters3);
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "hello world");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();

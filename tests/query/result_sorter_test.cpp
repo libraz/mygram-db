@@ -26,10 +26,10 @@ class ResultSorterTest : public ::testing::Test {
 TEST_F(ResultSorterTest, SortByPrimaryKeyDesc) {
   // Add documents with numeric primary keys
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("100"));
-  doc_ids.push_back(doc_store_.AddDocument("50"));
-  doc_ids.push_back(doc_store_.AddDocument("200"));
-  doc_ids.push_back(doc_store_.AddDocument("150"));
+  doc_ids.push_back(*doc_store_.AddDocument("100"));
+  doc_ids.push_back(*doc_store_.AddDocument("50"));
+  doc_ids.push_back(*doc_store_.AddDocument("200"));
+  doc_ids.push_back(*doc_store_.AddDocument("150"));
 
   // Create query with default ordering (primary key DESC)
   Query query;
@@ -62,9 +62,9 @@ TEST_F(ResultSorterTest, SortByPrimaryKeyDesc) {
 TEST_F(ResultSorterTest, SortByPrimaryKeyAsc) {
   // Add documents
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("100"));
-  doc_ids.push_back(doc_store_.AddDocument("50"));
-  doc_ids.push_back(doc_store_.AddDocument("200"));
+  doc_ids.push_back(*doc_store_.AddDocument("100"));
+  doc_ids.push_back(*doc_store_.AddDocument("50"));
+  doc_ids.push_back(*doc_store_.AddDocument("200"));
 
   // Create query with ASC ordering
   Query query;
@@ -94,9 +94,9 @@ TEST_F(ResultSorterTest, SortByPrimaryKeyAsc) {
 TEST_F(ResultSorterTest, SortByFilterColumn) {
   // Add documents with filter column "score"
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("doc1", {{"score", int32_t(100)}}));
-  doc_ids.push_back(doc_store_.AddDocument("doc2", {{"score", int32_t(50)}}));
-  doc_ids.push_back(doc_store_.AddDocument("doc3", {{"score", int32_t(200)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc1", {{"score", int32_t(100)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc2", {{"score", int32_t(50)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc3", {{"score", int32_t(200)}}));
 
   // Sort by score DESC
   Query query;
@@ -126,7 +126,7 @@ TEST_F(ResultSorterTest, ApplyLimit) {
   // Add 10 documents
   std::vector<DocId> doc_ids;
   for (int i = 0; i < 10; i++) {
-    doc_ids.push_back(doc_store_.AddDocument(std::to_string(i)));
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i)));
   }
 
   // Query with LIMIT 5
@@ -147,11 +147,11 @@ TEST_F(ResultSorterTest, ApplyLimit) {
 TEST_F(ResultSorterTest, ApplyOffset) {
   // Add documents
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("1"));
-  doc_ids.push_back(doc_store_.AddDocument("2"));
-  doc_ids.push_back(doc_store_.AddDocument("3"));
-  doc_ids.push_back(doc_store_.AddDocument("4"));
-  doc_ids.push_back(doc_store_.AddDocument("5"));
+  doc_ids.push_back(*doc_store_.AddDocument("1"));
+  doc_ids.push_back(*doc_store_.AddDocument("2"));
+  doc_ids.push_back(*doc_store_.AddDocument("3"));
+  doc_ids.push_back(*doc_store_.AddDocument("4"));
+  doc_ids.push_back(*doc_store_.AddDocument("5"));
 
   // Query with OFFSET 2, LIMIT 2
   Query query;
@@ -178,8 +178,8 @@ TEST_F(ResultSorterTest, ApplyOffset) {
 TEST_F(ResultSorterTest, InvalidColumn) {
   // Add documents without "invalid_column"
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("doc1", {{"score", int32_t(100)}}));
-  doc_ids.push_back(doc_store_.AddDocument("doc2", {{"score", int32_t(50)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc1", {{"score", int32_t(100)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc2", {{"score", int32_t(50)}}));
 
   // Try to sort by non-existent column
   Query query;
@@ -219,7 +219,7 @@ TEST_F(ResultSorterTest, PartialSortOptimization) {
   // Add 1000 documents
   std::vector<DocId> doc_ids;
   for (int i = 0; i < 1000; i++) {
-    doc_ids.push_back(doc_store_.AddDocument(std::to_string(i)));
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i)));
   }
 
   // Query with small LIMIT (should trigger partial_sort)
@@ -245,9 +245,9 @@ TEST_F(ResultSorterTest, PartialSortOptimization) {
 TEST_F(ResultSorterTest, StringPrimaryKey) {
   // Add documents with string primary keys
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("charlie"));
-  doc_ids.push_back(doc_store_.AddDocument("alice"));
-  doc_ids.push_back(doc_store_.AddDocument("bob"));
+  doc_ids.push_back(*doc_store_.AddDocument("charlie"));
+  doc_ids.push_back(*doc_store_.AddDocument("alice"));
+  doc_ids.push_back(*doc_store_.AddDocument("bob"));
 
   // Sort ASC
   Query query;
@@ -282,11 +282,11 @@ TEST_F(ResultSorterTest, StringPrimaryKey) {
 TEST_F(ResultSorterTest, NumericPrimaryKeySortingNotLexicographic) {
   // Add documents with numeric primary keys that differ in numeric vs lexicographic order
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("1"));
-  doc_ids.push_back(doc_store_.AddDocument("10"));
-  doc_ids.push_back(doc_store_.AddDocument("2"));
-  doc_ids.push_back(doc_store_.AddDocument("20"));
-  doc_ids.push_back(doc_store_.AddDocument("3"));
+  doc_ids.push_back(*doc_store_.AddDocument("1"));
+  doc_ids.push_back(*doc_store_.AddDocument("10"));
+  doc_ids.push_back(*doc_store_.AddDocument("2"));
+  doc_ids.push_back(*doc_store_.AddDocument("20"));
+  doc_ids.push_back(*doc_store_.AddDocument("3"));
 
   // Test ASC: should be 1, 2, 3, 10, 20 (numeric order)
   Query query_asc;
@@ -335,11 +335,11 @@ TEST_F(ResultSorterTest, NumericPrimaryKeySortingNotLexicographic) {
  */
 TEST_F(ResultSorterTest, MixedNumericAndNonNumericPrimaryKeys) {
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(doc_store_.AddDocument("1"));
-  doc_ids.push_back(doc_store_.AddDocument("abc"));
-  doc_ids.push_back(doc_store_.AddDocument("10"));
-  doc_ids.push_back(doc_store_.AddDocument("2"));
-  doc_ids.push_back(doc_store_.AddDocument("xyz"));
+  doc_ids.push_back(*doc_store_.AddDocument("1"));
+  doc_ids.push_back(*doc_store_.AddDocument("abc"));
+  doc_ids.push_back(*doc_store_.AddDocument("10"));
+  doc_ids.push_back(*doc_store_.AddDocument("2"));
+  doc_ids.push_back(*doc_store_.AddDocument("xyz"));
 
   Query query;
   query.type = QueryType::SEARCH;
@@ -395,7 +395,7 @@ TEST_F(ResultSorterTest, OffsetLimitOverflow) {
   // Create test documents
   std::vector<DocId> doc_ids;
   for (int i = 1; i <= 100; ++i) {
-    doc_ids.push_back(doc_store_.AddDocument("doc" + std::to_string(i), {{"score", int32_t(i)}}));
+    doc_ids.push_back(*doc_store_.AddDocument("doc" + std::to_string(i), {{"score", int32_t(i)}}));
   }
 
   // Test case 1: offset + limit would overflow uint32_t

@@ -25,6 +25,8 @@
 #include "query/query_parser.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/network_utils.h"
 
 #ifdef USE_MYSQL
@@ -102,9 +104,9 @@ class HttpServer {
 
   /**
    * @brief Start server (non-blocking)
-   * @return true if started successfully
+   * @return Expected<void, Error> - Success or error details
    */
-  bool Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop server
@@ -127,11 +129,6 @@ class HttpServer {
   uint64_t GetTotalRequests() const { return stats_.GetTotalRequests(); }
 
   /**
-   * @brief Get last error message
-   */
-  const std::string& GetLastError() const { return last_error_; }
-
-  /**
    * @brief Get server statistics
    */
   const ServerStats& GetStats() const { return stats_; }
@@ -149,7 +146,6 @@ class HttpServer {
   std::unique_ptr<httplib::Server> server_;
   std::unique_ptr<std::thread> server_thread_;
 
-  std::string last_error_;
   const config::Config* full_config_;
 
 #ifdef USE_MYSQL
@@ -189,9 +185,24 @@ class HttpServer {
   void HandleInfo(const httplib::Request& req, httplib::Response& res);
 
   /**
-   * @brief Handle GET /health
+   * @brief Handle GET /health (legacy endpoint)
    */
   void HandleHealth(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle GET /health/live (liveness probe)
+   */
+  void HandleHealthLive(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle GET /health/ready (readiness probe)
+   */
+  void HandleHealthReady(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle GET /health/detail (detailed health status)
+   */
+  void HandleHealthDetail(const httplib::Request& req, httplib::Response& res);
 
   /**
    * @brief Handle GET /config

@@ -13,6 +13,7 @@
 #include <cmath>
 
 #include "mysql/rows_parser.h"
+#include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-*,readability-magic-numbers)
 
@@ -30,7 +31,11 @@ bool BinlogFilterEvaluator::EvaluateRequiredFilters(
                      [&filters](const auto& required_filter) {
                        auto filter_iter = filters.find(required_filter.name);
                        if (filter_iter == filters.end()) {
-                         spdlog::warn("Required filter column '{}' not found in binlog event", required_filter.name);
+                         mygram::utils::StructuredLog()
+                             .Event("mysql_binlog_warning")
+                             .Field("type", "required_filter_column_not_found")
+                             .Field("column_name", required_filter.name)
+                             .Warn();
                          return false;
                        }
                        return CompareFilterValue(filter_iter->second, required_filter);
@@ -43,8 +48,13 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
   // A malicious binlog event could contain multi-GB filter values
   constexpr size_t MAX_FILTER_VALUE_SIZE = 1024 * 1024;  // 1MB
   if (filter.value.size() > MAX_FILTER_VALUE_SIZE) {
-    spdlog::warn("Filter value too large ({} bytes, max {}), rejecting filter condition: {}", filter.value.size(),
-                 MAX_FILTER_VALUE_SIZE, filter.name);
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "filter_value_too_large")
+        .Field("value_size", static_cast<uint64_t>(filter.value.size()))
+        .Field("max_size", static_cast<uint64_t>(MAX_FILTER_VALUE_SIZE))
+        .Field("filter_name", filter.name)
+        .Warn();
     return false;  // Fail-safe: reject oversized filter values
   }
 
@@ -71,14 +81,32 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       target = std::stoll(filter.value, &pos);
       // SECURITY: Validate that entire string was consumed (no trailing garbage)
       if (pos != filter.value.length()) {
-        spdlog::warn("Invalid integer in filter (trailing characters): {} for column {}", filter.value, filter.name);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_integer_filter")
+            .Field("reason", "trailing_characters")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
         return false;  // Fail-closed: reject document on invalid filter
       }
     } catch (const std::invalid_argument& e) {
-      spdlog::warn("Invalid integer in filter (parse error): {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_integer_filter")
+          .Field("reason", "parse_error")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     } catch (const std::out_of_range& e) {
-      spdlog::warn("Integer out of range in filter: {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_integer_filter")
+          .Field("reason", "out_of_range")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
@@ -110,14 +138,32 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       target = std::stod(filter.value, &pos);
       // SECURITY: Validate that entire string was consumed (no trailing garbage)
       if (pos != filter.value.length()) {
-        spdlog::warn("Invalid float in filter (trailing characters): {} for column {}", filter.value, filter.name);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_float_filter")
+            .Field("reason", "trailing_characters")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
         return false;  // Fail-closed: reject document on invalid filter
       }
     } catch (const std::invalid_argument& e) {
-      spdlog::warn("Invalid float in filter (parse error): {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_float_filter")
+          .Field("reason", "parse_error")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     } catch (const std::out_of_range& e) {
-      spdlog::warn("Float out of range in filter: {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_float_filter")
+          .Field("reason", "out_of_range")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
@@ -177,15 +223,32 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       target = std::stoull(filter.value, &pos);
       // SECURITY: Validate that entire string was consumed (no trailing garbage)
       if (pos != filter.value.length()) {
-        spdlog::warn("Invalid unsigned integer in filter (trailing characters): {} for column {}", filter.value,
-                     filter.name);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_unsigned_integer_filter")
+            .Field("reason", "trailing_characters")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
         return false;  // Fail-closed: reject document on invalid filter
       }
     } catch (const std::invalid_argument& e) {
-      spdlog::warn("Invalid unsigned integer in filter (parse error): {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_unsigned_integer_filter")
+          .Field("reason", "parse_error")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     } catch (const std::out_of_range& e) {
-      spdlog::warn("Unsigned integer out of range in filter: {} for column {}", filter.value, filter.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_unsigned_integer_filter")
+          .Field("reason", "out_of_range")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
@@ -209,7 +272,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     }
   }
 
-  spdlog::warn("Unsupported filter value type for comparison");
+  mygram::utils::StructuredLog().Event("mysql_binlog_warning").Field("type", "unsupported_filter_value_type").Warn();
   return false;
 }
 

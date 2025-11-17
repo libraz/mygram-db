@@ -71,15 +71,15 @@ int main() {
   // Build snapshot
   mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store, table_config);
 
-  bool success = snapshot_builder.Build([](const auto& progress) {
+  auto result = snapshot_builder.Build([](const auto& progress) {
     if (progress.processed_rows % 5000 == 0 && progress.processed_rows > 0) {
       std::cout << "  Processed " << progress.processed_rows << " rows (" << progress.rows_per_second << " rows/s)"
                 << std::endl;
     }
   });
 
-  if (!success) {
-    std::cerr << "Failed to build snapshot: " << snapshot_builder.GetLastError() << std::endl;
+  if (!result) {
+    std::cerr << "Failed to build snapshot: " << result.error().message() << std::endl;
     return 1;
   }
 

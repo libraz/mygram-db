@@ -41,9 +41,9 @@ TEST(TcpServerMultiTableTest, MultiTableSearch) {
 
   // Add documents to articles table
   auto doc_id1 = table1.doc_store->AddDocument("article1", {});
-  table1.index->AddDocument(doc_id1, "machine learning");
+  table1.index->AddDocument(*doc_id1, "machine learning");
   auto doc_id2 = table1.doc_store->AddDocument("article2", {});
-  table1.index->AddDocument(doc_id2, "deep learning");
+  table1.index->AddDocument(*doc_id2, "deep learning");
 
   auto index2 = std::make_unique<mygramdb::index::Index>(1);
   auto doc_store2 = std::make_unique<mygramdb::storage::DocumentStore>();
@@ -55,9 +55,9 @@ TEST(TcpServerMultiTableTest, MultiTableSearch) {
 
   // Add documents to comments table
   auto doc_id3 = table2.doc_store->AddDocument("comment1", {});
-  table2.index->AddDocument(doc_id3, "great article");
+  table2.index->AddDocument(*doc_id3, "great article");
   auto doc_id4 = table2.doc_store->AddDocument("comment2", {});
-  table2.index->AddDocument(doc_id4, "interesting post");
+  table2.index->AddDocument(*doc_id4, "interesting post");
 
   std::unordered_map<std::string, mygramdb::server::TableContext*> table_contexts;
   table_contexts["articles"] = &table1;
@@ -142,7 +142,7 @@ TEST(TcpServerMultiTableTest, MultiTableCount) {
   // Add 3 documents with "test" to users table
   for (int i = 1; i <= 3; ++i) {
     auto doc_id = table1.doc_store->AddDocument("user" + std::to_string(i), {});
-    table1.index->AddDocument(doc_id, "test user data");
+    table1.index->AddDocument(*doc_id, "test user data");
   }
 
   auto index2 = std::make_unique<mygramdb::index::Index>(1);
@@ -156,7 +156,7 @@ TEST(TcpServerMultiTableTest, MultiTableCount) {
   // Add 2 documents with "test" to posts table
   for (int i = 1; i <= 2; ++i) {
     auto doc_id = table2.doc_store->AddDocument("post" + std::to_string(i), {});
-    table2.index->AddDocument(doc_id, "test post content");
+    table2.index->AddDocument(*doc_id, "test post content");
   }
 
   std::unordered_map<std::string, mygramdb::server::TableContext*> table_contexts;
@@ -225,7 +225,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   std::unordered_map<std::string, mygramdb::storage::FilterValue> filters1;
   filters1["type"] = std::string("premium");
   auto doc_id1 = table1.doc_store->AddDocument("cust_100", filters1);
-  table1.index->AddDocument(doc_id1, "Alice Johnson");
+  table1.index->AddDocument(*doc_id1, "Alice Johnson");
 
   auto index2 = std::make_unique<mygramdb::index::Index>(1);
   auto doc_store2 = std::make_unique<mygramdb::storage::DocumentStore>();
@@ -238,7 +238,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   std::unordered_map<std::string, mygramdb::storage::FilterValue> filters2;
   filters2["status"] = std::string("shipped");
   auto doc_id2 = table2.doc_store->AddDocument("order_200", filters2);
-  table2.index->AddDocument(doc_id2, "Product XYZ");
+  table2.index->AddDocument(*doc_id2, "Product XYZ");
 
   std::unordered_map<std::string, mygramdb::server::TableContext*> table_contexts;
   table_contexts["customers"] = &table1;
@@ -320,7 +320,7 @@ TEST(TcpServerMultiTableTest, MultiTableInfo) {
   // Add 5 documents to table_a
   for (int i = 1; i <= 5; ++i) {
     auto doc_id = table1.doc_store->AddDocument("doc_a" + std::to_string(i), {});
-    table1.index->AddDocument(doc_id, "content for table a");
+    table1.index->AddDocument(*doc_id, "content for table a");
   }
 
   auto index2 = std::make_unique<mygramdb::index::Index>(2);
@@ -334,7 +334,7 @@ TEST(TcpServerMultiTableTest, MultiTableInfo) {
   // Add 3 documents to table_b
   for (int i = 1; i <= 3; ++i) {
     auto doc_id = table2.doc_store->AddDocument("doc_b" + std::to_string(i), {});
-    table2.index->AddDocument(doc_id, "content for table b");
+    table2.index->AddDocument(*doc_id, "content for table b");
   }
 
   std::unordered_map<std::string, mygramdb::server::TableContext*> table_contexts;
@@ -394,7 +394,7 @@ TEST(TcpServerMultiTableTest, TableIsolation) {
   table1.doc_store = std::move(doc_store1);
 
   auto doc_id1 = table1.doc_store->AddDocument("doc1", {});
-  table1.index->AddDocument(doc_id1, "shared keyword");
+  table1.index->AddDocument(*doc_id1, "shared keyword");
 
   auto index2 = std::make_unique<mygramdb::index::Index>(1);
   auto doc_store2 = std::make_unique<mygramdb::storage::DocumentStore>();
@@ -405,7 +405,7 @@ TEST(TcpServerMultiTableTest, TableIsolation) {
   table2.doc_store = std::move(doc_store2);
 
   auto doc_id2 = table2.doc_store->AddDocument("doc2", {});
-  table2.index->AddDocument(doc_id2, "different content");
+  table2.index->AddDocument(*doc_id2, "different content");
 
   std::unordered_map<std::string, mygramdb::server::TableContext*> table_contexts;
   table_contexts["isolated_a"] = &table1;

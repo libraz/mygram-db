@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test
+.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-format-check-linux docker-clean-linux docker-ci-check
 
 # Build directory
 BUILD_DIR := build
@@ -52,6 +52,16 @@ help:
 	@echo "  make docker-logs  - View docker-compose logs"
 	@echo "  make docker-test  - Test Docker environment"
 	@echo ""
+	@echo "Linux CI testing (Docker-based):"
+	@echo "  make docker-dev-build       - Build Linux development image"
+	@echo "  make docker-dev-shell       - Interactive shell in Linux container"
+	@echo "  make docker-build-linux     - Build project in Linux container"
+	@echo "  make docker-test-linux      - Run tests in Linux container"
+	@echo "  make docker-lint-linux      - Run clang-tidy in Linux container"
+	@echo "  make docker-format-check-linux - Check formatting in Linux container"
+	@echo "  make docker-clean-linux     - Clean build in Linux container"
+	@echo "  make docker-ci-check        - Run full CI checks (format + build + lint + test)"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make                                  # Build the project"
 	@echo "  make test                             # Run tests (j=4, default)"
@@ -66,6 +76,8 @@ help:
 	@echo "  make CMAKE_OPTIONS=\"-DBUILD_TESTS=OFF\" configure # Disable tests"
 	@echo "  make docker-up                        # Start Docker environment"
 	@echo "  make docker-logs                      # View logs"
+	@echo "  make docker-ci-check                  # Run all CI checks in Linux (before git push)"
+	@echo "  make docker-build-linux               # Test Linux build locally"
 
 # Configure CMake
 configure:
@@ -200,3 +212,93 @@ docker-test:
 	@echo ""
 	@echo "Docker environment test completed!"
 	@echo "Run 'make docker-up' to start the full environment"
+
+# ============================================================================
+# Linux CI Testing (Docker-based)
+# ============================================================================
+# These targets allow you to test your code in the same Linux environment
+# used by GitHub Actions CI, catching platform-specific issues before pushing.
+
+# Image name for development container
+DOCKER_DEV_IMAGE := mygramdb-dev:latest
+
+# Build the Linux development Docker image
+docker-dev-build:
+	@echo "Building Linux development Docker image..."
+	@echo "This may take a few minutes on first run (installing LLVM, etc.)"
+	docker build -f support/dev/Dockerfile -t $(DOCKER_DEV_IMAGE) .
+	@echo ""
+	@echo "Development image built successfully!"
+	@echo "Run 'make docker-dev-shell' to start an interactive shell"
+	@echo "Run 'make docker-ci-check' to run full CI checks"
+
+# Start an interactive shell in the Linux development container
+docker-dev-shell: docker-dev-build
+	@echo "Starting interactive shell in Linux development container..."
+	@echo "Type 'exit' to leave the container"
+	docker run --rm -it -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) bash
+
+# Build the project in Linux container (mimics CI environment)
+docker-build-linux: docker-dev-build
+	@echo "Building project in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "mkdir -p build && cd build && \
+		cmake -DCMAKE_BUILD_TYPE=Debug \
+		      -DBUILD_TESTS=ON \
+		      -DENABLE_COVERAGE=ON \
+		      -DUSE_ICU=ON \
+		      -DUSE_MYSQL=ON \
+		      .. && \
+		make -j\$$(nproc)"
+	@echo "Linux build completed successfully!"
+
+# Run tests in Linux container
+docker-test-linux: docker-build-linux
+	@echo "Running tests in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "cd build && ctest --output-on-failure --parallel \$$(nproc)"
+	@echo "Linux tests completed successfully!"
+
+# Run clang-tidy in Linux container
+docker-lint-linux: docker-build-linux
+	@echo "Running clang-tidy in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "bash support/dev/run-clang-tidy.sh"
+	@echo "Linux lint completed successfully!"
+
+# Check code formatting in Linux container
+docker-format-check-linux: docker-dev-build
+	@echo "Checking code formatting in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "find src tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror"
+	@echo "Format check passed!"
+
+# Clean build directory in Linux container
+docker-clean-linux:
+	@echo "Cleaning build directory in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "rm -rf build"
+	@echo "Clean completed!"
+
+# Run full CI checks (format + build + lint + test) - recommended before git push
+docker-ci-check: docker-dev-build
+	@echo "=========================================="
+	@echo "Running full CI checks in Linux container"
+	@echo "=========================================="
+	@echo ""
+	@echo "Step 1/4: Checking code formatting..."
+	@$(MAKE) docker-format-check-linux
+	@echo ""
+	@echo "Step 2/4: Building project..."
+	@$(MAKE) docker-build-linux
+	@echo ""
+	@echo "Step 3/4: Running clang-tidy..."
+	@$(MAKE) docker-lint-linux
+	@echo ""
+	@echo "Step 4/4: Running tests..."
+	@$(MAKE) docker-test-linux
+	@echo ""
+	@echo "=========================================="
+	@echo "✓ All CI checks passed!"
+	@echo "=========================================="
+	@echo "Your code should pass GitHub Actions CI"

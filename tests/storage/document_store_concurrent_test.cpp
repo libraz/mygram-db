@@ -21,7 +21,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentReads) {
 
   // Add some documents
   for (int i = 0; i < 100; i++) {
-    store.AddDocument(std::to_string(i), {});
+    (void)store.AddDocument(std::to_string(i), {});
   }
 
   // Concurrent reads from multiple threads
@@ -55,7 +55,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentReadWrite) {
 
   // Add initial documents
   for (int i = 0; i < 50; i++) {
-    store.AddDocument(std::to_string(i), {});
+    (void)store.AddDocument(std::to_string(i), {});
   }
 
   std::vector<std::thread> threads;
@@ -64,7 +64,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentReadWrite) {
   // Writer thread - adds more documents
   threads.emplace_back([&store, &writer_done]() {
     for (int i = 50; i < 100; i++) {
-      store.AddDocument(std::to_string(i), {});
+      (void)store.AddDocument(std::to_string(i), {});
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     writer_done = true;
@@ -103,7 +103,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
   filters["status"] = static_cast<int32_t>(1);
 
   for (int i = 0; i < 100; i++) {
-    store1.AddDocument(std::to_string(i), filters);
+    EXPECT_TRUE(store1.AddDocument(std::to_string(i), filters));
   }
 
   std::string test_file = "/tmp/test_concurrent_load";
@@ -113,7 +113,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
 
   // Add some initial documents
   for (int i = 0; i < 50; i++) {
-    store2.AddDocument(std::to_string(i), {});
+    EXPECT_TRUE(store2.AddDocument(std::to_string(i), {}));
   }
 
   std::vector<std::thread> threads;
@@ -162,7 +162,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
   // Add initial documents
   constexpr int kInitialDocs = 100;
   for (int i = 0; i < kInitialDocs; i++) {
-    store.AddDocument(std::to_string(i), {});
+    (void)store.AddDocument(std::to_string(i), {});
   }
 
   std::atomic<bool> stop{false};
@@ -193,7 +193,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
       while (!stop) {
         std::unordered_map<std::string, FilterValue> filters;
         filters["thread_id"] = static_cast<int32_t>(i);
-        store.AddDocument("add_" + std::to_string(doc_id++), filters);
+        (void)store.AddDocument("add_" + std::to_string(doc_id++), filters);
         add_calls++;
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
@@ -247,7 +247,7 @@ TEST(DocumentStoreConcurrentTest, LoadFromFileNoDoubleSettingRace) {
   // Add some documents
   const int num_docs = 100;
   for (int i = 0; i < num_docs; ++i) {
-    DocId doc_id = store.AddDocument("key_" + std::to_string(i));
+    DocId doc_id = *store.AddDocument("key_" + std::to_string(i));
     ASSERT_GT(doc_id, 0);
   }
 
@@ -272,7 +272,7 @@ TEST(DocumentStoreConcurrentTest, LoadFromFileNoDoubleSettingRace) {
 
           // Verify next_doc_id is set correctly (should be num_docs + 1)
           // Try adding a new document to check ID continuity
-          DocId new_id = local_store.AddDocument("new_key");
+          DocId new_id = *local_store.AddDocument("new_key");
           EXPECT_GT(new_id, 0);
           EXPECT_GE(new_id, static_cast<DocId>(num_docs));
         }
@@ -302,7 +302,7 @@ TEST(DocumentStoreConcurrentTest, LoadFromStreamNoIDCorruption) {
 
   // Add documents
   for (int i = 0; i < 50; ++i) {
-    store.AddDocument("doc_" + std::to_string(i));
+    (void)store.AddDocument("doc_" + std::to_string(i));
   }
 
   // Save to stream
@@ -328,7 +328,7 @@ TEST(DocumentStoreConcurrentTest, LoadFromStreamNoIDCorruption) {
         EXPECT_EQ(50, local_store.Size());
 
         // Add new document to verify ID is correctly set
-        DocId new_id = local_store.AddDocument("new");
+        DocId new_id = *local_store.AddDocument("new");
         EXPECT_GT(new_id, 0);
         EXPECT_GE(new_id, 50);
       }

@@ -119,4 +119,19 @@ if(USE_MYSQL AND MYSQL_FOUND)
   gtest_discover_tests(binlog_filter_validation_test
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
+
+  # Binlog reader resource management tests
+  add_executable(binlog_reader_resource_test
+    binlog_reader_resource_test.cpp
+  )
+
+  target_link_libraries(binlog_reader_resource_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
+  gtest_discover_tests(binlog_reader_resource_test
+    PROPERTIES RESOURCE_LOCK mysql_connection
+  )
 endif()

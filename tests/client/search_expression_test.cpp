@@ -14,9 +14,9 @@ using namespace mygramdb::client;
  */
 TEST(SearchExpressionTest, SimpleRequiredTerm) {
   auto result = ParseSearchExpression("+golang");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_TRUE(expr.excluded_terms.empty());
@@ -28,9 +28,9 @@ TEST(SearchExpressionTest, SimpleRequiredTerm) {
  */
 TEST(SearchExpressionTest, SimpleExcludedTerm) {
   auto result = ParseSearchExpression("-old");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_TRUE(expr.required_terms.empty());
   EXPECT_EQ(expr.excluded_terms.size(), 1);
   EXPECT_EQ(expr.excluded_terms[0], "old");
@@ -42,9 +42,9 @@ TEST(SearchExpressionTest, SimpleExcludedTerm) {
  */
 TEST(SearchExpressionTest, OptionalTerm) {
   auto result = ParseSearchExpression("tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "tutorial");
   EXPECT_TRUE(expr.excluded_terms.empty());
@@ -55,9 +55,9 @@ TEST(SearchExpressionTest, OptionalTerm) {
  */
 TEST(SearchExpressionTest, RequiredAndOptional) {
   auto result = ParseSearchExpression("golang tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -69,9 +69,9 @@ TEST(SearchExpressionTest, RequiredAndOptional) {
  */
 TEST(SearchExpressionTest, RequiredAndExcluded) {
   auto result = ParseSearchExpression("+golang -old");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.excluded_terms.size(), 1);
@@ -84,9 +84,9 @@ TEST(SearchExpressionTest, RequiredAndExcluded) {
  */
 TEST(SearchExpressionTest, MultipleRequired) {
   auto result = ParseSearchExpression("+golang +tutorial +2024");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 3);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -98,9 +98,9 @@ TEST(SearchExpressionTest, MultipleRequired) {
  */
 TEST(SearchExpressionTest, OrExpression) {
   auto result = ParseSearchExpression("python OR ruby");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_TRUE(expr.HasComplexExpression());  // OR is a complex expression
   EXPECT_FALSE(expr.raw_expression.empty());
   EXPECT_TRUE(expr.required_terms.empty());
@@ -112,9 +112,9 @@ TEST(SearchExpressionTest, OrExpression) {
  */
 TEST(SearchExpressionTest, ParenthesizedExpression) {
   auto result = ParseSearchExpression("(tutorial OR guide)");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_TRUE(expr.HasComplexExpression());
   EXPECT_FALSE(expr.raw_expression.empty());
 }
@@ -124,9 +124,9 @@ TEST(SearchExpressionTest, ParenthesizedExpression) {
  */
 TEST(SearchExpressionTest, RequiredWithParenthesizedOr) {
   auto result = ParseSearchExpression("+golang +(tutorial OR guide)");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_TRUE(expr.HasComplexExpression());
@@ -137,9 +137,9 @@ TEST(SearchExpressionTest, RequiredWithParenthesizedOr) {
  */
 TEST(SearchExpressionTest, ComplexExpression) {
   auto result = ParseSearchExpression("+golang +(tutorial OR guide) -old -deprecated");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.excluded_terms.size(), 2);
@@ -153,9 +153,9 @@ TEST(SearchExpressionTest, ComplexExpression) {
  */
 TEST(SearchExpressionTest, ToQueryStringRequired) {
   auto result = ParseSearchExpression("+golang +tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   std::string query = expr.ToQueryString();
   EXPECT_EQ(query, "golang AND tutorial");
 }
@@ -165,9 +165,9 @@ TEST(SearchExpressionTest, ToQueryStringRequired) {
  */
 TEST(SearchExpressionTest, ToQueryStringExcluded) {
   auto result = ParseSearchExpression("+golang -old");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   std::string query = expr.ToQueryString();
   EXPECT_EQ(query, "golang AND NOT old");
 }
@@ -177,9 +177,9 @@ TEST(SearchExpressionTest, ToQueryStringExcluded) {
  */
 TEST(SearchExpressionTest, ToQueryStringOptional) {
   auto result = ParseSearchExpression("python ruby");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   std::string query = expr.ToQueryString();
   // Multiple terms without prefix become implicit AND
   EXPECT_EQ(query, "python AND ruby");
@@ -190,11 +190,9 @@ TEST(SearchExpressionTest, ToQueryStringOptional) {
  */
 TEST(SearchExpressionTest, ConvertSearchExpression) {
   auto result = ConvertSearchExpression("+golang -old");
-  // variant<string, string> where index 0 = success, index 1 = error
-  ASSERT_FALSE(result.index() == 1);  // Not an error
+  ASSERT_TRUE(result);  // Success
 
-  // Get the query string from index 0
-  std::string query = std::get<0>(result);
+  std::string query = *result;
   EXPECT_FALSE(query.empty());
   EXPECT_TRUE(query.find("golang") != std::string::npos);
   EXPECT_TRUE(query.find("NOT old") != std::string::npos);
@@ -223,9 +221,9 @@ TEST(SearchExpressionTest, SimplifySearchExpression) {
  */
 TEST(SearchExpressionTest, EmptyExpression) {
   auto result = ParseSearchExpression("");
-  ASSERT_TRUE(std::holds_alternative<std::string>(result));
+  ASSERT_TRUE(!result);
 
-  std::string error = std::get<std::string>(result);
+  std::string error = result.error().message();
   EXPECT_FALSE(error.empty());
 }
 
@@ -234,9 +232,9 @@ TEST(SearchExpressionTest, EmptyExpression) {
  */
 TEST(SearchExpressionTest, InvalidMissingTermAfterPlus) {
   auto result = ParseSearchExpression("+");
-  ASSERT_TRUE(std::holds_alternative<std::string>(result));
+  ASSERT_TRUE(!result);
 
-  std::string error = std::get<std::string>(result);
+  std::string error = result.error().message();
   EXPECT_TRUE(error.find("Expected term after") != std::string::npos || !error.empty());
 }
 
@@ -245,9 +243,9 @@ TEST(SearchExpressionTest, InvalidMissingTermAfterPlus) {
  */
 TEST(SearchExpressionTest, InvalidUnbalancedParens) {
   auto result = ParseSearchExpression("(golang tutorial");
-  ASSERT_TRUE(std::holds_alternative<std::string>(result));
+  ASSERT_TRUE(!result);
 
-  std::string error = std::get<std::string>(result);
+  std::string error = result.error().message();
   EXPECT_TRUE(error.find("Unbalanced") != std::string::npos || !error.empty());
 }
 
@@ -256,9 +254,9 @@ TEST(SearchExpressionTest, InvalidUnbalancedParens) {
  */
 TEST(SearchExpressionTest, WhitespaceHandling) {
   auto result = ParseSearchExpression("  +golang   -old   tutorial  ");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -271,9 +269,9 @@ TEST(SearchExpressionTest, WhitespaceHandling) {
  */
 TEST(SearchExpressionTest, JapaneseTerms) {
   auto result = ParseSearchExpression("+日本語 -古い チュートリアル");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "日本語");
   EXPECT_EQ(expr.required_terms[1], "チュートリアル");
@@ -286,9 +284,9 @@ TEST(SearchExpressionTest, JapaneseTerms) {
  */
 TEST(SearchExpressionTest, QuotedPhrase) {
   auto result = ParseSearchExpression("\"machine learning\" tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "\"machine learning\"");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -299,9 +297,9 @@ TEST(SearchExpressionTest, QuotedPhrase) {
  */
 TEST(SearchExpressionTest, QuotedPhraseWithExclusion) {
   auto result = ParseSearchExpression("\"deep learning\" -tensorflow");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "\"deep learning\"");
   EXPECT_EQ(expr.excluded_terms.size(), 1);
@@ -313,9 +311,9 @@ TEST(SearchExpressionTest, QuotedPhraseWithExclusion) {
  */
 TEST(SearchExpressionTest, QuotedPhraseWithOr) {
   auto result = ParseSearchExpression("\"machine learning\" OR \"deep learning\"");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_TRUE(expr.HasComplexExpression());
   EXPECT_FALSE(expr.raw_expression.empty());
   EXPECT_TRUE(expr.raw_expression.find("\"machine learning\"") != std::string::npos);
@@ -328,9 +326,9 @@ TEST(SearchExpressionTest, QuotedPhraseWithOr) {
 TEST(SearchExpressionTest, FullWidthSpace) {
   // "golang　tutorial" with full-width space (U+3000)
   auto result = ParseSearchExpression("golang　tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -342,9 +340,9 @@ TEST(SearchExpressionTest, FullWidthSpace) {
 TEST(SearchExpressionTest, MixedSpaces) {
   // "golang tutorial　日本語" with mixed spaces
   auto result = ParseSearchExpression("golang tutorial　日本語");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 3);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -356,9 +354,9 @@ TEST(SearchExpressionTest, MixedSpaces) {
  */
 TEST(SearchExpressionTest, QuotedPhraseToQueryString) {
   auto result = ConvertSearchExpression("\"machine learning\" tutorial");
-  ASSERT_FALSE(result.index() == 1);  // Not an error
+  ASSERT_TRUE(result);  // Success
 
-  std::string query = std::get<0>(result);
+  std::string query = *result;
   EXPECT_EQ(query, "\"machine learning\" AND tutorial");
 }
 
@@ -367,9 +365,9 @@ TEST(SearchExpressionTest, QuotedPhraseToQueryString) {
  */
 TEST(SearchExpressionTest, EmojiInExpression) {
   auto result = ParseSearchExpression("😀 tutorial");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 2);
   EXPECT_EQ(expr.required_terms[0], "😀");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
@@ -380,9 +378,9 @@ TEST(SearchExpressionTest, EmojiInExpression) {
  */
 TEST(SearchExpressionTest, MultipleEmojis) {
   auto result = ParseSearchExpression("😀 🎉 👍");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 3);
   EXPECT_EQ(expr.required_terms[0], "😀");
   EXPECT_EQ(expr.required_terms[1], "🎉");
@@ -394,9 +392,9 @@ TEST(SearchExpressionTest, MultipleEmojis) {
  */
 TEST(SearchExpressionTest, EmojiWithPrefixOperators) {
   auto result = ParseSearchExpression("+😀 -🎉");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "😀");
   EXPECT_EQ(expr.excluded_terms.size(), 1);
@@ -408,9 +406,9 @@ TEST(SearchExpressionTest, EmojiWithPrefixOperators) {
  */
 TEST(SearchExpressionTest, EmojiInQuotedPhrase) {
   auto result = ParseSearchExpression("\"Hello 😀 World\"");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "\"Hello 😀 World\"");
 }
@@ -420,9 +418,9 @@ TEST(SearchExpressionTest, EmojiInQuotedPhrase) {
  */
 TEST(SearchExpressionTest, EmojiWithOr) {
   auto result = ParseSearchExpression("😀 OR 🎉");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_TRUE(expr.HasComplexExpression());
   EXPECT_TRUE(expr.raw_expression.find("😀") != std::string::npos);
   EXPECT_TRUE(expr.raw_expression.find("🎉") != std::string::npos);
@@ -433,9 +431,9 @@ TEST(SearchExpressionTest, EmojiWithOr) {
  */
 TEST(SearchExpressionTest, EmojiWithJapanese) {
   auto result = ParseSearchExpression("楽しい😀チュートリアル🎉");
-  ASSERT_TRUE(std::holds_alternative<SearchExpression>(result));
+  ASSERT_TRUE(result);
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "楽しい😀チュートリアル🎉");
 }
@@ -445,9 +443,9 @@ TEST(SearchExpressionTest, EmojiWithJapanese) {
  */
 TEST(SearchExpressionTest, EmojiToQueryString) {
   auto result = ConvertSearchExpression("😀 tutorial -🎉");
-  ASSERT_FALSE(result.index() == 1);  // Not an error
+  ASSERT_TRUE(result);  // Success
 
-  std::string query = std::get<0>(result);
+  std::string query = *result;
   EXPECT_TRUE(query.find("😀") != std::string::npos);
   EXPECT_TRUE(query.find("tutorial") != std::string::npos);
   EXPECT_TRUE(query.find("NOT 🎉") != std::string::npos);

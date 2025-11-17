@@ -14,7 +14,15 @@
 #include <variant>
 #include <vector>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::storage {
+
+using mygram::utils::Error;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
 
 using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::DocId)
 
@@ -87,9 +95,10 @@ class DocumentStore {
    *
    * @param primary_key Primary key from MySQL
    * @param filters Filter column values
-   * @return Assigned DocID
+   * @return Expected<DocId, Error> Assigned DocID or error (e.g., DocID exhausted)
    */
-  DocId AddDocument(const std::string& primary_key, const std::unordered_map<std::string, FilterValue>& filters = {});
+  [[nodiscard]] Expected<DocId, Error> AddDocument(const std::string& primary_key,
+                                                   const std::unordered_map<std::string, FilterValue>& filters = {});
 
   /**
    * @brief Add multiple documents (batch operation, thread-safe)
@@ -98,10 +107,10 @@ class DocumentStore {
    * It processes documents in a single lock acquisition for better performance.
    *
    * @param documents Vector of documents to add
-   * @return Vector of assigned DocIDs (same order as input)
+   * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input) or error
    * @note This method is thread-safe
    */
-  std::vector<DocId> AddDocumentBatch(const std::vector<DocumentItem>& documents);
+  [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(const std::vector<DocumentItem>& documents);
 
   /**
    * @brief Update document
@@ -202,38 +211,44 @@ class DocumentStore {
    * @brief Serialize document store to file
    * @param filepath Output file path
    * @param replication_gtid Optional GTID position for replication (empty if not using replication)
-   * @return true if successful
+   * @return Expected<void, Error> Success or error with details
    */
-  [[nodiscard]] bool SaveToFile(const std::string& filepath, const std::string& replication_gtid = "") const;
+  [[nodiscard]] Expected<void, Error> SaveToFile(const std::string& filepath,
+                                                 const std::string& replication_gtid = "") const;
 
   /**
    * @brief Serialize document store to output stream
    * @param output_stream Output stream
    * @param replication_gtid Optional GTID position for replication (empty if not using replication)
-   * @return true if successful
+   * @return Expected<void, Error> Success or error with details
    */
-  [[nodiscard]] bool SaveToStream(std::ostream& output_stream, const std::string& replication_gtid = "") const;
+  [[nodiscard]] Expected<void, Error> SaveToStream(std::ostream& output_stream,
+                                                   const std::string& replication_gtid = "") const;
 
   /**
    * @brief Deserialize document store from file
    * @param filepath Input file path
    * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
-   * @return true if successful
+   * @return Expected<void, Error> Success or error with details
    */
-  [[nodiscard]] bool LoadFromFile(const std::string& filepath, std::string* replication_gtid = nullptr);
+  [[nodiscard]] Expected<void, Error> LoadFromFile(const std::string& filepath,
+                                                   std::string* replication_gtid = nullptr);
 
   /**
    * @brief Deserialize document store from input stream
    * @param input_stream Input stream
    * @param replication_gtid Output parameter for GTID position (empty if snapshot has no GTID)
-   * @return true if successful
+   * @return Expected<void, Error> Success or error with details
    */
-  [[nodiscard]] bool LoadFromStream(std::istream& input_stream, std::string* replication_gtid = nullptr);
+  [[nodiscard]] Expected<void, Error> LoadFromStream(std::istream& input_stream,
+                                                     std::string* replication_gtid = nullptr);
 
- private:
+ protected:
   // Next DocID to assign
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   DocId next_doc_id_ = 1;
 
+ private:
   // DocID -> Primary Key mapping
   std::unordered_map<DocId, std::string> doc_id_to_pk_;
 

@@ -51,14 +51,14 @@ class CacheCountIntegrationTest : public ::testing::Test {
       if (i <= 20) {
         text += " article";  // First 20 have both
       }
-      auto internal_doc_id = table_context_.doc_store->AddDocument(doc_id, {});
+      auto internal_doc_id = *table_context_.doc_store->AddDocument(doc_id, {});
       table_context_.index->AddDocument(internal_doc_id, text);
     }
 
     for (int i = 51; i <= 60; ++i) {
       std::string doc_id = std::to_string(i);
       std::string text = "article only " + std::to_string(i);
-      auto internal_doc_id = table_context_.doc_store->AddDocument(doc_id, {});
+      auto internal_doc_id = *table_context_.doc_store->AddDocument(doc_id, {});
       table_context_.index->AddDocument(internal_doc_id, text);
     }
 

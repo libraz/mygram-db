@@ -16,6 +16,7 @@
 
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
+#include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -37,7 +38,11 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader) {
   if (catalog_ == nullptr) {
-    spdlog::error("SnapshotScheduler: catalog cannot be null");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("component", "snapshot_scheduler")
+        .Field("error", "catalog cannot be null")
+        .Error();
   }
 }
 
@@ -47,7 +52,11 @@ SnapshotScheduler::~SnapshotScheduler() {
 
 void SnapshotScheduler::Start() {
   if (running_) {
-    spdlog::warn("SnapshotScheduler already running");
+    mygram::utils::StructuredLog()
+        .Event("server_warning")
+        .Field("component", "snapshot_scheduler")
+        .Field("type", "already_running")
+        .Warn();
     return;
   }
 
@@ -131,16 +140,26 @@ void SnapshotScheduler::TakeSnapshot() {
     auto dumpable = catalog_->GetDumpableContexts();
 
     // Perform save using dump_v1 API
-    bool success = storage::dump_v1::WriteDumpV1(dump_path.string(), gtid, *full_config_, dumpable);
+    auto result = storage::dump_v1::WriteDumpV1(dump_path.string(), gtid, *full_config_, dumpable);
 
-    if (success) {
+    if (result) {
       spdlog::info("Snapshot completed successfully: {}", dump_path.string());
     } else {
-      spdlog::error("Snapshot failed: {}", dump_path.string());
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "snapshot_save")
+          .Field("filepath", dump_path.string())
+          .Field("error", result.error().message())
+          .Error();
     }
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception during snapshot: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "snapshot_save")
+        .Field("type", "exception")
+        .Field("error", e.what())
+        .Error();
   }
 }
 
@@ -180,7 +199,12 @@ void SnapshotScheduler::CleanupOldSnapshots() {
     }
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception during snapshot cleanup: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "snapshot_cleanup")
+        .Field("type", "exception")
+        .Field("error", e.what())
+        .Error();
   }
 }
 

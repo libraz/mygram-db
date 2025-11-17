@@ -100,9 +100,9 @@ class BinlogReader {
 
   /**
    * @brief Start reading binlog events
-   * @return true if started successfully
+   * @return Expected<void, Error> - success or start error
    */
-  bool Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop reading binlog events

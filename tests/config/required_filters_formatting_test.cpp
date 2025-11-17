@@ -60,7 +60,9 @@ logging:
   ofs.close();
 
   // Load and check
-  Config config = LoadConfig(temp_file);
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -128,7 +130,9 @@ logging:
   ofs.close();
 
   // Load and check
-  Config config = LoadConfig(temp_file);
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -189,7 +193,9 @@ logging:
   ofs.close();
 
   // Load and check
-  Config config = LoadConfig(temp_file);
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -252,7 +258,9 @@ logging:
   ofs.close();
 
   // Load and check
-  Config config = LoadConfig(temp_file);
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -321,7 +329,9 @@ logging:
   ofs.close();
 
   // Load and check
-  Config config = LoadConfig(temp_file);
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];

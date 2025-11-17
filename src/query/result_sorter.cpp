@@ -9,6 +9,8 @@
 
 #include <variant>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::query {
 
 namespace {
@@ -176,10 +178,12 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     if (!column_found) {
       // Warning: column not found in sample
       // Note: This is not a hard error - documents without the column will be sorted as NULL
-      spdlog::warn(
-          "ORDER BY column '{}' not found in first {} documents. "
-          "Documents without this column will be sorted as NULL values.",
-          order_by.column, check_count);
+      mygram::utils::StructuredLog()
+          .Event("query_warning")
+          .Field("type", "order_by_column_not_found")
+          .Field("column", order_by.column)
+          .Field("check_count", static_cast<uint64_t>(check_count))
+          .Warn();
     }
   }
 

@@ -19,7 +19,9 @@ using json = nlohmann::json;
  * @brief Test loading valid configuration file
  */
 TEST(ConfigTest, LoadValidConfig) {
-  Config config = LoadConfig("test_config.yaml");
+  auto config_result = LoadConfig("test_config.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   // MySQL config
   EXPECT_EQ(config.mysql.host, "127.0.0.1");
@@ -103,7 +105,8 @@ TEST(ConfigTest, LoadValidConfig) {
  * @brief Test loading non-existent file
  */
 TEST(ConfigTest, LoadNonExistentFile) {
-  EXPECT_THROW(LoadConfig("non_existent.yaml"), std::runtime_error);
+  auto result = LoadConfig("non_existent.yaml");
+  EXPECT_FALSE(result);
 }
 
 /**
@@ -115,7 +118,8 @@ TEST(ConfigTest, LoadInvalidYAML) {
   f << "invalid: yaml: content: [\n";
   f.close();
 
-  EXPECT_THROW(LoadConfig("invalid.yaml"), std::runtime_error);
+  auto result = LoadConfig("invalid.yaml");
+  EXPECT_FALSE(result);
 }
 
 /**
@@ -135,7 +139,9 @@ TEST(ConfigTest, DefaultValues) {
   f << "      column: text\n";
   f.close();
 
-  Config config = LoadConfig("minimal.yaml");
+  auto config_result = LoadConfig("minimal.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   // Check defaults
   EXPECT_EQ(config.mysql.port, 3306);
@@ -166,7 +172,9 @@ TEST(ConfigTest, ConcatenatedTextSource) {
   f << "      delimiter: \" | \"\n";
   f.close();
 
-  Config config = LoadConfig("concat.yaml");
+  auto config_result = LoadConfig("concat.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   ASSERT_EQ(config.tables.size(), 1);
   const auto& table = config.tables[0];
@@ -196,22 +204,16 @@ TEST(ConfigTest, InvalidServerId) {
   f << "  start_from: snapshot\n";
   f.close();
 
-  EXPECT_THROW(
-      {
-        try {
-          LoadConfig("invalid_server_id.yaml");
-        } catch (const std::runtime_error& e) {
-          std::string error_msg(e.what());
-          // Schema validation happens first, so check for schema error or server_id error
-          bool valid_error =
-              (error_msg.find("replication.server_id must be set to a non-zero value") != std::string::npos) ||
-              (error_msg.find("server_id") != std::string::npos) ||
-              (error_msg.find("required property") != std::string::npos);
-          EXPECT_TRUE(valid_error) << "Actual error: " << error_msg;
-          throw;
-        }
-      },
-      std::runtime_error);
+  auto result = LoadConfig("invalid_server_id.yaml");
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    // Schema validation happens first, so check for schema error or server_id error
+    bool valid_error = (error_msg.find("replication.server_id must be set to a non-zero value") != std::string::npos) ||
+                       (error_msg.find("server_id") != std::string::npos) ||
+                       (error_msg.find("required property") != std::string::npos);
+    EXPECT_TRUE(valid_error) << "Actual error: " << error_msg;
+  }
 }
 
 /**
@@ -234,17 +236,12 @@ TEST(ConfigTest, InvalidGTIDFormat) {
   f << "  start_from: gtid=invalid-format\n";
   f.close();
 
-  EXPECT_THROW(
-      {
-        try {
-          LoadConfig("invalid_gtid.yaml");
-        } catch (const std::runtime_error& e) {
-          std::string error_msg(e.what());
-          EXPECT_TRUE(error_msg.find("Invalid GTID format") != std::string::npos);
-          throw;
-        }
-      },
-      std::runtime_error);
+  auto result = LoadConfig("invalid_gtid.yaml");
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("Invalid GTID format") != std::string::npos);
+  }
 }
 
 /**
@@ -267,18 +264,13 @@ TEST(ConfigTest, InvalidStartFrom) {
   f << "  start_from: invalid_option\n";
   f.close();
 
-  EXPECT_THROW(
-      {
-        try {
-          LoadConfig("invalid_start_from.yaml");
-        } catch (const std::runtime_error& e) {
-          std::string error_msg(e.what());
-          EXPECT_TRUE(error_msg.find("Replication configuration error") != std::string::npos);
-          EXPECT_TRUE(error_msg.find("Invalid start_from value") != std::string::npos);
-          throw;
-        }
-      },
-      std::runtime_error);
+  auto result = LoadConfig("invalid_start_from.yaml");
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("Replication configuration error") != std::string::npos);
+    EXPECT_TRUE(error_msg.find("Invalid start_from value") != std::string::npos);
+  }
 }
 
 /**
@@ -309,7 +301,9 @@ TEST(ConfigTest, LoadValidJSONConfig) {
   f << j.dump(2);
   f.close();
 
-  Config config = LoadConfig("test_config.json");
+  auto config_result = LoadConfig("test_config.json");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   // MySQL config
   EXPECT_EQ(config.mysql.host, "127.0.0.1");
@@ -355,7 +349,9 @@ TEST(ConfigTest, LoadJSONConfigWithSchemaValidation) {
   f.close();
 
   // Should load successfully with built-in schema validation
-  Config config = LoadConfig("valid_config.json");
+  auto config_result = LoadConfig("valid_config.json");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_EQ(config.mysql.user, "test_user");
   EXPECT_EQ(config.tables.size(), 1);
 }
@@ -373,7 +369,8 @@ TEST(ConfigTest, LoadInvalidJSONWithSchemaValidation) {
   f.close();
 
   // Should throw validation error (built-in schema requires "user" field)
-  EXPECT_THROW(LoadConfig("invalid_config.json"), std::runtime_error);
+  auto result = LoadConfig("invalid_config.json");
+  EXPECT_FALSE(result);
 }
 
 /**
@@ -394,7 +391,9 @@ TEST(ConfigTest, AutoDetectFormat) {
   yaml_file.close();
 
   // Should auto-detect as YAML and load successfully
-  Config config = LoadConfig("config_no_ext");
+  auto config_result = LoadConfig("config_no_ext");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_EQ(config.mysql.user, "root");
 }
 
@@ -407,7 +406,8 @@ TEST(ConfigTest, LoadInvalidJSON) {
   f << "{\"mysql\": {\"user\": \"test\",}}\n";  // trailing comma is invalid
   f.close();
 
-  EXPECT_THROW(LoadConfig("invalid.json"), std::runtime_error);
+  auto result = LoadConfig("invalid.json");
+  EXPECT_FALSE(result);
 }
 
 /**
@@ -428,7 +428,8 @@ TEST(ConfigTest, JSONConfigWithUnknownKeys) {
   f.close();
 
   // With built-in schema validation, unknown keys should be rejected
-  EXPECT_THROW(LoadConfig("unknown_keys.json"), std::runtime_error);
+  auto result = LoadConfig("unknown_keys.json");
+  EXPECT_FALSE(result);
 }
 
 /**
@@ -447,7 +448,9 @@ TEST(ConfigTest, LoadConfigYamlLegacy) {
   f << "      column: text\n";
   f.close();
 
-  Config config = LoadConfigYaml("legacy.yaml");
+  auto config_result = LoadConfigYaml("legacy.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_EQ(config.mysql.user, "legacy_user");
 }
 
@@ -463,7 +466,9 @@ TEST(ConfigTest, LoadConfigJsonFunction) {
   f << config_json.dump(2);
   f.close();
 
-  Config config = LoadConfigJson("func_test.json");
+  auto config_result = LoadConfigJson("func_test.json");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_EQ(config.mysql.user, "json_func_user");
   EXPECT_EQ(config.replication.server_id, 300U);
 }
@@ -484,7 +489,9 @@ TEST(ConfigTest, MysqlSslDefaults) {
   f << "      column: text\n";
   f.close();
 
-  Config config = LoadConfig("ssl_defaults.yaml");
+  auto config_result = LoadConfig("ssl_defaults.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   // Check SSL defaults
   EXPECT_FALSE(config.mysql.ssl_enable);
@@ -515,7 +522,9 @@ TEST(ConfigTest, MysqlSslConfiguration) {
   f << "      column: text\n";
   f.close();
 
-  Config config = LoadConfig("ssl_config.yaml");
+  auto config_result = LoadConfig("ssl_config.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_TRUE(config.mysql.ssl_enable);
   EXPECT_EQ(config.mysql.ssl_ca, "/path/to/ca-cert.pem");
@@ -542,7 +551,9 @@ TEST(ConfigTest, MysqlSslPartialConfiguration) {
   f << "      column: text\n";
   f.close();
 
-  Config config = LoadConfig("ssl_partial.yaml");
+  auto config_result = LoadConfig("ssl_partial.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_TRUE(config.mysql.ssl_enable);
   EXPECT_EQ(config.mysql.ssl_ca, "/path/to/ca-cert.pem");
@@ -579,18 +590,13 @@ TEST(ConfigTest, CacheMemoryExceedsPhysicalMemoryLimit) {
   f << "  max_memory_mb: " << excessive_cache_mb << "\n";
   f.close();
 
-  EXPECT_THROW(
-      {
-        try {
-          LoadConfig("cache_excessive.yaml");
-        } catch (const std::runtime_error& e) {
-          std::string error_msg(e.what());
-          EXPECT_TRUE(error_msg.find("Cache configuration error") != std::string::npos);
-          EXPECT_TRUE(error_msg.find("exceeds safe limit") != std::string::npos);
-          throw;
-        }
-      },
-      std::runtime_error);
+  auto result = LoadConfig("cache_excessive.yaml");
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("Cache configuration error") != std::string::npos);
+    EXPECT_TRUE(error_msg.find("exceeds safe limit") != std::string::npos);
+  }
 }
 
 /**
@@ -622,7 +628,9 @@ TEST(ConfigTest, CacheMemoryWithinPhysicalMemoryLimit) {
   f.close();
 
   // Should load successfully
-  Config config = LoadConfig("cache_safe.yaml");
+  auto config_result = LoadConfig("cache_safe.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_TRUE(config.cache.enabled);
   EXPECT_EQ(config.cache.max_memory_bytes, safe_cache_mb * 1024 * 1024);
 }
@@ -656,6 +664,8 @@ TEST(ConfigTest, CacheDisabledNoMemoryValidation) {
   f.close();
 
   // Should load successfully because cache is disabled
-  Config config = LoadConfig("cache_disabled.yaml");
+  auto config_result = LoadConfig("cache_disabled.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
   EXPECT_FALSE(config.cache.enabled);
 }

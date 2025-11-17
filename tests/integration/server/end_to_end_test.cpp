@@ -114,13 +114,13 @@ TEST_F(EndToEndTest, CompleteWorkflowAddIndexSearch) {
 
   // Step 1: Add documents directly to the store and index
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {{"status", static_cast<int64_t>(1)}});
-  table_context_.index->AddDocument(doc_id1, "hello world");
+  table_context_.index->AddDocument(*doc_id1, "hello world");
 
   auto doc_id2 = table_context_.doc_store->AddDocument("pk2", {{"status", static_cast<int64_t>(2)}});
-  table_context_.index->AddDocument(doc_id2, "hello universe");
+  table_context_.index->AddDocument(*doc_id2, "hello universe");
 
   auto doc_id3 = table_context_.doc_store->AddDocument("pk3", {{"status", static_cast<int64_t>(1)}});
-  table_context_.index->AddDocument(doc_id3, "goodbye world");
+  table_context_.index->AddDocument(*doc_id3, "goodbye world");
 
   // Step 2: Search for "hello"
   std::string response = client.SendCommand("SEARCH posts hello");
@@ -152,13 +152,13 @@ TEST_F(EndToEndTest, WorkflowWithFiltersAndSorting) {
 
   // Add documents with different filter values
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {{"priority", static_cast<int64_t>(1)}});
-  table_context_.index->AddDocument(doc_id1, "task one");
+  table_context_.index->AddDocument(*doc_id1, "task one");
 
   auto doc_id2 = table_context_.doc_store->AddDocument("pk2", {{"priority", static_cast<int64_t>(3)}});
-  table_context_.index->AddDocument(doc_id2, "task two");
+  table_context_.index->AddDocument(*doc_id2, "task two");
 
   auto doc_id3 = table_context_.doc_store->AddDocument("pk3", {{"priority", static_cast<int64_t>(2)}});
-  table_context_.index->AddDocument(doc_id3, "task three");
+  table_context_.index->AddDocument(*doc_id3, "task three");
 
   // Search all tasks
   std::string response = client.SendCommand("SEARCH posts task");
@@ -181,13 +181,13 @@ TEST_F(EndToEndTest, WorkflowWithLogicalOperators) {
 
   // Add documents
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {});
-  table_context_.index->AddDocument(doc_id1, "machine learning tutorial");
+  table_context_.index->AddDocument(*doc_id1, "machine learning tutorial");
 
   auto doc_id2 = table_context_.doc_store->AddDocument("pk2", {});
-  table_context_.index->AddDocument(doc_id2, "machine learning advanced");
+  table_context_.index->AddDocument(*doc_id2, "machine learning advanced");
 
   auto doc_id3 = table_context_.doc_store->AddDocument("pk3", {});
-  table_context_.index->AddDocument(doc_id3, "deep learning tutorial");
+  table_context_.index->AddDocument(*doc_id3, "deep learning tutorial");
 
   // Search with AND
   std::string response = client.SendCommand("SEARCH posts machine AND learning");
@@ -211,7 +211,7 @@ TEST_F(EndToEndTest, WorkflowWithInfoCommand) {
 
   // Add some documents
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {});
-  table_context_.index->AddDocument(doc_id1, "test document");
+  table_context_.index->AddDocument(*doc_id1, "test document");
 
   // Get server info
   std::string response = client.SendCommand("INFO");
@@ -230,7 +230,7 @@ TEST_F(EndToEndTest, WorkflowWithDebugMode) {
 
   // Add documents
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {});
-  table_context_.index->AddDocument(doc_id1, "debug test");
+  table_context_.index->AddDocument(*doc_id1, "debug test");
 
   // Enable debug mode
   std::string response = client.SendCommand("DEBUG ON");
@@ -279,7 +279,7 @@ TEST_F(EndToEndTest, WorkflowErrorHandling) {
 TEST_F(EndToEndTest, ConcurrentClients) {
   // Add documents
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1", {});
-  table_context_.index->AddDocument(doc_id1, "concurrent test");
+  table_context_.index->AddDocument(*doc_id1, "concurrent test");
 
   const int num_clients = 10;
   std::vector<std::thread> threads;
@@ -319,10 +319,10 @@ TEST_F(EndToEndTest, WorkflowWithJapaneseText) {
 
   // Add Japanese documents
   auto doc_id1 = table_context_.doc_store->AddDocument("jp1", {});
-  table_context_.index->AddDocument(doc_id1, "機械学習のチュートリアル");
+  table_context_.index->AddDocument(*doc_id1, "機械学習のチュートリアル");
 
   auto doc_id2 = table_context_.doc_store->AddDocument("jp2", {});
-  table_context_.index->AddDocument(doc_id2, "深層学習の応用");
+  table_context_.index->AddDocument(*doc_id2, "深層学習の応用");
 
   // Search in Japanese
   std::string response = client.SendCommand("SEARCH posts 学習");
@@ -344,10 +344,10 @@ TEST_F(EndToEndTest, WorkflowWithEmoji) {
 
   // Add documents with emoji
   auto doc_id1 = table_context_.doc_store->AddDocument("emoji1", {});
-  table_context_.index->AddDocument(doc_id1, "Great tutorial 😀");
+  table_context_.index->AddDocument(*doc_id1, "Great tutorial 😀");
 
   auto doc_id2 = table_context_.doc_store->AddDocument("emoji2", {});
-  table_context_.index->AddDocument(doc_id2, "Amazing post 🎉");
+  table_context_.index->AddDocument(*doc_id2, "Amazing post 🎉");
 
   // Search for regular text
   std::string response = client.SendCommand("SEARCH posts tutorial");

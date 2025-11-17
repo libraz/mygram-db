@@ -82,3 +82,18 @@ target_link_libraries(posting_list_test
 )
 
 gtest_discover_tests(posting_list_test)
+
+# Index optimization concurrency tests
+add_executable(optimize_concurrency_test
+  optimize_concurrency_test.cpp
+)
+
+target_link_libraries(optimize_concurrency_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(optimize_concurrency_test
+  PROPERTIES
+    RESOURCE_LOCK optimize_concurrent_lock
+)

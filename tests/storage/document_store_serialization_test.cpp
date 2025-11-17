@@ -43,7 +43,7 @@ TEST_F(DocumentStoreSerializationTest, MonostateNullValue) {
   std::unordered_map<std::string, FilterValue> filters;
   filters["null_field"] = std::monostate{};
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -65,7 +65,7 @@ TEST_F(DocumentStoreSerializationTest, BoolValue) {
   filters["bool_true"] = true;
   filters["bool_false"] = false;
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -88,7 +88,7 @@ TEST_F(DocumentStoreSerializationTest, Int8Value) {
   filters["int8_max"] = static_cast<int8_t>(127);
   filters["int8_zero"] = static_cast<int8_t>(0);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -111,7 +111,7 @@ TEST_F(DocumentStoreSerializationTest, UInt8Value) {
   filters["uint8_min"] = static_cast<uint8_t>(0);
   filters["uint8_max"] = static_cast<uint8_t>(255);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -133,7 +133,7 @@ TEST_F(DocumentStoreSerializationTest, Int16Value) {
   filters["int16_min"] = static_cast<int16_t>(-32768);
   filters["int16_max"] = static_cast<int16_t>(32767);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -155,7 +155,7 @@ TEST_F(DocumentStoreSerializationTest, UInt16Value) {
   filters["uint16_min"] = static_cast<uint16_t>(0);
   filters["uint16_max"] = static_cast<uint16_t>(65535);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -177,7 +177,7 @@ TEST_F(DocumentStoreSerializationTest, Int32Value) {
   filters["int32_min"] = static_cast<int32_t>(-2147483648);
   filters["int32_max"] = static_cast<int32_t>(2147483647);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -199,7 +199,7 @@ TEST_F(DocumentStoreSerializationTest, UInt32Value) {
   filters["uint32_min"] = static_cast<uint32_t>(0);
   filters["uint32_max"] = static_cast<uint32_t>(4294967295);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -221,7 +221,7 @@ TEST_F(DocumentStoreSerializationTest, Int64Value) {
   filters["int64_min"] = static_cast<int64_t>(-9223372036854775807LL - 1);
   filters["int64_max"] = static_cast<int64_t>(9223372036854775807LL);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -243,7 +243,7 @@ TEST_F(DocumentStoreSerializationTest, UInt64Value) {
   filters["uint64_min"] = static_cast<uint64_t>(0);
   filters["uint64_max"] = static_cast<uint64_t>(18446744073709551615ULL);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -267,7 +267,7 @@ TEST_F(DocumentStoreSerializationTest, StringValue) {
   filters["str_unicode"] = std::string("こんにちは世界");
   filters["str_long"] = std::string(1000, 'x');
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -294,7 +294,7 @@ TEST_F(DocumentStoreSerializationTest, DoubleValue) {
   filters["double_small"] = 1.23e-100;
   filters["double_large"] = 9.87e100;
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -329,7 +329,7 @@ TEST_F(DocumentStoreSerializationTest, AllTypesInOneDocument) {
   filters["string"] = std::string("test value");
   filters["double"] = 3.14159;
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
   DocumentStore store2;
@@ -372,9 +372,9 @@ TEST_F(DocumentStoreSerializationTest, MultipleDocumentsMixedTypes) {
   filters3["status"] = static_cast<int32_t>(0);
   filters3["active"] = false;
 
-  store1.AddDocument("doc1", filters1);
-  store1.AddDocument("doc2", filters2);
-  store1.AddDocument("doc3", filters3);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters1));
+  EXPECT_TRUE(store1.AddDocument("doc2", filters2));
+  EXPECT_TRUE(store1.AddDocument("doc3", filters3));
 
   ASSERT_TRUE(store1.SaveToFile(test_file_ + ".docs"));
 
@@ -420,7 +420,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationAllTypes) {
   filters["string"] = std::string("test value");
   filters["double"] = 3.14159;
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
 
   // Serialize to stringstream
   std::stringstream stream;
@@ -458,7 +458,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationWithGTID) {
   filters["id"] = static_cast<int32_t>(42);
   filters["name"] = std::string("test");
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
 
   // Serialize with GTID
   std::string original_gtid = "00000000-0000-0000-0000-000000000000:1-100";
@@ -487,7 +487,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationEmptyGTID) {
   std::unordered_map<std::string, FilterValue> filters;
   filters["value"] = static_cast<int32_t>(123);
 
-  store1.AddDocument("doc1", filters);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
 
   // Serialize without GTID
   std::stringstream stream;
@@ -517,7 +517,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationMultipleDocuments) {
     filters["id"] = static_cast<int32_t>(i);
     filters["value"] = static_cast<double>(i * 1.5);
     filters["name"] = std::string("doc_") + std::to_string(i);
-    store1.AddDocument("pk_" + std::to_string(i), filters);
+    EXPECT_TRUE(store1.AddDocument("pk_" + std::to_string(i), filters));
   }
 
   // Serialize to stream

@@ -33,6 +33,7 @@
 #include "server/handlers/dump_handler.h"
 #include "server/handlers/replication_handler.h"
 #include "server/handlers/search_handler.h"
+#include "utils/structured_log.h"
 #ifdef USE_MYSQL
 #include "server/handlers/sync_handler.h"
 #endif
@@ -93,7 +94,11 @@ std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_c
   for (const auto& cidr_str : allow_cidrs) {
     auto cidr = utils::CIDR::Parse(cidr_str);
     if (!cidr) {
-      spdlog::warn("Ignoring invalid CIDR entry in network.allow_cidrs: {}", cidr_str);
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "invalid_cidr_entry")
+          .Field("cidr", cidr_str)
+          .Warn();
       continue;
     }
     parsed.push_back(*cidr);
@@ -126,11 +131,20 @@ TcpServer::~TcpServer() {
   Stop();
 }
 
-bool TcpServer::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Check if already running
   if (acceptor_ && acceptor_->IsRunning()) {
-    last_error_ = "Server already running";
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "tcp_server_start")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // 1. Create thread pool
@@ -215,9 +229,9 @@ bool TcpServer::Start() {
   // 6. Start connection acceptor
   acceptor_ = std::make_unique<ConnectionAcceptor>(config_, thread_pool_.get());
   acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-  if (!acceptor_->Start()) {
-    last_error_ = acceptor_->GetLastError();
-    return false;
+  auto start_result = acceptor_->Start();
+  if (!start_result) {
+    return MakeUnexpected(start_result.error());
   }
 
   // 7. Start snapshot scheduler (if configured)
@@ -228,7 +242,7 @@ bool TcpServer::Start() {
   }
 
   spdlog::info("TCP server started on {}:{}", config_.host, acceptor_->GetPort());
-  return true;
+  return {};
 }
 
 void TcpServer::Stop() {

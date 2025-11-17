@@ -3,12 +3,18 @@
  * @brief Web-style search expression parser implementation
  */
 
-#include "search_expression.h"
+#include "client/search_expression.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <sstream>
+
+#include "utils/error.h"
+#include "utils/expected.h"
+
+using namespace mygram::utils;
 
 namespace mygramdb::client {
 
@@ -203,7 +209,7 @@ class Parser {
   /**
    * @brief Parse the expression
    */
-  std::variant<SearchExpression, std::string> Parse() {
+  Expected<SearchExpression, Error> Parse() {
     SearchExpression expr;
 
     while (current_.type != TokenType::kEnd) {
@@ -213,20 +219,20 @@ class Parser {
         if (auto term = ParsePrefixedTerm()) {
           expr.required_terms.push_back(*term);
         } else {
-          return "Expected term after '+'";
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Expected term after '+'"));
         }
       } else if (current_.type == TokenType::kMinus) {
         Advance();
         if (auto term = ParsePrefixedTerm()) {
           expr.excluded_terms.push_back(*term);
         } else {
-          return "Expected term after '-'";
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Expected term after '-'"));
         }
       } else if (current_.type == TokenType::kLParen) {
         // Parenthesized expression - capture as raw
         std::string paren_expr = CaptureParenExpression();
         if (paren_expr.empty()) {
-          return "Unbalanced parentheses";
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unbalanced parentheses"));
         }
         if (!expr.raw_expression.empty()) {
           expr.raw_expression += " ";
@@ -251,9 +257,9 @@ class Parser {
           Advance();
         }
       } else if (current_.type == TokenType::kOr) {
-        return "Unexpected 'OR' operator";
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unexpected 'OR' operator"));
       } else if (current_.type == TokenType::kRParen) {
-        return "Unexpected ')'";
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unexpected ')'"));
       } else {
         Advance();
       }
@@ -435,34 +441,31 @@ std::string SearchExpression::ToQueryString() const {
   return oss.str();
 }
 
-std::variant<SearchExpression, std::string> ParseSearchExpression(const std::string& expression) {
+Expected<SearchExpression, Error> ParseSearchExpression(const std::string& expression) {
   if (expression.empty()) {
-    return "Empty search expression";
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Empty search expression"));
   }
 
   Parser parser(expression);
   return parser.Parse();
 }
 
-std::variant<std::string, std::string> ConvertSearchExpression(const std::string& expression) {
+Expected<std::string, Error> ConvertSearchExpression(const std::string& expression) {
   auto result = ParseSearchExpression(expression);
-  if (auto* err = std::get_if<std::string>(&result)) {
-    // Return error (index 1)
-    return std::variant<std::string, std::string>(std::in_place_index<1>, *err);
+  if (!result) {
+    return MakeUnexpected(result.error());
   }
-  auto expr = std::get<SearchExpression>(result);
-  // Return success (index 0)
-  return std::variant<std::string, std::string>(std::in_place_index<0>, expr.ToQueryString());
+  return result->ToQueryString();
 }
 
 bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
                               std::vector<std::string>& and_terms, std::vector<std::string>& not_terms) {
   auto result = ParseSearchExpression(expression);
-  if (std::get_if<std::string>(&result) != nullptr) {
+  if (!result) {
     return false;
   }
 
-  auto expr = std::get<SearchExpression>(result);
+  auto& expr = *result;
 
   // Extract main term - all terms are now in required_terms
   if (!expr.required_terms.empty()) {

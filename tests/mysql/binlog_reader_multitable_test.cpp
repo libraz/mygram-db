@@ -558,12 +558,12 @@ TEST_F(BinlogReaderFixture, ConcurrentStartCallsThreadSafe) {
     threads.emplace_back([&]() {
       // Note: Start() will fail because we don't have a real MySQL connection
       // But the important part is testing the thread safety of the check-and-set logic
-      bool result = reader_->Start();
+      auto result = reader_->Start();
       if (result) {
         start_success_count.fetch_add(1);
       } else {
         // Check if error was "already running"
-        if (reader_->GetLastError().find("already running") != std::string::npos) {
+        if (result.error().message().find("already running") != std::string::npos) {
           already_running_count.fetch_add(1);
         }
       }

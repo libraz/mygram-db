@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "config/config.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::query {
 
@@ -209,9 +211,9 @@ class QueryParser {
    * @brief Parse query string
    *
    * @param query_str Query string
-   * @return Parsed query
+   * @return Expected<Query, Error> - Parsed query or error
    */
-  Query Parse(const std::string& query_str);
+  mygram::utils::Expected<Query, mygram::utils::Error> Parse(const std::string& query_str);
 
   /**
    * @brief Get last error message
@@ -235,17 +237,17 @@ class QueryParser {
   /**
    * @brief Parse SEARCH command
    */
-  Query ParseSearch(const std::vector<std::string>& tokens);
+  mygram::utils::Expected<Query, mygram::utils::Error> ParseSearch(const std::vector<std::string>& tokens);
 
   /**
    * @brief Parse COUNT command
    */
-  Query ParseCount(const std::vector<std::string>& tokens);
+  mygram::utils::Expected<Query, mygram::utils::Error> ParseCount(const std::vector<std::string>& tokens);
 
   /**
    * @brief Parse GET command
    */
-  Query ParseGet(const std::vector<std::string>& tokens);
+  mygram::utils::Expected<Query, mygram::utils::Error> ParseGet(const std::vector<std::string>& tokens);
 
   /**
    * @brief Parse AND clause

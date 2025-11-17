@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::config {
 
 // Default values for configuration
@@ -299,38 +302,38 @@ struct Config {
  *
  * @param path Path to configuration file (YAML or JSON)
  * @param schema_path Optional path to JSON Schema file for validation
- * @return Configuration object
- * @throws std::runtime_error if file cannot be read, parsed, or validation fails
+ * @return Expected<Config, Error> with configuration or error
  */
-Config LoadConfig(const std::string& path, const std::string& schema_path = "");
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
+                                                                 const std::string& schema_path = "");
 
 /**
  * @brief Load configuration from YAML file (legacy compatibility)
  *
  * @param path Path to YAML configuration file
- * @return Configuration object
- * @throws std::runtime_error if file cannot be read or parsed
+ * @return Expected<Config, Error> with configuration or error
  * @deprecated Use LoadConfig() which auto-detects format
  */
-Config LoadConfigYaml(const std::string& path);
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::string& path);
 
 /**
  * @brief Load configuration from JSON file
  *
  * @param path Path to JSON configuration file
  * @param schema_path Optional path to JSON Schema file for validation
- * @return Configuration object
- * @throws std::runtime_error if file cannot be read, parsed, or validation fails
+ * @return Expected<Config, Error> with configuration or error
  */
-Config LoadConfigJson(const std::string& path, const std::string& schema_path = "");
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::string& path,
+                                                                     const std::string& schema_path = "");
 
 /**
  * @brief Validate JSON configuration against schema
  *
- * @param config_json JSON configuration object
- * @param schema_json JSON Schema object
- * @throws std::runtime_error if validation fails with detailed error message
+ * @param config_json_str JSON configuration string
+ * @param schema_json_str JSON Schema string
+ * @return Expected<void, Error> with success or validation error
  */
-void ValidateConfigJson(const std::string& config_json_str, const std::string& schema_json_str);
+mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std::string& config_json_str,
+                                                                       const std::string& schema_json_str);
 
 }  // namespace mygramdb::config

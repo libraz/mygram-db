@@ -13,6 +13,9 @@
 #include <optional>
 #include <string>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::mysql {
 
 /**
@@ -24,8 +27,10 @@ struct GTID {
 
   /**
    * @brief Parse GTID from string format (UUID:transaction_id)
+   * @param gtid_str GTID string in format "UUID:transaction_id"
+   * @return Expected<GTID, Error> with parsed GTID or error
    */
-  static std::optional<GTID> Parse(const std::string& gtid_str);
+  static mygram::utils::Expected<GTID, mygram::utils::Error> Parse(const std::string& gtid_str);
 
   /**
    * @brief Convert GTID to string format
@@ -106,9 +111,9 @@ class Connection {
   /**
    * @brief Connect to MySQL server
    * @param context Optional context label for logging (e.g., "main", "binlog worker")
-   * @return true if connection successful
+   * @return Expected<void, Error> - success or connection error
    */
-  bool Connect(const std::string& context = "");
+  mygram::utils::Expected<void, mygram::utils::Error> Connect(const std::string& context = "");
 
   /**
    * @brief Check if connection is alive
@@ -117,15 +122,15 @@ class Connection {
 
   /**
    * @brief Ping MySQL server to check if connection is still alive
-   * @return true if connection is alive
+   * @return Expected<void, Error> - success or ping error
    */
-  bool Ping();
+  mygram::utils::Expected<void, mygram::utils::Error> Ping();
 
   /**
    * @brief Reconnect to MySQL server
-   * @return true if reconnection successful
+   * @return Expected<void, Error> - success or reconnection error
    */
-  bool Reconnect();
+  mygram::utils::Expected<void, mygram::utils::Error> Reconnect();
 
   /**
    * @brief Close connection
@@ -135,16 +140,16 @@ class Connection {
   /**
    * @brief Execute SQL query
    * @param query SQL query string
-   * @return RAII-managed MySQL result set (automatically freed)
+   * @return Expected<MySQLResult, Error> - RAII-managed MySQL result set or error
    */
-  MySQLResult Execute(const std::string& query);
+  mygram::utils::Expected<MySQLResult, mygram::utils::Error> Execute(const std::string& query);
 
   /**
    * @brief Execute SQL query without result set (INSERT/UPDATE/DELETE)
    * @param query SQL query string
-   * @return true if successful
+   * @return Expected<void, Error> - success or query execution error
    */
-  bool ExecuteUpdate(const std::string& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ExecuteUpdate(const std::string& query);
 
   /**
    * @brief Get current GTID executed on the server
@@ -161,9 +166,9 @@ class Connection {
   /**
    * @brief Set session GTID_NEXT for testing
    * @param gtid GTID to set (e.g., "AUTOMATIC" or specific GTID)
-   * @return true if successful
+   * @return Expected<void, Error> - success or error
    */
-  bool SetGTIDNext(const std::string& gtid);
+  mygram::utils::Expected<void, mygram::utils::Error> SetGTIDNext(const std::string& gtid);
 
   /**
    * @brief Get server UUID

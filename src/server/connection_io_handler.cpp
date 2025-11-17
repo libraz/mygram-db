@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "server/server_types.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -27,7 +28,13 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
     timeout.tv_sec = config_.recv_timeout_sec;
     timeout.tv_usec = 0;
     if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-      spdlog::warn("Failed to set SO_RCVTIMEO on fd {}: {}", client_fd, strerror(errno));
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("operation", "setsockopt")
+          .Field("option", "SO_RCVTIMEO")
+          .Field("fd", static_cast<uint64_t>(client_fd))
+          .Field("error", strerror(errno))
+          .Warn();
       // Continue anyway - timeout is not critical for functionality
     }
   }
@@ -55,7 +62,13 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
 
     // Check buffer size limit
     if (accumulated.size() + bytes > max_accumulated) {
-      spdlog::warn("Accumulated buffer exceeded limit on fd {}, closing", client_fd);
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "request_too_large")
+          .Field("fd", static_cast<uint64_t>(client_fd))
+          .Field("size", static_cast<uint64_t>(accumulated.size() + bytes))
+          .Field("limit", static_cast<uint64_t>(max_accumulated))
+          .Warn();
       SendResponse(client_fd, "ERROR Request too large (no newline detected)");
       break;
     }

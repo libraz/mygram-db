@@ -13,24 +13,12 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <variant>
 #include <vector>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::client {
-
-/**
- * @brief Error wrapper to distinguish from success strings in std::variant
- */
-struct Error {
-  std::string message;
-
-  Error() = default;
-  explicit Error(std::string msg) : message(std::move(msg)) {}
-
-  // Convenience conversion to string
-  [[nodiscard]] const std::string& str() const { return message; }
-  operator const std::string&() const { return message; }
-};
 
 /**
  * @brief Search result document
@@ -135,16 +123,17 @@ struct ClientConfig {
  *   config.port = 11016;
  *
  *   MygramClient client(config);
- *   if (auto err = client.Connect()) {
- *     std::cerr << "Connection failed: " << *err << std::endl;
+ *   auto conn_result = client.Connect();
+ *   if (!conn_result) {
+ *     std::cerr << "Connection failed: " << conn_result.error().message() << std::endl;
  *     return;
  *   }
  *
  *   auto result = client.Search("articles", "hello world", 100);
- *   if (auto err = std::get_if<std::string>(&result)) {
- *     std::cerr << "Search failed: " << *err << std::endl;
+ *   if (!result) {
+ *     std::cerr << "Search failed: " << result.error().message() << std::endl;
  *   } else {
- *     auto resp = std::get<SearchResponse>(result);
+ *     auto& resp = *result;
  *     std::cout << "Found " << resp.total_count << " results\n";
  *   }
  * @endcode
@@ -172,9 +161,9 @@ class MygramClient {
 
   /**
    * @brief Connect to MygramDB server
-   * @return std::nullopt on success, error message on failure
+   * @return Expected<void, Error> - success or error
    */
-  std::optional<std::string> Connect();
+  mygram::utils::Expected<void, mygram::utils::Error> Connect();
 
   /**
    * @brief Disconnect from server
@@ -199,16 +188,16 @@ class MygramClient {
    * @param filters Filter conditions (key=value pairs)
    * @param sort_column Column name for SORT clause (empty for primary key)
    * @param sort_desc Sort descending (default: true = descending)
-   * @return SearchResponse on success, Error on failure
+   * @return Expected<SearchResponse, Error>
    */
-  std::variant<SearchResponse, Error> Search(
+  mygram::utils::Expected<SearchResponse, mygram::utils::Error> Search(
       const std::string& table, const std::string& query,
       uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
                               // - Default result limit
       uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
-      bool sort_desc = true);
+      bool sort_desc = true) const;
 
   /**
    * @brief Count matching documents
@@ -218,77 +207,78 @@ class MygramClient {
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms
    * @param filters Filter conditions (key=value pairs)
-   * @return CountResponse on success, Error on failure
+   * @return Expected<CountResponse, Error>
    */
-  std::variant<CountResponse, Error> Count(const std::string& table, const std::string& query,
-                                           const std::vector<std::string>& and_terms = {},
-                                           const std::vector<std::string>& not_terms = {},
-                                           const std::vector<std::pair<std::string, std::string>>& filters = {});
+  mygram::utils::Expected<CountResponse, mygram::utils::Error> Count(
+      const std::string& table, const std::string& query, const std::vector<std::string>& and_terms = {},
+      const std::vector<std::string>& not_terms = {},
+      const std::vector<std::pair<std::string, std::string>>& filters = {}) const;
 
   /**
    * @brief Get document by primary key
    *
    * @param table Table name
    * @param primary_key Primary key value
-   * @return Document on success, Error on failure
+   * @return Expected<Document, Error>
    */
-  std::variant<Document, Error> Get(const std::string& table, const std::string& primary_key);
+  mygram::utils::Expected<Document, mygram::utils::Error> Get(const std::string& table,
+                                                              const std::string& primary_key) const;
 
   /**
    * @brief Get server information
-   * @return ServerInfo on success, Error on failure
+   * @return Expected<ServerInfo, Error>
    */
-  std::variant<ServerInfo, Error> Info();
+  mygram::utils::Expected<ServerInfo, mygram::utils::Error> Info() const;
 
   /**
    * @brief Get server configuration
-   * @return Configuration string on success, Error on failure
+   * @return Expected<std::string, Error>
    */
-  std::variant<std::string, Error> GetConfig();
+  mygram::utils::Expected<std::string, mygram::utils::Error> GetConfig() const;
 
   /**
    * @brief Save snapshot to disk
    * @param filepath Optional filepath (empty for default)
-   * @return Saved filepath on success, Error on failure
+   * @return Expected<std::string, Error> - saved filepath or error
    */
-  std::variant<std::string, Error> Save(const std::string& filepath = "");
+  mygram::utils::Expected<std::string, mygram::utils::Error> Save(const std::string& filepath = "") const;
 
   /**
    * @brief Load snapshot from disk
    * @param filepath Snapshot filepath
-   * @return Loaded filepath on success, Error on failure
+   * @return Expected<std::string, Error> - loaded filepath or error
    */
-  std::variant<std::string, Error> Load(const std::string& filepath);
+  mygram::utils::Expected<std::string, mygram::utils::Error> Load(const std::string& filepath) const;
 
   /**
    * @brief Get replication status
-   * @return ReplicationStatus on success, Error on failure
+   * @return Expected<ReplicationStatus, Error>
    */
-  std::variant<ReplicationStatus, Error> GetReplicationStatus();
+  mygram::utils::Expected<ReplicationStatus, mygram::utils::Error> GetReplicationStatus() const;
 
   /**
    * @brief Stop replication
-   * @return std::nullopt on success, error message on failure
+   * @return Expected<void, Error>
    */
-  std::optional<std::string> StopReplication();
+  mygram::utils::Expected<void, mygram::utils::Error> StopReplication() const;
 
   /**
    * @brief Start replication
-   * @return std::nullopt on success, error message on failure
+   * @return Expected<void, Error>
    */
-  std::optional<std::string> StartReplication();
+  mygram::utils::Expected<void, mygram::utils::Error> StartReplication() const;
 
   /**
    * @brief Enable debug mode for this connection
-   * @return std::nullopt on success, error message on failure
+   * @return Expected<void, Error>
    */
-  std::optional<std::string> EnableDebug();
+  mygram::utils::Expected<void, mygram::utils::Error> EnableDebug() const;
 
   /**
    * @brief Disable debug mode for this connection
-   * @return std::nullopt on success, error message on failure
+   * @return Expected<void, Error>
    */
-  std::optional<std::string> DisableDebug();
+  mygram::utils::Expected<void, mygram::utils::Error> DisableDebug() const;
 
   /**
    * @brief Send raw command to server
@@ -297,19 +287,13 @@ class MygramClient {
    * Most users should use the higher-level methods instead.
    *
    * @param command Command string (without \r\n terminator)
-   * @return Response string on success, Error on failure
+   * @return Expected<std::string, Error>
    */
-  std::variant<std::string, Error> SendCommand(const std::string& command);
-
-  /**
-   * @brief Get last error message
-   * @return Last error message (empty if no error)
-   */
-  [[nodiscard]] const std::string& GetLastError() const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> SendCommand(const std::string& command) const;
 
  private:
   class Impl;  // Forward declaration for PIMPL
-  std::unique_ptr<Impl> impl_;
+  mutable std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace mygramdb::client

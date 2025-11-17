@@ -14,6 +14,8 @@
 #include <thread>
 
 #include "server/server_types.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::server {
 
@@ -66,9 +68,9 @@ class ConnectionAcceptor {
 
   /**
    * @brief Start accepting connections
-   * @return true if started successfully
+   * @return Expected<void, Error> - Success or error details
    */
-  bool Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop accepting connections
@@ -95,12 +97,6 @@ class ConnectionAcceptor {
    */
   bool IsRunning() const { return running_; }
 
-  /**
-   * @brief Get last error message
-   * @return Error message
-   */
-  const std::string& GetLastError() const { return last_error_; }
-
  private:
   /**
    * @brief Accept loop (runs in separate thread)
@@ -112,7 +108,7 @@ class ConnectionAcceptor {
    * @param socket_fd Socket file descriptor
    * @return true if successful
    */
-  bool SetSocketOptions(int socket_fd);
+  bool SetSocketOptions(int socket_fd) const;
 
   /**
    * @brief Remove connection from active list
@@ -132,8 +128,6 @@ class ConnectionAcceptor {
 
   std::set<int> active_fds_;
   std::mutex fds_mutex_;
-
-  std::string last_error_;
 };
 
 }  // namespace mygramdb::server

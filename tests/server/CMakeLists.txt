@@ -100,6 +100,22 @@ gtest_discover_tests(thread_pool_test
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
+# Thread Pool shutdown tests
+
+add_executable(thread_pool_shutdown_test
+  thread_pool_shutdown_test.cpp
+)
+
+target_link_libraries(thread_pool_shutdown_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
+gtest_discover_tests(thread_pool_shutdown_test
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
 # HTTP Server tests (split into focused files)
 
 add_executable(http_server_basic_test
@@ -299,6 +315,22 @@ gtest_discover_tests(rate_limiter_test
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
+# RateLimiter cleanup tests
+
+add_executable(rate_limiter_cleanup_test
+  rate_limiter_cleanup_test.cpp
+)
+
+target_link_libraries(rate_limiter_cleanup_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(rate_limiter_cleanup_test
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
 # ConnectionLimit tests (SECURITY: Resource exhaustion prevention)
 
 add_executable(connection_limit_test
@@ -312,6 +344,26 @@ target_link_libraries(connection_limit_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(connection_limit_test
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# Health Endpoint tests
+
+add_executable(health_endpoint_test
+  health_endpoint_test.cpp
+)
+
+target_link_libraries(health_endpoint_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(health_endpoint_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(health_endpoint_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 

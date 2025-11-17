@@ -192,11 +192,12 @@ int TcpServerTest::CreateClientSocket(uint16_t port) {
 }
 
 void TcpServerTest::StartServerOrSkip() {
-  if (server_->Start()) {
+  auto result = server_->Start();
+  if (result) {
     return;
   }
 
-  const std::string& error = server_->GetLastError();
+  const std::string error = result.error().to_string();
   if (error.find("Operation not permitted") != std::string::npos ||
       error.find("Permission denied") != std::string::npos) {
     GTEST_SKIP() << "Skipping TcpServerTest: " << error << ". This environment does not allow creating TCP sockets.";
@@ -531,8 +532,8 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
   // Add test documents
   auto doc_id1 = doc_store_->AddDocument("100", {});
   auto doc_id2 = doc_store_->AddDocument("200", {});
-  index_->AddDocument(doc_id1, "hello world");
-  index_->AddDocument(doc_id2, "test data");
+  index_->AddDocument(*doc_id1, "hello world");
+  index_->AddDocument(*doc_id2, "test data");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -578,7 +579,7 @@ TEST_F(TcpServerTest, DebugModeWithSearch) {
 TEST_F(TcpServerTest, DebugModePerConnection) {
   // Add test document
   auto doc_id = doc_store_->AddDocument("100", {});
-  index_->AddDocument(doc_id, "hello world");
+  index_->AddDocument(*doc_id, "hello world");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -611,9 +612,9 @@ TEST_F(TcpServerTest, DebugModePerConnection) {
 TEST_F(TcpServerTest, DebugModeDefaultParameterMarkers) {
   // Add test documents
   auto doc_id1 = doc_store_->AddDocument("100", {});
-  index_->AddDocument(doc_id1, "hello world");
+  index_->AddDocument(*doc_id1, "hello world");
   auto doc_id2 = doc_store_->AddDocument("101", {});
-  index_->AddDocument(doc_id2, "hello universe");
+  index_->AddDocument(*doc_id2, "hello universe");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -705,10 +706,10 @@ TEST_F(TcpServerTest, CountEmpty) {
 TEST_F(TcpServerTest, CountWithDocuments) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello there");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "hello there");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -730,13 +731,13 @@ TEST_F(TcpServerTest, CountWithDocuments) {
 TEST_F(TcpServerTest, CountWithAnd) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "abc xyz");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "abc def");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "xyz def");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -760,7 +761,7 @@ TEST_F(TcpServerTest, CountSearchConsistency) {
   // Insert test documents
   for (int i = 1; i <= 100; ++i) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "test document");
+    index_->AddDocument(static_cast<index::DocId>(*doc_id), "test document");
   }
 
   StartServerOrSkip();

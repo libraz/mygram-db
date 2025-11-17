@@ -19,6 +19,11 @@
 #include <thread>
 #include <utility>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
+using namespace mygram::utils;
+
 namespace mygramdb::client {
 
 namespace {
@@ -160,15 +165,15 @@ class MygramClient::Impl {
   Impl(Impl&&) = default;
   Impl& operator=(Impl&&) = default;
 
-  std::optional<std::string> Connect() {
+  Expected<void, Error> Connect() {
     if (sock_ >= 0) {
-      return "Already connected";
+      return MakeUnexpected(MakeError(ErrorCode::kClientAlreadyConnected, "Already connected"));
     }
 
     sock_ = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_ < 0) {
-      last_error_ = std::string("Failed to create socket: ") + strerror(errno);
-      return last_error_;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kClientConnectionFailed, std::string("Failed to create socket: ") + strerror(errno)));
     }
 
     // Set socket timeout
@@ -184,21 +189,20 @@ class MygramClient::Impl {
     server_addr.sin_port = htons(config_.port);
 
     if (inet_pton(AF_INET, config_.host.c_str(), &server_addr.sin_addr) <= 0) {
-      last_error_ = "Invalid address: " + config_.host;
       close(sock_);
       sock_ = -1;
-      return last_error_;
+      return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed, "Invalid address: " + config_.host));
     }
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
     if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
-      last_error_ = std::string("Connection failed: ") + strerror(errno);
+      std::string error_msg = std::string("Connection failed: ") + strerror(errno);
       close(sock_);
       sock_ = -1;
-      return last_error_;
+      return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed, error_msg));
     }
 
-    return std::nullopt;
+    return {};
   }
 
   void Disconnect() {
@@ -210,20 +214,17 @@ class MygramClient::Impl {
 
   [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
 
-  std::variant<std::string, Error> SendCommand(const std::string& command) {
+  Expected<std::string, Error> SendCommand(const std::string& command) const {
     if (!IsConnected()) {
-      last_error_ = "Not connected";
-
-      return Error(last_error_);
+      return MakeUnexpected(MakeError(ErrorCode::kClientNotConnected, "Not connected"));
     }
 
     // Send command with \r\n terminator
     std::string msg = command + "\r\n";
     ssize_t sent = send(sock_, msg.c_str(), msg.length(), 0);
     if (sent < 0) {
-      last_error_ = std::string("Failed to send command: ") + strerror(errno);
-
-      return Error(last_error_);
+      return MakeUnexpected(
+          MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to send command: ") + strerror(errno)));
     }
 
     // Receive response (loop until complete response is received)
@@ -234,12 +235,10 @@ class MygramClient::Impl {
       ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
       if (received <= 0) {
         if (received == 0) {
-          last_error_ = "Connection closed by server";
-        } else {
-          last_error_ = std::string("Failed to receive response: ") + strerror(errno);
+          return MakeUnexpected(MakeError(ErrorCode::kClientConnectionClosed, "Connection closed by server"));
         }
-
-        return Error(last_error_);
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to receive response: ") + strerror(errno)));
       }
 
       buffer[received] = '\0';
@@ -269,38 +268,38 @@ class MygramClient::Impl {
     return response;
   }
 
-  std::variant<SearchResponse, Error> Search(const std::string& table, const std::string& query, uint32_t limit,
-                                             uint32_t offset, const std::vector<std::string>& and_terms,
-                                             const std::vector<std::string>& not_terms,
-                                             const std::vector<std::pair<std::string, std::string>>& filters,
-                                             const std::string& sort_column, bool sort_desc) {
+  Expected<SearchResponse, Error> Search(const std::string& table, const std::string& query, uint32_t limit,
+                                         uint32_t offset, const std::vector<std::string>& and_terms,
+                                         const std::vector<std::string>& not_terms,
+                                         const std::vector<std::pair<std::string, std::string>>& filters,
+                                         const std::string& sort_column, bool sort_desc) const {
     if (auto err = ValidateNoControlCharacters(table, "table name")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     if (auto err = ValidateNoControlCharacters(query, "search query")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     for (const auto& term : and_terms) {
       if (auto err = ValidateNoControlCharacters(term, "AND term")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
     for (const auto& term : not_terms) {
       if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
     for (const auto& [key, value] : filters) {
       if (auto err = ValidateNoControlCharacters(key, "filter key")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
       if (auto err = ValidateNoControlCharacters(value, "filter value")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
     if (!sort_column.empty()) {
       if (auto err = ValidateNoControlCharacters(sort_column, "sort column")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
 
@@ -344,18 +343,18 @@ class MygramClient::Impl {
     // }
 
     auto result = SendCommand(cmd.str());
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Parse response: OK RESULTS <total_count> [<id1> <id2> ...] [DEBUG ...]
     if (response.find("OK RESULTS") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     std::istringstream iss(response);
@@ -395,32 +394,32 @@ class MygramClient::Impl {
     return resp;
   }
 
-  std::variant<CountResponse, Error> Count(const std::string& table, const std::string& query,
-                                           const std::vector<std::string>& and_terms,
-                                           const std::vector<std::string>& not_terms,
-                                           const std::vector<std::pair<std::string, std::string>>& filters) {
+  Expected<CountResponse, Error> Count(const std::string& table, const std::string& query,
+                                       const std::vector<std::string>& and_terms,
+                                       const std::vector<std::string>& not_terms,
+                                       const std::vector<std::pair<std::string, std::string>>& filters) const {
     if (auto err = ValidateNoControlCharacters(table, "table name")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     if (auto err = ValidateNoControlCharacters(query, "search query")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     for (const auto& term : and_terms) {
       if (auto err = ValidateNoControlCharacters(term, "AND term")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
     for (const auto& term : not_terms) {
       if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
     for (const auto& [key, value] : filters) {
       if (auto err = ValidateNoControlCharacters(key, "filter key")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
       if (auto err = ValidateNoControlCharacters(value, "filter value")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
 
@@ -441,18 +440,18 @@ class MygramClient::Impl {
     }
 
     auto result = SendCommand(cmd.str());
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Parse response: OK COUNT <n> [DEBUG ...]
     if (response.find("OK COUNT") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     std::istringstream iss(response);
@@ -478,30 +477,30 @@ class MygramClient::Impl {
     return resp;
   }
 
-  std::variant<Document, Error> Get(const std::string& table, const std::string& primary_key) {
+  Expected<Document, Error> Get(const std::string& table, const std::string& primary_key) const {
     if (auto err = ValidateNoControlCharacters(table, "table name")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     if (auto err = ValidateNoControlCharacters(primary_key, "primary key")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
 
     std::ostringstream cmd;
     cmd << "GET " << table << " " << primary_key;
 
     auto result = SendCommand(cmd.str());
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(kErrorPrefixLen));  // Remove "ERROR "
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
     if (response.find("OK DOC") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     std::istringstream iss(response);
@@ -520,19 +519,19 @@ class MygramClient::Impl {
     return doc;
   }
 
-  std::variant<ServerInfo, Error> Info() {
+  Expected<ServerInfo, Error> Info() const {
     auto result = SendCommand("INFO");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(kErrorPrefixLen));
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     if (response.find("OK INFO") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     // Parse Redis-style INFO response (multi-line key: value format)
@@ -590,84 +589,84 @@ class MygramClient::Impl {
     return info;
   }
 
-  std::variant<std::string, Error> GetConfig() {
+  Expected<std::string, Error> GetConfig() const {
     auto result = SendCommand("CONFIG");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Return raw config response (already formatted)
     return response;
   }
 
-  std::variant<std::string, Error> Save(const std::string& filepath) {
+  Expected<std::string, Error> Save(const std::string& filepath) const {
     if (!filepath.empty()) {
       if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
-        return Error(*err);
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
     }
 
     std::string cmd = filepath.empty() ? "SAVE" : "SAVE " + filepath;
 
     auto result = SendCommand(cmd);
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Parse: OK SAVED <filepath>
     if (response.find("OK SAVED") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     return response.substr(kSavedPrefixLen);  // Return filepath after "OK SAVED "
   }
 
-  std::variant<std::string, Error> Load(const std::string& filepath) {
+  Expected<std::string, Error> Load(const std::string& filepath) const {
     if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
-      return Error(*err);
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
 
     auto result = SendCommand("LOAD " + filepath);
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     // Parse: OK LOADED <filepath>
     if (response.find("OK LOADED") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     return response.substr(kLoadedPrefixLen);  // Return filepath after "OK LOADED "
   }
 
-  std::variant<ReplicationStatus, Error> GetReplicationStatus() {
+  Expected<ReplicationStatus, Error> GetReplicationStatus() const {
     auto result = SendCommand("REPLICATION STATUS");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return Error(response.substr(kErrorPrefixLen));
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
     if (response.find("OK REPLICATION") != 0) {
-      return Error("Unexpected response format");
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
     ReplicationStatus status;
@@ -685,68 +684,65 @@ class MygramClient::Impl {
     return status;
   }
 
-  std::optional<std::string> StopReplication() {
+  Expected<void, Error> StopReplication() const {
     auto result = SendCommand("REPLICATION STOP");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
-    return std::nullopt;
+    return {};
   }
 
-  std::optional<std::string> StartReplication() {
+  Expected<void, Error> StartReplication() const {
     auto result = SendCommand("REPLICATION START");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
-    return std::nullopt;
+    return {};
   }
 
-  std::optional<std::string> EnableDebug() {
+  Expected<void, Error> EnableDebug() const {
     auto result = SendCommand("DEBUG ON");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
-    return std::nullopt;
+    return {};
   }
 
-  std::optional<std::string> DisableDebug() {
+  Expected<void, Error> DisableDebug() const {
     auto result = SendCommand("DEBUG OFF");
-    if (auto* err = std::get_if<Error>(&result)) {
-      return *err;
+    if (!result) {
+      return MakeUnexpected(result.error());
     }
 
-    std::string response = std::get<std::string>(result);
+    std::string response = *result;
     if (response.find("ERROR") == 0) {
-      return response.substr(kErrorPrefixLen);
+      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
     }
 
-    return std::nullopt;
+    return {};
   }
-
-  [[nodiscard]] const std::string& GetLastError() const { return last_error_; }
 
  private:
   ClientConfig config_;
   int sock_{-1};
-  std::string last_error_;
 };
 
 // MygramClient public interface implementation
@@ -758,7 +754,7 @@ MygramClient::~MygramClient() = default;
 MygramClient::MygramClient(MygramClient&&) noexcept = default;
 MygramClient& MygramClient::operator=(MygramClient&&) noexcept = default;
 
-std::optional<std::string> MygramClient::Connect() {
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::Connect() {
   return impl_->Connect();
 }
 
@@ -770,65 +766,63 @@ bool MygramClient::IsConnected() const {
   return impl_->IsConnected();
 }
 
-std::variant<SearchResponse, Error> MygramClient::Search(
+mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::Search(
     const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
     const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column, bool sort_desc) {
+    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column,
+    bool sort_desc) const {
   return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, sort_column, sort_desc);
 }
 
-std::variant<CountResponse, Error> MygramClient::Count(
+mygram::utils::Expected<CountResponse, mygram::utils::Error> MygramClient::Count(
     const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
-    const std::vector<std::string>& not_terms, const std::vector<std::pair<std::string, std::string>>& filters) {
+    const std::vector<std::string>& not_terms, const std::vector<std::pair<std::string, std::string>>& filters) const {
   return impl_->Count(table, query, and_terms, not_terms, filters);
 }
 
-std::variant<Document, Error> MygramClient::Get(const std::string& table, const std::string& primary_key) {
+mygram::utils::Expected<Document, mygram::utils::Error> MygramClient::Get(const std::string& table,
+                                                                          const std::string& primary_key) const {
   return impl_->Get(table, primary_key);
 }
 
-std::variant<ServerInfo, Error> MygramClient::Info() {
+mygram::utils::Expected<ServerInfo, mygram::utils::Error> MygramClient::Info() const {
   return impl_->Info();
 }
 
-std::variant<std::string, Error> MygramClient::GetConfig() {
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::GetConfig() const {
   return impl_->GetConfig();
 }
 
-std::variant<std::string, Error> MygramClient::Save(const std::string& filepath) {
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::Save(const std::string& filepath) const {
   return impl_->Save(filepath);
 }
 
-std::variant<std::string, Error> MygramClient::Load(const std::string& filepath) {
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::Load(const std::string& filepath) const {
   return impl_->Load(filepath);
 }
 
-std::variant<ReplicationStatus, Error> MygramClient::GetReplicationStatus() {
+mygram::utils::Expected<ReplicationStatus, mygram::utils::Error> MygramClient::GetReplicationStatus() const {
   return impl_->GetReplicationStatus();
 }
 
-std::optional<std::string> MygramClient::StopReplication() {
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::StopReplication() const {
   return impl_->StopReplication();
 }
 
-std::optional<std::string> MygramClient::StartReplication() {
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::StartReplication() const {
   return impl_->StartReplication();
 }
 
-std::optional<std::string> MygramClient::EnableDebug() {
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::EnableDebug() const {
   return impl_->EnableDebug();
 }
 
-std::optional<std::string> MygramClient::DisableDebug() {
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::DisableDebug() const {
   return impl_->DisableDebug();
 }
 
-std::variant<std::string, Error> MygramClient::SendCommand(const std::string& command) {
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::SendCommand(const std::string& command) const {
   return impl_->SendCommand(command);
-}
-
-const std::string& MygramClient::GetLastError() const {
-  return impl_->GetLastError();
 }
 
 }  // namespace mygramdb::client

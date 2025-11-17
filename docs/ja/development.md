@@ -300,6 +300,40 @@ clang-format --version  # 18.x.x であることを確認
 
 詳細なコーディングガイドラインについては、プロジェクトルートの [CLAUDE.md](../../CLAUDE.md) を参照してください。
 
+## Linux CI テスト（macOS開発者向け）
+
+macOSで開発している場合、一部の問題（ヘッダの記載漏れ、コンパイラの違いなど）はLinux環境でのみ発生し、CIで失敗します。
+
+**解決策**: **pushする前に**GitHub Actions CI と同じLinux環境でコードをテストします。
+
+```bash
+# フルCIチェック（git pushの前に推奨）
+make docker-ci-check
+```
+
+これで以下を実行します：
+1. コードフォーマットチェック
+2. ビルド（CIと同じフラグ）
+3. clang-tidyリント
+4. 全テスト実行
+
+**個別チェック:**
+
+```bash
+make docker-build-linux       # ビルドのみ
+make docker-test-linux        # テストのみ
+make docker-lint-linux        # リントのみ
+make docker-format-check-linux # フォーマットチェックのみ
+```
+
+**対話的シェル:**
+
+```bash
+make docker-dev-shell         # デバッグ用にLinuxコンテナに入る
+```
+
+詳細は [Linux CIテストガイド](./linux-testing.md) を参照してください。
+
 ## コントリビューション
 
 変更を送信する前に:
@@ -309,7 +343,8 @@ clang-format --version  # 18.x.x であることを確認
 3. **`make format-check` を実行** - フォーマットを検証（CI相当）
 4. **`make lint` を実行** - コード品質をチェック（ローカルでは任意、CIでは必須）
 5. **`make test` を実行** - すべてのテストが通ることを確認
-6. **変更をコミット** - すべてのチェックが通った場合
+6. **[macOSのみ] `make docker-ci-check` を実行** - Linux CI互換性を検証
+7. **変更をコミット** - すべてのチェックが通った場合
 
 チェックリスト:
 - [ ] コードが Google C++ Style Guide に従っている（120文字制限）
@@ -320,4 +355,5 @@ clang-format --version  # 18.x.x であることを確認
 - [ ] コードが整形済み (`make format-check` が通る)
 - [ ] clang-tidy 警告がない (`make lint` が通る)
 - [ ] コンパイラ警告がない
+- [ ] [macOSのみ] Linux CIチェックが通る (`make docker-ci-check`)
 - [ ] ドキュメントを更新済み（必要な場合）

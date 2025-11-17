@@ -17,7 +17,7 @@ using namespace mygramdb::mysql;
 TEST(MySQLConnectionTest, GTIDParseBasic) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:1");
 
-  ASSERT_TRUE(gtid.has_value());
+  ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
   EXPECT_EQ(gtid->server_uuid, "3E11FA47-71CA-11E1-9E33-C80AA9429562");
   EXPECT_EQ(gtid->transaction_id, 1);
 }
@@ -28,7 +28,7 @@ TEST(MySQLConnectionTest, GTIDParseBasic) {
 TEST(MySQLConnectionTest, GTIDParseRange) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100");
 
-  ASSERT_TRUE(gtid.has_value());
+  ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
   EXPECT_EQ(gtid->server_uuid, "3E11FA47-71CA-11E1-9E33-C80AA9429562");
   EXPECT_EQ(gtid->transaction_id, 100);  // Should parse end of range
 }
@@ -39,7 +39,7 @@ TEST(MySQLConnectionTest, GTIDParseRange) {
 TEST(MySQLConnectionTest, GTIDParseLargeID) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:1000000");
 
-  ASSERT_TRUE(gtid.has_value());
+  ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
   EXPECT_EQ(gtid->transaction_id, 1000000);
 }
 
@@ -49,7 +49,7 @@ TEST(MySQLConnectionTest, GTIDParseLargeID) {
 TEST(MySQLConnectionTest, GTIDParseInvalidNoColon) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562");
 
-  EXPECT_FALSE(gtid.has_value());
+  EXPECT_FALSE(gtid);
 }
 
 /**
@@ -58,7 +58,7 @@ TEST(MySQLConnectionTest, GTIDParseInvalidNoColon) {
 TEST(MySQLConnectionTest, GTIDParseInvalidNonNumeric) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:abc");
 
-  EXPECT_FALSE(gtid.has_value());
+  EXPECT_FALSE(gtid);
 }
 
 /**
@@ -67,7 +67,7 @@ TEST(MySQLConnectionTest, GTIDParseInvalidNonNumeric) {
 TEST(MySQLConnectionTest, GTIDParseEmpty) {
   auto gtid = GTID::Parse("");
 
-  EXPECT_FALSE(gtid.has_value());
+  EXPECT_FALSE(gtid);
 }
 
 /**
@@ -108,7 +108,7 @@ TEST(MySQLConnectionTest, GTIDRoundTrip) {
   std::string original = "3E11FA47-71CA-11E1-9E33-C80AA9429562:123";
 
   auto gtid = GTID::Parse(original);
-  ASSERT_TRUE(gtid.has_value());
+  ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
 
   std::string result = gtid->ToString();
   EXPECT_EQ(result, original);

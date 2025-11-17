@@ -55,7 +55,7 @@ TEST_F(StressTest, DISABLED_LargeScale100K) {
 
     auto doc_id = doc_store_->AddDocument(pk, filters);
     std::string text = "document " + std::to_string(i) + " content test data";
-    batch.push_back({doc_id, text});
+    batch.push_back({*doc_id, text});
   }
 
   // Add all documents in one batch operation
@@ -116,7 +116,7 @@ TEST_F(StressTest, DISABLED_LargeScale1M) {
 
     auto doc_id = doc_store_->AddDocument(pk, filters);
     std::string text = "document " + std::to_string(i) + " test";
-    batch.push_back({doc_id, text});
+    batch.push_back({*doc_id, text});
 
     if (i % 100000 == 0 && i > 0) {
       std::cout << "Progress: " << i << " / " << num_docs << std::endl;
@@ -150,7 +150,7 @@ TEST_F(StressTest, ContinuousAddRemove) {
     std::string pk = "pk" + std::to_string(i);
     auto doc_id = doc_store_->AddDocument(pk);
     std::string text = "document " + std::to_string(i);
-    index_->AddDocument(doc_id, text);
+    index_->AddDocument(*doc_id, text);
 
     // Remove old document
     if (i >= max_docs) {
@@ -182,7 +182,7 @@ TEST_F(StressTest, MemoryLeakTest) {
       std::string pk = "cycle" + std::to_string(cycle) + "_pk" + std::to_string(i);
       auto doc_id = doc_store_->AddDocument(pk);
       std::string text = "test document " + std::to_string(i);
-      index_->AddDocument(doc_id, text);
+      index_->AddDocument(*doc_id, text);
     }
 
     // Remove all documents from this cycle
@@ -216,7 +216,7 @@ TEST_F(StressTest, HighFrequencyConcurrentOps) {
     std::string pk = "pk" + std::to_string(i);
     auto doc_id = doc_store_->AddDocument(pk, {{"status", static_cast<int64_t>(i % 10)}});
     std::string text = "document " + std::to_string(i) + " test data";
-    index_->AddDocument(doc_id, text);
+    index_->AddDocument(*doc_id, text);
   }
 
   const int num_threads = 20;
@@ -291,7 +291,7 @@ TEST_F(StressTest, SearchPerformanceDegradation) {
       std::string pk = "pk" + std::to_string(i);
       auto doc_id = doc_store_->AddDocument(pk);
       std::string text = "document " + std::to_string(i) + " test search performance";
-      batch.push_back({doc_id, text});
+      batch.push_back({*doc_id, text});
     }
 
     // Add all documents in one batch operation

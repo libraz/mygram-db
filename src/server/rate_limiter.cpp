@@ -9,14 +9,9 @@
 
 #include <algorithm>
 
-namespace mygramdb::server {
+#include "utils/structured_log.h"
 
-namespace {
-// Clean up clients inactive for more than this duration
-constexpr auto kClientInactivityTimeout = std::chrono::minutes(5);
-// Check for cleanup every N requests
-constexpr size_t kCleanupInterval = 1000;
-}  // namespace
+namespace mygramdb::server {
 
 //
 // TokenBucket implementation
@@ -73,30 +68,52 @@ void TokenBucket::Refill() {
 // RateLimiter implementation
 //
 
-RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients)
-    : capacity_(capacity), refill_rate_(refill_rate), max_clients_(max_clients) {}
+RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, size_t cleanup_interval,
+                         uint32_t inactivity_timeout_sec)
+    : capacity_(capacity),
+      refill_rate_(refill_rate),
+      max_clients_(max_clients),
+      cleanup_interval_(cleanup_interval),
+      inactivity_timeout_(inactivity_timeout_sec) {
+  spdlog::debug(
+      "RateLimiter created: capacity={}, refill_rate={}, max_clients={}, cleanup_interval={}, "
+      "inactivity_timeout={}s",
+      capacity, refill_rate, max_clients, cleanup_interval, inactivity_timeout_sec);
+}
 
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Update statistics
+  // Update statistics and check for cleanup
+  bool should_cleanup = false;
   {
     std::lock_guard<std::mutex> stats_lock(stats_mutex_);
     total_requests_++;
 
-    // Periodic cleanup to prevent memory leak
-    if (total_requests_ % kCleanupInterval == 0) {
-      // Release mutex during cleanup (cleanup acquires mutex internally)
-      // Note: We can't call CleanupOldClients() here because it would deadlock
-      // (it tries to acquire mutex_). Instead, we'll do inline cleanup.
-      auto now = std::chrono::steady_clock::now();
-      for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
-        if (now - it->second->last_access > kClientInactivityTimeout) {
-          it = client_buckets_.erase(it);
-        } else {
-          ++it;
-        }
+    // Check if cleanup is needed
+    if (total_requests_ % cleanup_interval_ == 0) {
+      should_cleanup = true;
+    }
+  }
+
+  // Periodic cleanup to prevent memory leak
+  // Note: We do this while holding mutex_ to avoid race conditions
+  if (should_cleanup) {
+    auto now = std::chrono::steady_clock::now();
+    size_t removed = 0;
+
+    for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
+      if (now - it->second->last_access > inactivity_timeout_) {
+        it = client_buckets_.erase(it);
+        removed++;
+      } else {
+        ++it;
       }
+    }
+
+    if (removed > 0) {
+      spdlog::debug("Rate limiter: cleaned up {} inactive clients (total tracked: {})", removed,
+                    client_buckets_.size());
     }
   }
 
@@ -108,7 +125,12 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
       // Enforce hard limit: reject new clients
       std::lock_guard<std::mutex> stats_lock(stats_mutex_);
       blocked_requests_++;
-      spdlog::warn("Rate limiter: max clients ({}) reached, rejecting new client: {}", max_clients_, client_ip);
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "rate_limiter_max_clients")
+          .Field("max_clients", static_cast<uint64_t>(max_clients_))
+          .Field("client_ip", client_ip)
+          .Warn();
       return false;
     }
 
@@ -164,7 +186,7 @@ void RateLimiter::CleanupOldClients() {
   size_t removed = 0;
 
   for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
-    if (now - it->second->last_access > kClientInactivityTimeout) {
+    if (now - it->second->last_access > inactivity_timeout_) {
       it = client_buckets_.erase(it);
       removed++;
     } else {
@@ -173,7 +195,7 @@ void RateLimiter::CleanupOldClients() {
   }
 
   if (removed > 0) {
-    spdlog::debug("Rate limiter: cleaned up {} inactive clients", removed);
+    spdlog::debug("Rate limiter: cleaned up {} inactive clients (total tracked: {})", removed, client_buckets_.size());
   }
 }
 

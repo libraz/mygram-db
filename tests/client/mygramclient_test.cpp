@@ -125,8 +125,8 @@ TEST_F(MygramClientTest, Construction) {
  * @brief Test connection
  */
 TEST_F(MygramClientTest, Connect) {
-  auto err = client_->Connect();
-  EXPECT_FALSE(err.has_value()) << "Connection error: " << err.value_or("");
+  auto result = client_->Connect();
+  EXPECT_TRUE(result) << "Connection error: " << result.error().message();
   EXPECT_TRUE(client_->IsConnected());
 }
 
@@ -134,7 +134,7 @@ TEST_F(MygramClientTest, Connect) {
  * @brief Test disconnect
  */
 TEST_F(MygramClientTest, Disconnect) {
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
   EXPECT_TRUE(client_->IsConnected());
 
   client_->Disconnect();
@@ -147,13 +147,13 @@ TEST_F(MygramClientTest, Disconnect) {
 TEST_F(MygramClientTest, BasicSearch) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Search("test", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 2);  // Documents 1 and 2 contain "hello"
   EXPECT_EQ(resp.results.size(), 2);
 }
@@ -164,13 +164,13 @@ TEST_F(MygramClientTest, BasicSearch) {
 TEST_F(MygramClientTest, SearchWithLimit) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Search("test", "hello", 1);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
+  ASSERT_TRUE(result);
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 2);     // Total 2 matches
   EXPECT_EQ(resp.results.size(), 1);  // But only 1 returned due to LIMIT
 }
@@ -181,14 +181,14 @@ TEST_F(MygramClientTest, SearchWithLimit) {
 TEST_F(MygramClientTest, SearchWithAndTerms) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   std::vector<std::string> and_terms = {"world"};
   auto result = client_->Search("test", "hello", 100, 0, and_terms);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
+  ASSERT_TRUE(result);
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 1);  // Only document 1 has both "hello" and "world"
 }
 
@@ -200,16 +200,16 @@ TEST_F(MygramClientTest, SearchWithAndTerms) {
 TEST_F(MygramClientTest, SearchWithNotTerms) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Search for "w" (in "world" and "news"), but NOT "x" (only in "example")
   // This should return doc 3 ("World news today") but not doc 1 ("Hello world example")
   std::vector<std::string> not_terms = {"x"};
   auto result = client_->Search("test", "w", 100, 0, {}, not_terms);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 1);  // Only document 3 (doc 1 has "x" in "example")
   EXPECT_EQ(resp.results.size(), 1);
   if (!resp.results.empty()) {
@@ -223,36 +223,36 @@ TEST_F(MygramClientTest, SearchWithNotTerms) {
 TEST_F(MygramClientTest, SearchWithFilters) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   std::vector<std::pair<std::string, std::string>> filters = {{"status", "active"}};
   auto result = client_->Search("test", "hello", 100, 0, {}, {}, filters);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 2);  // Both docs 1 and 2 are active
 }
 
 TEST_F(MygramClientTest, RejectsControlCharactersInQuery) {
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Search("test", "hello\nworld", 100);
 
-  ASSERT_TRUE(std::holds_alternative<Error>(result));
-  const auto& err = std::get<Error>(result);
-  EXPECT_NE(err.message.find("control character"), std::string::npos);
+  ASSERT_TRUE(!result);
+  const auto& err = result.error();
+  EXPECT_NE(err.message().find("control character"), std::string::npos);
 }
 
 TEST_F(MygramClientTest, RejectsControlCharactersInFilters) {
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   std::vector<std::pair<std::string, std::string>> filters = {{"status", "active\r\n"}};
   auto result = client_->Search("test", "hello", 100, 0, {}, {}, filters);
 
-  ASSERT_TRUE(std::holds_alternative<Error>(result));
-  const auto& err = std::get<Error>(result);
-  EXPECT_NE(err.message.find("filter value"), std::string::npos);
+  ASSERT_TRUE(!result);
+  const auto& err = result.error();
+  EXPECT_NE(err.message().find("filter value"), std::string::npos);
 }
 
 /**
@@ -261,13 +261,13 @@ TEST_F(MygramClientTest, RejectsControlCharactersInFilters) {
 TEST_F(MygramClientTest, Count) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Count("test", "hello");
 
-  ASSERT_TRUE(std::holds_alternative<CountResponse>(result)) << "Count error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Count error: " << result.error().message();
 
-  auto resp = std::get<CountResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.count, 2);
 }
 
@@ -277,14 +277,14 @@ TEST_F(MygramClientTest, Count) {
 TEST_F(MygramClientTest, CountWithFilters) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   std::vector<std::pair<std::string, std::string>> filters = {{"status", "active"}};
   auto result = client_->Count("test", "world", {}, {}, filters);
 
-  ASSERT_TRUE(std::holds_alternative<CountResponse>(result)) << "Count error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Count error: " << result.error().message();
 
-  auto resp = std::get<CountResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.count, 1);  // Only doc 1 has "world" and is active
 }
 
@@ -294,13 +294,13 @@ TEST_F(MygramClientTest, CountWithFilters) {
 TEST_F(MygramClientTest, GetDocument) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Get("test", "1");
 
-  ASSERT_TRUE(std::holds_alternative<Document>(result)) << "Get error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Get error: " << result.error().message();
 
-  auto doc = std::get<Document>(result);
+  auto doc = *result;
   EXPECT_EQ(doc.primary_key, "1");
 
   // Check filter field
@@ -320,13 +320,13 @@ TEST_F(MygramClientTest, GetDocument) {
 TEST_F(MygramClientTest, Info) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->Info();
 
-  ASSERT_TRUE(std::holds_alternative<ServerInfo>(result)) << "Info error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Info error: " << result.error().message();
 
-  auto info = std::get<ServerInfo>(result);
+  auto info = *result;
   EXPECT_FALSE(info.version.empty());
   EXPECT_EQ(info.doc_count, 3);
 }
@@ -335,13 +335,13 @@ TEST_F(MygramClientTest, Info) {
  * @brief Test CONFIG command
  */
 TEST_F(MygramClientTest, GetConfig) {
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->GetConfig();
 
-  ASSERT_TRUE(std::holds_alternative<std::string>(result)) << "GetConfig error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "GetConfig error: " << result.error().message();
 
-  auto config = std::get<std::string>(result);
+  auto config = *result;
   EXPECT_FALSE(config.empty());
 }
 
@@ -351,23 +351,23 @@ TEST_F(MygramClientTest, GetConfig) {
 TEST_F(MygramClientTest, DebugMode) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Enable debug mode
-  auto err = client_->EnableDebug();
-  EXPECT_FALSE(err.has_value()) << "Debug enable error: " << err.value_or("");
+  auto debug_result = client_->EnableDebug();
+  EXPECT_TRUE(debug_result) << "Debug enable error: " << debug_result.error().message();
 
   // Perform search - should include debug info
   auto result = client_->Search("test", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result));
+  ASSERT_TRUE(result);
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_TRUE(resp.debug.has_value());
 
   // Disable debug mode
-  err = client_->DisableDebug();
-  EXPECT_FALSE(err.has_value()) << "Debug disable error: " << err.value_or("");
+  debug_result = client_->DisableDebug();
+  EXPECT_TRUE(debug_result) << "Debug disable error: " << debug_result.error().message();
 }
 
 /**
@@ -376,15 +376,15 @@ TEST_F(MygramClientTest, DebugMode) {
 TEST_F(MygramClientTest, ErrorHandling_InvalidTable) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Search with invalid table name should return error
   auto result = client_->Search("nonexistent_table", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<Error>(result)) << "Expected error for invalid table";
+  ASSERT_TRUE(!result) << "Expected error for invalid table";
 
-  auto err = std::get<Error>(result);
-  EXPECT_TRUE(err.message.find("Table not found") != std::string::npos) << "Error message: " << err.message;
+  auto err = result.error();
+  EXPECT_TRUE(err.message().find("Table not found") != std::string::npos) << "Error message: " << err.message();
 }
 
 /**
@@ -395,8 +395,8 @@ TEST_F(MygramClientTest, ErrorHandling_NotConnected) {
 
   auto result = client_->Search("test", "hello", 100);
 
-  ASSERT_TRUE(std::holds_alternative<Error>(result));
-  EXPECT_EQ(std::get<Error>(result).message, "Not connected");
+  ASSERT_TRUE(!result);
+  EXPECT_EQ(result.error().message(), "Not connected");
 }
 
 /**
@@ -405,13 +405,13 @@ TEST_F(MygramClientTest, ErrorHandling_NotConnected) {
 TEST_F(MygramClientTest, SendCommand) {
   AddTestDocuments();
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   auto result = client_->SendCommand("COUNT test hello");
 
-  ASSERT_TRUE(std::holds_alternative<std::string>(result)) << "SendCommand error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "SendCommand error: " << result.error().message();
 
-  auto response = std::get<std::string>(result);
+  auto response = *result;
   EXPECT_TRUE(response.find("OK COUNT 2") != std::string::npos);
 }
 
@@ -419,7 +419,7 @@ TEST_F(MygramClientTest, SendCommand) {
  * @brief Test move semantics
  */
 TEST_F(MygramClientTest, MoveSemantics) {
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
   EXPECT_TRUE(client_->IsConnected());
 
   // Move construct
@@ -447,14 +447,14 @@ TEST_F(MygramClientTest, EmojiInSearch) {
   std::string text3 = utils::NormalizeText("Tutorial😀学習", true, "keep", true);
   index_->AddDocument(3, text3);
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Search for emoji
   auto result = client_->Search("test", "😀", 100);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 3);  // All 3 documents contain 😀
   EXPECT_EQ(resp.results.size(), 3);
 }
@@ -472,14 +472,14 @@ TEST_F(MygramClientTest, MultipleEmojisInSearch) {
   std::string text2 = utils::NormalizeText("😀👍", true, "keep", true);
   index_->AddDocument(2, text2);
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Search for specific emoji
   auto result = client_->Search("test", "🎉", 100);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 1);  // Only doc 1 has 🎉
   EXPECT_EQ(resp.results.size(), 1);
   if (!resp.results.empty()) {
@@ -500,15 +500,15 @@ TEST_F(MygramClientTest, EmojiWithAndSearch) {
   std::string text2 = utils::NormalizeText("😀XYZ", true, "keep", true);
   index_->AddDocument(2, text2);
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Search for emoji AND 'A'
   std::vector<std::string> and_terms = {"A"};
   auto result = client_->Search("test", "😀", 100, 0, and_terms);
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result)) << "Search error: " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
   EXPECT_EQ(resp.total_count, 1);  // Only doc 1 has both 😀 and A
   EXPECT_EQ(resp.results.size(), 1);
   if (!resp.results.empty()) {
@@ -539,20 +539,19 @@ TEST_F(MygramClientTest, LargeResponseHandling) {
     index_->AddDocument(static_cast<uint64_t>(i), text);
   }
 
-  ASSERT_FALSE(client_->Connect().has_value());
+  ASSERT_TRUE(client_->Connect());
 
   // Enable debug mode to make response even larger
   auto debug_result = client_->EnableDebug();
-  ASSERT_FALSE(debug_result.has_value()) << "EnableDebug error: " << debug_result.value();
+  ASSERT_TRUE(debug_result) << "EnableDebug error: " << debug_result.error().message();
 
   // Search for "test" which should match all documents
   // This will create a very large response (>65KB with all primary keys and DEBUG info)
   auto result = client_->Search("test", "test", num_docs);  // Request max results
 
-  ASSERT_TRUE(std::holds_alternative<SearchResponse>(result))
-      << "Search error (response may have been truncated): " << std::get<Error>(result).message;
+  ASSERT_TRUE(result) << "Search error (response may have been truncated): " << result.error().message();
 
-  auto resp = std::get<SearchResponse>(result);
+  auto resp = *result;
 
   // Verify we got all results (not truncated)
   // Note: total_count should match the number of matching docs

@@ -14,6 +14,7 @@
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/tcp_server.h"  // For ServerStats
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
 
@@ -32,7 +33,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
       case BinlogEventType::INSERT: {
         if (matches_required) {
           // Condition satisfied -> add to index
-          storage::DocId doc_id = doc_store.AddDocument(event.primary_key, event.filters);
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          if (!doc_id_result) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "add_document_failed")
+                .Field("event_type", "insert")
+                .Field("primary_key", event.primary_key)
+                .Field("error", doc_id_result.error().message())
+                .Error();
+            return false;
+          }
+          storage::DocId doc_id = *doc_id_result;
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           index.AddDocument(doc_id, normalized);
@@ -71,7 +83,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
-          storage::DocId doc_id = doc_store.AddDocument(event.primary_key, event.filters);
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          if (!doc_id_result) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "add_document_failed")
+                .Field("event_type", "update")
+                .Field("primary_key", event.primary_key)
+                .Field("error", doc_id_result.error().message())
+                .Error();
+            return false;
+          }
+          storage::DocId doc_id = *doc_id_result;
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           index.AddDocument(doc_id, normalized);
@@ -162,22 +185,43 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         if (query_upper.find("TRUNCATE") != std::string::npos) {
           // TRUNCATE TABLE - clear all data
-          spdlog::warn("TRUNCATE TABLE detected for table {}: {}", event.table_name, query);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "truncate_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
           index.Clear();
           doc_store.Clear();
           spdlog::info("Cleared index and document store due to TRUNCATE");
         } else if (query_upper.find("DROP") != std::string::npos) {
           // DROP TABLE - clear all data and warn
-          spdlog::error("DROP TABLE detected for table {}: {}", event.table_name, query);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "drop_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Error();
           index.Clear();
           doc_store.Clear();
-          spdlog::error(
-              "Table dropped! Index and document store cleared. Please reconfigure or stop "
-              "MygramDB.");
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "table_dropped")
+              .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
+              .Error();
         } else if (query_upper.find("ALTER") != std::string::npos) {
           // ALTER TABLE - log warning about potential schema mismatch
-          spdlog::warn("ALTER TABLE detected for table {}: {}", event.table_name, query);
-          spdlog::warn("Schema change may cause data inconsistency. Consider rebuilding from snapshot.");
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "alter_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "schema_change_warning")
+              .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
+              .Warn();
           // Note: We cannot automatically detect what changed (column type, name, etc.)
           // Users should manually rebuild if text column type or PK changed
         }
@@ -188,14 +232,22 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
       }
 
       default:
-        spdlog::warn("Unknown event type for pk={}", event.primary_key);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unknown_event_type")
+            .Field("primary_key", event.primary_key)
+            .Warn();
         return false;
     }
 
     return true;
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception processing event: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "event_processing_exception")
+        .Field("error", e.what())
+        .Error();
     return false;
   }
 }

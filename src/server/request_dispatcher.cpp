@@ -32,43 +32,43 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   // Parse query
   auto query = parser.Parse(request);
 
-  if (!query.IsValid()) {
-    return ResponseFormatter::FormatError(parser.GetError());
+  if (!query) {
+    return ResponseFormatter::FormatError(query.error().message());
   }
 
   // Apply configured default LIMIT if not explicitly specified
-  if (!query.limit_explicit && (query.type == query::QueryType::SEARCH)) {
-    query.limit = static_cast<uint32_t>(config_.default_limit);
+  if (!query->limit_explicit && (query->type == query::QueryType::SEARCH)) {
+    query->limit = static_cast<uint32_t>(config_.default_limit);
   }
 
   // Increment command statistics
-  ctx_.stats.IncrementCommand(query.type);
+  ctx_.stats.IncrementCommand(query->type);
 
   // For queries that require a table, validate table exists
-  if (!query.table.empty()) {
+  if (!query->table.empty()) {
     // Use TableCatalog if available (new path)
     if (ctx_.table_catalog != nullptr) {
-      if (!ctx_.table_catalog->TableExists(query.table)) {
-        return ResponseFormatter::FormatError("Table not found: " + query.table);
+      if (!ctx_.table_catalog->TableExists(query->table)) {
+        return ResponseFormatter::FormatError("Table not found: " + query->table);
       }
     } else {
       // Fallback to legacy path
-      auto table_iter = ctx_.table_contexts.find(query.table);
+      auto table_iter = ctx_.table_contexts.find(query->table);
       if (table_iter == ctx_.table_contexts.end()) {
-        return ResponseFormatter::FormatError("Table not found: " + query.table);
+        return ResponseFormatter::FormatError("Table not found: " + query->table);
       }
     }
   }
 
   // Find handler
-  auto handler_iter = handlers_.find(query.type);
+  auto handler_iter = handlers_.find(query->type);
   if (handler_iter == handlers_.end()) {
     return ResponseFormatter::FormatError("Unknown query type");
   }
 
   // Dispatch to handler
   try {
-    return handler_iter->second->Handle(query, conn_ctx);
+    return handler_iter->second->Handle(*query, conn_ctx);
   } catch (const std::exception& e) {
     return ResponseFormatter::FormatError(std::string("Exception: ") + e.what());
   }

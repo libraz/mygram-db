@@ -192,11 +192,12 @@ int TcpServerTest::CreateClientSocket(uint16_t port) {
 }
 
 void TcpServerTest::StartServerOrSkip() {
-  if (server_->Start()) {
+  auto result = server_->Start();
+  if (result) {
     return;
   }
 
-  const std::string& error = server_->GetLastError();
+  const std::string error = result.error().to_string();
   if (error.find("Operation not permitted") != std::string::npos ||
       error.find("Permission denied") != std::string::npos) {
     GTEST_SKIP() << "Skipping TcpServerTest: " << error << ". This environment does not allow creating TCP sockets.";
@@ -229,10 +230,10 @@ TEST_F(TcpServerTest, SearchEmpty) {
 TEST_F(TcpServerTest, SearchWithDocuments) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello there");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "hello there");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -256,7 +257,7 @@ TEST_F(TcpServerTest, SearchWithLimit) {
   // Add 5 documents
   for (int i = 1; i <= 5; i++) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
+    index_->AddDocument(static_cast<index::DocId>(*doc_id), "test");
   }
 
   StartServerOrSkip();
@@ -281,7 +282,7 @@ TEST_F(TcpServerTest, SearchWithOffset) {
   // Add 5 documents
   for (int i = 1; i <= 5; i++) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "test");
+    index_->AddDocument(static_cast<index::DocId>(*doc_id), "test");
   }
 
   StartServerOrSkip();
@@ -306,13 +307,13 @@ TEST_F(TcpServerTest, SearchWithOffset) {
 TEST_F(TcpServerTest, SearchWithNot) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "abc xyz");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "abc def");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "ghi jkl");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "ghi jkl");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -336,13 +337,13 @@ TEST_F(TcpServerTest, SearchWithNot) {
 TEST_F(TcpServerTest, SearchWithAnd) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "abc xyz");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "abc def");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "xyz def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "xyz def");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -366,13 +367,13 @@ TEST_F(TcpServerTest, SearchWithAnd) {
 TEST_F(TcpServerTest, SearchWithMultipleAnds) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz pqr");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "abc xyz pqr");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "abc def");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc xyz");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "abc xyz");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -396,13 +397,13 @@ TEST_F(TcpServerTest, SearchWithMultipleAnds) {
 TEST_F(TcpServerTest, SearchWithAndAndNot) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "abc xyz old");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "abc xyz old");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "abc xyz new");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "abc xyz new");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "abc def");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "abc def");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -426,13 +427,13 @@ TEST_F(TcpServerTest, SearchWithAndAndNot) {
 TEST_F(TcpServerTest, SearchWithQuotedString) {
   // Add documents
   auto doc_id1 = doc_store_->AddDocument("1", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id1), "hello world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
   auto doc_id2 = doc_store_->AddDocument("2", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id2), "hello");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "hello");
 
   auto doc_id3 = doc_store_->AddDocument("3", {});
-  index_->AddDocument(static_cast<index::DocId>(doc_id3), "world");
+  index_->AddDocument(static_cast<index::DocId>(*doc_id3), "world");
 
   StartServerOrSkip();
   uint16_t port = server_->GetPort();
@@ -602,12 +603,12 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
 
   for (int i = 1; i <= 10; ++i) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "small unique text");
+    index_->AddDocument(static_cast<index::DocId>(*doc_id), "small unique text");
   }
 
   for (int i = 11; i <= 1010; ++i) {
     auto doc_id = doc_store_->AddDocument(std::to_string(i), {});
-    index_->AddDocument(static_cast<index::DocId>(doc_id), "large dataset text");
+    index_->AddDocument(static_cast<index::DocId>(*doc_id), "large dataset text");
   }
 
   StartServerOrSkip();

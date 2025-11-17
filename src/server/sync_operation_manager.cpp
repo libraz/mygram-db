@@ -18,6 +18,7 @@
 #include "server/response_formatter.h"
 #include "storage/snapshot_builder.h"
 #include "utils/memory_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -183,7 +184,11 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
 
     if (elapsed > timeout_sec) {
-      spdlog::warn("Timeout waiting for SYNC operations to complete");
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("operation", "wait_all_sync_complete")
+          .Field("timeout_sec", static_cast<uint64_t>(timeout_sec))
+          .Warn();
       return false;
     }
 
@@ -240,7 +245,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.error_message = "Configuration not available";
         state.is_running = false;
       });
-      spdlog::error("SYNC failed for {}: Configuration not available", table_name);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("error", "Configuration not available")
+          .Error();
       return;
     }
 
@@ -260,7 +270,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.error_message = error_msg;
         state.is_running = false;
       });
-      spdlog::error("SYNC failed for {}: {}", table_name, error_msg);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("error", error_msg)
+          .Error();
       return;
     }
 
@@ -292,7 +307,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     RegisterBuilder(table_name, &builder);
 
-    bool success = builder.Build([&](const auto& progress) {
+    auto result = builder.Build([&](const auto& progress) {
       // Update progress atomically (these fields are atomic in SyncState)
       std::lock_guard<std::mutex> lock(sync_mutex_);
       sync_states_[table_name].total_rows = progress.total_rows;
@@ -314,7 +329,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     }
 
     // Handle result
-    if (success) {
+    if (result) {
       std::string gtid = builder.GetSnapshotGTID();
       uint64_t processed = builder.GetProcessedRows();
 
@@ -332,17 +347,22 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
                        gtid);
         } else {
           binlog_reader_->SetCurrentGTID(gtid);
-          if (binlog_reader_->Start()) {
+          auto start_result = binlog_reader_->Start();
+          if (start_result) {
             update_state([](SyncState& state) { state.replication_status = "STARTED"; });
             spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication started.", table_name, processed, gtid);
           } else {
-            std::string error_msg = "Snapshot OK but replication failed: " + binlog_reader_->GetLastError();
+            std::string error_msg = "Snapshot OK but replication failed: " + start_result.error().message();
             update_state([&error_msg](SyncState& state) {
               state.replication_status = "FAILED";
               state.error_message = error_msg;
             });
-            spdlog::error("SYNC completed for {} but replication failed: {}", table_name,
-                          binlog_reader_->GetLastError());
+            mygram::utils::StructuredLog()
+                .Event("server_error")
+                .Field("operation", "sync_replication")
+                .Field("table", table_name)
+                .Field("error", start_result.error().message())
+                .Error();
           }
         }
       } else {
@@ -350,12 +370,17 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         spdlog::info("SYNC completed for {} (rows={}, replication disabled)", table_name, processed);
       }
     } else {
-      std::string error_msg = builder.GetLastError();
+      std::string error_msg = result.error().message();
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
         state.error_message = error_msg;
       });
-      spdlog::error("SYNC failed for {}: {}", table_name, error_msg);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("error", error_msg)
+          .Error();
     }
 
   } catch (const std::exception& e) {
@@ -364,7 +389,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       state.status = "FAILED";
       state.error_message = error_msg;
     });
-    spdlog::error("SYNC exception for {}: {}", table_name, error_msg);
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "sync_exception")
+        .Field("table", table_name)
+        .Field("error", error_msg)
+        .Error();
   }
 
   update_state([](SyncState& state) { state.is_running = false; });

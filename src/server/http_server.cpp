@@ -23,6 +23,7 @@
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 #include "version.h"
 
 // Fix for httplib missing NI_MAXHOST on some platforms
@@ -58,7 +59,11 @@ std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_c
   for (const auto& cidr_str : allow_cidrs) {
     auto cidr = utils::CIDR::Parse(cidr_str);
     if (!cidr) {
-      spdlog::warn("Ignoring invalid CIDR entry in network.allow_cidrs: {}", cidr_str);
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "invalid_cidr_entry")
+          .Field("cidr", cidr_str)
+          .Warn();
       continue;
     }
     parsed.push_back(*cidr);
@@ -144,7 +149,14 @@ void HttpServer::SetupRoutes() {
   server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
 
   // GET /health - Health check
+  // Health check endpoints
   server_->Get("/health", [this](const httplib::Request& req, httplib::Response& res) { HandleHealth(req, res); });
+  server_->Get("/health/live",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthLive(req, res); });
+  server_->Get("/health/ready",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthReady(req, res); });
+  server_->Get("/health/detail",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthDetail(req, res); });
 
   // GET /config - Configuration
   server_->Get("/config", [this](const httplib::Request& req, httplib::Response& res) { HandleConfig(req, res); });
@@ -165,7 +177,11 @@ void HttpServer::SetupAccessControl() {
 
     stats_.IncrementRequests();
     const auto& remote = req.remote_addr.empty() ? std::string("<unknown>") : req.remote_addr;
-    spdlog::warn("Rejected HTTP request from {} (not in network.allow_cidrs)", remote);
+    mygram::utils::StructuredLog()
+        .Event("server_warning")
+        .Field("type", "http_request_rejected_acl")
+        .Field("remote_addr", remote)
+        .Warn();
     SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
     return httplib::Server::HandlerResponse::Handled;
   });
@@ -188,22 +204,42 @@ void HttpServer::SetupCors() {
   });
 }
 
-bool HttpServer::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (running_) {
-    last_error_ = "Server already running";
-    return false;
+    auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "http_server_start")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
   }
 
   // Set running flag before starting thread to avoid race condition
   running_ = true;
 
+  // Store error from thread (if any)
+  std::string thread_error;
+  std::mutex error_mutex;
+
   // Start server in separate thread
-  server_thread_ = std::make_unique<std::thread>([this]() {
+  server_thread_ = std::make_unique<std::thread>([this, &thread_error, &error_mutex]() {
     spdlog::info("Starting HTTP server on {}:{}", config_.bind, config_.port);
 
     if (!server_->listen(config_.bind, config_.port)) {
-      last_error_ = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
-      spdlog::error("{}", last_error_);
+      std::lock_guard<std::mutex> lock(error_mutex);
+      thread_error = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "http_server_listen")
+          .Field("bind", config_.bind)
+          .Field("port", static_cast<uint64_t>(config_.port))
+          .Field("error", thread_error)
+          .Error();
       running_ = false;
       return;
     }
@@ -216,11 +252,14 @@ bool HttpServer::Start() {
     if (server_thread_ && server_thread_->joinable()) {
       server_thread_->join();
     }
-    return false;
+    std::lock_guard<std::mutex> lock(error_mutex);
+    auto error =
+        MakeError(ErrorCode::kNetworkBindFailed, thread_error.empty() ? "Failed to start HTTP server" : thread_error);
+    return MakeUnexpected(error);
   }
 
   spdlog::info("HTTP server started successfully on {}:{}", config_.bind, config_.port);
-  return true;
+  return {};
 }
 
 void HttpServer::Stop() {
@@ -303,21 +342,21 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       query_parser.SetMaxQueryLength(max_query_length_);
     }
     auto query = query_parser.Parse(query_str.str());
-    if (!query.IsValid()) {
-      SendError(res, kHttpBadRequest, "Invalid query: " + query_parser.GetError());
+    if (!query) {
+      SendError(res, kHttpBadRequest, "Invalid query: " + query.error().message());
       return;
     }
 
     // Apply default limit if LIMIT was not explicitly specified in the request
-    if (!query.limit_explicit && full_config_ != nullptr) {
-      query.limit = static_cast<size_t>(full_config_->api.default_limit);
+    if (!query->limit_explicit && full_config_ != nullptr) {
+      query->limit = static_cast<size_t>(full_config_->api.default_limit);
     }
 
     // Apply filters from JSON payload
     // Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
     // Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
     if (body.contains("filters") && body["filters"].is_object()) {
-      query.filters.clear();
+      query->filters.clear();
       for (const auto& [key, val] : body["filters"].items()) {
         query::FilterCondition filter;
         filter.column = key;
@@ -351,24 +390,24 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           filter.op = query::FilterOp::EQ;
           filter.value = val.is_string() ? val.get<std::string>() : val.dump();
         }
-        query.filters.push_back(std::move(filter));
+        query->filters.push_back(std::move(filter));
       }
     }
 
     // Try cache lookup first
     if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
-      auto cached_result = cache_manager_->Lookup(query);
+      auto cached_result = cache_manager_->Lookup(*query);
       if (cached_result.has_value()) {
         // Cache hit! Return cached results directly
         std::vector<DocId> cached_doc_ids = cached_result.value();  // Make non-const copy
 
         // Apply ORDER BY, LIMIT, OFFSET on cached results
         std::vector<DocId> sorted_results;
-        if (query.order_by.has_value()) {
-          sorted_results = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, query);
+        if (query->order_by.has_value()) {
+          sorted_results = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, *query);
         } else {
-          size_t start_idx = std::min(static_cast<size_t>(query.offset), cached_doc_ids.size());
-          size_t end_idx = std::min(start_idx + query.limit, cached_doc_ids.size());
+          size_t start_idx = std::min(static_cast<size_t>(query->offset), cached_doc_ids.size());
+          size_t end_idx = std::min(start_idx + query->limit, cached_doc_ids.size());
           if (start_idx < cached_doc_ids.size()) {
             sorted_results =
                 std::vector<DocId>(cached_doc_ids.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
@@ -379,8 +418,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         // Build JSON response from cache
         json response;
         response["count"] = cached_doc_ids.size();
-        response["limit"] = query.limit;
-        response["offset"] = query.offset;
+        response["limit"] = query->limit;
+        response["offset"] = query->offset;
 
         json results_array = json::array();
         for (const auto& doc_id : sorted_results) {
@@ -411,10 +450,10 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
-    if (!query.search_text.empty()) {
-      all_search_terms.push_back(query.search_text);
+    if (!query->search_text.empty()) {
+      all_search_terms.push_back(query->search_text);
     }
-    all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+    all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
 
     // Generate n-grams for each term (same as TCP server)
     struct TermInfo {
@@ -478,9 +517,9 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Apply NOT terms if specified
-    if (!query.not_terms.empty()) {
+    if (!query->not_terms.empty()) {
       std::vector<DocId> not_results_union;
-      for (const auto& not_term : query.not_terms) {
+      for (const auto& not_term : query->not_terms) {
         std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
         std::vector<std::string> ngrams;
 
@@ -507,7 +546,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Apply filters if specified
-    if (!query.filters.empty()) {
+    if (!query->filters.empty()) {
       std::vector<DocId> filtered_results;
       for (const auto& doc_id : results) {
         auto doc = current_doc_store->GetDocument(doc_id);
@@ -516,7 +555,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         }
 
         bool matches_all_filters = true;
-        for (const auto& filter_cond : query.filters) {
+        for (const auto& filter_cond : query->filters) {
           auto filter_it = doc->filters.find(filter_cond.column);
           if (filter_it == doc->filters.end()) {
             matches_all_filters = false;
@@ -662,19 +701,19 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       for (const auto& term_info : term_infos) {
         all_ngrams.insert(term_info.ngrams.begin(), term_info.ngrams.end());
       }
-      cache_manager_->Insert(query, results, all_ngrams, 0.0);
+      cache_manager_->Insert(*query, results, all_ngrams, 0.0);
     }
 
     // Apply ORDER BY, LIMIT, OFFSET
     // Only use ResultSorter if ORDER BY is explicitly specified
     std::vector<DocId> sorted_results;
-    if (query.order_by.has_value()) {
+    if (query->order_by.has_value()) {
       // Use ResultSorter for ORDER BY support (same as TCP)
-      sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
+      sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query);
     } else {
       // No ORDER BY: apply limit/offset directly (preserve DocID order)
-      size_t start_idx = std::min(static_cast<size_t>(query.offset), results.size());
-      size_t end_idx = std::min(start_idx + query.limit, results.size());
+      size_t start_idx = std::min(static_cast<size_t>(query->offset), results.size());
+      size_t end_idx = std::min(start_idx + query->limit, results.size());
 
       if (start_idx < results.size()) {
         sorted_results =
@@ -686,8 +725,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Build JSON response
     json response;
     response["count"] = total_count;
-    response["limit"] = query.limit;
-    response["offset"] = query.offset;
+    response["limit"] = query->limit;
+    response["offset"] = query->offset;
 
     json results_array = json::array();
     for (const auto& doc_id : sorted_results) {
@@ -939,6 +978,121 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
   response["status"] = "ok";
   response["timestamp"] =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+  SendJson(res, kHttpOk, response);
+}
+
+void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Response& res) {
+  stats_.IncrementRequests();
+
+  // Liveness probe: Always return 200 OK if the process is running
+  // This is used by orchestrators (Kubernetes, Docker) to detect deadlocks
+  json response;
+  response["status"] = "alive";
+  response["timestamp"] =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+  SendJson(res, kHttpOk, response);
+}
+
+void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Response& res) {
+  stats_.IncrementRequests();
+
+  // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
+  bool is_ready = (loading_ == nullptr || !loading_->load());
+
+  json response;
+  if (is_ready) {
+    response["status"] = "ready";
+    response["loading"] = false;
+    response["timestamp"] =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    SendJson(res, kHttpOk, response);
+  } else {
+    response["status"] = "not_ready";
+    response["loading"] = true;
+    response["reason"] = "Server is loading";
+    response["timestamp"] =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    SendJson(res, kHttpServiceUnavailable, response);
+  }
+}
+
+void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Response& res) {
+  stats_.IncrementRequests();
+
+  // Detailed health: Return comprehensive component status
+  json response;
+
+  // Overall status
+  bool is_loading = (loading_ != nullptr && loading_->load());
+  response["status"] = is_loading ? "degraded" : "healthy";
+  response["timestamp"] =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+  // Calculate uptime (approximate, based on stats initialization)
+  static auto start_time = std::chrono::steady_clock::now();
+  auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time).count();
+  response["uptime_seconds"] = uptime;
+
+  // Components status
+  json components;
+
+  // Server component
+  json server_comp;
+  server_comp["status"] = is_loading ? "loading" : "ready";
+  server_comp["loading"] = is_loading;
+  components["server"] = server_comp;
+
+  // Index component (aggregate from all tables)
+  json index_comp;
+  size_t total_terms = 0;
+  size_t total_documents = 0;
+  for (const auto& [table_name, ctx] : table_contexts_) {
+    if (ctx != nullptr && ctx->index) {
+      total_terms += ctx->index->TermCount();
+      // Note: Index doesn't have document count method, use doc_store instead
+      if (ctx->doc_store != nullptr) {
+        total_documents += ctx->doc_store->Size();
+      }
+    }
+  }
+  index_comp["status"] = "ok";
+  index_comp["total_terms"] = total_terms;
+  index_comp["total_documents"] = total_documents;
+  components["index"] = index_comp;
+
+  // Cache component (if available)
+  if (cache_manager_ != nullptr) {
+    json cache_comp;
+    auto cache_stats = cache_manager_->GetStatistics();
+    cache_comp["status"] = "ok";
+    cache_comp["hit_rate"] = cache_stats.total_queries > 0 ? static_cast<double>(cache_stats.cache_hits) /
+                                                                 static_cast<double>(cache_stats.total_queries)
+                                                           : 0.0;
+    cache_comp["total_hits"] = cache_stats.cache_hits;
+    cache_comp["total_misses"] = cache_stats.cache_misses;
+    cache_comp["current_entries"] = cache_stats.current_entries;
+    components["cache"] = cache_comp;
+  }
+
+#ifdef USE_MYSQL
+  // Binlog component (if available)
+  if (binlog_reader_ != nullptr) {
+    json binlog_comp;
+    if (binlog_reader_->IsRunning()) {
+      binlog_comp["status"] = "connected";
+      binlog_comp["running"] = true;
+      // Note: lag calculation would require additional methods in BinlogReader
+    } else {
+      binlog_comp["status"] = "disconnected";
+      binlog_comp["running"] = false;
+    }
+    components["binlog"] = binlog_comp;
+  }
+#endif
+
+  response["components"] = components;
 
   SendJson(res, kHttpOk, response);
 }

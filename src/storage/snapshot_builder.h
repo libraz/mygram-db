@@ -15,6 +15,8 @@
 #include "index/index.h"
 #include "mysql/connection.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::storage {
 
@@ -55,9 +57,10 @@ class SnapshotBuilder {
    * data consistency and captures the GTID at snapshot time.
    *
    * @param progress_callback Optional progress callback
-   * @return true if successful
+   * @return Expected<void, Error> on success or error
    */
-  bool Build(const ProgressCallback& progress_callback = {});
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> Build(
+      const ProgressCallback& progress_callback = {});
 
   /**
    * @brief Get GTID captured at snapshot time
@@ -68,11 +71,6 @@ class SnapshotBuilder {
    * @return GTID string or empty if not available
    */
   const std::string& GetSnapshotGTID() const { return snapshot_gtid_; }
-
-  /**
-   * @brief Get last error message
-   */
-  const std::string& GetLastError() const { return last_error_; }
 
   /**
    * @brief Get total rows processed
@@ -91,7 +89,6 @@ class SnapshotBuilder {
   config::TableConfig table_config_;
   config::BuildConfig build_config_;
 
-  std::string last_error_;
   uint64_t processed_rows_ = 0;
   std::atomic<bool> cancelled_{false};
   std::string snapshot_gtid_;  // GTID captured at snapshot time
@@ -104,7 +101,8 @@ class SnapshotBuilder {
   /**
    * @brief Process single row from result set
    */
-  bool ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields);
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                               unsigned int num_fields);
 
   /**
    * @brief Check if column type is text (VARCHAR/TEXT)

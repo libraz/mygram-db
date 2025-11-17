@@ -181,13 +181,12 @@ int main(int argc, char* argv[]) {
   }
 
   // Load configuration
-  mygramdb::config::Config config;
-  try {
-    config = mygramdb::config::LoadConfig(config_path, schema_path != nullptr ? schema_path : "");
-  } catch (const std::exception& e) {
-    spdlog::error("Failed to load configuration: {}", e.what());
+  auto config_result = mygramdb::config::LoadConfig(config_path, schema_path != nullptr ? schema_path : "");
+  if (!config_result) {
+    spdlog::error("Failed to load configuration: {}", config_result.error().to_string());
     return 1;
   }
+  mygramdb::config::Config config = *config_result;
 
   // Apply logging configuration
   if (config.logging.level == "debug") {
@@ -335,7 +334,7 @@ int main(int argc, char* argv[]) {
       mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *ctx->index, *ctx->doc_store, table_config,
                                                           config.build);
 
-      bool snapshot_success = snapshot_builder.Build([&table_config, &snapshot_builder](const auto& progress) {
+      auto snapshot_result = snapshot_builder.Build([&table_config, &snapshot_builder](const auto& progress) {
         // Check cancellation flag in progress callback (safe: main thread context)
         if (g_cancel_snapshot_requested != 0) {
           spdlog::info("Snapshot cancellation requested during build");
@@ -354,9 +353,9 @@ int main(int argc, char* argv[]) {
         return 1;
       }
 
-      if (!snapshot_success) {
+      if (!snapshot_result) {
         spdlog::error("Failed to build snapshot for table: {} - {}", table_config.name,
-                      snapshot_builder.GetLastError());
+                      snapshot_result.error().message());
         return 1;
       }
 
@@ -430,8 +429,9 @@ int main(int argc, char* argv[]) {
 
     // Only start if we have a GTID
     if (!start_gtid.empty()) {
-      if (!binlog_reader->Start()) {
-        spdlog::error("Failed to start binlog reader");
+      auto start_result = binlog_reader->Start();
+      if (!start_result) {
+        spdlog::error("Failed to start binlog reader: {}", start_result.error().to_string());
         return 1;
       }
       spdlog::info("Binlog replication started from GTID: {}", start_gtid);
@@ -477,8 +477,9 @@ int main(int argc, char* argv[]) {
   mygramdb::server::TcpServer tcp_server(server_config, table_contexts_ptrs, config.dump.dir, &config, nullptr);
 #endif
 
-  if (!tcp_server.Start()) {
-    spdlog::error("Failed to start TCP server: {}", tcp_server.GetLastError());
+  auto tcp_start_result = tcp_server.Start();
+  if (!tcp_start_result) {
+    spdlog::error("Failed to start TCP server: {}", tcp_start_result.error().to_string());
     return 1;
   }
 
@@ -504,8 +505,9 @@ int main(int argc, char* argv[]) {
         tcp_server.GetMutableStats());
 #endif
 
-    if (!http_server->Start()) {
-      spdlog::error("Failed to start HTTP server: {}", http_server->GetLastError());
+    auto http_start_result = http_server->Start();
+    if (!http_start_result) {
+      spdlog::error("Failed to start HTTP server: {}", http_start_result.error().to_string());
       tcp_server.Stop();
       return 1;
     }

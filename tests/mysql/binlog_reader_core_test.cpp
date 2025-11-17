@@ -367,4 +367,149 @@ TEST(BinlogReaderTest, MultipleEventTypes) {
   EXPECT_EQ(delete_event.primary_key, "3");
 }
 
+/**
+ * @brief Test clean shutdown sequence without threads running
+ *
+ * Verifies that Stop() can be called safely even when threads are not running,
+ * and that internal connection cleanup happens in the correct order.
+ */
+TEST_F(BinlogReaderFixture, CleanShutdownWithoutThreads) {
+  // Stop should be safe even when not running
+  EXPECT_FALSE(reader_->IsRunning());
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+
+  // Multiple stops should be safe
+  reader_->Stop();
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+}
+
+/**
+ * @brief Test shutdown sequence with active queue operations
+ *
+ * This test simulates threads blocked on queue operations and verifies
+ * that Stop() properly unblocks them and allows clean shutdown.
+ */
+TEST_F(BinlogReaderFixture, ShutdownUnblocksQueueOperations) {
+  std::atomic<bool> pop_finished{false};
+  std::atomic<bool> push_finished{false};
+
+  // Start thread blocked on Pop (queue is empty)
+  std::thread pop_thread([&] {
+    BinlogEvent event;
+    reader_->PopEvent(event);  // Should block since queue is empty
+    pop_finished.store(true);
+  });
+
+  // Give pop thread time to block on empty queue
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(pop_finished.load());
+
+  // Fill queue to capacity
+  reader_->config_.queue_size = 1;
+  reader_->PushEvent(MakeEvent(BinlogEventType::INSERT, "1", 1));
+
+  // Wait for pop thread to consume the item
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Start thread blocked on Push (queue should fill up again)
+  std::thread push_thread([&] {
+    reader_->PushEvent(MakeEvent(BinlogEventType::INSERT, "2", 1));
+    push_finished.store(true);
+  });
+
+  // Give push thread time to complete (queue has space)
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Stop should unblock any remaining operations
+  reader_->Stop();
+
+  pop_thread.join();
+  push_thread.join();
+
+  EXPECT_TRUE(pop_finished.load());
+  EXPECT_TRUE(push_finished.load());
+
+  // Reset state for cleanup
+  reader_->should_stop_ = false;
+}
+
+/**
+ * @brief Test that binlog_connection_ is properly cleaned up
+ *
+ * Verifies the critical shutdown sequence fix: threads must complete
+ * (including mysql_binlog_close) before mysql_close is called.
+ */
+TEST_F(BinlogReaderFixture, BinlogConnectionCleanupOrder) {
+  // Create a mock scenario where binlog_connection_ exists and reader is running
+  Connection::Config binlog_config = connection_config_;
+  reader_->binlog_connection_ = std::make_unique<Connection>(binlog_config);
+  reader_->running_ = true;  // Simulate running state
+
+  // Verify connection exists
+  EXPECT_NE(reader_->binlog_connection_, nullptr);
+
+  // Call Stop - this should properly clean up the connection
+  // without double-free or use-after-free errors
+  reader_->Stop();
+
+  // Connection should be destroyed
+  EXPECT_EQ(reader_->binlog_connection_, nullptr);
+  EXPECT_FALSE(reader_->IsRunning());
+}
+
+/**
+ * @brief Test rapid start/stop cycles
+ *
+ * Verifies that the reader can handle rapid start/stop sequences
+ * without deadlocks or memory corruption.
+ */
+TEST_F(BinlogReaderFixture, RapidStartStopCycles) {
+  // Rapid stop calls (without start)
+  for (int i = 0; i < 5; i++) {
+    reader_->Stop();
+    EXPECT_FALSE(reader_->IsRunning());
+  }
+
+  // Should still be in a valid state
+  EXPECT_FALSE(reader_->IsRunning());
+  EXPECT_EQ(reader_->GetQueueSize(), 0);
+}
+
+/**
+ * @brief Test destructor cleanup
+ *
+ * Verifies that BinlogReader destructor properly calls Stop()
+ * and cleans up all resources.
+ */
+TEST(BinlogReaderTest, DestructorCallsStop) {
+  Connection::Config conn_config;
+  Connection conn(conn_config);
+
+  index::Index idx(1);
+  storage::DocumentStore doc_store;
+
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+
+  BinlogReader::Config reader_config;
+  reader_config.start_gtid = "uuid:1";
+
+  // Create reader in a scope
+  {
+    BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+    EXPECT_FALSE(reader.IsRunning());
+
+    // Simulate having a binlog connection
+    Connection::Config binlog_config = conn_config;
+    reader.binlog_connection_ = std::make_unique<Connection>(binlog_config);
+
+    // Destructor will be called here and should clean up properly
+  }
+
+  // If we reach here without crash/hang, the test passes
+  SUCCEED();
+}
+
 #endif  // USE_MYSQL

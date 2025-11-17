@@ -85,7 +85,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
   void SimulateTransaction(const std::string& gtid, const std::vector<std::pair<int, std::string>>& docs) {
     for (const auto& [primary_key_int, content] : docs) {
       auto doc_id = table_ctx_->doc_store->AddDocument(std::to_string(primary_key_int), {{"content", content}});
-      table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id), content);
+      table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), content);
     }
     // Record the GTID for this transaction
     transaction_gtids_.push_back(gtid);
@@ -107,7 +107,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
       converted[name] = {ctx->index.get(), ctx->doc_store.get()};
     }
 
-    bool success = storage::dump_v1::WriteDumpV1(filepath, expected_gtid, *config_, converted);
+    auto success = storage::dump_v1::WriteDumpV1(filepath, expected_gtid, *config_, converted);
     EXPECT_TRUE(success) << "Failed to create snapshot";
 
     return filepath;
@@ -118,7 +118,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
    */
   std::string GetSnapshotGtid(const std::string& filepath) {
     storage::dump_v1::DumpInfo info;
-    bool success = storage::dump_v1::GetDumpInfo(filepath, info);
+    auto success = storage::dump_v1::GetDumpInfo(filepath, info);
     EXPECT_TRUE(success) << "Failed to get snapshot info";
     return info.gtid;
   }
@@ -134,7 +134,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
 
     std::string gtid;
     config::Config loaded_config;
-    bool success = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted);
+    auto success = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted);
     EXPECT_TRUE(success) << "Failed to load snapshot";
 
     return gtid;
@@ -281,7 +281,7 @@ TEST_F(GtidSnapshotIntegrationTest, ConcurrentTransactionsDuringSnapshot) {
   // Add initial data
   for (int i = 1; i <= 50; ++i) {
     auto doc_id = table_ctx_->doc_store->AddDocument(std::to_string(i), {{"content", "doc " + std::to_string(i)}});
-    table_ctx_->index->AddDocument(static_cast<index::DocId>(doc_id), "doc " + std::to_string(i));
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), "doc " + std::to_string(i));
   }
 
   // Take snapshot (in real scenario, read_only=true would block writes)
@@ -372,7 +372,7 @@ TEST_F(GtidSnapshotIntegrationTest, ValidGtidFormats) {
       converted[name] = {ctx->index.get(), ctx->doc_store.get()};
     }
 
-    bool success = storage::dump_v1::WriteDumpV1(snapshot_path, gtid, *config_, converted);
+    auto success = storage::dump_v1::WriteDumpV1(snapshot_path, gtid, *config_, converted);
     EXPECT_TRUE(success) << "Failed to save with GTID: " << gtid;
 
     std::string captured_gtid = GetSnapshotGtid(snapshot_path);

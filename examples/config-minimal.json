@@ -15,5 +15,8 @@
   ],
   "replication": {
     "server_id": 12345
+  },
+  "network": {
+    "allow_cidrs": ["127.0.0.1/32"]
   }
 }

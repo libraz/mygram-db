@@ -608,7 +608,7 @@ TEST(IndexTest, MemoryUsage) {
 
   // Add more documents and verify memory growth
   for (int i = 3; i <= 100; ++i) {
-    index.AddDocument(i, "test document " + std::to_string(i));
+    index.AddDocument(*i, "test document " + std::to_string(i));
   }
 
   size_t after_hundred_docs = index.MemoryUsage();
@@ -637,7 +637,7 @@ TEST(IndexTest, Optimize) {
 
   // Add many documents to trigger optimization
   for (int i = 1; i <= 100; ++i) {
-    index.AddDocument(i, "abc");
+    index.AddDocument(*i, "abc");
   }
 
   // Optimize (should convert to Roaring bitmap for high-density term "a", "b", "c")
@@ -658,7 +658,7 @@ TEST(IndexTest, LargeDocumentSet) {
   // Add 1000 documents
   for (int i = 1; i <= 1000; ++i) {
     std::string text = "doc" + std::to_string(i % 10);
-    index.AddDocument(i, text);
+    index.AddDocument(*i, text);
   }
 
   // Verify search works correctly
@@ -766,7 +766,7 @@ TEST(IndexTest, AddDocumentBatchSearchCorrectness) {
   std::vector<Index::DocumentItem> batch;
   for (DocId i = 1; i <= 100; ++i) {
     std::string text = NormalizeText("テスト" + std::to_string(i), true, "keep", false);
-    index_single.AddDocument(i, text);
+    index_single.AddDocument(*i, text);
     batch.push_back({i, text});
   }
   index_batch.AddDocumentBatch(batch);
@@ -1147,7 +1147,7 @@ TEST(IndexTest, StreamSerializationLargeDataset) {
   // Add 1000 documents
   for (DocId i = 1; i <= 1000; ++i) {
     std::string text = NormalizeText("document " + std::to_string(i), true, "keep", false);
-    index1.AddDocument(i, text);
+    index1.AddDocument(*i, text);
   }
 
   // Serialize to stringstream

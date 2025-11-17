@@ -221,9 +221,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigHelp) {
 
   auto query = parser.Parse("CONFIG HELP mysql");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_HELP);
-  EXPECT_EQ(query.filepath, "mysql");
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_HELP);
+  EXPECT_EQ(query->filepath, "mysql");
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigHelpNoPath) {
@@ -231,9 +231,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigHelpNoPath) {
 
   auto query = parser.Parse("CONFIG HELP");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_HELP);
-  EXPECT_TRUE(query.filepath.empty());
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_HELP);
+  EXPECT_TRUE(query->filepath.empty());
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigShow) {
@@ -241,9 +241,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigShow) {
 
   auto query = parser.Parse("CONFIG SHOW mysql.port");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_SHOW);
-  EXPECT_EQ(query.filepath, "mysql.port");
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_SHOW);
+  EXPECT_EQ(query->filepath, "mysql.port");
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigShowNoPath) {
@@ -251,9 +251,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigShowNoPath) {
 
   auto query = parser.Parse("CONFIG SHOW");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_SHOW);
-  EXPECT_TRUE(query.filepath.empty());
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_SHOW);
+  EXPECT_TRUE(query->filepath.empty());
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigVerify) {
@@ -261,9 +261,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigVerify) {
 
   auto query = parser.Parse("CONFIG VERIFY /path/to/config.yaml");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_VERIFY);
-  EXPECT_EQ(query.filepath, "/path/to/config.yaml");
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_VERIFY);
+  EXPECT_EQ(query->filepath, "/path/to/config.yaml");
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigVerifyNoFilepath) {
@@ -272,8 +272,8 @@ TEST_F(ConfigHandlerTest, QueryParserConfigVerifyNoFilepath) {
   auto query = parser.Parse("CONFIG VERIFY");
 
   // Parser should report an error for missing filepath
-  EXPECT_EQ(query.type, query::QueryType::UNKNOWN);
-  EXPECT_FALSE(parser.GetError().empty());
+  EXPECT_FALSE(query);
+  EXPECT_FALSE(query.error().message().empty());
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigNoSubcommand) {
@@ -281,9 +281,9 @@ TEST_F(ConfigHandlerTest, QueryParserConfigNoSubcommand) {
 
   auto query = parser.Parse("CONFIG");
 
-  EXPECT_EQ(query.type, query::QueryType::CONFIG_SHOW);  // Defaults to SHOW
-  EXPECT_TRUE(query.filepath.empty());
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, query::QueryType::CONFIG_SHOW);  // Defaults to SHOW
+  EXPECT_TRUE(query->filepath.empty());
 }
 
 TEST_F(ConfigHandlerTest, QueryParserConfigInvalidSubcommand) {
@@ -291,9 +291,8 @@ TEST_F(ConfigHandlerTest, QueryParserConfigInvalidSubcommand) {
 
   auto query = parser.Parse("CONFIG INVALID");
 
-  EXPECT_EQ(query.type, query::QueryType::UNKNOWN);
-  EXPECT_FALSE(query.IsValid());
-  EXPECT_FALSE(parser.GetError().empty());
+  EXPECT_FALSE(query);
+  EXPECT_FALSE(query.error().message().empty());
 }
 
 }  // namespace mygramdb::server

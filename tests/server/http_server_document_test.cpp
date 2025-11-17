@@ -48,9 +48,9 @@ class HttpServerTest : public ::testing::Test {
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 
     // Index documents
-    index->AddDocument(doc_id1, "machine learning");
-    index->AddDocument(doc_id2, "breaking news");
-    index->AddDocument(doc_id3, "old article");
+    index->AddDocument(*doc_id1, "machine learning");
+    index->AddDocument(*doc_id2, "breaking news");
+    index->AddDocument(*doc_id3, "old article");
 
     // Create table context
     table_context_.name = "test";

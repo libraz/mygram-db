@@ -46,7 +46,9 @@ tables:
   - name: test_table
 )");
 
-  Config config = LoadConfig(config_file_);
+  auto config_result = LoadConfig(config_file_);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   // Rate limiting should be disabled by default
   EXPECT_FALSE(config.api.rate_limiting.enable);
@@ -72,7 +74,9 @@ api:
     enable: true
 )");
 
-  Config config = LoadConfig(config_file_);
+  auto config_result = LoadConfig(config_file_);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_TRUE(config.api.rate_limiting.enable);
   EXPECT_EQ(config.api.rate_limiting.capacity, 100);       // Default
@@ -100,7 +104,9 @@ api:
     max_clients: 5000
 )");
 
-  Config config = LoadConfig(config_file_);
+  auto config_result = LoadConfig(config_file_);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_TRUE(config.api.rate_limiting.enable);
   EXPECT_EQ(config.api.rate_limiting.capacity, 50);
@@ -127,7 +133,9 @@ api:
     refill_rate: 20
 )");
 
-  Config config = LoadConfig(config_file_);
+  auto config_result = LoadConfig(config_file_);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_FALSE(config.api.rate_limiting.enable);
   // Other values should still be loaded even if disabled
@@ -153,7 +161,9 @@ api:
     capacity: 1000
 )");
 
-  Config config = LoadConfig(config_file_);
+  auto config_result = LoadConfig(config_file_);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
 
   EXPECT_TRUE(config.api.rate_limiting.enable);
   EXPECT_EQ(config.api.rate_limiting.capacity, 1000);

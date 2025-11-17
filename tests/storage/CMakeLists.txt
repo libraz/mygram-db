@@ -44,6 +44,18 @@ gtest_discover_tests(document_store_serialization_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# DocumentStore DocID overflow detection tests
+add_executable(document_store_docid_overflow_test
+  document_store_docid_overflow_test.cpp
+)
+
+target_link_libraries(document_store_docid_overflow_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(document_store_docid_overflow_test)
+
 # Dump commands tests (DUMP SAVE/LOAD/VERIFY/INFO)
 add_executable(dump_commands_test
   dump_commands_test.cpp

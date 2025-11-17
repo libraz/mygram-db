@@ -27,6 +27,8 @@
 #include "server/table_catalog.h"
 #include "server/thread_pool.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 #ifdef USE_MYSQL
 #include "server/sync_operation_manager.h"
@@ -94,9 +96,9 @@ class TcpServer {
 
   /**
    * @brief Start server
-   * @return true if started successfully
+   * @return Expected<void, Error> - Success or error details
    */
-  bool Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop server
@@ -122,11 +124,6 @@ class TcpServer {
    * @brief Get total requests handled
    */
   uint64_t GetTotalRequests() const { return stats_.GetTotalRequests(); }
-
-  /**
-   * @brief Get last error message
-   */
-  const std::string& GetLastError() const { return last_error_; }
 
   /**
    * @brief Get server start time (Unix timestamp)
@@ -175,7 +172,6 @@ class TcpServer {
   ServerConfig config_;
   const config::Config* full_config_;
   std::string dump_dir_;
-  std::string last_error_;
 
   // State
   ServerStats stats_;

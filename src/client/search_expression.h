@@ -23,10 +23,11 @@
 
 #pragma once
 
-#include <optional>
 #include <string>
-#include <variant>
 #include <vector>
+
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::client {
 
@@ -72,19 +73,23 @@ struct SearchExpression {
  * Examples:
  * ```cpp
  * auto expr = ParseSearchExpression("+golang tutorial");
- * // expr.required_terms = ["golang"]
- * // expr.optional_terms = ["tutorial"]
+ * if (expr) {
+ *   // expr->required_terms = ["golang"]
+ *   // expr->optional_terms = ["tutorial"]
+ * }
  *
  * auto expr = ParseSearchExpression("+golang +(tutorial OR guide) -old");
- * // expr.required_terms = ["golang"]
- * // expr.excluded_terms = ["old"]
- * // expr.raw_expression = "+(tutorial OR guide)"
+ * if (expr) {
+ *   // expr->required_terms = ["golang"]
+ *   // expr->excluded_terms = ["old"]
+ *   // expr->raw_expression = "+(tutorial OR guide)"
+ * }
  * ```
  *
  * @param expression Web-style search expression
- * @return Parsed expression components, or error message
+ * @return Parsed expression components, or Error
  */
-std::variant<SearchExpression, std::string> ParseSearchExpression(const std::string& expression);
+mygram::utils::Expected<SearchExpression, mygram::utils::Error> ParseSearchExpression(const std::string& expression);
 
 /**
  * @brief Convert search expression directly to QueryAST-compatible string
@@ -99,9 +104,9 @@ std::variant<SearchExpression, std::string> ParseSearchExpression(const std::str
  * - `+golang +(tutorial OR guide)` → `golang AND (tutorial OR guide)`
  *
  * @param expression Web-style search expression
- * @return QueryAST-compatible query string, or error message
+ * @return QueryAST-compatible query string, or Error
  */
-std::variant<std::string, std::string> ConvertSearchExpression(const std::string& expression);
+mygram::utils::Expected<std::string, mygram::utils::Error> ConvertSearchExpression(const std::string& expression);
 
 /**
  * @brief Simplify search expression to basic terms (for backward compatibility)

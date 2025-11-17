@@ -22,6 +22,7 @@
 #include "mysql/binlog_event_types.h"
 #include "mysql/gtid_encoder.h"
 #include "server/tcp_server.h"  // For TableContext definition
+#include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
 
@@ -54,37 +55,72 @@ BinlogReader::~BinlogReader() {
   Stop();
 }
 
-bool BinlogReader::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
     last_error_ = "Binlog reader is already running";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
 
-  // RAII guard to reset running_ flag on failure
-  struct RunningGuard {
-    std::atomic<bool>& flag;
-    bool& success;
-    explicit RunningGuard(std::atomic<bool>& flag_ref, bool& success_ref) : flag(flag_ref), success(success_ref) {}
-    ~RunningGuard() {
-      if (!success) {
-        flag = false;
+  // RAII guard to manage all resources on failure
+  struct StartupGuard {
+    std::atomic<bool>& running_flag;
+    std::unique_ptr<std::thread>& worker_thread;
+    std::unique_ptr<std::thread>& reader_thread;
+    std::unique_ptr<Connection>& binlog_conn;
+    std::atomic<bool>& should_stop;
+    bool success = false;
+
+    StartupGuard(std::atomic<bool>& running, std::unique_ptr<std::thread>& worker, std::unique_ptr<std::thread>& reader,
+                 std::unique_ptr<Connection>& conn, std::atomic<bool>& stop)
+        : running_flag(running), worker_thread(worker), reader_thread(reader), binlog_conn(conn), should_stop(stop) {}
+
+    ~StartupGuard() {
+      if (success) {
+        return;  // Success - don't clean up
       }
+
+      // Failure - clean up all resources
+      should_stop = true;
+
+      // Join threads if they were created
+      if (worker_thread && worker_thread->joinable()) {
+        worker_thread->join();
+      }
+      if (reader_thread && reader_thread->joinable()) {
+        reader_thread->join();
+      }
+
+      // Reset thread objects
+      worker_thread.reset();
+      reader_thread.reset();
+
+      // Reset connection
+      binlog_conn.reset();
+
+      // Clear running flag
+      running_flag = false;
     }
-    RunningGuard(const RunningGuard&) = delete;
-    RunningGuard& operator=(const RunningGuard&) = delete;
-    RunningGuard(RunningGuard&&) = delete;
-    RunningGuard& operator=(RunningGuard&&) = delete;
+
+    StartupGuard(const StartupGuard&) = delete;
+    StartupGuard& operator=(const StartupGuard&) = delete;
+    StartupGuard(StartupGuard&&) = delete;
+    StartupGuard& operator=(StartupGuard&&) = delete;
   };
-  bool start_success = false;
-  RunningGuard guard(running_, start_success);
+
+  StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, should_stop_);
 
   // Check MySQL connection
   if (!connection_.IsConnected()) {
     last_error_ = "MySQL connection not established";
-    spdlog::error("Cannot start binlog reader: {}", last_error_);
-    return false;
+    mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
   // Check if GTID mode is enabled (using main connection)
@@ -92,8 +128,8 @@ bool BinlogReader::Start() {
     last_error_ =
         "GTID mode is not enabled on MySQL server. "
         "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
-    spdlog::error("Cannot start binlog reader: {}", last_error_);
-    return false;
+    mygram::utils::LogBinlogError("gtid_mode_disabled", current_gtid_, last_error_);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
 
   // Validate primary keys for all tables
@@ -106,8 +142,14 @@ bool BinlogReader::Start() {
         last_error_ += table_name;
         last_error_ += "': ";
         last_error_ += validation_error;
-        spdlog::error("Cannot start binlog reader: {}", last_error_);
-        return false;
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "primary_key_validation_failed")
+            .Field("table", table_name)
+            .Field("gtid", current_gtid_)
+            .Field("error", last_error_)
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
       }
     }
   } else {
@@ -116,8 +158,14 @@ bool BinlogReader::Start() {
     if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
                                           table_config_.primary_key, validation_error)) {
       last_error_ = "Primary key validation failed: " + validation_error;
-      spdlog::error("Cannot start binlog reader: {}", last_error_);
-      return false;
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "primary_key_validation_failed")
+          .Field("table", table_config_.name)
+          .Field("gtid", current_gtid_)
+          .Field("error", last_error_)
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
     }
   }
 
@@ -136,11 +184,12 @@ bool BinlogReader::Start() {
   binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
 
   binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
-  if (!binlog_connection_->Connect("binlog worker")) {
-    last_error_ = "Failed to create binlog connection: " + binlog_connection_->GetLastError();
-    spdlog::error("Cannot start binlog reader: {}", last_error_);
-    binlog_connection_.reset();
-    return false;
+  auto connect_result = binlog_connection_->Connect("binlog worker");
+  if (!connect_result) {
+    last_error_ = "Failed to create binlog connection: " + connect_result.error().message();
+    mygram::utils::LogBinlogError("connection_failed", current_gtid_, last_error_);
+    // StartupGuard will clean up binlog_connection_
+    return MakeUnexpected(connect_result.error());
   }
 
   should_stop_ = false;
@@ -154,30 +203,13 @@ bool BinlogReader::Start() {
     reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
 
     spdlog::info("Binlog reader started from GTID: {}", current_gtid_);
-    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used by RunningGuard destructor
-    start_success = true;  // Mark start as successful
-    return true;
+    guard.success = true;  // Mark start as successful - StartupGuard won't clean up
+    return {};
   } catch (const std::exception& e) {
     last_error_ = std::string("Failed to start threads: ") + e.what();
-    spdlog::error("Cannot start binlog reader: {}", last_error_);
-
-    // Clean up on failure (RunningGuard will reset running_ flag)
-    should_stop_ = true;
-
-    // Ensure threads are properly joined and cleaned up to prevent leaks
-    // Even if only one thread was created before exception, both are checked
-    if (worker_thread_ && worker_thread_->joinable()) {
-      worker_thread_->join();
-    }
-    if (reader_thread_ && reader_thread_->joinable()) {
-      reader_thread_->join();
-    }
-
-    // Explicitly reset thread objects to ensure cleanup
-    worker_thread_.reset();
-    reader_thread_.reset();
-
-    return false;
+    mygram::utils::LogBinlogError("thread_start_failed", current_gtid_, last_error_);
+    // StartupGuard destructor will clean up all resources automatically
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
 }
 
@@ -193,15 +225,8 @@ void BinlogReader::Stop() {
   queue_cv_.notify_all();
   queue_full_cv_.notify_all();
 
-  // Close binlog connection BEFORE joining threads to unblock mysql_binlog_fetch()
-  // This forces the reader thread to exit from its blocking call
-  if (binlog_connection_) {
-    spdlog::debug("Closing binlog connection to unblock reader thread");
-    binlog_connection_->Close();
-  }
-
-  // Wait for threads to finish BEFORE destroying binlog_connection_
-  // This ensures threads don't access connection during destruction
+  // Wait for threads to finish
+  // The reader thread will call mysql_binlog_close() before exiting
   if (reader_thread_ && reader_thread_->joinable()) {
     reader_thread_->join();
     reader_thread_.reset();
@@ -212,7 +237,7 @@ void BinlogReader::Stop() {
     worker_thread_.reset();
   }
 
-  // Now it's safe to destroy the connection
+  // Now it's safe to destroy the connection (will call Close() in destructor)
   if (binlog_connection_) {
     binlog_connection_.reset();
   }
@@ -258,7 +283,7 @@ void BinlogReader::ReaderThreadFunc() {
     // We don't verify checksums yet, so ask the server to send events without them
     if (mysql_query(binlog_connection_->GetHandle(), "SET @source_binlog_checksum='NONE'") != 0) {
       last_error_ = "Failed to disable binlog checksum: " + binlog_connection_->GetLastError();
-      spdlog::error("{}", last_error_);
+      mygram::utils::LogBinlogError("checksum_disable_failed", GetCurrentGTID(), last_error_, reconnect_attempt);
 
       // Retry connection after delay
       spdlog::info("[binlog worker] Will retry connection in {} ms", config_.reconnect_delay_ms);
@@ -271,8 +296,10 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       // Reconnect
-      if (!binlog_connection_->Connect("binlog worker")) {
-        spdlog::error("[binlog worker] Failed to reconnect: {}", binlog_connection_->GetLastError());
+      auto reconnect_result = binlog_connection_->Connect("binlog worker");
+      if (!reconnect_result) {
+        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(),
+                                      reconnect_attempt + 1);
         continue;
       }
       spdlog::info("[binlog worker] Reconnected successfully");
@@ -321,7 +348,7 @@ void BinlogReader::ReaderThreadFunc() {
     // Open binlog stream
     if (mysql_binlog_open(binlog_connection_->GetHandle(), &rpl) != 0) {
       last_error_ = "Failed to open binlog stream: " + binlog_connection_->GetLastError();
-      spdlog::error("{}", last_error_);
+      mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), last_error_, reconnect_attempt);
 
       // Retry connection after delay
       spdlog::info("Will retry connection in {} ms", config_.reconnect_delay_ms);
@@ -335,7 +362,8 @@ void BinlogReader::ReaderThreadFunc() {
 
       // Reconnect
       if (!binlog_connection_->Connect()) {
-        spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), binlog_connection_->GetLastError(),
+                                      reconnect_attempt + 1);
       } else {
         // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
         reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -391,7 +419,8 @@ void BinlogReader::ReaderThreadFunc() {
 
           // Reconnect
           if (!binlog_connection_->Connect()) {
-            spdlog::error("Failed to reconnect: {}", binlog_connection_->GetLastError());
+            mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), binlog_connection_->GetLastError(),
+                                          reconnect_attempt);
           } else {
             // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
             reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -399,8 +428,14 @@ void BinlogReader::ReaderThreadFunc() {
           break;  // Exit inner loop to retry from outer loop
         }
         // Non-recoverable error - log as error and stop
-        spdlog::error("{}", last_error_);
-        spdlog::error("mysql_binlog_fetch returned: {}", result);
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "fetch_non_recoverable_error")
+            .Field("gtid", GetCurrentGTID())
+            .Field("error", last_error_)
+            .Field("result_code", static_cast<int64_t>(result))
+            .Field("errno", static_cast<int64_t>(err_no))
+            .Error();
         should_stop_ = true;
         break;
       }
@@ -434,8 +469,14 @@ void BinlogReader::ReaderThreadFunc() {
           auto metadata_opt = BinlogEventParser::ParseTableMapEvent(rpl.buffer, rpl.size);
           if (metadata_opt) {
             if (!FetchColumnNames(metadata_opt.value())) {
-              spdlog::warn("Failed to fetch column names for {}.{}, using col_N placeholders",
-                           metadata_opt->database_name, metadata_opt->table_name);
+              mygram::utils::StructuredLog()
+                  .Event("binlog_warning")
+                  .Field("type", "column_fetch_failed")
+                  .Field("database", metadata_opt->database_name)
+                  .Field("table", metadata_opt->table_name)
+                  .Field("gtid", GetCurrentGTID())
+                  .Message("Failed to fetch column names, using col_N placeholders")
+                  .Warn();
             }
             table_metadata_cache_.Add(metadata_opt->table_id, metadata_opt.value());
             spdlog::debug("Cached TABLE_MAP: {}.{} (table_id={})", metadata_opt->database_name,
@@ -498,7 +539,13 @@ void BinlogReader::WorkerThreadFunc() {
     }
 
     if (!ProcessEvent(event)) {
-      spdlog::error("Failed to process event for table {}, pk: {}", event.table_name, event.primary_key);
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "event_processing_failed")
+          .Field("table", event.table_name)
+          .Field("primary_key", event.primary_key)
+          .Field("gtid", event.gtid)
+          .Error();
     }
 
     processed_events_++;
@@ -558,7 +605,13 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
       return true;
     }
     if (!table_iter->second->index || !table_iter->second->doc_store) {
-      spdlog::error("Table context for '{}' has null index or doc_store", event.table_name);
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "null_table_context")
+          .Field("table", event.table_name)
+          .Field("gtid", event.gtid)
+          .Field("error", "Table context has null index or doc_store")
+          .Error();
       return false;
     }
     current_index = table_iter->second->index.get();
@@ -605,8 +658,15 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
         return true;
       }
       // Cache mismatch (column count changed?), fall through to query
-      spdlog::warn("Cached column names for {}.{} have mismatched count (cached={}, current={})",
-                   metadata.database_name, metadata.table_name, column_names.size(), metadata.columns.size());
+      mygram::utils::StructuredLog()
+          .Event("binlog_warning")
+          .Field("type", "column_cache_mismatch")
+          .Field("database", metadata.database_name)
+          .Field("table", metadata.table_name)
+          .Field("cached_count", static_cast<int64_t>(column_names.size()))
+          .Field("current_count", static_cast<int64_t>(metadata.columns.size()))
+          .Message("Cached column names have mismatched count")
+          .Warn();
       column_names_cache_.erase(cache_it);  // Remove stale cache entry
     }
   }
@@ -629,10 +689,15 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   std::string query = "SHOW COLUMNS FROM `" + escape_identifier(metadata.database_name) + "`.`" +
                       escape_identifier(metadata.table_name) + "`";
 
-  MySQLResult result = connection_.Execute(query);
-  if (!result) {
-    spdlog::error("Failed to query column names for {}.{}: {}", metadata.database_name, metadata.table_name,
-                  connection_.GetLastError());
+  auto result_exp = connection_.Execute(query);
+  if (!result_exp) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "column_query_failed")
+        .Field("database", metadata.database_name)
+        .Field("table", metadata.table_name)
+        .Field("error", connection_.GetLastError())
+        .Error();
     return false;
   }
 
@@ -640,15 +705,21 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   column_names.reserve(metadata.columns.size());
 
   MYSQL_ROW row = nullptr;
-  while ((row = mysql_fetch_row(result.get())) != nullptr) {
+  while ((row = mysql_fetch_row(result_exp->get())) != nullptr) {
     column_names.emplace_back(row[0]);
   }
 
   // result automatically freed by MySQLResult destructor
 
   if (column_names.size() != metadata.columns.size()) {
-    spdlog::error("Column count mismatch for {}.{}: SHOW COLUMNS returned {}, binlog has {}", metadata.database_name,
-                  metadata.table_name, column_names.size(), metadata.columns.size());
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "column_count_mismatch")
+        .Field("database", metadata.database_name)
+        .Field("table", metadata.table_name)
+        .Field("show_columns_count", static_cast<int64_t>(column_names.size()))
+        .Field("binlog_count", static_cast<int64_t>(metadata.columns.size()))
+        .Error();
     return false;
   }
 

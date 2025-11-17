@@ -12,7 +12,11 @@
 #include <cstring>
 #include <fstream>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::storage {
+
+using mygram::utils::ErrorCode;
 
 namespace {
 
@@ -84,15 +88,26 @@ inline void ReadBinary(std::istream& input_stream, T& data) {
 
 }  // namespace
 
-DocId DocumentStore::AddDocument(const std::string& primary_key,
-                                 const std::unordered_map<std::string, FilterValue>& filters) {
+Expected<DocId, Error> DocumentStore::AddDocument(const std::string& primary_key,
+                                                  const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if primary key already exists
   auto iterator = pk_to_doc_id_.find(primary_key);
   if (iterator != pk_to_doc_id_.end()) {
-    spdlog::warn("Primary key {} already exists with DocID {}", primary_key, iterator->second);
+    mygram::utils::StructuredLog()
+        .Event("storage_warning")
+        .Field("type", "duplicate_primary_key")
+        .Field("primary_key", primary_key)
+        .Field("existing_doc_id", static_cast<uint64_t>(iterator->second))
+        .Warn();
     return iterator->second;
+  }
+
+  // Check for DocID overflow (uint32_t wraparound to 0)
+  if (next_doc_id_ == 0) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDocIdExhausted, "DocID space exhausted (4 billion limit reached)", ""));
   }
 
   // Assign new DocID
@@ -112,7 +127,7 @@ DocId DocumentStore::AddDocument(const std::string& primary_key,
   return doc_id;
 }
 
-std::vector<DocId> DocumentStore::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
+Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   std::vector<DocId> doc_ids;
   doc_ids.reserve(documents.size());
 
@@ -127,9 +142,20 @@ std::vector<DocId> DocumentStore::AddDocumentBatch(const std::vector<DocumentIte
     // Check if primary key already exists
     auto iterator = pk_to_doc_id_.find(doc.primary_key);
     if (iterator != pk_to_doc_id_.end()) {
-      spdlog::warn("Primary key {} already exists with DocID {}", doc.primary_key, iterator->second);
+      mygram::utils::StructuredLog()
+          .Event("storage_warning")
+          .Field("type", "duplicate_primary_key_batch")
+          .Field("primary_key", doc.primary_key)
+          .Field("existing_doc_id", static_cast<uint64_t>(iterator->second))
+          .Warn();
       doc_ids.push_back(iterator->second);
       continue;
+    }
+
+    // Check for DocID overflow (uint32_t wraparound to 0)
+    if (next_doc_id_ == 0) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDocIdExhausted,
+                                      "DocID space exhausted (4 billion limit reached) during batch add", ""));
     }
 
     // Assign new DocID
@@ -158,7 +184,11 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::s
   // Check if document exists
   auto iterator = doc_id_to_pk_.find(doc_id);
   if (iterator == doc_id_to_pk_.end()) {
-    spdlog::warn("Document {} does not exist", doc_id);
+    mygram::utils::StructuredLog()
+        .Event("storage_warning")
+        .Field("type", "document_not_found")
+        .Field("doc_id", static_cast<uint64_t>(doc_id))
+        .Warn();
     return false;
   }
 
@@ -333,12 +363,13 @@ void DocumentStore::Clear() {
   spdlog::info("Document store cleared");
 }
 
-bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& replication_gtid) const {
+Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
+                                                const std::string& replication_gtid) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) {
-      spdlog::error("Failed to open file for writing: {}", filepath);
-      return false;
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open file for writing", filepath));
     }
 
     // File format:
@@ -428,35 +459,35 @@ bool DocumentStore::SaveToFile(const std::string& filepath, const std::string& r
     ofs.close();
     spdlog::info("Saved document store to {}: {} documents, {} MB", filepath, doc_count,
                  MemoryUsage() / kBytesPerMegabyte);
-    return true;
+    return {};
   } catch (const std::exception& e) {
-    spdlog::error("Exception while saving document store: {}", e.what());
-    return false;
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                    std::string("Exception while saving document store: ") + e.what(), filepath));
   }
 }
 
-bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* replication_gtid) {
+Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, std::string* replication_gtid) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
-      spdlog::error("Failed to open file for reading: {}", filepath);
-      return false;
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to open file for reading", filepath));
     }
 
     // Read and verify magic number
     std::array<char, 4> magic{};
     ifs.read(magic.data(), magic.size());
     if (std::memcmp(magic.data(), "MGDS", 4) != 0) {
-      spdlog::error("Invalid document store file format (bad magic number)");
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Invalid document store file format (bad magic number)", filepath));
     }
 
     // Read version
     uint32_t version = 0;
     ReadBinary(ifs, version);
     if (version != 1) {
-      spdlog::error("Unsupported document store file version: {}", version);
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Unsupported document store file version: " + std::to_string(version), filepath));
     }
 
     // Read next_doc_id (will be set later under lock)
@@ -469,19 +500,21 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     uint32_t gtid_len = 0;
     ReadBinary(ifs, gtid_len);
     if (!ifs.good()) {
-      spdlog::error("Failed to read GTID length from snapshot");
-      return false;
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID length from snapshot", filepath));
     }
     if (gtid_len > kMaxGTIDLength) {
-      spdlog::error("GTID length {} exceeds maximum allowed {}", gtid_len, kMaxGTIDLength);
-      return false;
+      return MakeUnexpected(MakeError(
+          mygram::utils::ErrorCode::kStorageCorrupted,
+          "GTID length " + std::to_string(gtid_len) + " exceeds maximum allowed " + std::to_string(kMaxGTIDLength),
+          filepath));
     }
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       ifs.read(gtid.data(), gtid_len);
       if (!ifs.good()) {
-        spdlog::error("Failed to read GTID data from snapshot");
-        return false;
+        return MakeUnexpected(
+            MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID data from snapshot", filepath));
       }
       if (replication_gtid != nullptr) {
         *replication_gtid = gtid;
@@ -494,12 +527,14 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
     uint64_t doc_count = 0;
     ReadBinary(ifs, doc_count);
     if (!ifs.good()) {
-      spdlog::error("Failed to read document count from snapshot");
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                      "Failed to read document count from snapshot", filepath));
     }
     if (doc_count > kMaxDocumentCount) {
-      spdlog::error("Document count {} exceeds maximum allowed {}", doc_count, kMaxDocumentCount);
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Document count " + std::to_string(doc_count) + " exceeds maximum allowed " +
+                                          std::to_string(kMaxDocumentCount),
+                                      filepath));
     }
 
     // Load into new maps to minimize lock time
@@ -522,8 +557,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       uint32_t pk_len = 0;
       ReadBinary(ifs, pk_len);
       if (pk_len > kMaxPKLength) {
-        spdlog::error("Primary key length {} exceeds maximum allowed {}", pk_len, kMaxPKLength);
-        return false;
+        return MakeUnexpected(MakeError(
+            mygram::utils::ErrorCode::kStorageCorrupted,
+            "Primary key length " + std::to_string(pk_len) + " exceeds maximum allowed " + std::to_string(kMaxPKLength),
+            filepath));
       }
 
       std::string primary_key_str(pk_len, '\0');
@@ -536,8 +573,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
       uint32_t filter_count = 0;
       ReadBinary(ifs, filter_count);
       if (filter_count > kMaxFilterCount) {
-        spdlog::error("Filter count {} exceeds maximum allowed {}", filter_count, kMaxFilterCount);
-        return false;
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                        "Filter count " + std::to_string(filter_count) + " exceeds maximum allowed " +
+                                            std::to_string(kMaxFilterCount),
+                                        filepath));
       }
 
       if (filter_count > 0) {
@@ -548,8 +587,10 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
           uint32_t name_len = 0;
           ReadBinary(ifs, name_len);
           if (name_len > kMaxFilterNameLength) {
-            spdlog::error("Filter name length {} exceeds maximum allowed {}", name_len, kMaxFilterNameLength);
-            return false;
+            return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                            "Filter name length " + std::to_string(name_len) +
+                                                " exceeds maximum allowed " + std::to_string(kMaxFilterNameLength),
+                                            filepath));
           }
 
           std::string name(name_len, '\0');
@@ -624,8 +665,11 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
               uint32_t str_len = 0;
               ReadBinary(ifs, str_len);
               if (str_len > kMaxFilterStringLength) {
-                spdlog::error("Filter string length {} exceeds maximum allowed {}", str_len, kMaxFilterStringLength);
-                return false;
+                return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                                "Filter string length " + std::to_string(str_len) +
+                                                    " exceeds maximum allowed " +
+                                                    std::to_string(kMaxFilterStringLength),
+                                                filepath));
               }
               std::string string_value(str_len, '\0');
               ifs.read(string_value.data(), str_len);
@@ -639,8 +683,8 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
               break;
             }
             default:
-              spdlog::error("Unknown filter type index: {}", type_idx);
-              return false;
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Unknown filter type index: " + std::to_string(type_idx), filepath));
           }
 
           filters[name] = value;
@@ -663,14 +707,15 @@ bool DocumentStore::LoadFromFile(const std::string& filepath, std::string* repli
 
     spdlog::info("Loaded document store from {}: {} documents, {} MB", filepath, doc_count,
                  MemoryUsage() / kBytesPerMegabyte);
-    return true;
+    return {};
   } catch (const std::exception& e) {
-    spdlog::error("Exception while loading document store: {}", e.what());
-    return false;
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                    std::string("Exception while loading document store: ") + e.what(), filepath));
   }
 }
 
-bool DocumentStore::SaveToStream(std::ostream& output_stream, const std::string& replication_gtid) const {
+Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
+                                                  const std::string& replication_gtid) const {
   try {
     // File format:
     // [4 bytes: magic "MGDS"] [4 bytes: version] [4 bytes: next_doc_id]
@@ -757,34 +802,34 @@ bool DocumentStore::SaveToStream(std::ostream& output_stream, const std::string&
     }
 
     if (!output_stream.good()) {
-      spdlog::error("Stream error while saving document store");
-      return false;
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Stream error while saving document store"));
     }
 
     spdlog::debug("Saved document store to stream: {} documents", doc_count);
-    return true;
+    return {};
   } catch (const std::exception& e) {
-    spdlog::error("Exception while saving document store to stream: {}", e.what());
-    return false;
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                    std::string("Exception while saving document store to stream: ") + e.what()));
   }
 }
 
-bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* replication_gtid) {
+Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, std::string* replication_gtid) {
   try {
     // Read and verify magic number
     std::array<char, 4> magic{};
     input_stream.read(magic.data(), magic.size());
     if (std::memcmp(magic.data(), "MGDS", 4) != 0) {
-      spdlog::error("Invalid document store stream format (bad magic number)");
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Invalid document store stream format (bad magic number)"));
     }
 
     // Read version
     uint32_t version = 0;
     ReadBinary(input_stream, version);
     if (version != 1) {
-      spdlog::error("Unsupported document store stream version: {}", version);
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Unsupported document store stream version: " + std::to_string(version)));
     }
 
     // Read next_doc_id (will be set later under lock)
@@ -797,8 +842,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     uint32_t gtid_len = 0;
     ReadBinary(input_stream, gtid_len);
     if (gtid_len > kMaxGTIDLength) {
-      spdlog::error("GTID length {} exceeds maximum allowed {}", gtid_len, kMaxGTIDLength);
-      return false;
+      return MakeUnexpected(MakeError(
+          mygram::utils::ErrorCode::kStorageCorrupted,
+          "GTID length " + std::to_string(gtid_len) + " exceeds maximum allowed " + std::to_string(kMaxGTIDLength)));
     }
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
@@ -814,8 +860,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     uint64_t doc_count = 0;
     ReadBinary(input_stream, doc_count);
     if (doc_count > kMaxDocumentCount) {
-      spdlog::error("Document count {} exceeds maximum allowed {}", doc_count, kMaxDocumentCount);
-      return false;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Document count " + std::to_string(doc_count) + " exceeds maximum allowed " +
+                                          std::to_string(kMaxDocumentCount)));
     }
 
     // Load into new maps to minimize lock time
@@ -838,8 +885,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
       uint32_t pk_len = 0;
       ReadBinary(input_stream, pk_len);
       if (pk_len > kMaxPKLength) {
-        spdlog::error("Primary key length {} exceeds maximum allowed {}", pk_len, kMaxPKLength);
-        return false;
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                        "Primary key length " + std::to_string(pk_len) + " exceeds maximum allowed " +
+                                            std::to_string(kMaxPKLength)));
       }
 
       std::string primary_key_str(pk_len, '\0');
@@ -852,8 +900,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
       uint32_t filter_count = 0;
       ReadBinary(input_stream, filter_count);
       if (filter_count > kMaxFilterCount) {
-        spdlog::error("Filter count {} exceeds maximum allowed {}", filter_count, kMaxFilterCount);
-        return false;
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                        "Filter count " + std::to_string(filter_count) + " exceeds maximum allowed " +
+                                            std::to_string(kMaxFilterCount)));
       }
 
       if (filter_count > 0) {
@@ -864,8 +913,9 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
           uint32_t name_len = 0;
           ReadBinary(input_stream, name_len);
           if (name_len > kMaxFilterNameLength) {
-            spdlog::error("Filter name length {} exceeds maximum allowed {}", name_len, kMaxFilterNameLength);
-            return false;
+            return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                            "Filter name length " + std::to_string(name_len) +
+                                                " exceeds maximum allowed " + std::to_string(kMaxFilterNameLength)));
           }
 
           std::string name(name_len, '\0');
@@ -940,8 +990,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
               uint32_t str_len = 0;
               ReadBinary(input_stream, str_len);
               if (str_len > kMaxFilterStringLength) {
-                spdlog::error("Filter string length {} exceeds maximum allowed {}", str_len, kMaxFilterStringLength);
-                return false;
+                return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                                "Filter string length " + std::to_string(str_len) +
+                                                    " exceeds maximum allowed " +
+                                                    std::to_string(kMaxFilterStringLength)));
               }
               std::string str_value(str_len, '\0');
               input_stream.read(str_value.data(), static_cast<std::streamsize>(str_len));
@@ -955,8 +1007,8 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
               break;
             }
             default:
-              spdlog::error("Unknown filter type index: {}", type_idx);
-              return false;
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Unknown filter type index: " + std::to_string(type_idx)));
           }
 
           filters[name] = value;
@@ -967,8 +1019,8 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     }
 
     if (!input_stream.good()) {
-      spdlog::error("Stream error while loading document store");
-      return false;
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error while loading document store"));
     }
 
     // Swap the loaded data in with minimal lock time
@@ -981,10 +1033,10 @@ bool DocumentStore::LoadFromStream(std::istream& input_stream, std::string* repl
     }
 
     spdlog::debug("Loaded document store from stream: {} documents", doc_count);
-    return true;
+    return {};
   } catch (const std::exception& e) {
-    spdlog::error("Exception while loading document store from stream: {}", e.what());
-    return false;
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                    std::string("Exception while loading document store from stream: ") + e.what()));
   }
 }
 

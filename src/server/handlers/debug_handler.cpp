@@ -11,6 +11,7 @@
 
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -74,7 +75,12 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
           oss << "available=" << utils::FormatBytes(sys_info->available_physical_bytes)
               << " total=" << utils::FormatBytes(sys_info->total_physical_bytes);
         }
-        spdlog::warn("OPTIMIZE rejected due to critical memory status: {}", oss.str());
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "optimize_rejected")
+            .Field("reason", "critical_memory_status")
+            .Field("details", oss.str())
+            .Warn();
         return ResponseFormatter::FormatError("Memory critically low. Cannot start optimization: " + oss.str());
       }
 
@@ -92,7 +98,12 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         if (sys_info) {
           oss << " available=" << utils::FormatBytes(sys_info->available_physical_bytes);
         }
-        spdlog::warn("OPTIMIZE rejected due to insufficient memory: {}", oss.str());
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "optimize_rejected")
+            .Field("reason", "insufficient_memory")
+            .Field("details", oss.str())
+            .Warn();
         return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str());
       }
 

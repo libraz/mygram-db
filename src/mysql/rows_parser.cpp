@@ -32,6 +32,7 @@
 #include <sstream>
 
 #include "mysql/binlog_util.h"
+#include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
 
@@ -100,7 +101,11 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
         str_data = data + 1;
       }
       if (str_len > kMaxFieldLength || str_data + str_len > end) {
-        spdlog::error("VARCHAR field length {} exceeds bounds", str_len);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "varchar_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(str_len))
+            .Error();
         return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(str_data), str_len};
@@ -140,7 +145,11 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           break;
       }
       if (blob_len > kMaxFieldLength || blob_data + blob_len > end) {
-        spdlog::error("BLOB field length {} exceeds bounds", blob_len);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "blob_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(blob_len))
+            .Error();
         return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(blob_data), blob_len};
@@ -171,7 +180,11 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
         str_data = data + 1;
       }
       if (str_len > kMaxFieldLength || str_data + str_len > end) {
-        spdlog::error("STRING field length {} exceeds bounds", str_len);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "string_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(str_len))
+            .Error();
         return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(str_data), str_len};
@@ -214,7 +227,11 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           break;
       }
       if (json_len > kMaxFieldLength || json_data + json_len > end) {
-        spdlog::error("JSON field length {} exceeds bounds", json_len);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "json_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(json_len))
+            .Error();
         return "[TRUNCATED]";
       }
       return {reinterpret_cast<const char*>(json_data), json_len};
@@ -336,7 +353,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
 
     // Parse post-header
     if (ptr + 8 > end) {
-      spdlog::error("WRITE_ROWS event too short for post-header");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "write_rows_too_short")
+          .Field("section", "post-header")
+          .Error();
       return std::nullopt;
     }
 
@@ -350,7 +371,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       if (ptr >= end) {
-        spdlog::error("WRITE_ROWS event too short for extra_row_info_length");
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "write_rows_too_short")
+            .Field("section", "extra_row_info_length")
+            .Error();
         return std::nullopt;
       }
       uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
@@ -360,20 +385,34 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     // Parse body
     // width (packed integer) - number of columns
     if (ptr >= end) {
-      spdlog::error("WRITE_ROWS event too short for width");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "write_rows_too_short")
+          .Field("section", "width")
+          .Error();
       return std::nullopt;
     }
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "column_count_mismatch")
+          .Field("event_type", "write_rows")
+          .Field("event_columns", column_count)
+          .Field("table_columns", static_cast<uint64_t>(table_metadata->columns.size()))
+          .Error();
       return std::nullopt;
     }
 
     // columns_present bitmap - which columns are in the event
     size_t bitmap_size = binlog_util::bitmap_bytes(column_count);
     if (ptr + bitmap_size > end) {
-      spdlog::error("WRITE_ROWS event too short for columns_present bitmap");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "write_rows_too_short")
+          .Field("section", "columns_present bitmap")
+          .Error();
       return std::nullopt;
     }
     const unsigned char* columns_present = ptr;
@@ -429,7 +468,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
 
         if (ptr > end) {
-          spdlog::error("WRITE_ROWS event truncated while parsing column {}", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "write_rows_truncated")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Error();
           return std::nullopt;
         }
 
@@ -452,7 +495,13 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
           uint32_t field_size =
               binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "unsupported_column_type")
+                .Field("event_type", "write_rows")
+                .Field("column_type", static_cast<int64_t>(col_meta.type))
+                .Field("column_name", col_meta.name)
+                .Warn();
             return std::nullopt;
           }
           ptr += field_size;
@@ -468,7 +517,12 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     return rows;
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception while parsing WRITE_ROWS event: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "parse_exception")
+        .Field("event_type", "write_rows")
+        .Field("error", e.what())
+        .Error();
     return std::nullopt;
   }
 }
@@ -494,7 +548,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
     // Parse post-header (same as WRITE_ROWS)
     if (ptr + 8 > end) {
-      spdlog::error("UPDATE_ROWS event too short for post-header");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "update_rows_too_short")
+          .Field("section", "post-header")
+          .Error();
       return std::nullopt;
     }
 
@@ -507,7 +565,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       // Read extra_row_info_length (packed integer)
       if (ptr >= end) {
-        spdlog::error("UPDATE_ROWS event too short for extra_row_info_length");
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "update_rows_too_short")
+            .Field("section", "extra_row_info_length")
+            .Error();
         return std::nullopt;
       }
 
@@ -530,12 +592,21 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
       // So we need to skip (extra_info_len - len_bytes) more bytes
       auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
       if (skip_bytes < 0) {
-        spdlog::error("Invalid extra_row_info_len: {} (packed int used {} bytes)", extra_info_len, len_bytes);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "invalid_extra_row_info_len")
+            .Field("extra_info_len", extra_info_len)
+            .Field("packed_int_bytes", static_cast<uint64_t>(len_bytes))
+            .Error();
         return std::nullopt;
       }
 
       if (ptr + skip_bytes > end) {
-        spdlog::error("UPDATE_ROWS event too short for extra_row_info data");
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "update_rows_too_short")
+            .Field("section", "extra_row_info data")
+            .Error();
         return std::nullopt;
       }
 
@@ -554,7 +625,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
     // Parse body
     if (ptr >= end) {
-      spdlog::error("UPDATE_ROWS event too short for width");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "update_rows_too_short")
+          .Field("section", "width")
+          .Error();
       return std::nullopt;
     }
 
@@ -573,14 +648,24 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
                   *column_count_ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "column_count_mismatch")
+          .Field("event_type", "update_rows")
+          .Field("event_columns", column_count)
+          .Field("table_columns", static_cast<uint64_t>(table_metadata->columns.size()))
+          .Error();
       return std::nullopt;
     }
 
     // columns_before_image bitmap - which columns are in the before image
     size_t bitmap_size = binlog_util::bitmap_bytes(column_count);
     if (ptr + bitmap_size > end) {
-      spdlog::error("UPDATE_ROWS event too short for columns_before_image bitmap");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "update_rows_too_short")
+          .Field("section", "columns_before_image bitmap")
+          .Error();
       return std::nullopt;
     }
     const unsigned char* columns_before = ptr;
@@ -588,7 +673,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
     // columns_after_image bitmap - which columns are in the after image
     if (ptr + bitmap_size > end) {
-      spdlog::error("UPDATE_ROWS event too short for columns_after_image bitmap");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "update_rows_too_short")
+          .Field("section", "columns_after_image bitmap")
+          .Error();
       return std::nullopt;
     }
     const unsigned char* columns_after = ptr;
@@ -671,7 +760,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
-          spdlog::error("Field truncation detected at column {}", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "field_truncation")
+              .Field("event_type", "update_rows")
+              .Field("image", "before")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Error();
           return std::nullopt;
         }
 
@@ -696,7 +791,14 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           uint32_t field_size =
               binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "unsupported_column_type")
+                .Field("event_type", "update_rows")
+                .Field("image", "before")
+                .Field("column_type", static_cast<int64_t>(col_meta.type))
+                .Field("column_name", col_meta.name)
+                .Warn();
             return std::nullopt;
           }
           spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
@@ -749,7 +851,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
-          spdlog::error("Field truncation detected in after image at column {}", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "field_truncation")
+              .Field("event_type", "update_rows")
+              .Field("image", "after")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Error();
           return std::nullopt;
         }
 
@@ -774,7 +882,14 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           uint32_t field_size =
               binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "unsupported_column_type")
+                .Field("event_type", "update_rows")
+                .Field("image", "after")
+                .Field("column_type", static_cast<int64_t>(col_meta.type))
+                .Field("column_name", col_meta.name)
+                .Warn();
             return std::nullopt;
           }
           spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
@@ -796,7 +911,12 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     return row_pairs;
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception while parsing UPDATE_ROWS event: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "parse_exception")
+        .Field("event_type", "update_rows")
+        .Field("error", e.what())
+        .Error();
     return std::nullopt;
   }
 }
@@ -815,7 +935,11 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
 
     // Parse post-header
     if (ptr + 8 > end) {
-      spdlog::error("DELETE_ROWS event too short for post-header");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "delete_rows_too_short")
+          .Field("section", "post-header")
+          .Error();
       return std::nullopt;
     }
 
@@ -826,7 +950,11 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       if (ptr >= end) {
-        spdlog::error("DELETE_ROWS event too short for extra_row_info_length");
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "delete_rows_too_short")
+            .Field("section", "extra_row_info_length")
+            .Error();
         return std::nullopt;
       }
       uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
@@ -835,20 +963,34 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
 
     // Parse body
     if (ptr >= end) {
-      spdlog::error("DELETE_ROWS event too short for width");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "delete_rows_too_short")
+          .Field("section", "width")
+          .Error();
       return std::nullopt;
     }
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
     if (column_count != table_metadata->columns.size()) {
-      spdlog::error("Column count mismatch: event has {}, table has {}", column_count, table_metadata->columns.size());
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "column_count_mismatch")
+          .Field("event_type", "delete_rows")
+          .Field("event_columns", column_count)
+          .Field("table_columns", static_cast<uint64_t>(table_metadata->columns.size()))
+          .Error();
       return std::nullopt;
     }
 
     // columns_present bitmap - which columns are in the event (before image only)
     size_t bitmap_size = binlog_util::bitmap_bytes(column_count);
     if (ptr + bitmap_size > end) {
-      spdlog::error("DELETE_ROWS event too short for columns_present bitmap");
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "delete_rows_too_short")
+          .Field("section", "columns_present bitmap")
+          .Error();
       return std::nullopt;
     }
     const unsigned char* columns_present = ptr;
@@ -903,7 +1045,11 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
         bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
 
         if (ptr > end) {
-          spdlog::error("DELETE_ROWS event truncated while parsing column {}", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "delete_rows_truncated")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Error();
           return std::nullopt;
         }
 
@@ -911,7 +1057,12 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
-          spdlog::error("Field truncation detected in DELETE_ROWS at column {}", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "field_truncation")
+              .Field("event_type", "delete_rows")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Error();
           return std::nullopt;
         }
 
@@ -929,7 +1080,13 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           uint32_t field_size =
               binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
           if (field_size == 0) {
-            spdlog::warn("Unsupported column type {} for column {}", static_cast<int>(col_meta.type), col_meta.name);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "unsupported_column_type")
+                .Field("event_type", "delete_rows")
+                .Field("column_type", static_cast<int64_t>(col_meta.type))
+                .Field("column_name", col_meta.name)
+                .Warn();
             return std::nullopt;
           }
           ptr += field_size;
@@ -945,7 +1102,12 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     return rows;
 
   } catch (const std::exception& e) {
-    spdlog::error("Exception while parsing DELETE_ROWS event: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "parse_exception")
+        .Field("event_type", "delete_rows")
+        .Field("error", e.what())
+        .Error();
     return std::nullopt;
   }
 }
@@ -958,7 +1120,11 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
     // Check if column exists in row data
     auto iterator = row_data.columns.find(filter_config.name);
     if (iterator == row_data.columns.end()) {
-      spdlog::warn("Filter column '{}' not found in row data", filter_config.name);
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "filter_column_not_found")
+          .Field("column_name", filter_config.name)
+          .Warn();
       continue;
     }
 
@@ -995,10 +1161,21 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
         // Boolean: "1"/"true" = true, "0"/"false" = false
         filters[filter_config.name] = (value_str == "1" || value_str == "true");
       } else {
-        spdlog::warn("Unknown filter type '{}' for column '{}'", filter_config.type, filter_config.name);
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unknown_filter_type")
+            .Field("filter_type", filter_config.type)
+            .Field("column_name", filter_config.name)
+            .Warn();
       }
     } catch (const std::exception& e) {
-      spdlog::error("Failed to convert filter value '{}' for column '{}': {}", value_str, filter_config.name, e.what());
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "filter_conversion_failed")
+          .Field("value", value_str)
+          .Field("column_name", filter_config.name)
+          .Field("error", e.what())
+          .Error();
     }
   }
 

@@ -300,6 +300,40 @@ When implementing features or making changes, prioritize in this order:
 
 For detailed coding guidelines, see [CLAUDE.md](../../CLAUDE.md) in the project root.
 
+## Linux CI Testing (macOS Developers)
+
+If you're developing on macOS, certain issues (missing headers, compiler differences) only appear in Linux environments and fail in CI.
+
+**Solution:** Test your code in the same Linux environment used by GitHub Actions CI **before pushing**.
+
+```bash
+# Run full CI checks (recommended before git push)
+make docker-ci-check
+```
+
+This runs:
+1. Code formatting check
+2. Build (with same flags as CI)
+3. Clang-tidy linting
+4. All tests
+
+**Individual checks:**
+
+```bash
+make docker-build-linux       # Build only
+make docker-test-linux        # Test only
+make docker-lint-linux        # Lint only
+make docker-format-check-linux # Format check only
+```
+
+**Interactive shell:**
+
+```bash
+make docker-dev-shell         # Enter Linux container for debugging
+```
+
+See [Linux Testing Guide](./linux-testing.md) for details.
+
 ## Contributing
 
 Before submitting changes:
@@ -309,7 +343,8 @@ Before submitting changes:
 3. **Run `make format-check`** to verify formatting (CI equivalent)
 4. **Run `make lint`** to check code quality (optional locally, required in CI)
 5. **Run `make test`** to ensure all tests pass
-6. **Commit changes** if all checks pass
+6. **[macOS only] Run `make docker-ci-check`** to verify Linux CI compatibility
+7. **Commit changes** if all checks pass
 
 Checklist:
 - [ ] Code follows Google C++ Style Guide (120 char line limit)
@@ -320,4 +355,5 @@ Checklist:
 - [ ] Code formatted (`make format-check` passes)
 - [ ] No clang-tidy warnings (`make lint` passes)
 - [ ] No compiler warnings
+- [ ] [macOS only] Linux CI checks pass (`make docker-ci-check`)
 - [ ] Documentation updated (if needed)

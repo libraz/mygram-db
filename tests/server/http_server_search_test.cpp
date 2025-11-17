@@ -50,9 +50,9 @@ class HttpServerTest : public ::testing::Test {
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 
     // Index documents
-    index->AddDocument(doc_id1, "machine learning");
-    index->AddDocument(doc_id2, "breaking news");
-    index->AddDocument(doc_id3, "old article");
+    index->AddDocument(*doc_id1, "machine learning");
+    index->AddDocument(*doc_id2, "breaking news");
+    index->AddDocument(*doc_id3, "old article");
 
     // Create table context
     table_context_.name = "test";
@@ -332,12 +332,12 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
   std::unordered_map<std::string, storage::FilterValue> filters_bool_true;
   filters_bool_true["published"] = true;
   auto doc_id_bool1 = doc_store_->AddDocument("bool_article_1", filters_bool_true);
-  index_->AddDocument(doc_id_bool1, "boolean test");
+  index_->AddDocument(*doc_id_bool1, "boolean test");
 
   std::unordered_map<std::string, storage::FilterValue> filters_bool_false;
   filters_bool_false["published"] = false;
   auto doc_id_bool2 = doc_store_->AddDocument("bool_article_2", filters_bool_false);
-  index_->AddDocument(doc_id_bool2, "boolean test");
+  index_->AddDocument(*doc_id_bool2, "boolean test");
 
   // Test bool filter with "true"
   json request_body;
@@ -550,7 +550,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
   // Add 150 documents (more than default limit)
   for (int i = 0; i < 150; ++i) {
     auto doc_id = table_context.doc_store->AddDocument("doc_" + std::to_string(i), {});
-    table_context.index->AddDocument(doc_id, "test content");
+    table_context.index->AddDocument(*doc_id, "test content");
   }
 
   std::unordered_map<std::string, TableContext*> table_contexts;

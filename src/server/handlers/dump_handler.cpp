@@ -16,6 +16,7 @@
 #include <sstream>
 
 #include "storage/dump_format_v1.h"
+#include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -78,7 +79,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
       for (const auto& table : ctx_.syncing_tables) {
         oss << " " << table;
       }
-      spdlog::warn("{}", oss.str());
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("operation", "dump_save")
+          .Field("reason", "sync_in_progress")
+          .Field("details", oss.str())
+          .Warn();
     }
   }
 #endif
@@ -115,7 +121,11 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   // Check if full_config is available
   if (ctx_.full_config == nullptr) {
     std::string error_msg = "Cannot save dump: server configuration is not available";
-    spdlog::error("{}", error_msg);
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "dump_save")
+        .Field("reason", "config_not_available")
+        .Error();
     return ResponseFormatter::FormatError(error_msg);
   }
 
@@ -138,15 +148,20 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   }
 
   // Call dump_v1 API
-  bool success = storage::dump_v1::WriteDumpV1(filepath, gtid, *ctx_.full_config, converted_contexts);
+  auto result = storage::dump_v1::WriteDumpV1(filepath, gtid, *ctx_.full_config, converted_contexts);
 
-  if (success) {
+  if (result) {
     spdlog::info("Successfully saved dump to: {}", filepath);
     return ResponseFormatter::FormatSaveResponse(filepath);
   }
 
-  std::string error_msg = "Failed to save dump to: " + filepath;
-  spdlog::error("{}", error_msg);
+  std::string error_msg = "Failed to save dump to " + filepath + ": " + result.error().message();
+  mygram::utils::StructuredLog()
+      .Event("server_error")
+      .Field("operation", "dump_save")
+      .Field("filepath", filepath)
+      .Field("error", result.error().message())
+      .Error();
   return ResponseFormatter::FormatError(error_msg);
 }
 
@@ -204,19 +219,24 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   storage::dump_format::IntegrityError integrity_error;
 
   // Call dump_v1 API
-  bool success = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
-                                              &integrity_error);
+  auto result = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
+                                             &integrity_error);
 
-  if (success) {
+  if (result) {
     spdlog::info("Successfully loaded dump from: {} (GTID: {})", filepath, gtid);
     return ResponseFormatter::FormatLoadResponse(filepath);
   }
 
-  std::string error_msg = "Failed to load dump from: " + filepath;
+  std::string error_msg = "Failed to load dump from " + filepath + ": " + result.error().message();
   if (!integrity_error.message.empty()) {
     error_msg += " (" + integrity_error.message + ")";
   }
-  spdlog::error("{}", error_msg);
+  mygram::utils::StructuredLog()
+      .Event("server_error")
+      .Field("operation", "dump_load")
+      .Field("filepath", filepath)
+      .Field("error", error_msg)
+      .Error();
   return ResponseFormatter::FormatError(error_msg);
 }
 
@@ -245,18 +265,23 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   spdlog::info("Verifying dump: {}", filepath);
 
   storage::dump_format::IntegrityError integrity_error;
-  bool success = storage::dump_v1::VerifyDumpIntegrity(filepath, integrity_error);
+  auto result = storage::dump_v1::VerifyDumpIntegrity(filepath, integrity_error);
 
-  if (success) {
+  if (result) {
     spdlog::info("Dump verification succeeded: {}", filepath);
     return "OK DUMP_VERIFIED " + filepath;
   }
 
-  std::string error_msg = "Dump verification failed: " + filepath;
+  std::string error_msg = "Dump verification failed for " + filepath + ": " + result.error().message();
   if (!integrity_error.message.empty()) {
     error_msg += " (" + integrity_error.message + ")";
   }
-  spdlog::error("{}", error_msg);
+  mygram::utils::StructuredLog()
+      .Event("server_error")
+      .Field("operation", "dump_verify")
+      .Field("filepath", filepath)
+      .Field("error", error_msg)
+      .Error();
   return ResponseFormatter::FormatError(error_msg);
 }
 
@@ -285,10 +310,11 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   spdlog::info("Reading dump info: {}", filepath);
 
   storage::dump_v1::DumpInfo info;
-  bool success = storage::dump_v1::GetDumpInfo(filepath, info);
+  auto info_result = storage::dump_v1::GetDumpInfo(filepath, info);
 
-  if (!success) {
-    return ResponseFormatter::FormatError("Failed to read dump info from: " + filepath);
+  if (!info_result) {
+    return ResponseFormatter::FormatError("Failed to read dump info from " + filepath + ": " +
+                                          info_result.error().message());
   }
 
   std::ostringstream result;

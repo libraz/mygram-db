@@ -9,6 +9,7 @@
 
 #include "config/config_help.h"
 #include "server/statistics_service.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -63,7 +64,11 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     return "+OK\n" + result;
 
   } catch (const std::exception& e) {
-    spdlog::error("CONFIG HELP failed: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "config_help")
+        .Field("error", e.what())
+        .Error();
     return ResponseFormatter::FormatError(std::string("CONFIG HELP failed: ") + e.what());
   }
 }
@@ -71,14 +76,22 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
 std::string AdminHandler::HandleConfigShow(const std::string& path) {
   try {
     if (ctx_.full_config == nullptr) {
-      spdlog::warn("CONFIG SHOW requested but full configuration is not available");
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("operation", "config_show")
+          .Field("reason", "config_not_available")
+          .Warn();
       return ResponseFormatter::FormatError("Server configuration is not available");
     }
 
     std::string result = config::FormatConfigForDisplay(*ctx_.full_config, path);
     return "+OK\n" + result;
   } catch (const std::exception& e) {
-    spdlog::error("CONFIG SHOW failed: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "config_show")
+        .Field("error", e.what())
+        .Error();
     return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + e.what());
   }
 }
@@ -88,33 +101,39 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
   }
 
-  try {
-    // Try to load and validate the configuration file
-    config::Config test_config = config::LoadConfig(filepath);
-
-    // Build summary information
-    std::ostringstream summary;
-    summary << "Configuration is valid\n";
-    summary << "  Tables: " << test_config.tables.size();
-    if (!test_config.tables.empty()) {
-      summary << " (";
-      for (size_t i = 0; i < test_config.tables.size(); ++i) {
-        if (i > 0) {
-          summary << ", ";
-        }
-        summary << test_config.tables[i].name;
-      }
-      summary << ")";
-    }
-    summary << "\n";
-    summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port;
-
-    return "+OK\n" + summary.str();
-
-  } catch (const std::exception& e) {
-    spdlog::error("CONFIG VERIFY failed for file '{}': {}", filepath, e.what());
-    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\n  ") + e.what());
+  // Try to load and validate the configuration file
+  auto config_result = config::LoadConfig(filepath);
+  if (!config_result) {
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "config_verify")
+        .Field("filepath", filepath)
+        .Field("error", config_result.error().to_string())
+        .Error();
+    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\n  ") +
+                                          config_result.error().message());
   }
+
+  config::Config test_config = *config_result;
+
+  // Build summary information
+  std::ostringstream summary;
+  summary << "Configuration is valid\n";
+  summary << "  Tables: " << test_config.tables.size();
+  if (!test_config.tables.empty()) {
+    summary << " (";
+    for (size_t i = 0; i < test_config.tables.size(); ++i) {
+      if (i > 0) {
+        summary << ", ";
+      }
+      summary << test_config.tables[i].name;
+    }
+    summary << ")";
+  }
+  summary << "\n";
+  summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port;
+
+  return "+OK\n" + summary.str();
 }
 
 }  // namespace mygramdb::server

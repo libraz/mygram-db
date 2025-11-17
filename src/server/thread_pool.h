@@ -71,8 +71,10 @@ class ThreadPool {
 
   /**
    * @brief Shutdown pool and wait for all tasks
+   * @param graceful If true, wait for pending tasks to complete. If false, abandon pending tasks.
+   * @param timeout_ms Maximum time to wait for pending tasks (0 = no timeout)
    */
-  void Shutdown();
+  void Shutdown(bool graceful = true, uint32_t timeout_ms = 0);
 
  private:
   std::vector<std::thread> workers_;
@@ -81,6 +83,7 @@ class ThreadPool {
   mutable std::mutex queue_mutex_;
   std::condition_variable condition_;
   std::atomic<bool> shutdown_{false};
+  std::atomic<size_t> active_workers_{0};  // Number of workers currently executing tasks
 
   size_t max_queue_size_;
 

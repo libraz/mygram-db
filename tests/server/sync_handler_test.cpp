@@ -69,9 +69,9 @@ TEST_F(SyncHandlerTest, ParseSyncCommand) {
 
   // Test SYNC <table>
   auto query = parser.Parse("SYNC test_table");
-  EXPECT_EQ(query::QueryType::SYNC, query.type);
-  EXPECT_EQ("test_table", query.table);
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query::QueryType::SYNC, query->type);
+  EXPECT_EQ("test_table", query->table);
 }
 
 TEST_F(SyncHandlerTest, ParseSyncStatusCommand) {
@@ -79,9 +79,9 @@ TEST_F(SyncHandlerTest, ParseSyncStatusCommand) {
 
   // Test SYNC STATUS
   auto query = parser.Parse("SYNC STATUS");
-  EXPECT_EQ(query::QueryType::SYNC_STATUS, query.type);
-  EXPECT_EQ("", query.table);
-  EXPECT_TRUE(query.IsValid());
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query::QueryType::SYNC_STATUS, query->type);
+  EXPECT_EQ("", query->table);
 }
 
 TEST_F(SyncHandlerTest, ParseSyncInvalidCommand) {
@@ -89,8 +89,7 @@ TEST_F(SyncHandlerTest, ParseSyncInvalidCommand) {
 
   // Test SYNC without arguments (should fail)
   auto query = parser.Parse("SYNC");
-  EXPECT_EQ(query::QueryType::UNKNOWN, query.type);
-  EXPECT_FALSE(query.IsValid());
+  EXPECT_FALSE(query);
   EXPECT_FALSE(parser.GetError().empty());
 }
 

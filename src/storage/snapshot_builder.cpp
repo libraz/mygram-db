@@ -24,6 +24,7 @@
 #include <sstream>
 
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::storage {
 
@@ -40,52 +41,78 @@ SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& in
       table_config_(std::move(table_config)),
       build_config_(std::move(build_config)) {}
 
-bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
+mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (!connection_.IsConnected()) {
-    last_error_ = "MySQL connection not established";
-    spdlog::error(last_error_);
-    return false;
+    std::string error_msg = "MySQL connection not established";
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "snapshot_build")
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Check if GTID mode is enabled
   if (!connection_.IsGTIDModeEnabled()) {
-    last_error_ =
+    std::string error_msg =
         "GTID mode is not enabled on MySQL server. "
         "Please enable GTID mode (gtid_mode=ON) for replication support.";
-    spdlog::error(last_error_);
-    return false;
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "snapshot_build")
+        .Field("type", "gtid_mode_disabled")
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Validate that the primary_key column is unique (PRIMARY KEY or single-column UNIQUE KEY)
   std::string validation_error;
   if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name, table_config_.primary_key,
                                         validation_error)) {
-    last_error_ = "Primary key validation failed: " + validation_error;
-    spdlog::error(last_error_);
-    return false;
+    std::string error_msg = "Primary key validation failed: " + validation_error;
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "snapshot_build")
+        .Field("type", "primary_key_validation_failed")
+        .Field("table", table_config_.name)
+        .Field("primary_key", table_config_.primary_key)
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Start transaction with consistent snapshot for GTID consistency
   spdlog::info("Starting consistent snapshot transaction");
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
-    last_error_ = "Failed to start consistent snapshot: " + connection_.GetLastError();
-    spdlog::error(last_error_);
-    return false;
+    std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "snapshot_build")
+        .Field("type", "transaction_start_failed")
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Capture GTID at this point (represents snapshot state)
-  mysql::MySQLResult gtid_result = connection_.Execute("SELECT @@global.gtid_executed");
-  if (gtid_result) {
-    MYSQL_ROW row = mysql_fetch_row(gtid_result.get());
+  auto gtid_result_exp = connection_.Execute("SELECT @@global.gtid_executed");
+  if (gtid_result_exp) {
+    MYSQL_ROW row = mysql_fetch_row(gtid_result_exp->get());
     if (row != nullptr && row[0] != nullptr) {
       snapshot_gtid_ = std::string(row[0]);
     }
-    // gtid_result automatically freed by MySQLResult destructor
+    // gtid_result_exp automatically freed by MySQLResult destructor
   }
 
   // GTID must not be empty for replication to work
   if (snapshot_gtid_.empty()) {
-    last_error_ =
+    std::string error_msg =
         "GTID is empty - cannot start replication from undefined position.\n"
         "This typically happens when GTID mode was recently enabled.\n"
         "To resolve this issue:\n"
@@ -93,9 +120,14 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
         "  2. Verify GTID is set: SELECT @@global.gtid_executed;\n"
         "  3. Restart MygramDB\n"
         "Alternatively, disable replication by setting replication.enable=false in config.";
-    spdlog::error(last_error_);
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "snapshot_build")
+        .Field("type", "gtid_empty")
+        .Field("error", error_msg)
+        .Error();
     connection_.ExecuteUpdate("ROLLBACK");
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
@@ -107,20 +139,19 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   auto start_time = std::chrono::steady_clock::now();
 
   // Execute query (within the consistent snapshot transaction)
-  mysql::MySQLResult result = connection_.Execute(query);
-  if (!result) {
-    last_error_ = "Failed to execute SELECT query: " + connection_.GetLastError();
-    spdlog::error(last_error_);
+  auto result_exp = connection_.Execute(query);
+  if (!result_exp) {
+    std::string error_msg = "Failed to execute SELECT query: " + connection_.GetLastError();
     connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Get field metadata
-  unsigned int num_fields = mysql_num_fields(result.get());
-  MYSQL_FIELD* fields = mysql_fetch_fields(result.get());
+  unsigned int num_fields = mysql_num_fields(result_exp->get());
+  MYSQL_FIELD* fields = mysql_fetch_fields(result_exp->get());
 
   // Get total row count (approximate from result)
-  uint64_t total_rows = mysql_num_rows(result.get());
+  uint64_t total_rows = mysql_num_rows(result_exp->get());
 
   spdlog::info("Processing {} rows from table {}", total_rows, table_config_.name);
 
@@ -136,15 +167,21 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   doc_batch.reserve(batch_size);
   index_batch.reserve(batch_size);
 
-  while ((row = mysql_fetch_row(result.get())) != nullptr && !cancelled_) {
+  while ((row = mysql_fetch_row(result_exp->get())) != nullptr && !cancelled_) {
     // Extract primary key
     std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
     if (primary_key.empty()) {
-      last_error_ = "Failed to extract primary key";
-      spdlog::error(last_error_);
+      std::string error_msg = "Failed to extract primary key";
+      mygram::utils::StructuredLog()
+          .Event("storage_error")
+          .Field("operation", "snapshot_build")
+          .Field("type", "primary_key_extraction_failed")
+          .Field("table", table_config_.name)
+          .Field("error", error_msg)
+          .Error();
       // result automatically freed by MySQLResult destructor
       connection_.ExecuteUpdate("ROLLBACK");
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
     // Extract text
@@ -167,7 +204,11 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
       // Add documents to document store
-      std::vector<DocId> doc_ids = doc_store_.AddDocumentBatch(doc_batch);
+      auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
+      if (!doc_ids_result) {
+        return MakeUnexpected(doc_ids_result.error());
+      }
+      std::vector<DocId> doc_ids = *doc_ids_result;
 
       // Update index_batch with assigned doc_ids
       for (size_t i = 0; i < doc_ids.size(); ++i) {
@@ -202,7 +243,11 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   // Process remaining rows in batch
   if (!doc_batch.empty() && !cancelled_) {
     // Add documents to document store
-    std::vector<DocId> doc_ids = doc_store_.AddDocumentBatch(doc_batch);
+    auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
+    if (!doc_ids_result) {
+      return MakeUnexpected(doc_ids_result.error());
+    }
+    std::vector<DocId> doc_ids = *doc_ids_result;
 
     // Update index_batch with assigned doc_ids
     for (size_t i = 0; i < doc_ids.size(); ++i) {
@@ -219,13 +264,17 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
 
   // Commit the transaction (releases the snapshot)
   if (!connection_.ExecuteUpdate("COMMIT")) {
-    spdlog::warn("Failed to commit snapshot transaction");
+    mygram::utils::StructuredLog()
+        .Event("storage_warning")
+        .Field("operation", "snapshot_build")
+        .Field("type", "commit_failed")
+        .Field("error", connection_.GetLastError())
+        .Warn();
   }
 
   if (cancelled_) {
-    last_error_ = "Build cancelled";
-    spdlog::warn(last_error_);
-    return false;
+    std::string error_msg = "Build cancelled";
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   auto end_time = std::chrono::steady_clock::now();
@@ -234,7 +283,7 @@ bool SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
   spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_, total_elapsed,
                total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
 
-  return true;
+  return {};  // Success
 }
 
 std::string SnapshotBuilder::BuildSelectQuery() const {
@@ -299,20 +348,25 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
   return query.str();
 }
 
-bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) {
+mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                                unsigned int num_fields) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Extract primary key
   std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
   if (primary_key.empty()) {
-    last_error_ = "Failed to extract primary key";
-    spdlog::error(last_error_);
-    return false;
+    std::string error_msg = "Failed to extract primary key";
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   // Extract text
   std::string text = ExtractText(row, fields, num_fields);
   if (text.empty()) {
     spdlog::debug("Empty text for primary key {}, skipping", primary_key);
-    return true;  // Skip empty documents
+    return {};  // Skip empty documents (success)
   }
 
   // Normalize text
@@ -322,12 +376,16 @@ bool SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned in
   auto filters = ExtractFilters(row, fields, num_fields);
 
   // Add to document store
-  DocId doc_id = doc_store_.AddDocument(primary_key, filters);
+  auto doc_id_result = doc_store_.AddDocument(primary_key, filters);
+  if (!doc_id_result) {
+    return MakeUnexpected(doc_id_result.error());
+  }
+  DocId doc_id = *doc_id_result;
 
   // Add to index
   index_.AddDocument(doc_id, normalized_text);
 
-  return true;
+  return {};  // Success
 }
 
 bool SnapshotBuilder::IsTextColumn(enum_field_types type) {
@@ -344,10 +402,14 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, uns
     if (idx >= 0) {
       // Validate column type
       if (!IsTextColumn(fields[idx].type)) {
-        spdlog::error(
-            "Column '{}' is not a text type (VARCHAR/TEXT). "
-            "Type: {}",
-            table_config_.text_source.column, static_cast<int>(fields[idx].type));
+        mygram::utils::StructuredLog()
+            .Event("storage_error")
+            .Field("operation", "extract_text")
+            .Field("type", "invalid_column_type")
+            .Field("column", table_config_.text_source.column)
+            .Field("expected", "VARCHAR/TEXT")
+            .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
+            .Error();
         return "";
       }
       if (row[idx] != nullptr) {
@@ -362,10 +424,14 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, uns
       if (idx >= 0) {
         // Validate column type
         if (!IsTextColumn(fields[idx].type)) {
-          spdlog::error(
-              "Column '{}' is not a text type (VARCHAR/TEXT). "
-              "Type: {}",
-              col, static_cast<int>(fields[idx].type));
+          mygram::utils::StructuredLog()
+              .Event("storage_error")
+              .Field("operation", "extract_text_concat")
+              .Field("type", "invalid_column_type")
+              .Field("column", col)
+              .Field("expected", "VARCHAR/TEXT")
+              .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
+              .Error();
           continue;  // Skip this column
         }
         if (row[idx] != nullptr) {
@@ -432,10 +498,24 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
       else if (type == "datetime" || type == "date" || type == "timestamp") {
         filters[filter_config.name] = value_str;
       } else {
-        spdlog::warn("Unknown filter type '{}' for field '{}'", type, filter_config.name);
+        mygram::utils::StructuredLog()
+            .Event("storage_warning")
+            .Field("operation", "extract_filters")
+            .Field("type", "unknown_filter_type")
+            .Field("filter_type", type)
+            .Field("field", filter_config.name)
+            .Warn();
       }
     } catch (const std::exception& e) {
-      spdlog::warn("Failed to parse {} filter {}: {}", type, filter_config.name, value_str);
+      mygram::utils::StructuredLog()
+          .Event("storage_warning")
+          .Field("operation", "extract_filters")
+          .Field("type", "filter_parse_failed")
+          .Field("filter_type", type)
+          .Field("field", filter_config.name)
+          .Field("value", value_str)
+          .Field("error", e.what())
+          .Warn();
     }
   }
 

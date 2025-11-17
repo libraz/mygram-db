@@ -13,18 +13,26 @@
 #include <sstream>
 #include <utility>
 
+#include "utils/structured_log.h"
+
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
 
 namespace mygramdb::mysql {
 
 // GTID implementation
 
-std::optional<GTID> GTID::Parse(const std::string& gtid_str) {
+mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::string& gtid_str) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Format: "UUID:transaction_id" or "UUID:start-end"
   // For simplicity, we'll parse the simple format
   size_t colon_pos = gtid_str.find(':');
   if (colon_pos == std::string::npos) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: missing colon separator", gtid_str));
   }
 
   GTID gtid;
@@ -41,7 +49,8 @@ std::optional<GTID> GTID::Parse(const std::string& gtid_str) {
   try {
     gtid.transaction_id = std::stoull(txn_part);
   } catch (const std::exception& e) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: invalid transaction ID", gtid_str));
   }
 
   return gtid;
@@ -79,10 +88,15 @@ Connection& Connection::operator=(Connection&& other) noexcept {
   return *this;
 }
 
-bool Connection::Connect(const std::string& context) {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const std::string& context) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (mysql_ == nullptr) {
     last_error_ = "MySQL handle not initialized";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
   // Set connection timeouts
@@ -121,16 +135,23 @@ bool Connection::Connect(const std::string& context) {
                          config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
                          0) == nullptr) {
     SetMySQLError();
-    std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
-    spdlog::error("{}MySQL connection failed: {}", context_prefix, last_error_);
-    return false;
+    // Structured logging
+    mygram::utils::StructuredLog()
+        .Event("mysql_connection_error")
+        .Field("host", config_.host)
+        .Field("port", static_cast<uint64_t>(config_.port))
+        .Field("context", context)
+        .Field("error", last_error_)
+        .Error();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLConnectionFailed, last_error_, config_.host + ":" + std::to_string(config_.port)));
   }
 
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
   std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";
   spdlog::info("{}Connected to MySQL {}:{}{}{}", context_prefix, config_.host, config_.port, db_info, ssl_info);
-  return true;
+  return {};
 }
 
 bool Connection::IsConnected() const {
@@ -142,26 +163,36 @@ bool Connection::IsConnected() const {
   return mysql_thread_id(mysql_) != 0;
 }
 
-bool Connection::Ping() {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::Ping() {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (mysql_ == nullptr) {
     last_error_ = "Not connected";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
   int result = mysql_ping(mysql_);
   if (result != 0) {
     SetMySQLError();
-    spdlog::warn("MySQL ping failed: {}", last_error_);
-    return false;
+    mygram::utils::StructuredLog().Event("mysql_warning").Field("operation", "ping").Field("error", last_error_).Warn();
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
-  return true;
+  return {};
 }
 
-bool Connection::Reconnect() {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect() {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (mysql_ == nullptr) {
     last_error_ = "MySQL handle not initialized";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
   spdlog::info("Attempting to reconnect to MySQL {}:{}...", config_.host, config_.port);
@@ -176,8 +207,12 @@ bool Connection::Reconnect() {
   mysql_ = mysql_init(nullptr);
   if (mysql_ == nullptr) {
     last_error_ = "Failed to initialize MySQL handle";
-    spdlog::error("MySQL reconnection failed: {}", last_error_);
-    return false;
+    mygram::utils::StructuredLog()
+        .Event("mysql_error")
+        .Field("operation", "reconnect")
+        .Field("error", last_error_)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
   // Reconnect
@@ -192,54 +227,69 @@ void Connection::Close() {
   }
 }
 
-MySQLResult Connection::Execute(const std::string& query) {
+mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(const std::string& query) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (mysql_ == nullptr) {
     last_error_ = "Not connected";
-    return nullptr;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
   spdlog::debug("Executing query: {}", query);
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
     SetMySQLError();
-    spdlog::error("Query failed: {}", last_error_);
-    return nullptr;
+    mygram::utils::LogMySQLQueryError(query, last_error_);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
   }
 
   MYSQL_RES* result = mysql_store_result(mysql_);
   if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
     SetMySQLError();
-    spdlog::error("Failed to store result: {}", last_error_);
-    return nullptr;
+    mygram::utils::LogMySQLQueryError(query, "Failed to store result: " + last_error_);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
   }
 
   return MySQLResult(result);
 }
 
-bool Connection::ExecuteUpdate(const std::string& query) {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(const std::string& query) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (mysql_ == nullptr) {
     last_error_ = "Not connected";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
   spdlog::debug("Executing update: {}", query);
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
     SetMySQLError();
-    spdlog::error("Update failed: {}", last_error_);
-    return false;
+    mygram::utils::StructuredLog()
+        .Event("mysql_error")
+        .Field("operation", "execute_update")
+        .Field("query", query)
+        .Field("error", last_error_)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
   }
 
-  return true;
+  return {};
 }
 
 std::optional<std::string> Connection::GetExecutedGTID() {
-  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_executed");
+  auto result = Execute("SELECT @@GLOBAL.gtid_executed");
   if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result.get());
+  MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
     return std::nullopt;
   }
@@ -252,12 +302,12 @@ std::optional<std::string> Connection::GetExecutedGTID() {
 }
 
 std::optional<std::string> Connection::GetPurgedGTID() {
-  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_purged");
+  auto result = Execute("SELECT @@GLOBAL.gtid_purged");
   if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result.get());
+  MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
     return std::nullopt;
   }
@@ -269,11 +319,24 @@ std::optional<std::string> Connection::GetPurgedGTID() {
   return gtid;
 }
 
-bool Connection::SetGTIDNext(const std::string& gtid) {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(const std::string& gtid) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Validate GTID format using existing parser
-  if (gtid != "AUTOMATIC" && !GTID::Parse(gtid).has_value()) {
-    spdlog::error("Invalid GTID format: {}", gtid);
-    return false;
+  if (gtid != "AUTOMATIC") {
+    auto gtid_result = GTID::Parse(gtid);
+    if (!gtid_result) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_error")
+          .Field("operation", "set_gtid_next")
+          .Field("gtid", gtid)
+          .Field("error", "Invalid GTID format")
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid));
+    }
   }
 
   std::string query = "SET GTID_NEXT = '" + gtid + "'";
@@ -281,12 +344,12 @@ bool Connection::SetGTIDNext(const std::string& gtid) {
 }
 
 std::optional<std::string> Connection::GetServerUUID() {
-  MySQLResult result = Execute("SELECT @@GLOBAL.server_uuid");
+  auto result = Execute("SELECT @@GLOBAL.server_uuid");
   if (!result) {
     return std::nullopt;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result.get());
+  MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
     return std::nullopt;
   }
@@ -299,13 +362,17 @@ std::optional<std::string> Connection::GetServerUUID() {
 }
 
 bool Connection::IsGTIDModeEnabled() {
-  MySQLResult result = Execute("SELECT @@GLOBAL.gtid_mode");
+  auto result = Execute("SELECT @@GLOBAL.gtid_mode");
   if (!result) {
-    spdlog::warn("Failed to query GTID mode");
+    mygram::utils::StructuredLog()
+        .Event("mysql_warning")
+        .Field("operation", "query_gtid_mode")
+        .Field("error", last_error_)
+        .Warn();
     return false;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result.get());
+  MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
     return false;
   }
@@ -322,18 +389,24 @@ bool Connection::IsGTIDModeEnabled() {
 
 std::optional<std::string> Connection::GetLatestGTID() {
   // Try new syntax first (MySQL 8.0.23+)
-  MySQLResult result = Execute("SHOW BINARY LOG STATUS");
+  auto result_exp = Execute("SHOW BINARY LOG STATUS");
 
   // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
-  if (!result) {
+  if (!result_exp) {
     spdlog::debug("SHOW BINARY LOG STATUS failed, trying SHOW MASTER STATUS");
-    result = Execute("SHOW MASTER STATUS");
+    result_exp = Execute("SHOW MASTER STATUS");
   }
 
-  if (!result) {
-    spdlog::error("Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS");
+  if (!result_exp) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_error")
+        .Field("operation", "get_latest_gtid")
+        .Field("error", "Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS")
+        .Error();
     return std::nullopt;
   }
+
+  MySQLResult& result = *result_exp;
 
   // Get field names
   unsigned int num_fields = mysql_num_fields(result.get());
@@ -349,7 +422,11 @@ std::optional<std::string> Connection::GetLatestGTID() {
   }
 
   if (gtid_column_index == -1) {
-    spdlog::warn("Executed_Gtid_Set column not found in SHOW BINARY LOG STATUS");
+    mygram::utils::StructuredLog()
+        .Event("mysql_warning")
+        .Field("operation", "get_latest_gtid")
+        .Field("error", "Executed_Gtid_Set column not found in SHOW BINARY LOG STATUS")
+        .Warn();
     return std::nullopt;
   }
 
@@ -366,7 +443,11 @@ std::optional<std::string> Connection::GetLatestGTID() {
   // For simplicity, we'll return the entire set as-is
   // Example format: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
   if (gtid_set.empty()) {
-    spdlog::warn("Executed_Gtid_Set is empty");
+    mygram::utils::StructuredLog()
+        .Event("mysql_warning")
+        .Field("operation", "get_latest_gtid")
+        .Field("error", "Executed_Gtid_Set is empty")
+        .Warn();
     return std::nullopt;
   }
 
@@ -406,13 +487,13 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
       std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
       "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
-  MySQLResult result = Execute(query);
-  if (!result) {
+  auto result_exp = Execute(query);
+  if (!result_exp) {
     error_message = "Failed to query table schema: " + GetLastError();
     return false;
   }
 
-  MYSQL_ROW row = mysql_fetch_row(result.get());
+  MYSQL_ROW row = mysql_fetch_row(result_exp->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
     error_message = "Failed to fetch result for unique column validation";
     return false;
@@ -439,9 +520,9 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
         std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
         "' AND COLUMN_NAME = '" + std::string(escaped_column.data()) + "'";
 
-    MySQLResult col_result = Execute(column_check_query);
-    if (col_result) {
-      MYSQL_ROW col_row = mysql_fetch_row(col_result.get());
+    auto col_result_exp = Execute(column_check_query);
+    if (col_result_exp) {
+      MYSQL_ROW col_row = mysql_fetch_row(col_result_exp->get());
       if ((col_row != nullptr) && (col_row[0] != nullptr)) {
         try {
           if (std::stoi(col_row[0]) == 0) {

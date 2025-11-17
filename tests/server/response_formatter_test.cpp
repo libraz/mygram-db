@@ -151,7 +151,7 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithResults) {
   auto doc_id2 = table_context_.doc_store->AddDocument("pk2");
   auto doc_id3 = table_context_.doc_store->AddDocument("pk3");
 
-  std::vector<index::DocId> results = {doc_id1, doc_id2, doc_id3};
+  std::vector<index::DocId> results = {*doc_id1, *doc_id2, *doc_id3};
   size_t total_results = 3;
 
   std::string response =
@@ -173,7 +173,7 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithPagination) {
   auto doc_id2 = table_context_.doc_store->AddDocument("pk2");
 
   // Simulate pagination: 2 results returned, but 100 total
-  std::vector<index::DocId> results = {doc_id1, doc_id2};
+  std::vector<index::DocId> results = {*doc_id1, *doc_id2};
   size_t total_results = 100;
 
   std::string response =
@@ -191,7 +191,7 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithPagination) {
 TEST_F(ResponseFormatterTest, FormatSearchResponseWithDebugInfo) {
   auto doc_id1 = table_context_.doc_store->AddDocument("pk1");
 
-  std::vector<index::DocId> results = {doc_id1};
+  std::vector<index::DocId> results = {*doc_id1};
   size_t total_results = 1;
 
   query::DebugInfo debug_info;
