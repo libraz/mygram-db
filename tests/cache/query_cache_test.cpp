@@ -726,7 +726,6 @@ TEST(QueryCacheTest, ABAProofLockUpgrade) {
   cache.Insert(key1, result1, meta, 5.0);
 
   // Create a scenario where ABA could occur
-  std::atomic<bool> thread1_released_lock{false};
   std::atomic<bool> thread2_replaced_entry{false};
   std::atomic<int> thread1_access_count{0};
 

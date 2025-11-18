@@ -53,7 +53,7 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
           // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
           char buf[kNumericBufferSize];
           // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          snprintf(buf, sizeof(buf), "%020llu", num);
+          snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(num));
           // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
           return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
         } catch (const std::exception&) {
