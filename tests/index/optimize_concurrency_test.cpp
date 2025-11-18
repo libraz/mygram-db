@@ -329,12 +329,14 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
  * multiple batches using that stale snapshot. When documents were added during
  * batch 1 processing, batch 2 would use the old snapshot and lose those additions.
  *
+ * Fix:
+ * OptimizeInBatches() now takes per-batch snapshots and merges concurrent additions
+ * using Union() to preserve all documents added during optimization.
+ *
  * This test specifically targets that bug by:
  * 1. Using small batch size to ensure multiple batches
  * 2. Adding documents continuously during optimization
  * 3. Verifying ALL added documents are searchable after optimization
- *
- * TODO: Re-enable once OptimizeInBatches() data loss issue is fully resolved
  */
 TEST_F(OptimizeConcurrencyTest, OptimizeInBatchesDataLossRegression) {
   std::atomic<bool> optimization_started{false};

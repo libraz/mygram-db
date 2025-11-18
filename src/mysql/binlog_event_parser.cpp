@@ -13,8 +13,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <iomanip>
-#include <regex>
 #include <sstream>
 
 #include "mysql/binlog_event_types.h"
@@ -26,6 +26,127 @@
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
 
 namespace mygramdb::mysql {
+
+namespace {
+
+/**
+ * @brief Normalize whitespace in a string by replacing consecutive spaces with a single space
+ * @param str Input string
+ * @return Normalized string
+ */
+std::string NormalizeWhitespace(const std::string& str) {
+  std::string result;
+  result.reserve(str.length());
+
+  bool prev_was_space = false;
+  for (char cur_char : str) {
+    bool is_space = std::isspace(static_cast<unsigned char>(cur_char)) != 0;
+    if (is_space) {
+      if (!prev_was_space) {
+        result += ' ';
+        prev_was_space = true;
+      }
+    } else {
+      result += cur_char;
+      prev_was_space = false;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * @brief Skip whitespace characters starting from a given position
+ * @param str Input string
+ * @param pos Starting position (updated to position after whitespace)
+ * @return true if position is valid after skipping, false otherwise
+ */
+bool SkipWhitespace(const std::string& str, size_t& pos) {
+  while (pos < str.length() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
+    ++pos;
+  }
+  return pos < str.length();
+}
+
+/**
+ * @brief Case-insensitive keyword matching at a given position
+ * @param str Input string (should be uppercase)
+ * @param pos Starting position (updated to position after keyword if matched)
+ * @param keyword Keyword to match (should be uppercase)
+ * @return true if keyword matches, false otherwise
+ */
+bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keyword) {
+  // Check if there's enough space for the keyword
+  if (pos + keyword.length() > str.length()) {
+    return false;
+  }
+
+  // Check if keyword matches
+  if (str.compare(pos, keyword.length(), keyword) != 0) {
+    return false;
+  }
+
+  // Check that keyword is followed by whitespace, backtick, or end of string
+  size_t next_pos = pos + keyword.length();
+  if (next_pos < str.length()) {
+    char next_char = str[next_pos];
+    if (std::isspace(static_cast<unsigned char>(next_char)) == 0 && next_char != '`') {
+      return false;
+    }
+  }
+
+  pos = next_pos;
+  return true;
+}
+
+/**
+ * @brief Match table name at a given position (with optional backticks)
+ * @param str Input string (should be uppercase)
+ * @param pos Starting position (updated to position after table name if matched)
+ * @param table_name Table name to match (should be uppercase)
+ * @return true if table name matches, false otherwise
+ */
+bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name) {
+  // Skip optional backtick
+  bool has_backtick = false;
+  if (pos < str.length() && str[pos] == '`') {
+    has_backtick = true;
+    ++pos;
+  }
+
+  // Match table name
+  if (pos + table_name.length() > str.length()) {
+    return false;
+  }
+
+  if (str.compare(pos, table_name.length(), table_name) != 0) {
+    return false;
+  }
+
+  pos += table_name.length();
+
+  // Skip optional closing backtick
+  if (has_backtick && pos < str.length() && str[pos] == '`') {
+    ++pos;
+  }
+
+  // Ensure the match is a complete word (not a prefix of a longer identifier)
+  // After the table name (and optional backtick), the next character must be:
+  // - End of string
+  // - Whitespace
+  // - Semicolon
+  // - Not an identifier character (alphanumeric or underscore)
+  if (pos < str.length()) {
+    char next_char = str[pos];
+    if (std::isalnum(static_cast<unsigned char>(next_char)) != 0 || next_char == '_') {
+      return false;  // Table name is a prefix of a longer identifier
+    }
+  }
+
+  return true;
+}
+
+}  // namespace
 
 std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
@@ -744,22 +865,60 @@ bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std:
   std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
   std::transform(table_upper.begin(), table_upper.end(), table_upper.begin(), ::toupper);
 
-  // Remove extra whitespace
-  query_upper = std::regex_replace(query_upper, std::regex("\\s+"), " ");
+  // Normalize whitespace (replace consecutive spaces with single space)
+  query_upper = NormalizeWhitespace(query_upper);
 
-  // Check for TRUNCATE TABLE
-  if (std::regex_search(query_upper, std::regex("TRUNCATE\\s+TABLE\\s+`?" + table_upper + "`?"))) {
-    return true;
-  }
+  // Try to match DDL statements at each position in the query
+  // We need to search for patterns anywhere in the query string
+  for (size_t i = 0; i < query_upper.length(); ++i) {
+    size_t pos = i;
 
-  // Check for DROP TABLE
-  if (std::regex_search(query_upper, std::regex(R"(DROP\s+TABLE\s+(IF\s+EXISTS\s+)?`?)" + table_upper + "`?"))) {
-    return true;
-  }
+    // Check for TRUNCATE TABLE
+    if (MatchKeyword(query_upper, pos, "TRUNCATE")) {
+      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+        if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+          return true;
+        }
+      }
+    }
 
-  // Check for ALTER TABLE
-  if (std::regex_search(query_upper, std::regex("ALTER\\s+TABLE\\s+`?" + table_upper + "`?"))) {
-    return true;
+    // Reset position for next pattern
+    pos = i;
+
+    // Check for DROP TABLE [IF EXISTS]
+    if (MatchKeyword(query_upper, pos, "DROP")) {
+      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+        if (SkipWhitespace(query_upper, pos)) {
+          // Check for optional "IF EXISTS"
+          size_t saved_pos = pos;
+          if (MatchKeyword(query_upper, pos, "IF")) {
+            if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "EXISTS")) {
+              SkipWhitespace(query_upper, pos);
+            } else {
+              // "IF" without "EXISTS" - restore position
+              pos = saved_pos;
+            }
+          }
+
+          // Match table name
+          if (MatchTableName(query_upper, pos, table_upper)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    // Reset position for next pattern
+    pos = i;
+
+    // Check for ALTER TABLE
+    if (MatchKeyword(query_upper, pos, "ALTER")) {
+      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+        if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+          return true;
+        }
+      }
+    }
   }
 
   return false;

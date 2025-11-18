@@ -98,7 +98,7 @@ TEST(ConfigTest, LoadValidConfig) {
 
   // Logging config
   EXPECT_EQ(config.logging.level, "debug");
-  EXPECT_FALSE(config.logging.json);
+  EXPECT_EQ(config.logging.format, "text");
 }
 
 /**
@@ -295,7 +295,7 @@ TEST(ConfigTest, LoadValidJSONConfig) {
                {"ngram_size", 2},
                {"posting", {{"block_size", 256}, {"freq_bits", 8}, {"use_roaring", "always"}}}}}},
             {"replication", {{"enable", true}, {"server_id", 200}, {"start_from", "latest"}}},
-            {"logging", {{"level", "info"}, {"json", true}}}};
+            {"logging", {{"level", "info"}, {"format", "json"}}}};
 
   std::ofstream f("test_config.json");
   f << j.dump(2);
@@ -332,7 +332,7 @@ TEST(ConfigTest, LoadValidJSONConfig) {
 
   // Logging config
   EXPECT_EQ(config.logging.level, "info");
-  EXPECT_TRUE(config.logging.json);
+  EXPECT_EQ(config.logging.format, "json");
 }
 
 /**

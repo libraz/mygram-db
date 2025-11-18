@@ -105,13 +105,33 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
     return iterator->second;
   }
 
-  // Check for DocID overflow (uint32_t wraparound to 0)
+  // Check for DocID overflow: if next_doc_id_ reached UINT32_MAX, this is the last valid ID
+  // After using UINT32_MAX, next_doc_id_ will wrap to 0
+  if (next_doc_id_ == UINT32_MAX) {
+    // Assign the last valid DocID (UINT32_MAX)
+    DocId doc_id = next_doc_id_++;  // Will wrap to 0
+
+    // Store mappings for this last document
+    doc_id_to_pk_[doc_id] = primary_key_str;
+    pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
+
+    // Store filters
+    if (!filters.empty()) {
+      doc_filters_[doc_id] = filters;
+    }
+
+    spdlog::debug("Added document (LAST AVAILABLE): DocID={}, PK={}, filters={}", doc_id, primary_key, filters.size());
+
+    return doc_id;
+  }
+
+  // Post-increment defensive check: if we've wrapped to 0, DocID space is exhausted
   if (next_doc_id_ == 0) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDocIdExhausted, "DocID space exhausted (4 billion limit reached)", ""));
   }
 
-  // Assign new DocID
+  // Assign new DocID and increment
   DocId doc_id = next_doc_id_++;
 
   // Store mappings
@@ -759,6 +779,12 @@ Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
       doc_count = doc_id_to_pk_.size();
       WriteBinary(output_stream, doc_count);
 
+      // Early error detection: check stream after writing document count
+      if (!output_stream.good()) {
+        return MakeUnexpected(
+            MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Stream error after writing document count"));
+      }
+
       // Write doc_id -> pk mappings
       for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
         // Write doc_id
@@ -866,6 +892,10 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     // Read document count
     uint64_t doc_count = 0;
     ReadBinary(input_stream, doc_count);
+    if (!input_stream.good()) {
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error while reading document count"));
+    }
     if (doc_count > kMaxDocumentCount) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                       "Document count " + std::to_string(doc_count) + " exceeds maximum allowed " +
@@ -882,6 +912,10 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       // Read doc_id
       uint32_t doc_id_value = 0;
       ReadBinary(input_stream, doc_id_value);
+      if (!input_stream.good()) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                        "Stream error while reading doc_id for document " + std::to_string(i)));
+      }
       auto doc_id = static_cast<DocId>(doc_id_value);
 
       // Read pk length and pk
@@ -891,6 +925,11 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       constexpr uint32_t kMaxFilterStringLength = 64 * 1024;  // 64KB max for filter string
       uint32_t pk_len = 0;
       ReadBinary(input_stream, pk_len);
+      if (!input_stream.good()) {
+        return MakeUnexpected(
+            MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                      "Stream error while reading primary key length for doc_id " + std::to_string(doc_id)));
+      }
       if (pk_len > kMaxPKLength) {
         return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                         "Primary key length " + std::to_string(pk_len) + " exceeds maximum allowed " +
@@ -899,6 +938,10 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
 
       std::string primary_key_str(pk_len, '\0');
       input_stream.read(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
+      if (!input_stream.good()) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                        "Stream error while reading primary key for doc_id " + std::to_string(doc_id)));
+      }
 
       new_doc_id_to_pk[doc_id] = primary_key_str;
       new_pk_to_doc_id[primary_key_str] = doc_id;
@@ -906,6 +949,11 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       // Read filters
       uint32_t filter_count = 0;
       ReadBinary(input_stream, filter_count);
+      if (!input_stream.good()) {
+        return MakeUnexpected(
+            MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                      "Stream error while reading filter count for doc_id " + std::to_string(doc_id)));
+      }
       if (filter_count > kMaxFilterCount) {
         return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                         "Filter count " + std::to_string(filter_count) + " exceeds maximum allowed " +
@@ -919,6 +967,11 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
           // Read filter name
           uint32_t name_len = 0;
           ReadBinary(input_stream, name_len);
+          if (!input_stream.good()) {
+            return MakeUnexpected(
+                MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                          "Stream error while reading filter name length for doc_id " + std::to_string(doc_id)));
+          }
           if (name_len > kMaxFilterNameLength) {
             return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                             "Filter name length " + std::to_string(name_len) +
@@ -927,6 +980,11 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
 
           std::string name(name_len, '\0');
           input_stream.read(name.data(), static_cast<std::streamsize>(name_len));
+          if (!input_stream.good()) {
+            return MakeUnexpected(
+                MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                          "Stream error while reading filter name for doc_id " + std::to_string(doc_id)));
+          }
 
           // Read filter type
           uint8_t type_idx = 0;

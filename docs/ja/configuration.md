@@ -821,7 +821,7 @@ Continuing with current configuration
 ### モニタリング
 
 1. **ロギング**:
-   - ✅ JSONロギングを使用(`logging.json: true`)
+   - ✅ JSONロギングを使用(`logging.format: "json"`)
    - ✅ 集中ログ(ELK、Lokiなど)にログを送信
 
 2. **ヘルスチェック**:

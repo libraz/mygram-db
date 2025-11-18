@@ -11,6 +11,7 @@
 #include "server/http_server.h"
 #include "server/tcp_server.h"
 #include "storage/snapshot_builder.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::app {
 
@@ -450,7 +451,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::HandleMy
 
   auto connect_result = mysql_connection_->Connect("config-reload");
   if (!connect_result) {
-    spdlog::error("Failed to reconnect to MySQL after config reload: {}", connect_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("mysql_error")
+        .Field("type", "reconnect_failed")
+        .Field("context", "config_reload")
+        .Field("error", connect_result.error().to_string())
+        .Error();
     spdlog::warn("Binlog replication will remain stopped until manual restart");
     return mygram::utils::MakeUnexpected(connect_result.error());
   }
@@ -462,7 +468,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::HandleMy
   if (was_running && binlog_reader_) {
     auto start_result = binlog_reader_->Start();
     if (!start_result) {
-      spdlog::error("Failed to restart binlog reader: {}", start_result.error().to_string());
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "restart_failed")
+          .Field("context", "config_reload")
+          .Field("error", start_result.error().to_string())
+          .Error();
       return mygram::utils::MakeUnexpected(start_result.error());
     }
     spdlog::info("Binlog reader restarted successfully");

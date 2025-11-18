@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <iostream>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::app {
 
 mygram::utils::Expected<std::unique_ptr<ConfigurationManager>, mygram::utils::Error> ConfigurationManager::Create(
@@ -39,7 +41,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reload
   auto reload_result = config::LoadConfig(config_file_, schema_file_);
   if (!reload_result) {
     // Log error but don't update config (keep old config)
-    spdlog::error("Failed to reload configuration: {}", reload_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("config_error")
+        .Field("type", "reload_failed")
+        .Field("config_file", config_file_)
+        .Field("error", reload_result.error().to_string())
+        .Error();
     spdlog::warn("Continuing with current configuration");
     return mygram::utils::MakeUnexpected(reload_result.error());
   }
@@ -58,6 +65,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reload
       spdlog::set_level(spdlog::level::err);
     }
     spdlog::info("Logging level changed: {} -> {}", config_.logging.level, new_config.logging.level);
+  }
+
+  // Apply log format changes
+  if (new_config.logging.format != config_.logging.format) {
+    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(new_config.logging.format));
+    spdlog::info("Logging format changed: {} -> {}", config_.logging.format, new_config.logging.format);
   }
 
   // Update config (atomic replacement)
@@ -93,6 +106,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
   } else if (config_.logging.level == "error") {
     spdlog::set_level(spdlog::level::err);
   }
+
+  // Apply structured log format (JSON or TEXT)
+  mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config_.logging.format));
 
   // Configure log output (file or stdout)
   if (!config_.logging.file.empty()) {

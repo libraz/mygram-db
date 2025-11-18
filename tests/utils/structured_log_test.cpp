@@ -260,3 +260,75 @@ TEST_F(StructuredLogTest, MultipleFieldTypes) {
   EXPECT_NE(output.find("\"double_field\":"), std::string::npos);
   EXPECT_NE(output.find("\"message\":\"Mixed types test\""), std::string::npos);
 }
+
+/**
+ * @brief Test TEXT format output
+ */
+TEST_F(StructuredLogTest, TextFormatBasic) {
+  StructuredLog::SetFormat(LogFormat::TEXT);
+
+  StructuredLog().Event("test_event").Field("key", "value").Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_EQ(output, "event=test_event key=value\n");
+
+  // Restore JSON format for other tests
+  StructuredLog::SetFormat(LogFormat::JSON);
+}
+
+/**
+ * @brief Test TEXT format with multiple fields
+ */
+TEST_F(StructuredLogTest, TextFormatMultipleFields) {
+  StructuredLog::SetFormat(LogFormat::TEXT);
+
+  StructuredLog()
+      .Event("database_error")
+      .Field("table", "users")
+      .Field("error_code", static_cast<int64_t>(500))
+      .Field("retry", true)
+      .Message("Connection failed")
+      .Error();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("event=database_error"), std::string::npos);
+  EXPECT_NE(output.find("table=users"), std::string::npos);
+  EXPECT_NE(output.find("error_code=500"), std::string::npos);
+  EXPECT_NE(output.find("retry=true"), std::string::npos);
+  EXPECT_NE(output.find("message=\"Connection failed\""), std::string::npos);
+
+  // Restore JSON format for other tests
+  StructuredLog::SetFormat(LogFormat::JSON);
+}
+
+/**
+ * @brief Test TEXT format with string containing spaces
+ */
+TEST_F(StructuredLogTest, TextFormatStringWithSpaces) {
+  StructuredLog::SetFormat(LogFormat::TEXT);
+
+  StructuredLog().Event("message_event").Field("message", "Hello World").Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("message=\"Hello World\""), std::string::npos);
+
+  // Restore JSON format for other tests
+  StructuredLog::SetFormat(LogFormat::JSON);
+}
+
+/**
+ * @brief Test ParseFormat() function
+ */
+TEST_F(StructuredLogTest, ParseFormat) {
+  // Test parsing "text" to TEXT format
+  EXPECT_EQ(StructuredLog::ParseFormat("text"), LogFormat::TEXT);
+
+  // Test parsing "json" to JSON format
+  EXPECT_EQ(StructuredLog::ParseFormat("json"), LogFormat::JSON);
+
+  // Test default to JSON for unknown values
+  EXPECT_EQ(StructuredLog::ParseFormat("unknown"), LogFormat::JSON);
+  EXPECT_EQ(StructuredLog::ParseFormat(""), LogFormat::JSON);
+  EXPECT_EQ(StructuredLog::ParseFormat("TEXT"), LogFormat::JSON);  // Case sensitive
+  EXPECT_EQ(StructuredLog::ParseFormat("JSON"), LogFormat::JSON);  // Case sensitive
+}

@@ -158,7 +158,7 @@ format-check:
 	@echo "Format check passed!"
 
 # Check code with clang-tidy
-lint: build
+lint: format build
 	@bash support/dev/run-clang-tidy.sh
 
 # Build and run mygramdb

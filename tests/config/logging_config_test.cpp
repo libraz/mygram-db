@@ -56,7 +56,7 @@ TEST(LoggingConfigTest, DefaultStdout) {
   std::string config_path = CreateTempConfig(
       "logging:\n"
       "  level: \"info\"\n"
-      "  json: true\n"
+      "  format: \"json\"\n"
       "  file: \"\"\n");
 
   auto config_result = LoadConfig(config_path);
@@ -64,7 +64,7 @@ TEST(LoggingConfigTest, DefaultStdout) {
   Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "info");
-  EXPECT_TRUE(config.logging.json);
+  EXPECT_EQ(config.logging.format, "json");
   EXPECT_EQ(config.logging.file, "");
 
   std::filesystem::remove(config_path);
@@ -77,7 +77,7 @@ TEST(LoggingConfigTest, FileLogging) {
   std::string config_path = CreateTempConfig(
       "logging:\n"
       "  level: \"debug\"\n"
-      "  json: false\n"
+      "  format: \"text\"\n"
       "  file: \"/var/log/mygramdb/mygramdb.log\"\n");
 
   auto config_result = LoadConfig(config_path);
@@ -85,7 +85,7 @@ TEST(LoggingConfigTest, FileLogging) {
   Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "debug");
-  EXPECT_FALSE(config.logging.json);
+  EXPECT_EQ(config.logging.format, "text");
   EXPECT_EQ(config.logging.file, "/var/log/mygramdb/mygramdb.log");
 
   std::filesystem::remove(config_path);
@@ -104,8 +104,8 @@ TEST(LoggingConfigTest, OnlyLevel) {
   Config config = *config_result;
 
   EXPECT_EQ(config.logging.level, "warn");
-  EXPECT_TRUE(config.logging.json);    // Default
-  EXPECT_EQ(config.logging.file, "");  // Default
+  EXPECT_EQ(config.logging.format, "json");  // Default
+  EXPECT_EQ(config.logging.file, "");        // Default
 
   std::filesystem::remove(config_path);
 }
@@ -141,9 +141,9 @@ TEST(LoggingConfigTest, NoLoggingSection) {
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
 
-  EXPECT_EQ(config.logging.level, "info");  // Default
-  EXPECT_TRUE(config.logging.json);         // Default
-  EXPECT_EQ(config.logging.file, "");       // Default
+  EXPECT_EQ(config.logging.level, "info");   // Default
+  EXPECT_EQ(config.logging.format, "json");  // Default
+  EXPECT_EQ(config.logging.file, "");        // Default
 
   std::filesystem::remove(config_path);
 }
@@ -185,38 +185,38 @@ TEST(LoggingConfigTest, AbsoluteFilePath) {
 }
 
 /**
- * @brief Test JSON format combinations
+ * @brief Test log format combinations
  */
-TEST(LoggingConfigTest, JsonFormatCombinations) {
-  // JSON enabled + file logging
+TEST(LoggingConfigTest, LogFormatCombinations) {
+  // JSON format + file logging
   {
     std::string config_path = CreateTempConfig(
         "logging:\n"
         "  level: \"info\"\n"
-        "  json: true\n"
+        "  format: \"json\"\n"
         "  file: \"/tmp/test.log\"\n");
 
     auto config_result = LoadConfig(config_path);
     ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
     Config config = *config_result;
-    EXPECT_TRUE(config.logging.json);
+    EXPECT_EQ(config.logging.format, "json");
     EXPECT_EQ(config.logging.file, "/tmp/test.log");
 
     std::filesystem::remove(config_path);
   }
 
-  // JSON disabled + stdout
+  // TEXT format + stdout
   {
     std::string config_path = CreateTempConfig(
         "logging:\n"
         "  level: \"info\"\n"
-        "  json: false\n"
+        "  format: \"text\"\n"
         "  file: \"\"\n");
 
     auto config_result = LoadConfig(config_path);
     ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
     Config config = *config_result;
-    EXPECT_FALSE(config.logging.json);
+    EXPECT_EQ(config.logging.format, "text");
     EXPECT_EQ(config.logging.file, "");
 
     std::filesystem::remove(config_path);

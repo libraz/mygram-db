@@ -14,6 +14,7 @@
 #include <fstream>
 
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::index {
 
@@ -749,7 +750,12 @@ bool Index::SaveToFile(const std::string& filepath) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) {
-      spdlog::error("Failed to open file for writing: {}", filepath);
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "file_open_failed")
+          .Field("operation", "save")
+          .Field("filepath", filepath)
+          .Error();
       return false;
     }
 
@@ -808,7 +814,12 @@ bool Index::SaveToFile(const std::string& filepath) const {
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
-    spdlog::error("Exception while saving index: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("index_io_error")
+        .Field("type", "exception_during_save")
+        .Field("operation", "save")
+        .Field("error", e.what())
+        .Error();
     return false;
   }
 }
@@ -865,14 +876,23 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
     }
 
     if (!output_stream.good()) {
-      spdlog::error("Stream error while saving index");
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "stream_error")
+          .Field("operation", "save_to_stream")
+          .Error();
       return false;
     }
 
     spdlog::debug("Saved index to stream: {} terms", term_count);
     return true;
   } catch (const std::exception& e) {
-    spdlog::error("Exception while saving index to stream: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("index_io_error")
+        .Field("type", "exception_during_save")
+        .Field("operation", "save_to_stream")
+        .Field("error", e.what())
+        .Error();
     return false;
   }
 }
@@ -881,7 +901,12 @@ bool Index::LoadFromFile(const std::string& filepath) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
-      spdlog::error("Failed to open file for reading: {}", filepath);
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "file_open_failed")
+          .Field("operation", "load")
+          .Field("filepath", filepath)
+          .Error();
       return false;
     }
 
@@ -889,7 +914,13 @@ bool Index::LoadFromFile(const std::string& filepath) {
     std::array<char, 4> magic{};
     ifs.read(magic.data(), magic.size());
     if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
-      spdlog::error("Invalid index file format (bad magic number)");
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "invalid_format")
+          .Field("operation", "load")
+          .Field("error", "bad_magic_number")
+          .Field("filepath", filepath)
+          .Error();
       return false;
     }
 
@@ -898,7 +929,13 @@ bool Index::LoadFromFile(const std::string& filepath) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (version != 1) {
-      spdlog::error("Unsupported index file version: {}", version);
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "unsupported_version")
+          .Field("operation", "load")
+          .Field("version", std::to_string(version))
+          .Field("filepath", filepath)
+          .Error();
       return false;
     }
 
@@ -942,7 +979,13 @@ bool Index::LoadFromFile(const std::string& filepath) {
       auto posting = std::make_shared<PostingList>(roaring_threshold_);
       size_t offset = 0;
       if (!posting->Deserialize(posting_data, offset)) {
-        spdlog::error("Failed to deserialize posting list for term: {}", term);
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "deserialization_failed")
+            .Field("operation", "load")
+            .Field("term", term)
+            .Field("filepath", filepath)
+            .Error();
         return false;
       }
 
@@ -963,7 +1006,12 @@ bool Index::LoadFromFile(const std::string& filepath) {
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
-    spdlog::error("Exception while loading index: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("index_io_error")
+        .Field("type", "exception_during_load")
+        .Field("operation", "load")
+        .Field("error", e.what())
+        .Error();
     return false;
   }
 }
@@ -974,7 +1022,12 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     std::array<char, 4> magic{};
     input_stream.read(magic.data(), magic.size());
     if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
-      spdlog::error("Invalid index stream format (bad magic number)");
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "invalid_format")
+          .Field("operation", "load_from_stream")
+          .Field("error", "bad_magic_number")
+          .Error();
       return false;
     }
 
@@ -983,7 +1036,12 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     input_stream.read(reinterpret_cast<char*>(&version), sizeof(version));
     if (version != 1) {
-      spdlog::error("Unsupported index stream version: {}", version);
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "unsupported_version")
+          .Field("operation", "load_from_stream")
+          .Field("version", std::to_string(version))
+          .Error();
       return false;
     }
 
@@ -1027,7 +1085,12 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       auto posting = std::make_shared<PostingList>(roaring_threshold_);
       size_t offset = 0;
       if (!posting->Deserialize(posting_data, offset)) {
-        spdlog::error("Failed to deserialize posting list for term: {}", term);
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "deserialization_failed")
+            .Field("operation", "load_from_stream")
+            .Field("term", term)
+            .Error();
         return false;
       }
 
@@ -1035,7 +1098,11 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     }
 
     if (!input_stream.good()) {
-      spdlog::error("Stream error while loading index");
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "stream_error")
+          .Field("operation", "load_from_stream")
+          .Error();
       return false;
     }
 
@@ -1048,7 +1115,12 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     spdlog::debug("Loaded index from stream: {} terms", term_count);
     return true;
   } catch (const std::exception& e) {
-    spdlog::error("Exception while loading index from stream: {}", e.what());
+    mygram::utils::StructuredLog()
+        .Event("index_io_error")
+        .Field("type", "exception_during_load")
+        .Field("operation", "load_from_stream")
+        .Field("error", e.what())
+        .Error();
     return false;
   }
 }

@@ -72,7 +72,7 @@ network:
 
 logging:
   level: "debug"
-  json: false
+  format: "text"
 
 cache:
   enabled: true

@@ -574,8 +574,8 @@ Config ParseConfigFromJson(const json& root) {
     if (log.contains("level")) {
       config.logging.level = log["level"].get<std::string>();
     }
-    if (log.contains("json")) {
-      config.logging.json = log["json"].get<bool>();
+    if (log.contains("format")) {
+      config.logging.format = log["format"].get<std::string>();
     }
     if (log.contains("file")) {
       config.logging.file = log["file"].get<std::string>();

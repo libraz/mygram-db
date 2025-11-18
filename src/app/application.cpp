@@ -12,6 +12,7 @@
 #include <iostream>
 
 #include "utils/daemon_utils.h"
+#include "utils/structured_log.h"
 #include "version.h"
 
 #ifndef _WIN32
@@ -83,42 +84,72 @@ int Application::Run() {
   // Check root privilege
   auto root_check = CheckRootPrivilege();
   if (!root_check) {
-    spdlog::error("Root privilege check failed: {}", root_check.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "root_privilege_check_failed")
+        .Field("phase", "startup")
+        .Field("error", root_check.error().to_string())
+        .Error();
     return 1;
   }
 
   // Apply logging configuration
   auto logging_result = config_manager_->ApplyLoggingConfig();
   if (!logging_result) {
-    spdlog::error("Failed to apply logging configuration: {}", logging_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "logging_config_failed")
+        .Field("phase", "startup")
+        .Field("error", logging_result.error().to_string())
+        .Error();
     return 1;
   }
 
   // Daemonize if requested (must be done before opening files/sockets)
   auto daemon_result = DaemonizeIfRequested();
   if (!daemon_result) {
-    spdlog::error("Daemonization failed: {}", daemon_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "daemonization_failed")
+        .Field("phase", "startup")
+        .Field("error", daemon_result.error().to_string())
+        .Error();
     return 1;
   }
 
   // Verify dump directory permissions
   auto dump_check = VerifyDumpDirectory();
   if (!dump_check) {
-    spdlog::error("Dump directory verification failed: {}", dump_check.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "dump_directory_verification_failed")
+        .Field("phase", "startup")
+        .Field("error", dump_check.error().to_string())
+        .Error();
     return 1;
   }
 
   // Initialize components
   auto init_result = Initialize();
   if (!init_result) {
-    spdlog::error("Initialization failed: {}", init_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "initialization_failed")
+        .Field("phase", "startup")
+        .Field("error", init_result.error().to_string())
+        .Error();
     return 1;
   }
 
   // Start servers
   auto start_result = Start();
   if (!start_result) {
-    spdlog::error("Server startup failed: {}", start_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "server_startup_failed")
+        .Field("phase", "startup")
+        .Field("error", start_result.error().to_string())
+        .Error();
     return 1;
   }
 
@@ -265,6 +296,36 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
       std::filesystem::create_directories(dump_path);
     }
 
+    // SECURITY: Validate that the dump directory is within allowed bounds
+    // Resolve to canonical path to prevent directory traversal attacks
+    std::filesystem::path canonical_dump = std::filesystem::canonical(dump_path);
+
+    // Define the base allowed directory (current working directory or parent)
+    // This prevents malicious configurations like "../../../etc/" from writing outside project
+    std::filesystem::path current_dir = std::filesystem::current_path();
+    std::filesystem::path allowed_base = current_dir.parent_path();  // Allow one level up for flexibility
+
+    // Check if canonical dump path starts with allowed base
+    auto dump_parts = canonical_dump.begin();
+    auto base_parts = allowed_base.begin();
+    bool within_bounds = true;
+
+    while (base_parts != allowed_base.end()) {
+      if (dump_parts == canonical_dump.end() || *dump_parts != *base_parts) {
+        within_bounds = false;
+        break;
+      }
+      ++dump_parts;
+      ++base_parts;
+    }
+
+    if (!within_bounds) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kPermissionDenied,
+          "Dump directory path traversal detected. Path must be within allowed directory: " + canonical_dump.string() +
+              " is outside " + allowed_base.string()));
+    }
+
     // Check if directory is writable by attempting to create a test file
     std::filesystem::path test_file = dump_path / ".write_test";
     std::ofstream test_stream(test_file);
@@ -275,7 +336,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
     test_stream.close();
     std::filesystem::remove(test_file);
 
-    spdlog::info("Dump directory verified: {}", dump_dir);
+    spdlog::info("Dump directory verified: {} (canonical: {})", dump_dir, canonical_dump.string());
   } catch (const std::exception& e) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kIOError, "Failed to verify dump directory: " + std::string(e.what())));
@@ -306,7 +367,12 @@ void Application::HandleConfigReload() {
   // Reload configuration
   auto reload_result = config_manager_->Reload();
   if (!reload_result) {
-    spdlog::error("Failed to reload configuration: {}", reload_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "config_reload_failed")
+        .Field("phase", "runtime")
+        .Field("error", reload_result.error().to_string())
+        .Error();
     spdlog::warn("Continuing with current configuration");
     return;
   }
@@ -314,7 +380,12 @@ void Application::HandleConfigReload() {
   // Apply config changes to server orchestrator
   auto apply_result = server_orchestrator_->ReloadConfig(config_manager_->GetConfig());
   if (!apply_result) {
-    spdlog::error("Failed to apply configuration changes: {}", apply_result.error().to_string());
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "config_apply_failed")
+        .Field("phase", "runtime")
+        .Field("error", apply_result.error().to_string())
+        .Error();
   } else {
     spdlog::info("Configuration reload completed successfully");
   }

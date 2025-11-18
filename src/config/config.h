@@ -255,8 +255,8 @@ struct NetworkConfig {
  */
 struct LoggingConfig {
   std::string level = "info";
-  bool json = true;
-  std::string file;  ///< Log file path (empty = stdout, path = file output)
+  std::string format = "json";  ///< Log output format: "json" or "text" (default: json)
+  std::string file;             ///< Log file path (empty = stdout, path = file output)
 };
 
 /**

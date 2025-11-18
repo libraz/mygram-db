@@ -26,6 +26,8 @@
 
 #pragma once
 
+#include <cassert>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -496,7 +498,7 @@ class Expected<void, E> {
   /**
    * @brief Default constructor - constructs with success (no value)
    */
-  Expected() : has_value_(true) {}
+  Expected() : has_value_(true), error_(std::nullopt) {}
 
   /**
    * @brief Construct with an error
@@ -552,7 +554,7 @@ class Expected<void, E> {
    */
   void value() const {
     if (!has_value_) {
-      throw BadExpectedAccess<E>(error_);
+      throw BadExpectedAccess<E>(*error_);
     }
   }
 
@@ -560,31 +562,47 @@ class Expected<void, E> {
 
   /**
    * @brief Access the contained error (const lvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
+   *          will trigger an assertion in debug mode.
    */
-  [[nodiscard]] const E& error() const& { return error_; }
+  [[nodiscard]] const E& error() const& {
+    assert(!has_value_ && "error() called on Expected containing a value");
+    return *error_;
+  }
 
   /**
    * @brief Access the contained error (lvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
+   *          will trigger an assertion in debug mode.
    */
-  [[nodiscard]] E& error() & { return error_; }
+  [[nodiscard]] E& error() & {
+    assert(!has_value_ && "error() called on Expected containing a value");
+    return *error_;
+  }
 
   /**
    * @brief Access the contained error (const rvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
+   *          will trigger an assertion in debug mode.
    */
-  [[nodiscard]] const E&& error() const&& { return std::move(error_); }
+  [[nodiscard]] const E&& error() const&& {
+    assert(!has_value_ && "error() called on Expected containing a value");
+    return std::move(*error_);
+  }
 
   /**
    * @brief Access the contained error (rvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
+   *          will trigger an assertion in debug mode.
    */
-  [[nodiscard]] E&& error() && { return std::move(error_); }
+  [[nodiscard]] E&& error() && {
+    assert(!has_value_ && "error() called on Expected containing a value");
+    return std::move(*error_);
+  }
 
  private:
   bool has_value_;
-  E error_;
+  std::optional<E> error_;  // Only constructed when has_value_ is false
 };
 
 }  // namespace mygram::utils

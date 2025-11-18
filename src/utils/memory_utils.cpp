@@ -15,6 +15,7 @@
 #include <sstream>
 
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -50,7 +51,12 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
   // Array decay required by macOS sysctl() system call
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   if (sysctl(mib, 2, &physical_memory, &length, nullptr, 0) != 0) {
-    spdlog::error("Failed to get total physical memory (sysctl)");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "sysctl_failed")
+        .Field("operation", "get_total_physical_memory")
+        .Field("platform", "macos")
+        .Error();
     return std::nullopt;
   }
   info.total_physical_bytes = physical_memory;
@@ -69,7 +75,12 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
                                              reinterpret_cast<host_info64_t>(&vm_stats), &count);
 
   if (kern_ret != KERN_SUCCESS) {
-    spdlog::error("Failed to get VM statistics");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "vm_statistics_failed")
+        .Field("operation", "host_statistics64")
+        .Field("platform", "macos")
+        .Error();
     return std::nullopt;
   }
 
@@ -98,7 +109,12 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
   constexpr uint64_t kBytesPerKB = 1024ULL;
   std::ifstream meminfo("/proc/meminfo");
   if (!meminfo) {
-    spdlog::error("Failed to open /proc/meminfo");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "file_open_failed")
+        .Field("file", "/proc/meminfo")
+        .Field("platform", "linux")
+        .Error();
     return std::nullopt;
   }
 
@@ -127,12 +143,22 @@ std::optional<SystemMemoryInfo> GetSystemMemoryInfo() {
 
   // Validate we got the essential information
   if (info.total_physical_bytes == 0) {
-    spdlog::error("Failed to parse total physical memory from /proc/meminfo");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "parse_failed")
+        .Field("field", "total_physical_memory")
+        .Field("file", "/proc/meminfo")
+        .Field("platform", "linux")
+        .Error();
     return std::nullopt;
   }
 
 #else
-  spdlog::error("Unsupported platform for memory info");
+  mygram::utils::StructuredLog()
+      .Event("memory_error")
+      .Field("type", "unsupported_platform")
+      .Field("operation", "get_system_memory_info")
+      .Error();
   return std::nullopt;
 #endif
 
@@ -154,7 +180,12 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
                 &count);
 
   if (kern_ret != KERN_SUCCESS) {
-    spdlog::error("Failed to get task info");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "task_info_failed")
+        .Field("operation", "task_info")
+        .Field("platform", "macos")
+        .Error();
     return std::nullopt;
   }
 
@@ -175,7 +206,12 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
   constexpr uint64_t kBytesPerKB = 1024ULL;
   std::ifstream status("/proc/self/status");
   if (!status) {
-    spdlog::error("Failed to open /proc/self/status");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "file_open_failed")
+        .Field("file", "/proc/self/status")
+        .Field("platform", "linux")
+        .Error();
     return std::nullopt;
   }
 
@@ -202,12 +238,22 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
 
   // Validate we got essential information
   if (info.rss_bytes == 0) {
-    spdlog::error("Failed to parse RSS from /proc/self/status");
+    mygram::utils::StructuredLog()
+        .Event("memory_error")
+        .Field("type", "parse_failed")
+        .Field("field", "rss")
+        .Field("file", "/proc/self/status")
+        .Field("platform", "linux")
+        .Error();
     return std::nullopt;
   }
 
 #else
-  spdlog::error("Unsupported platform for process memory info");
+  mygram::utils::StructuredLog()
+      .Event("memory_error")
+      .Field("type", "unsupported_platform")
+      .Field("operation", "get_process_memory_info")
+      .Error();
   return std::nullopt;
 #endif
 

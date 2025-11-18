@@ -821,7 +821,7 @@ Continuing with current configuration
 ### Monitoring
 
 1. **Logging**:
-   - ✅ Use JSON logging (`logging.json: true`)
+   - ✅ Use JSON logging (`logging.format: "json"`)
    - ✅ Send logs to centralized logging (ELK, Loki, etc.)
 
 2. **Health Checks**:

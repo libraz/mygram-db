@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+
+#include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
@@ -592,6 +595,165 @@ TEST(BinlogParsingSecurityTest, MetadataBoundsChecking) {
   // - All checks use metadata_end (computed once, checked for overflow)
 
   SUCCEED() << "Metadata bounds checking prevents buffer overflow";
+}
+
+/**
+ * @brief Test IsTableAffectingDDL with TRUNCATE TABLE statements
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_TruncateTable) {
+  // Test basic TRUNCATE TABLE
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE articles", "articles"));
+
+  // Test with backticks
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE `articles`", "articles"));
+
+  // Test case insensitive
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("truncate table articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TrUnCaTe TaBlE articles", "articles"));
+
+  // Test with multiple spaces
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE  TABLE   articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE\t\tTABLE\t\tarticles", "articles"));
+
+  // Test with newlines and tabs
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE\nTABLE\narticles", "articles"));
+
+  // Test different table name should not match
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE users", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE articles_backup", "articles"));
+}
+
+/**
+ * @brief Test IsTableAffectingDDL with DROP TABLE statements
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_DropTable) {
+  // Test basic DROP TABLE
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE articles", "articles"));
+
+  // Test with backticks
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE `articles`", "articles"));
+
+  // Test with IF EXISTS
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE IF EXISTS articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE IF EXISTS `articles`", "articles"));
+
+  // Test case insensitive
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("drop table articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("drop table if exists articles", "articles"));
+
+  // Test with multiple spaces
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP  TABLE   IF  EXISTS  articles", "articles"));
+
+  // Test different table name should not match
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE users", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE IF EXISTS users", "articles"));
+}
+
+/**
+ * @brief Test IsTableAffectingDDL with ALTER TABLE statements
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_AlterTable) {
+  // Test basic ALTER TABLE
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles ADD COLUMN status INT", "articles"));
+
+  // Test with backticks
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE `articles` ADD COLUMN status INT", "articles"));
+
+  // Test case insensitive
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("alter table articles add column status int", "articles"));
+
+  // Test with multiple spaces
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER  TABLE   articles  ADD  COLUMN status INT", "articles"));
+
+  // Test various ALTER TABLE operations
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles DROP COLUMN status", "articles"));
+  EXPECT_TRUE(
+      BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles MODIFY COLUMN title VARCHAR(500)", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles ADD INDEX idx_status (status)", "articles"));
+
+  // Test different table name should not match
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE users ADD COLUMN email VARCHAR(255)", "articles"));
+}
+
+/**
+ * @brief Test IsTableAffectingDDL with non-matching statements
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_NonMatching) {
+  // Test SELECT statements
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("SELECT * FROM articles", "articles"));
+
+  // Test INSERT statements
+  EXPECT_FALSE(
+      BinlogEventParser::IsTableAffectingDDL("INSERT INTO articles VALUES (1, 'title', 'content')", "articles"));
+
+  // Test UPDATE statements
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("UPDATE articles SET title='new title' WHERE id=1", "articles"));
+
+  // Test DELETE statements
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DELETE FROM articles WHERE id=1", "articles"));
+
+  // Test CREATE TABLE statements (different table)
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("CREATE TABLE users (id INT PRIMARY KEY)", "articles"));
+
+  // Test empty string
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("", "articles"));
+
+  // Test partial keyword matches should not match
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE_TABLE articles", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROPTABLE articles", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ALTERTABLE articles", "articles"));
+}
+
+/**
+ * @brief Test IsTableAffectingDDL with edge cases
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_EdgeCases) {
+  // Test table name as substring of another table name
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE articles_backup", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE old_articles", "articles"));
+
+  // Test with semicolons
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE articles;", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE articles;", "articles"));
+
+  // Test with multiple statements (should match if any affects the table)
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE users; DROP TABLE articles;", "articles"));
+
+  // Test with comments (simplified - real parser may need to handle comments)
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("/* comment */ DROP TABLE articles", "articles"));
+
+  // Test table name case sensitivity (table names are converted to uppercase for matching)
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE Articles", "articles"));
+}
+
+/**
+ * @brief Test IsTableAffectingDDL security - no regex injection
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_Security) {
+  // Test that special regex characters in table names don't cause issues
+  // (Since we removed regex, these should be treated as literal characters)
+
+  // Test with special characters that would be regex metacharacters
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE test.*", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE test+", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE test[abc]", "articles"));
+
+  // Test that very long strings don't cause performance issues
+  std::string long_query = "SELECT * FROM ";
+  for (int i = 0; i < 1000; ++i) {
+    long_query += "table" + std::to_string(i) + ", ";
+  }
+  long_query += "articles";
+
+  // This should complete quickly (no ReDoS vulnerability)
+  auto start = std::chrono::steady_clock::now();
+  bool result = BinlogEventParser::IsTableAffectingDDL(long_query, "articles");
+  auto end = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+  EXPECT_FALSE(result);  // Not a DDL statement
+  EXPECT_LT(duration, 100) << "Query parsing took too long (possible ReDoS): " << duration << "ms";
 }
 
 #endif  // USE_MYSQL

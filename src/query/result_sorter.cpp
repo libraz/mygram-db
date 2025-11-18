@@ -40,7 +40,29 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
     // Get primary key as sort key
     auto pk_opt = doc_store.GetPrimaryKey(doc_id);
     if (pk_opt.has_value()) {
-      return pk_opt.value();
+      const auto& pk_str = pk_opt.value();
+
+      // Fast path: Numeric primary keys
+      // Try to parse as numeric and convert to zero-padded string for correct lexicographic ordering
+      if (!pk_str.empty() &&
+          std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+        try {
+          uint64_t num = std::stoull(pk_str);
+          // Convert to zero-padded string (20 digits) for lexicographic comparison
+          // This ensures: "00000000000000000001" < "00000000000000000002" < "00000000000000000010"
+          // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          char buf[kNumericBufferSize];
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          snprintf(buf, sizeof(buf), "%020llu", num);
+          // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+        } catch (const std::exception&) {
+          // Overflow or parse error - fall through to string comparison
+        }
+      }
+
+      // String primary keys: use as-is
+      return pk_str;
     }
     // Fallback: use DocID itself (numeric)
     // Pre-pad to avoid repeated string allocation in comparator
@@ -124,59 +146,10 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   }
 
   // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
+  // GetSortKey() handles both primary keys and filter columns
   for (const auto& doc_id : results) {
-    if (!order_by.IsPrimaryKey()) {
-      // Currently only primary key sorting is optimized
-      // For filter columns, fall back to traditional sort
-      // TODO(performance): Extend Schwartzian Transform to filter columns in Phase 2
-      mygram::utils::StructuredLog()
-          .Event("sort_fallback")
-          .Field("reason", "filter_column_not_yet_optimized")
-          .Field("column", order_by.column)
-          .Warn();
-
-      std::vector<DocId> sorted_results = results;
-      SortComparator comparator(doc_store, order_by);
-      std::sort(sorted_results.begin(), sorted_results.end(), comparator);
-      return sorted_results;
-    }
-
-    // Get primary key
-    auto pk_opt = doc_store.GetPrimaryKey(doc_id);
-    if (pk_opt.has_value()) {
-      const auto& pk_str = pk_opt.value();
-
-      // Fast path: Numeric primary keys
-      // Try to parse as numeric and convert to zero-padded string for correct lexicographic ordering
-      if (!pk_str.empty() &&
-          std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-        try {
-          uint64_t num = std::stoull(pk_str);
-          // Convert to zero-padded string (20 digits) for lexicographic comparison
-          // This ensures: "00000000000000000001" < "00000000000000000002" < "00000000000000000010"
-          // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          char buf[kNumericBufferSize];
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          snprintf(buf, sizeof(buf), "%020llu", num);
-          // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          entries.push_back({doc_id, std::string(buf)});  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          continue;
-        } catch (const std::exception&) {
-          // Overflow or parse error - fall through to string comparison
-        }
-      }
-
-      // String primary keys: use as-is
-      entries.push_back({doc_id, pk_str});
-    } else {
-      // No primary key: use DocId itself (fallback)
-      // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-      char buf[kDocIdBufferSize];
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-      snprintf(buf, sizeof(buf), "%0*u", kDocIdWidth, doc_id);
-      // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-      entries.push_back({doc_id, std::string(buf)});  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    }
+    std::string sort_key = GetSortKey(doc_id, doc_store, order_by);
+    entries.push_back({doc_id, std::move(sort_key)});
   }
 
   // Phase 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
@@ -306,17 +279,16 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
       (total_needed < results.size() && total_needed_double < results_size_double * kPartialSortThreshold);
 
   // Decide whether to use Schwartzian Transform optimization
-  // Benefits: Eliminates repeated GetPrimaryKey() calls (96% reduction in lock acquisitions)
+  // Benefits: Eliminates repeated GetSortKey() calls (96% reduction in lock acquisitions)
   // Trade-offs: Requires O(N) temporary memory, only beneficial for N >= threshold
   //
   // Use Schwartzian Transform when:
   // 1. Result set is large enough (N >= 100) to justify overhead
-  // 2. Sorting by primary key (currently only primary key is optimized)
-  // 3. NOT using partial_sort (Schwartzian Transform returns new vector, incompatible with in-place partial_sort)
+  // 2. NOT using partial_sort (Schwartzian Transform returns new vector, incompatible with in-place partial_sort)
   //
+  // Schwartzian Transform now supports both primary keys and filter columns.
   // TODO(performance): Combine Schwartzian Transform with partial_sort in future
-  bool use_schwartzian =
-      (results.size() >= kSchwartzianTransformThreshold && order_by.IsPrimaryKey() && !use_partial_sort);
+  bool use_schwartzian = (results.size() >= kSchwartzianTransformThreshold && !use_partial_sort);
 
   if (use_schwartzian) {
     // Schwartzian Transform: Pre-compute sort keys, then sort

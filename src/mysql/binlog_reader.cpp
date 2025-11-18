@@ -315,7 +315,12 @@ void BinlogReader::ReaderThreadFunc() {
       // Validate connection after reconnection (detect failover, invalid servers)
       if (!ValidateConnection()) {
         // Validation failed - server is invalid, stop replication
-        spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "connection_validation_failed")
+            .Field("context", "after_reconnect")
+            .Field("error", last_error_)
+            .Error();
         should_stop_ = true;
         break;
       }
@@ -386,7 +391,12 @@ void BinlogReader::ReaderThreadFunc() {
         // Validate connection after reconnection (detect failover, invalid servers)
         if (!ValidateConnection()) {
           // Validation failed - server is invalid, stop replication
-          spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+          mygram::utils::StructuredLog()
+              .Event("binlog_error")
+              .Field("type", "connection_validation_failed")
+              .Field("context", "after_reconnect")
+              .Field("error", last_error_)
+              .Error();
           should_stop_ = true;
           break;
         }
@@ -452,7 +462,12 @@ void BinlogReader::ReaderThreadFunc() {
             // Validate connection after reconnection (detect failover, invalid servers)
             if (!ValidateConnection()) {
               // Validation failed - server is invalid, stop replication
-              spdlog::error("[binlog worker] Connection validation failed after reconnect: {}", last_error_);
+              mygram::utils::StructuredLog()
+                  .Event("binlog_error")
+                  .Field("type", "connection_validation_failed")
+                  .Field("context", "after_reconnect")
+                  .Field("error", last_error_)
+                  .Error();
               should_stop_ = true;
               break;
             }
@@ -827,7 +842,11 @@ bool BinlogReader::ValidateConnection() {
   // Log warnings if any (e.g., failover detected)
   if (!result.warnings.empty()) {
     for (const auto& warning : result.warnings) {
-      spdlog::warn("[binlog validation] {}", warning);
+      mygram::utils::StructuredLog()
+          .Event("binlog_warning")
+          .Field("type", "connection_validation")
+          .Field("warning", warning)
+          .Warn();
     }
   }
 

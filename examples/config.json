@@ -120,7 +120,7 @@
   },
   "logging": {
     "level": "info",
-    "json": true
+    "format": "json"
   },
   "cache": {
     "enabled": true,

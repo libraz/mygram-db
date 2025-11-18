@@ -300,3 +300,57 @@ TEST_F(RateLimiterTest, RealisticRefill) {
   EXPECT_GE(consumed, 4);
   EXPECT_LE(consumed, 6);
 }
+
+/**
+ * @brief Test no deadlock when calling GetStats() and AllowRequest() concurrently
+ *
+ * This test ensures that concurrent calls to GetStats() and AllowRequest()
+ * do not cause deadlock due to lock ordering issues. It spawns multiple
+ * threads that continuously call both methods.
+ *
+ * Run with ThreadSanitizer to detect potential deadlocks:
+ *   cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON ..
+ */
+TEST_F(RateLimiterTest, NoDeadlockUnderConcurrentLoad) {
+  RateLimiter limiter(100, 10, 1000, 1000, 60);
+
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> threads;
+
+  // Threads continuously calling AllowRequest
+  for (int i = 0; i < 5; ++i) {
+    threads.emplace_back([&, i]() {
+      std::string client_ip = "192.168.1." + std::to_string(i);
+      while (!stop.load()) {
+        limiter.AllowRequest(client_ip);
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+    });
+  }
+
+  // Threads continuously calling GetStats
+  for (int i = 0; i < 3; ++i) {
+    threads.emplace_back([&]() {
+      while (!stop.load()) {
+        auto stats = limiter.GetStats();
+        (void)stats;  // Suppress unused variable warning
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+    });
+  }
+
+  // Let threads run for a short period
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+  // Signal threads to stop
+  stop.store(true);
+
+  // Wait for all threads to finish
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // If we reach here without hanging, the test passes
+  auto final_stats = limiter.GetStats();
+  EXPECT_GT(final_stats.total_requests, 0);
+}

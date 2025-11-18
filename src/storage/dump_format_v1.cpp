@@ -667,8 +667,8 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
   if (!WriteString(output_stream, config.logging.level)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write logging.level"));
   }
-  if (!WriteBinary(output_stream, config.logging.json)) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write logging.json"));
+  if (!WriteString(output_stream, config.logging.format)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write logging.format"));
   }
 
   // Query limits
@@ -851,8 +851,8 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   if (!ReadString(input_stream, config.logging.level)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.level"));
   }
-  if (!ReadBinary(input_stream, config.logging.json)) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.json"));
+  if (!ReadString(input_stream, config.logging.format)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.format"));
   }
 
   // Query limits (added in newer dumps; optional for backward compatibility)

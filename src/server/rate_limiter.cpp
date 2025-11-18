@@ -158,8 +158,9 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
 }
 
 RateLimiter::Stats RateLimiter::GetStats() const {
-  std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-  std::lock_guard<std::mutex> lock(mutex_);
+  // Use std::scoped_lock to acquire both mutexes in a deadlock-free manner.
+  // This prevents deadlock with AllowRequest() which acquires mutex_ first.
+  std::scoped_lock lock(mutex_, stats_mutex_);
 
   return Stats{.total_requests = total_requests_,
                .allowed_requests = allowed_requests_,

@@ -204,7 +204,7 @@ nlohmann::json ConfigToJson(const Config& config) {
   // Logging configuration
   json["logging"] = {
       {"level", config.logging.level},
-      {"json", config.logging.json},
+      {"format", config.logging.format},
   };
 
   // Cache configuration

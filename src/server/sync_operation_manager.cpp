@@ -340,14 +340,20 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
 
       // Start replication if configured
-      if (full_config_->replication.enable && binlog_reader_ != nullptr && !gtid.empty()) {
-        if (binlog_reader_->IsRunning()) {
+      // NOTE: binlog_reader_ is owned by Application and guaranteed to outlive
+      // SyncOperationManager. We check for nullptr for defensive programming.
+      // SAFETY: Capture binlog_reader_ to local variable to prevent TOCTOU issues
+      // (Time-Of-Check-Time-Of-Use) if binlog_reader_ were to be modified by another thread.
+      mysql::BinlogReader* reader = binlog_reader_;
+      if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
+        // reader is guaranteed non-null here due to the check above
+        if (reader->IsRunning()) {
           update_state([](SyncState& state) { state.replication_status = "ALREADY_RUNNING"; });
           spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication already running.", table_name, processed,
                        gtid);
         } else {
-          binlog_reader_->SetCurrentGTID(gtid);
-          auto start_result = binlog_reader_->Start();
+          reader->SetCurrentGTID(gtid);
+          auto start_result = reader->Start();
           if (start_result) {
             update_state([](SyncState& state) { state.replication_status = "STARTED"; });
             spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication started.", table_name, processed, gtid);

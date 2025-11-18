@@ -209,7 +209,9 @@ network:
 # Logging Configuration
 logging:
   level: "info"                     # Log level: "debug", "info", "warn", "error" (default: info)
-  json: true                        # JSON format output (default: true)
+  format: "json"                    # Structured log format: "json" or "text" (default: json)
+                                     # - "json": {"event":"name","field":"value"} - best for log aggregation (Elasticsearch, Splunk)
+                                     # - "text": event=name field=value - best for human reading
   file: ""                          # Log file path (default: "" = stdout)
                                      # - Empty string: log to stdout (systemd/Docker)
                                      # - Path: log to file (e.g., "/var/log/mygramdb/mygramdb.log")

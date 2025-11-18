@@ -614,10 +614,11 @@
           "default": "info",
           "enum": ["debug", "info", "warn", "error"]
         },
-        "json": {
-          "type": "boolean",
-          "description": "JSON format output",
-          "default": true
+        "format": {
+          "type": "string",
+          "description": "Structured log output format: 'json' for JSON format {\"event\":\"name\"}, 'text' for key=value format (event=name)",
+          "default": "json",
+          "enum": ["json", "text"]
         },
         "file": {
           "type": "string",
