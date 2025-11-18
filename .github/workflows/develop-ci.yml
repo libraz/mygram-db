@@ -53,7 +53,8 @@ jobs:
           libicu-dev \
           libreadline-dev \
           pkg-config \
-          ccache
+          ccache \
+          jq
 
     - name: Install LLVM/Clang 18
       if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -97,6 +98,19 @@ jobs:
 
     - name: Show ccache statistics
       run: ccache --show-stats
+
+    - name: Run tests for changed files
+      run: |
+        # Fetch develop branch for comparison
+        git fetch origin develop:refs/remotes/origin/develop
+        # Run tests affected by changes in this push
+        if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+          # Normal push: test changes from previous commit
+          bash support/dev/test-diff.sh ${{ github.event.before }} ${{ github.sha }} --verbose
+        else
+          # First push or force push: test last commit only
+          bash support/dev/test-diff.sh --committed --verbose
+        fi
 
     - name: Run clang-tidy (diff mode, warnings only)
       run: bash support/dev/run-clang-tidy.sh --diff origin/develop

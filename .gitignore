@@ -28,6 +28,9 @@ _deps/
 .claude/
 CLAUDE.md
 
+# Test diff configuration (local customizations)
+.test-diff.conf
+
 # act (GitHub Actions local runner)
 .secrets
 .act/

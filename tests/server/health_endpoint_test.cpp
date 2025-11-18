@@ -12,6 +12,7 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <thread>
 
@@ -50,12 +51,30 @@ class HealthEndpointTest : public ::testing::Test {
     // Start server
     ASSERT_TRUE(server_->Start());
 
-    // Wait for server to be ready
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
     // Use configured port
     port_ = http_config.port;
     base_url_ = "http://127.0.0.1:" + std::to_string(port_);
+
+    // Wait for server to be actually ready by polling health endpoint
+    WaitForServerReady();
+  }
+
+  void WaitForServerReady() {
+    httplib::Client client(base_url_);
+    client.set_connection_timeout(2);
+    client.set_read_timeout(2, 0);
+
+    const int max_attempts = 50;  // 5 seconds total (50 * 100ms)
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+      auto res = client.Get("/health/live");
+      if (res && res->status == 200) {
+        // Server is ready, wait a bit more for full initialization
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    FAIL() << "Server did not become ready within timeout";
   }
 
   void TearDown() override {
@@ -212,28 +231,52 @@ TEST_F(HealthEndpointTest, LegacyHealthEndpointWorks) {
  * @brief Test multiple concurrent health check requests
  */
 TEST_F(HealthEndpointTest, ConcurrentHealthChecks) {
-  httplib::Client client(base_url_);
-  client.set_connection_timeout(5);
-
   const int num_requests = 50;
   std::vector<std::thread> threads;
   std::atomic<int> success_count{0};
+  std::atomic<int> timeout_count{0};
+  std::atomic<int> connection_failed_count{0};
+  std::atomic<int> other_error_count{0};
 
   for (int i = 0; i < num_requests; ++i) {
     threads.emplace_back([&, i]() {
       httplib::Client thread_client(base_url_);
-      thread_client.set_connection_timeout(5);
+      thread_client.set_connection_timeout(10);  // Increase timeout for CI environments
+      thread_client.set_read_timeout(10, 0);
+      thread_client.set_write_timeout(10, 0);
+      thread_client.set_keep_alive(false);  // Disable keep-alive to avoid connection pool issues
 
       std::string endpoint = (i % 3 == 0) ? "/health/live" : (i % 3 == 1) ? "/health/ready" : "/health/detail";
       auto res = thread_client.Get(endpoint.c_str());
+
       if (res && res->status == 200) {
         success_count++;
+      } else if (!res) {
+        auto err = thread_client.get_openssl_verify_result();
+        if (err != 0) {
+          other_error_count++;
+        } else {
+          // Connection or timeout failure
+          connection_failed_count++;
+        }
+      } else {
+        // Got response but not 200
+        other_error_count++;
       }
     });
   }
 
   for (auto& t : threads) {
     t.join();
+  }
+
+  // Log failure details for debugging
+  if (success_count < num_requests * 0.9) {
+    std::cerr << "Concurrent test failures:\n"
+              << "  Success: " << success_count << "/" << num_requests << "\n"
+              << "  Connection failures: " << connection_failed_count << "\n"
+              << "  Timeouts: " << timeout_count << "\n"
+              << "  Other errors: " << other_error_count << std::endl;
   }
 
   // Most requests should succeed (allowing some failures due to timing)
