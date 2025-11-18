@@ -465,7 +465,7 @@ int main(int argc, char* argv[]) {
   mygramdb::server::ServerConfig server_config;
   server_config.host = config.api.tcp.bind;
   server_config.port = config.api.tcp.port;
-  server_config.max_connections = kDefaultMaxConnections;
+  server_config.max_connections = config.api.tcp.max_connections;
   server_config.default_limit = config.api.default_limit;
   server_config.max_query_length = config.api.max_query_length;
   server_config.allow_cidrs = config.network.allow_cidrs;
@@ -557,9 +557,9 @@ int main(int argc, char* argv[]) {
 
 #ifdef USE_MYSQL
       // Check if MySQL connection settings changed
-      bool mysql_changed = (new_config.mysql.host != config.mysql.host) || (new_config.mysql.port != config.mysql.port) ||
-                           (new_config.mysql.user != config.mysql.user) ||
-                           (new_config.mysql.password != config.mysql.password);
+      bool mysql_changed =
+          (new_config.mysql.host != config.mysql.host) || (new_config.mysql.port != config.mysql.port) ||
+          (new_config.mysql.user != config.mysql.user) || (new_config.mysql.password != config.mysql.password);
 
       if (mysql_changed && mysql_conn) {
         spdlog::info("MySQL connection settings changed, reconnecting...");

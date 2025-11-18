@@ -5,6 +5,8 @@
 
 #ifdef USE_MYSQL
 
+#include "mysql/connection_validator.h"
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
@@ -12,7 +14,6 @@
 #include <cstdlib>
 
 #include "mysql/connection.h"
-#include "mysql/connection_validator.h"
 
 namespace mygramdb::mysql {
 
@@ -210,7 +211,8 @@ TEST_F(ConnectionValidatorIntegrationTest, ValidateServerAllCheckPass) {
   EXPECT_FALSE(result.server_uuid->empty());
 
   // Server UUID should be a valid MySQL UUID format
-  EXPECT_THAT(*result.server_uuid, ::testing::MatchesRegex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
+  EXPECT_THAT(*result.server_uuid,
+              ::testing::MatchesRegex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
 }
 
 /**
@@ -320,7 +322,8 @@ TEST_F(ConnectionValidatorIntegrationTest, ValidateServerUUIDChanged) {
  * @brief Test ValidateServer - all tables exist
  */
 TEST_F(ConnectionValidatorIntegrationTest, ValidateServerAllTablesExist) {
-  std::vector<std::string> required_tables = {"validator_test_table1", "validator_test_table2", "validator_test_messages"};
+  std::vector<std::string> required_tables = {"validator_test_table1", "validator_test_table2",
+                                              "validator_test_messages"};
 
   auto result = ConnectionValidator::ValidateServer(*conn_, required_tables);
 

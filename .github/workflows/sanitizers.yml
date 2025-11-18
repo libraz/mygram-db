@@ -1,0 +1,161 @@
+name: Sanitizers (Disabled)
+
+# Workflow is disabled - only manual trigger available
+# To re-enable, uncomment the push and pull_request triggers below
+on:
+  workflow_dispatch:  # Manual trigger only
+  # push:
+  #   branches: [ main, develop ]
+  # pull_request:
+  #   branches: [ main, develop ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Detect which files have changed to skip unnecessary jobs
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      src: ${{ steps.filter.outputs.src }}
+      tests: ${{ steps.filter.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            src:
+              - 'src/**'
+              - 'CMakeLists.txt'
+              - 'third_party/**'
+            tests:
+              - 'tests/**'
+
+  # AddressSanitizer - Detects memory errors (use-after-free, buffer overflows, etc.)
+  asan:
+    name: AddressSanitizer
+    needs: changes
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-asan-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libmysqlclient-dev \
+          libicu-dev \
+          libreadline-dev \
+          pkg-config
+
+    - name: Configure CMake with ASAN
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_TESTS=ON \
+              -DENABLE_ASAN=ON \
+              -DUSE_ICU=ON \
+              -DUSE_MYSQL=ON \
+              ..
+
+    - name: Build
+      run: |
+        cd build
+        make -j$(nproc)
+
+    - name: Run tests with ASAN
+      run: |
+        cd build
+        # Set ASAN options for better error reporting
+        export ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:detect_stack_use_after_return=1
+        ctest --output-on-failure --parallel $(nproc)
+
+    - name: Upload build artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: asan-build-logs
+        path: |
+          build/CMakeFiles/*.log
+          build/Testing/Temporary/
+
+  # ThreadSanitizer - Detects data races and thread safety issues
+  tsan:
+    name: ThreadSanitizer
+    needs: changes
+    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-tsan-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libmysqlclient-dev \
+          libicu-dev \
+          libreadline-dev \
+          pkg-config
+
+    - name: Configure CMake with TSAN
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_TESTS=ON \
+              -DENABLE_TSAN=ON \
+              -DUSE_ICU=ON \
+              -DUSE_MYSQL=ON \
+              ..
+
+    - name: Build
+      run: |
+        cd build
+        make -j$(nproc)
+
+    - name: Run tests with TSAN
+      run: |
+        cd build
+        # Set TSAN options for better error reporting
+        export TSAN_OPTIONS=second_deadlock_stack=1:halt_on_error=0
+        ctest --output-on-failure --parallel $(nproc)
+
+    - name: Upload build artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: tsan-build-logs
+        path: |
+          build/CMakeFiles/*.log
+          build/Testing/Temporary/

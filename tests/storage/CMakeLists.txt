@@ -88,8 +88,8 @@ add_executable(dump_security_test
 )
 
 target_link_libraries(dump_security_test
-  mygramdb_config   # May include mygramdb_storage via mygramdb_mysql
-  mygramdb_storage  # Includes mygramdb_index transitively
+  mygramdb_storage  # For dump functionality (explicit link needed for headers)
+  mygramdb_config   # For configuration
   GTest::gtest_main
 )
 
@@ -108,7 +108,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(dump_save_load_test
-    mygramdb_query  # Includes mygramdb_storage, mygramdb_index transitively
+    mygramdb_cache  # Includes mygramdb_query, mygramdb_storage, mygramdb_index transitively
     mygramdb_config # Includes mygramdb_mysql transitively
     GTest::gtest_main
   )

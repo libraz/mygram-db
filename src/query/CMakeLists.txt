@@ -2,6 +2,9 @@ add_library(mygramdb_query STATIC
   query_parser.cpp
   query_ast.cpp
   result_sorter.cpp
+  cache_key.cpp
+  query_normalizer.cpp
+  md5.cpp
 )
 
 target_include_directories(mygramdb_query PUBLIC

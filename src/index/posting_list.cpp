@@ -104,6 +104,7 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
 }
 
 void PostingList::Add(DocId doc_id) {
+  std::unique_lock lock(mutex_);  // Exclusive access for write
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
@@ -123,6 +124,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     return;
   }
 
+  std::unique_lock lock(mutex_);  // Exclusive access for write
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Merge sorted arrays
     auto existing = DecodeDelta(delta_compressed_);
@@ -136,6 +138,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 }
 
 void PostingList::Remove(DocId doc_id) {
+  std::unique_lock lock(mutex_);  // Exclusive access for write
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
@@ -151,6 +154,7 @@ void PostingList::Remove(DocId doc_id) {
 }
 
 bool PostingList::Contains(DocId doc_id) const {
+  std::shared_lock lock(mutex_);  // Protect read access
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     if (delta_compressed_.empty()) {
       return false;
@@ -211,6 +215,7 @@ bool PostingList::Contains(DocId doc_id) const {
 }
 
 std::vector<DocId> PostingList::GetAll() const {
+  std::shared_lock lock(mutex_);  // Protect read access
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return DecodeDelta(delta_compressed_);
   }
@@ -221,9 +226,18 @@ std::vector<DocId> PostingList::GetAll() const {
 }
 
 std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
+  std::shared_lock lock(mutex_);  // Protect read access
+
   // If limit is 0, return all documents
   if (limit == 0) {
-    auto result = GetAll();
+    std::vector<DocId> result;
+    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+      result = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      result.resize(size);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, result.data());
+    }
     if (reverse) {
       std::reverse(result.begin(), result.end());
     }
@@ -293,6 +307,7 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
 }
 
 uint64_t PostingList::Size() const {
+  std::shared_lock lock(mutex_);  // Protect read access
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size();
   }
@@ -300,6 +315,7 @@ uint64_t PostingList::Size() const {
 }
 
 size_t PostingList::MemoryUsage() const {
+  std::shared_lock lock(mutex_);  // Protect read access
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size() * sizeof(uint32_t);
   }
@@ -307,6 +323,9 @@ size_t PostingList::MemoryUsage() const {
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
+  std::shared_lock lock1(mutex_);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
   if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
@@ -315,8 +334,25 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     result->roaring_bitmap_ = roaring_bitmap_and(roaring_bitmap_, other.roaring_bitmap_);
   } else {
     // At least one is delta: fall back to sorted array intersection
-    auto docs1 = GetAll();
-    auto docs2 = other.GetAll();
+    // Note: GetAll() would try to acquire the lock again, so we inline the logic
+    std::vector<DocId> docs1;
+    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+      docs1 = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      docs1.resize(size1);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs1.data());
+    }
+
+    std::vector<DocId> docs2;
+    if (other.strategy_ == PostingStrategy::kDeltaCompressed) {
+      docs2 = DecodeDelta(other.delta_compressed_);
+    } else {
+      uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
+      docs2.resize(size2);
+      roaring_bitmap_to_uint32_array(other.roaring_bitmap_, docs2.data());
+    }
+
     std::vector<DocId> intersection;
     std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
     result->delta_compressed_ = EncodeDelta(intersection);
@@ -326,6 +362,9 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 }
 
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
+  std::shared_lock lock1(mutex_);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
   if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
@@ -334,8 +373,25 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     result->roaring_bitmap_ = roaring_bitmap_or(roaring_bitmap_, other.roaring_bitmap_);
   } else {
     // At least one is delta: fall back to sorted array union
-    auto docs1 = GetAll();
-    auto docs2 = other.GetAll();
+    // Note: GetAll() would try to acquire the lock again, so we inline the logic
+    std::vector<DocId> docs1;
+    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+      docs1 = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      docs1.resize(size1);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs1.data());
+    }
+
+    std::vector<DocId> docs2;
+    if (other.strategy_ == PostingStrategy::kDeltaCompressed) {
+      docs2 = DecodeDelta(other.delta_compressed_);
+    } else {
+      uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
+      docs2.resize(size2);
+      roaring_bitmap_to_uint32_array(other.roaring_bitmap_, docs2.data());
+    }
+
     std::vector<DocId> union_result;
     std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(union_result));
     result->delta_compressed_ = EncodeDelta(union_result);
@@ -345,11 +401,20 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
 }
 
 void PostingList::Optimize(uint64_t total_docs) {
+  std::unique_lock lock(mutex_);  // Exclusive access for write
   if (total_docs == 0) {
     return;
   }
 
-  double density = static_cast<double>(Size()) / static_cast<double>(total_docs);
+  // Calculate size without calling Size() to avoid recursive locking
+  uint64_t size = 0;
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    size = delta_compressed_.size();
+  } else {
+    size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  }
+
+  double density = static_cast<double>(size) / static_cast<double>(total_docs);
 
   if (density >= roaring_threshold_ && strategy_ == PostingStrategy::kDeltaCompressed) {
     // Convert to Roaring for high density
@@ -363,12 +428,24 @@ void PostingList::Optimize(uint64_t total_docs) {
 }
 
 std::shared_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
+  std::shared_lock lock(mutex_);  // Protect read access to internal state
+
   auto cloned = std::make_shared<PostingList>(roaring_threshold_);
 
   // Get all document IDs from current posting list
-  auto docs = GetAll();
+  // Note: GetAll() is called with the lock already held
+  std::vector<DocId> docs;
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    docs = DecodeDelta(delta_compressed_);
+  } else {
+    uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+    docs.resize(size);
+    roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+  }
 
-  // Build the cloned posting list
+  lock.unlock();  // Release lock before expensive operations
+
+  // Build the cloned posting list (no longer needs lock on original)
   if (!docs.empty()) {
     cloned->AddBatch(docs);
   }
@@ -450,6 +527,8 @@ std::vector<DocId> PostingList::DecodeDelta(const std::vector<uint32_t>& encoded
 }
 
 void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
+  std::shared_lock lock(mutex_);  // Protect read access
+
   // Format:
   // [1 byte: strategy] [4 bytes: size] [data...]
 
@@ -489,6 +568,8 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 }
 
 bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset) {
+  std::unique_lock lock(mutex_);  // Exclusive access for write
+
   if (offset >= buffer.size()) {
     return false;
   }

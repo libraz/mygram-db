@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 
 namespace mygramdb::server {
 struct TableContext;

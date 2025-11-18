@@ -61,7 +61,7 @@ class ConnectionValidator {
    * @brief Check if required tables exist
    */
   static bool CheckTablesExist(Connection& conn, const std::vector<std::string>& tables,
-                                std::vector<std::string>& missing_tables);
+                               std::vector<std::string>& missing_tables);
 
   /**
    * @brief Check server UUID and detect failover

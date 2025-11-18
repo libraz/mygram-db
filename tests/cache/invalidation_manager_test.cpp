@@ -9,7 +9,7 @@
 
 #include <thread>
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 #include "cache/query_cache.h"
 
 namespace mygramdb::cache {

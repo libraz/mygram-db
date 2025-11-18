@@ -3,12 +3,12 @@
  * @brief Cache key generation implementation
  */
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 
 #include <iomanip>
 #include <sstream>
 
-#include "cache/md5.h"
+#include "query/md5.h"
 
 namespace mygramdb::cache {
 

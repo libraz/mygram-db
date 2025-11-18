@@ -23,6 +23,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "server/rate_limiter.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
 #include "utils/error.h"
@@ -155,6 +156,7 @@ class HttpServer {
 #endif
 
   cache::CacheManager* cache_manager_;
+  std::unique_ptr<RateLimiter> rate_limiter_;
   std::vector<utils::CIDR> parsed_allow_cidrs_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
@@ -173,6 +175,11 @@ class HttpServer {
    * @brief Handle POST /{table}/search
    */
   void HandleSearch(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle POST /{table}/count
+   */
+  void HandleCount(const httplib::Request& req, httplib::Response& res);
 
   /**
    * @brief Handle GET /{table}/:id

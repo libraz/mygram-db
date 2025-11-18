@@ -12,6 +12,9 @@
 #include <cctype>
 #include <sstream>
 
+#include "query/cache_key.h"
+#include "query/query_normalizer.h"
+
 namespace mygramdb::query {
 
 namespace {
@@ -585,6 +588,14 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
+  // Precompute cache key for performance optimization
+  // This avoids recomputing normalization and MD5 hash on every cache lookup
+  const std::string normalized = cache::QueryNormalizer::Normalize(query);
+  if (!normalized.empty()) {
+    const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
+    query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  }
+
   return query;
 }
 
@@ -780,6 +791,14 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
   if (!ValidateQueryLength(query)) {
     query.type = QueryType::UNKNOWN;
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
+  // Precompute cache key for performance optimization
+  // This avoids recomputing normalization and MD5 hash on every cache lookup
+  const std::string normalized = cache::QueryNormalizer::Normalize(query);
+  if (!normalized.empty()) {
+    const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
+    query.cache_key = std::make_pair(key.hash_high, key.hash_low);
   }
 
   return query;

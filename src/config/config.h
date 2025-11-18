@@ -205,10 +205,12 @@ struct ApiConfig {
   static constexpr int kDefaultRateLimitCapacity = 100;      ///< Default burst size
   static constexpr int kDefaultRateLimitRefillRate = 10;     ///< Default tokens per second
   static constexpr int kDefaultRateLimitMaxClients = 10000;  ///< Default max tracked clients
+  static constexpr int kDefaultMaxConnections = 10000;       ///< Default maximum concurrent connections
 
   struct {
     std::string bind = "127.0.0.1";
     int port = defaults::kTcpPort;
+    int max_connections = kDefaultMaxConnections;  ///< Maximum concurrent connections
   } tcp;
 
   struct {

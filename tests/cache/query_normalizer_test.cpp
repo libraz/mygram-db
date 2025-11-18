@@ -3,7 +3,7 @@
  * @brief Unit tests for QueryNormalizer
  */
 
-#include "cache/query_normalizer.h"
+#include "query/query_normalizer.h"
 
 #include <gtest/gtest.h>
 

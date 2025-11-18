@@ -632,5 +632,155 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
   tcp_server.Stop();
 }
 
+/**
+ * @brief Test HTTP COUNT endpoint
+ */
+TEST_F(HttpServerTest, CountEndpoint) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Test basic COUNT - should return count only, not documents
+  json request_body;
+  request_body["q"] = "machine";
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  // COUNT should not return results, limit, or offset
+  EXPECT_FALSE(body.contains("results"));
+  EXPECT_FALSE(body.contains("limit"));
+  EXPECT_FALSE(body.contains("offset"));
+
+  // Test COUNT with multiple results
+  json multi_request;
+  multi_request["q"] = "e";  // Present in multiple documents
+
+  res = client.Post("/test/count", multi_request.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  body = json::parse(res->body);
+  EXPECT_GE(body["count"], 2);  // At least 2 documents contain "e"
+}
+
+/**
+ * @brief Test HTTP COUNT endpoint with filters
+ */
+TEST_F(HttpServerTest, CountWithFilters) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Test COUNT with filter (status = 1)
+  json request_body;
+  request_body["q"] = "e";  // Present in all documents
+  request_body["filters"]["status"] = 1;
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 2);  // Only article_1 and article_2 have status = 1
+
+  // Test COUNT with multiple filters
+  json multi_filter_request;
+  multi_filter_request["q"] = "e";
+  multi_filter_request["filters"]["status"] = 1;
+  multi_filter_request["filters"]["category"] = "tech";
+
+  res = client.Post("/test/count", multi_filter_request.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);  // Only article_1 has both status=1 and category="tech"
+}
+
+/**
+ * @brief Test HTTP COUNT endpoint with advanced filter operators
+ */
+TEST_F(HttpServerTest, CountWithFilterOperators) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Test COUNT with GT operator
+  json request_body;
+  request_body["q"] = "e";
+  request_body["filters"]["score"]["op"] = "GT";
+  request_body["filters"]["score"]["value"] = 2.0;
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);  // Only article_1 has score > 2.0 (3.14159)
+
+  // Test COUNT with LT operator
+  json lt_request;
+  lt_request["q"] = "e";
+  lt_request["filters"]["score"]["op"] = "LT";
+  lt_request["filters"]["score"]["value"] = 2.0;
+
+  res = client.Post("/test/count", lt_request.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);  // Only article_2 has score < 2.0 (1.61803)
+}
+
+/**
+ * @brief Test HTTP COUNT endpoint error cases
+ */
+TEST_F(HttpServerTest, CountErrorCases) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Test missing required field 'q'
+  json request_body;
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  std::string error_msg = body["error"].get<std::string>();
+  EXPECT_NE(error_msg.find("Missing required field: q"), std::string::npos);
+
+  // Test non-existent table
+  json valid_request;
+  valid_request["q"] = "test";
+
+  res = client.Post("/nonexistent/count", valid_request.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 404);
+  body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  error_msg = body["error"].get<std::string>();
+  EXPECT_NE(error_msg.find("Table not found"), std::string::npos);
+
+  // Test invalid JSON
+  res = client.Post("/test/count", "invalid json", "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  error_msg = body["error"].get<std::string>();
+  EXPECT_NE(error_msg.find("Invalid JSON"), std::string::npos);
+}
+
 }  // namespace server
 }  // namespace mygramdb

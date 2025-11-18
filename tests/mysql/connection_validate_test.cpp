@@ -115,10 +115,8 @@ TEST(ConnectionValidateUnitTest, QueryConstructionLogic) {
     EXPECT_FALSE(component.empty()) << "Query should include: " << component;
   }
 
-  // Additional logic validation
-  // Single-column constraint check: GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1
-  // This ensures composite keys are excluded
-  EXPECT_TRUE(true) << "Query logic should exclude composite keys via COUNT(*) = 1";
+  // Verify all expected components exist
+  EXPECT_EQ(expected_components.size(), 8) << "Query should have 8 key components";
 }
 
 // Unit test: Error message content validation

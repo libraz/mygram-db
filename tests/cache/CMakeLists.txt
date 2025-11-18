@@ -6,7 +6,7 @@ add_executable(md5_test
 )
 
 target_link_libraries(md5_test PRIVATE
-  mygramdb_cache
+  mygramdb_query  # md5 moved to query module
   GTest::gtest_main
 )
 
@@ -21,7 +21,7 @@ add_executable(cache_key_test
 )
 
 target_link_libraries(cache_key_test PRIVATE
-  mygramdb_cache
+  mygramdb_query  # cache_key moved to query module
   GTest::gtest_main
 )
 
@@ -36,8 +36,7 @@ add_executable(query_normalizer_test
 )
 
 target_link_libraries(query_normalizer_test PRIVATE
-  mygramdb_cache
-  mygramdb_query
+  mygramdb_cache  # Includes mygramdb_query transitively
   GTest::gtest_main
 )
 
@@ -101,8 +100,7 @@ add_executable(cache_manager_test
 )
 
 target_link_libraries(cache_manager_test PRIVATE
-  mygramdb_cache
-  mygramdb_query
+  mygramdb_cache   # Includes mygramdb_query transitively
   mygramdb_config
   GTest::gtest_main
 )

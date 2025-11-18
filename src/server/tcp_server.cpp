@@ -41,6 +41,7 @@
 #include "server/connection_io_handler.h"
 #include "server/response_formatter.h"
 #include "storage/dump_format_v1.h"
+#include "utils/fd_guard.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
@@ -161,6 +162,16 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     spdlog::info("Cache manager initialized with per-table ngram settings");
   }
 
+  // 2.5.1. Create rate limiter (if configured)
+  if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
+    rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+                                                  static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
+                                                  static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
+    spdlog::info("Rate limiter initialized: capacity={}, refill_rate={}/s, max_clients={}",
+                 full_config_->api.rate_limiting.capacity, full_config_->api.rate_limiting.refill_rate,
+                 full_config_->api.rate_limiting.max_clients);
+  }
+
 #ifdef USE_MYSQL
   // 2.6. Create SYNC operation manager (if MySQL enabled)
   sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_);
@@ -278,6 +289,34 @@ void TcpServer::Stop() {
 }
 
 void TcpServer::HandleConnection(int client_fd) {
+  // RAII guard to ensure FD is closed even if exceptions occur
+  mygramdb::utils::FDGuard fd_guard(client_fd);
+
+  // Get client IP address for rate limiting
+  std::string client_ip;
+  struct sockaddr_in addr {};  // NOLINT(cppcoreguidelines-pro-type-member-init) - Zero-init needed for getpeername
+  socklen_t addr_len = sizeof(addr);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
+  if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
+    char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Required for inet_ntop
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Required for inet_ntop
+    inet_ntop(AF_INET, &(addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+    client_ip = ip_str;  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Safe implicit conversion
+  } else {
+    client_ip = "unknown";
+  }
+
+  // Check rate limit (if enabled)
+  if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+    mygram::utils::StructuredLog()
+        .Event("server_warning")
+        .Field("type", "rate_limit_exceeded")
+        .Field("client_ip", client_ip)
+        .Warn();
+    // Connection will be closed by fd_guard
+    return;
+  }
+
   // Initialize connection context
   ConnectionContext ctx;
   ctx.client_fd = client_fd;
@@ -290,6 +329,9 @@ void TcpServer::HandleConnection(int client_fd) {
   // Increment active connection count and total connections received
   stats_.IncrementConnections();
   stats_.IncrementTotalConnections();
+
+  // RAII guard to ensure stats are decremented even if exceptions occur
+  mygramdb::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
 
   // Create I/O handler config
   IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
@@ -321,15 +363,15 @@ void TcpServer::HandleConnection(int client_fd) {
   ConnectionIOHandler io_handler(io_config, processor, shutdown_requested_);
   io_handler.HandleConnection(client_fd, ctx);
 
-  // Clean up connection
+  // Clean up connection context
   {
     std::scoped_lock<std::mutex> lock(contexts_mutex_);
     connection_contexts_.erase(client_fd);
   }
-  close(client_fd);
-  stats_.DecrementConnections();
 
   spdlog::debug("Connection closed (active: {})", stats_.GetActiveConnections());
+
+  // Note: FD guard will close the FD, stats_cleanup will decrement the connection count
 }
 
 #ifdef USE_MYSQL

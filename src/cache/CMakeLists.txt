@@ -1,7 +1,4 @@
 add_library(mygramdb_cache STATIC
-  md5.cpp
-  cache_key.cpp
-  query_normalizer.cpp
   result_compressor.cpp
   query_cache.cpp
   invalidation_manager.cpp
@@ -14,7 +11,7 @@ target_include_directories(mygramdb_cache PUBLIC
 )
 
 target_link_libraries(mygramdb_cache PUBLIC
-  mygramdb_query
+  mygramdb_query  # For Query AST types and cache key generation
   mygramdb_utils
   lz4              # For LZ4 compression
   spdlog::spdlog

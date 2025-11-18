@@ -20,6 +20,7 @@
 #include "query/query_parser.h"
 #include "server/connection_acceptor.h"
 #include "server/connection_io_handler.h"
+#include "server/rate_limiter.h"
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
@@ -186,6 +187,7 @@ class TcpServer {
   std::unique_ptr<RequestDispatcher> dispatcher_;
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
+  std::unique_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
 #endif

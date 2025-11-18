@@ -160,7 +160,8 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   UErrorCode status = U_ZERO_ERROR;
 
   // Convert UTF-8 to UnicodeString
-  icu::UnicodeString ustr = icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), static_cast<int32_t>(text.size())));
+  icu::UnicodeString ustr =
+      icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), static_cast<int32_t>(text.size())));
 
   // NFKC normalization
   if (nfkc) {

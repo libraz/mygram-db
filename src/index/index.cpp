@@ -723,6 +723,7 @@ PostingList* Index::GetOrCreatePostingList(std::string_view term) {
 const PostingList* Index::GetPostingList(std::string_view term) const {
   // NOTE: This method assumes postings_mutex_ is already locked by the caller
   // C++17: unordered_map doesn't support heterogeneous lookup, so we convert to std::string
+  // TODO(performance): Consider upgrading to C++20 or using absl::flat_hash_map for heterogeneous lookup
   auto iterator = term_postings_.find(std::string(term));
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }

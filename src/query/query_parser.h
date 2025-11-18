@@ -168,6 +168,10 @@ struct Query {
   // DUMP command options
   bool dump_with_stats = false;  // --with-stats flag for DUMP SAVE
 
+  // Cache optimization: precomputed cache key (set by QueryParser)
+  // This avoids recomputing normalization and MD5 hash on every cache lookup
+  std::optional<std::pair<uint64_t, uint64_t>> cache_key;
+
   /**
    * @brief Check if query is valid
    */

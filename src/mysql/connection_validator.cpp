@@ -15,7 +15,7 @@
 namespace mygramdb::mysql {
 
 ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
-                                                      const std::optional<std::string>& expected_uuid) {
+                                                     const std::optional<std::string>& expected_uuid) {
   ValidationResult result;
 
   // Check connection status
@@ -40,10 +40,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   std::string actual_uuid;
   if (!CheckServerUUID(conn, expected_uuid, actual_uuid, result.warnings)) {
     result.error_message = "Failed to retrieve server UUID";
-    mygram::utils::StructuredLog()
-        .Event("connection_validation_failed")
-        .Field("reason", "uuid_check_failed")
-        .Error();
+    mygram::utils::StructuredLog().Event("connection_validation_failed").Field("reason", "uuid_check_failed").Error();
     return result;
   }
   result.server_uuid = actual_uuid;
@@ -94,7 +91,7 @@ bool ConnectionValidator::CheckGTIDEnabled(Connection& conn, std::string& error)
 }
 
 bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<std::string>& tables,
-                                            std::vector<std::string>& missing_tables) {
+                                           std::vector<std::string>& missing_tables) {
   missing_tables.clear();
 
   for (const auto& table : tables) {
@@ -121,7 +118,7 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
 }
 
 bool ConnectionValidator::CheckServerUUID(Connection& conn, const std::optional<std::string>& expected_uuid,
-                                           std::string& actual_uuid, std::vector<std::string>& warnings) {
+                                          std::string& actual_uuid, std::vector<std::string>& warnings) {
   auto uuid_opt = conn.GetServerUUID();
   if (!uuid_opt) {
     return false;
@@ -145,7 +142,7 @@ bool ConnectionValidator::CheckServerUUID(Connection& conn, const std::optional<
 }
 
 bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::optional<std::string>& last_gtid,
-                                                std::string& error) {
+                                               std::string& error) {
   // Get current executed GTID set
   auto executed_gtid = conn.GetExecutedGTID();
   if (!executed_gtid) {

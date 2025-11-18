@@ -5,7 +5,7 @@
 
 #include "cache/cache_manager.h"
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 #include "server/server_types.h"
 
 namespace mygramdb::cache {
@@ -52,13 +52,19 @@ std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query
     return std::nullopt;
   }
 
-  // Normalize query and generate cache key
-  const std::string normalized = QueryNormalizer::Normalize(query);
-  if (normalized.empty()) {
-    return std::nullopt;
+  // Use precomputed cache key if available (performance optimization)
+  CacheKey key;
+  if (query.cache_key.has_value()) {
+    key.hash_high = query.cache_key.value().first;
+    key.hash_low = query.cache_key.value().second;
+  } else {
+    // Fallback: compute cache key on-the-fly (for backwards compatibility)
+    const std::string normalized = QueryNormalizer::Normalize(query);
+    if (normalized.empty()) {
+      return std::nullopt;
+    }
+    key = CacheKeyGenerator::Generate(normalized);
   }
-
-  const CacheKey key = CacheKeyGenerator::Generate(normalized);
 
   // Lookup in cache
   return query_cache_->Lookup(key);
@@ -74,13 +80,19 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
     return std::nullopt;
   }
 
-  // Normalize query and generate cache key
-  const std::string normalized = QueryNormalizer::Normalize(query);
-  if (normalized.empty()) {
-    return std::nullopt;
+  // Use precomputed cache key if available (performance optimization)
+  CacheKey key;
+  if (query.cache_key.has_value()) {
+    key.hash_high = query.cache_key.value().first;
+    key.hash_low = query.cache_key.value().second;
+  } else {
+    // Fallback: compute cache key on-the-fly (for backwards compatibility)
+    const std::string normalized = QueryNormalizer::Normalize(query);
+    if (normalized.empty()) {
+      return std::nullopt;
+    }
+    key = CacheKeyGenerator::Generate(normalized);
   }
-
-  const CacheKey key = CacheKeyGenerator::Generate(normalized);
 
   // Lookup in cache with metadata
   QueryCache::LookupMetadata metadata;

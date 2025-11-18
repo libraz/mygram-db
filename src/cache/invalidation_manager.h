@@ -13,7 +13,7 @@
 #include <unordered_set>
 
 #include "cache/cache_entry.h"
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 
 namespace mygramdb::cache {
 

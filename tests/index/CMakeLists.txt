@@ -103,6 +103,23 @@ gtest_discover_tests(posting_list_test
   DISCOVERY_TIMEOUT 30
 )
 
+# PostingList thread safety tests
+add_executable(posting_list_thread_safety_test
+  posting_list_thread_safety_test.cpp
+)
+
+target_link_libraries(posting_list_thread_safety_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(posting_list_thread_safety_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 60
+  PROPERTIES
+    RESOURCE_LOCK posting_list_concurrent_lock
+)
+
 # Index optimization concurrency tests
 add_executable(optimize_concurrency_test
   optimize_concurrency_test.cpp

@@ -9,6 +9,7 @@
 
 #include <chrono>
 
+#include "utils/fd_guard.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -195,7 +196,11 @@ void ThreadPool::WorkerThread() {
 
     // Execute task (outside lock)
     if (task) {
-      active_workers_++;  // Increment before executing task
+      // RAII guard to ensure active_workers_ is properly managed
+      // even if task() throws an exception that escapes the catch blocks
+      active_workers_++;
+      mygramdb::utils::ScopeGuard worker_guard([this]() { active_workers_--; });
+
       try {
         task();
       } catch (const std::exception& e) {
@@ -207,7 +212,7 @@ void ThreadPool::WorkerThread() {
       } catch (...) {
         mygram::utils::StructuredLog().Event("server_error").Field("type", "worker_thread_unknown_exception").Error();
       }
-      active_workers_--;  // Decrement after task completes
+      // Note: worker_guard will automatically decrement active_workers_
     }
   }
 }

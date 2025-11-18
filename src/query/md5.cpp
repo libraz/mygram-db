@@ -8,7 +8,7 @@
  * Using standard MD5 algorithm conventions (short parameter names, magic numbers)
  */
 
-#include "cache/md5.h"
+#include "query/md5.h"
 
 namespace mygramdb::cache {
 

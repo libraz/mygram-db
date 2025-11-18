@@ -3,7 +3,7 @@
  * @brief Query normalization implementation
  */
 
-#include "cache/query_normalizer.h"
+#include "query/query_normalizer.h"
 
 #include <algorithm>
 #include <cctype>

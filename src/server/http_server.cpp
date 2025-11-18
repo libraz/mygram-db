@@ -44,8 +44,9 @@ namespace {
 constexpr int kHttpOk = 200;
 constexpr int kHttpNoContent = 204;
 constexpr int kHttpBadRequest = 400;
-constexpr int kHttpNotFound = 404;
 constexpr int kHttpForbidden = 403;
+constexpr int kHttpNotFound = 404;
+constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
 
@@ -110,6 +111,16 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
     max_query_length_ = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
+
+    // Initialize rate limiter (if configured)
+    if (full_config_->api.rate_limiting.enable) {
+      rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+                                                    static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
+                                                    static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
+      spdlog::info("HTTP server: Rate limiter initialized: capacity={}, refill_rate={}/s, max_clients={}",
+                   full_config_->api.rate_limiting.capacity, full_config_->api.rate_limiting.refill_rate,
+                   full_config_->api.rate_limiting.max_clients);
+    }
   }
 
   server_ = std::make_unique<httplib::Server>();
@@ -139,6 +150,10 @@ void HttpServer::SetupRoutes() {
   // Route pattern: match any non-slash characters to support table names with dashes, dots, or unicode
   server_->Post(R"(/([^/]+)/search)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
+
+  // POST /{table}/count - Count matching documents
+  server_->Post(R"(/([^/]+)/count)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
 
   // GET /{table}/:id - Get document by ID
   // Route pattern: match any non-slash characters for table name, digits for ID
@@ -171,19 +186,33 @@ void HttpServer::SetupRoutes() {
 
 void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-    if (utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
-      return httplib::Server::HandlerResponse::Unhandled;
+    const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
+
+    // Check CIDR-based access control first
+    if (!utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+      stats_.IncrementRequests();
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "http_request_rejected_acl")
+          .Field("remote_addr", client_ip)
+          .Warn();
+      SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
+      return httplib::Server::HandlerResponse::Handled;
     }
 
-    stats_.IncrementRequests();
-    const auto& remote = req.remote_addr.empty() ? std::string("<unknown>") : req.remote_addr;
-    mygram::utils::StructuredLog()
-        .Event("server_warning")
-        .Field("type", "http_request_rejected_acl")
-        .Field("remote_addr", remote)
-        .Warn();
-    SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
-    return httplib::Server::HandlerResponse::Handled;
+    // Check rate limit (if enabled)
+    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+      stats_.IncrementRequests();
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "http_rate_limit_exceeded")
+          .Field("client_ip", client_ip)
+          .Warn();
+      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+
+    return httplib::Server::HandlerResponse::Unhandled;
   });
 }
 
@@ -757,6 +786,373 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
   }
 }
 
+void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res) {
+  stats_.IncrementRequests();
+
+  try {
+    // Check if server is loading
+    if (loading_ != nullptr && loading_->load()) {
+      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+      return;
+    }
+
+    // Extract table name from URL
+    std::string table = req.matches[1];
+
+    // Lookup table
+    auto table_iter = table_contexts_.find(table);
+    if (table_iter == table_contexts_.end()) {
+      SendError(res, kHttpNotFound, "Table not found: " + table);
+      return;
+    }
+    if (!table_iter->second->index || !table_iter->second->doc_store) {
+      SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
+      return;
+    }
+    auto* current_index = table_iter->second->index.get();
+    auto* current_doc_store = table_iter->second->doc_store.get();
+
+    // Parse JSON body
+    json body;
+    try {
+      body = json::parse(req.body);
+    } catch (const json::parse_error& e) {
+      SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
+      return;
+    }
+
+    // Validate required field
+    if (!body.contains("q")) {
+      SendError(res, kHttpBadRequest, "Missing required field: q");
+      return;
+    }
+
+    // Build query string for QueryParser (COUNT query)
+    std::ostringstream query_str;
+    query_str << "COUNT " << table << " " << body["q"].get<std::string>();
+
+    // Parse and execute query
+    query::QueryParser query_parser;
+    if (max_query_length_ > 0) {
+      query_parser.SetMaxQueryLength(max_query_length_);
+    }
+    auto query = query_parser.Parse(query_str.str());
+    if (!query) {
+      SendError(res, kHttpBadRequest, "Invalid query: " + query.error().message());
+      return;
+    }
+
+    // Apply filters from JSON payload (same logic as search)
+    if (body.contains("filters") && body["filters"].is_object()) {
+      query->filters.clear();
+      for (const auto& [key, val] : body["filters"].items()) {
+        query::FilterCondition filter;
+        filter.column = key;
+
+        // Check if value is an object with operator specification
+        if (val.is_object() && val.contains("value")) {
+          // Format 2: full operator support
+          std::string op_str = val.value("op", "EQ");
+          // Parse operator
+          if (op_str == "EQ" || op_str == "==" || op_str == "=") {
+            filter.op = query::FilterOp::EQ;
+          } else if (op_str == "NE" || op_str == "!=" || op_str == "<>") {
+            filter.op = query::FilterOp::NE;
+          } else if (op_str == "GT" || op_str == ">") {
+            filter.op = query::FilterOp::GT;
+          } else if (op_str == "GTE" || op_str == ">=" || op_str == "≥") {
+            filter.op = query::FilterOp::GTE;
+          } else if (op_str == "LT" || op_str == "<") {
+            filter.op = query::FilterOp::LT;
+          } else if (op_str == "LTE" || op_str == "<=" || op_str == "≤") {
+            filter.op = query::FilterOp::LTE;
+          } else {
+            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
+            return;
+          }
+
+          // Get the value
+          json value_field = val["value"];
+          if (value_field.is_string()) {
+            filter.value = value_field.get<std::string>();
+          } else if (value_field.is_number_integer()) {
+            filter.value = std::to_string(value_field.get<int64_t>());
+          } else if (value_field.is_number_float()) {
+            filter.value = std::to_string(value_field.get<double>());
+          } else if (value_field.is_boolean()) {
+            filter.value = value_field.get<bool>() ? "1" : "0";
+          } else {
+            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
+            return;
+          }
+        } else {
+          // Format 1: backward compatible (defaults to EQ)
+          filter.op = query::FilterOp::EQ;
+          if (val.is_string()) {
+            filter.value = val.get<std::string>();
+          } else if (val.is_number_integer()) {
+            filter.value = std::to_string(val.get<int64_t>());
+          } else if (val.is_number_float()) {
+            filter.value = std::to_string(val.get<double>());
+          } else if (val.is_boolean()) {
+            filter.value = val.get<bool>() ? "1" : "0";
+          } else {
+            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
+            return;
+          }
+        }
+
+        query->filters.push_back(filter);
+      }
+    }
+
+    // Get ngram sizes for this table
+    int current_ngram_size = table_iter->second->config.ngram_size;
+    int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+
+    // Collect all search terms (main + AND terms)
+    std::vector<std::string> all_search_terms;
+    if (!query->search_text.empty()) {
+      all_search_terms.push_back(query->search_text);
+    }
+    all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
+
+    // Generate n-grams for each term
+    struct TermInfo {
+      std::vector<std::string> ngrams;
+      size_t estimated_size;
+    };
+    std::vector<TermInfo> term_infos;
+    term_infos.reserve(all_search_terms.size());
+
+    for (const auto& search_term : all_search_terms) {
+      std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+      std::vector<std::string> ngrams;
+
+      // Use hybrid n-grams if kanji_ngram_size is configured
+      if (current_kanji_ngram_size > 0) {
+        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+      } else if (current_ngram_size == 0) {
+        ngrams = utils::GenerateHybridNgrams(normalized);
+      } else {
+        ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
+      }
+
+      // Estimate result size by checking the smallest posting list
+      size_t min_size = std::numeric_limits<size_t>::max();
+      for (const auto& ngram : ngrams) {
+        const auto* posting = current_index->GetPostingList(ngram);
+        if (posting != nullptr) {
+          min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+        } else {
+          min_size = 0;
+          break;
+        }
+      }
+
+      term_infos.push_back({std::move(ngrams), min_size});
+    }
+
+    // Sort terms by estimated size (smallest first)
+    std::sort(term_infos.begin(), term_infos.end(),
+              [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+
+    // Execute search - perform intersection (AND of all terms)
+    std::vector<DocId> results;
+    if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
+      results.clear();  // Empty results
+    } else {
+      if (!term_infos.empty()) {
+        results = current_index->SearchAnd(term_infos[0].ngrams);
+        for (size_t i = 1; i < term_infos.size(); ++i) {
+          if (results.empty()) {
+            break;
+          }
+          auto term_results = current_index->SearchAnd(term_infos[i].ngrams);
+          std::vector<DocId> intersection;
+          std::set_intersection(results.begin(), results.end(), term_results.begin(), term_results.end(),
+                                std::back_inserter(intersection));
+          results = std::move(intersection);
+        }
+      }
+    }
+
+    // Apply NOT terms if specified
+    if (!query->not_terms.empty()) {
+      for (const auto& not_term : query->not_terms) {
+        std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
+        std::vector<std::string> not_ngrams;
+
+        if (current_kanji_ngram_size > 0) {
+          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        } else if (current_ngram_size == 0) {
+          not_ngrams = utils::GenerateHybridNgrams(normalized);
+        } else {
+          not_ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
+        }
+
+        auto not_results = current_index->SearchOr(not_ngrams);
+        std::vector<DocId> difference;
+        std::set_difference(results.begin(), results.end(), not_results.begin(), not_results.end(),
+                            std::back_inserter(difference));
+        results = std::move(difference);
+      }
+    }
+
+    // Apply filters (same logic as search)
+    if (!query->filters.empty()) {
+      std::vector<DocId> filtered_results;
+      filtered_results.reserve(results.size());
+
+      for (DocId doc_id : results) {
+        auto doc = current_doc_store->GetDocument(doc_id);
+        if (!doc) {
+          continue;  // Document not found (shouldn't happen)
+        }
+
+        bool matches_all_filters = true;
+        for (const auto& filter_cond : query->filters) {
+          auto stored_value_it = doc->filters.find(filter_cond.column);
+          if (stored_value_it == doc->filters.end()) {
+            matches_all_filters = false;
+            break;
+          }
+
+          const storage::FilterValue& stored_value = stored_value_it->second;
+          bool matches = std::visit(
+              [&filter_cond](const auto& val) -> bool {
+                using T = std::decay_t<decltype(val)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                  return false;  // NULL values don't match any filter
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                  const std::string& str_val = val;
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return str_val == filter_cond.value;
+                    case query::FilterOp::NE:
+                      return str_val != filter_cond.value;
+                    case query::FilterOp::GT:
+                      return str_val > filter_cond.value;
+                    case query::FilterOp::GTE:
+                      return str_val >= filter_cond.value;
+                    case query::FilterOp::LT:
+                      return str_val < filter_cond.value;
+                    case query::FilterOp::LTE:
+                      return str_val <= filter_cond.value;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, bool>) {
+                  bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val == bool_filter;
+                    case query::FilterOp::NE:
+                      return val != bool_filter;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, double>) {
+                  double filter_val = 0.0;
+                  try {
+                    filter_val = std::stod(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;
+                  }
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val == filter_val;
+                    case query::FilterOp::NE:
+                      return val != filter_val;
+                    case query::FilterOp::GT:
+                      return val > filter_val;
+                    case query::FilterOp::GTE:
+                      return val >= filter_val;
+                    case query::FilterOp::LT:
+                      return val < filter_val;
+                    case query::FilterOp::LTE:
+                      return val <= filter_val;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
+                                     std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
+                  uint64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoull(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;
+                  }
+                  auto unsigned_val = static_cast<uint64_t>(val);
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return unsigned_val == filter_val;
+                    case query::FilterOp::NE:
+                      return unsigned_val != filter_val;
+                    case query::FilterOp::GT:
+                      return unsigned_val > filter_val;
+                    case query::FilterOp::GTE:
+                      return unsigned_val >= filter_val;
+                    case query::FilterOp::LT:
+                      return unsigned_val < filter_val;
+                    case query::FilterOp::LTE:
+                      return unsigned_val <= filter_val;
+                    default:
+                      return false;
+                  }
+                } else {
+                  // Signed integer comparison
+                  int64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoll(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;
+                  }
+                  auto signed_val = static_cast<int64_t>(val);
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return signed_val == filter_val;
+                    case query::FilterOp::NE:
+                      return signed_val != filter_val;
+                    case query::FilterOp::GT:
+                      return signed_val > filter_val;
+                    case query::FilterOp::GTE:
+                      return signed_val >= filter_val;
+                    case query::FilterOp::LT:
+                      return signed_val < filter_val;
+                    case query::FilterOp::LTE:
+                      return signed_val <= filter_val;
+                    default:
+                      return false;
+                  }
+                }
+              },
+              stored_value);
+
+          if (!matches) {
+            matches_all_filters = false;
+            break;
+          }
+        }
+
+        if (matches_all_filters) {
+          filtered_results.push_back(doc_id);
+        }
+      }
+      results = std::move(filtered_results);
+    }
+
+    // Build JSON response - just return count
+    json response;
+    response["count"] = results.size();
+
+    SendJson(res, kHttpOk, response);
+
+  } catch (const std::exception& e) {
+    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+  }
+}
+
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
   stats_.IncrementRequests();
 
@@ -1083,7 +1479,9 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
     if (binlog_reader_->IsRunning()) {
       binlog_comp["status"] = "connected";
       binlog_comp["running"] = true;
-      // Note: lag calculation would require additional methods in BinlogReader
+      binlog_comp["current_gtid"] = binlog_reader_->GetCurrentGTID();
+      binlog_comp["processed_events"] = binlog_reader_->GetProcessedEvents();
+      binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
     } else {
       binlog_comp["status"] = "disconnected";
       binlog_comp["running"] = false;

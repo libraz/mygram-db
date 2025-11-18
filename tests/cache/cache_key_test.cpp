@@ -3,7 +3,7 @@
  * @brief Unit tests for CacheKey
  */
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 
 #include <gtest/gtest.h>
 

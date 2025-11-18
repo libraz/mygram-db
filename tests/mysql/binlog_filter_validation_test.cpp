@@ -5,11 +5,6 @@
  * SECURITY: Validates that invalid filter values (non-numeric strings,
  * out-of-range values, trailing garbage) are properly rejected without
  * throwing exceptions that could crash the server.
- *
- * Note: These tests verify that the code handles invalid input gracefully.
- * The actual CompareFilterValue method is private, so testing is done via
- * code inspection and integration tests. These unit tests document the
- * expected behavior and security requirements.
  */
 
 #include <gtest/gtest.h>
@@ -22,7 +17,7 @@ namespace mygramdb::mysql {
 class BinlogFilterValidationTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // No setup needed - these are documentation/specification tests
+    // No setup needed
   }
 
   void TearDown() override {
@@ -38,10 +33,12 @@ TEST_F(BinlogFilterValidationTest, InvalidIntegerFilterValue) {
   filter.op = "=";
   filter.value = "not_a_number";  // Invalid
 
-  // This test verifies the code doesn't crash with invalid input
-  // The actual validation happens in CompareFilterValue which is private
-  // Testing is done via integration tests and manual verification
-  SUCCEED() << "Filter validation prevents crashes on invalid integer values";
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
+  // CompareFilterValue should handle invalid filter.value gracefully
+  // It will attempt to parse "not_a_number" as int64_t and fail
+  // Expected behavior: returns false (doesn't match) without crashing
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Integer with trailing garbage
@@ -52,8 +49,10 @@ TEST_F(BinlogFilterValidationTest, IntegerWithTrailingGarbage) {
   filter.op = "=";
   filter.value = "123abc";  // Valid number with trailing garbage
 
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
   // Should be rejected by the pos != length check
-  SUCCEED() << "Filter validation rejects trailing garbage in integers";
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Integer out of range
@@ -64,8 +63,10 @@ TEST_F(BinlogFilterValidationTest, IntegerOutOfRange) {
   filter.op = "=";
   filter.value = "99999999999999999999999999";  // Too large for int64_t
 
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
   // Should be caught by std::out_of_range
-  SUCCEED() << "Filter validation rejects out-of-range integers";
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Invalid float filter value
@@ -76,7 +77,9 @@ TEST_F(BinlogFilterValidationTest, InvalidFloatFilterValue) {
   filter.op = ">";
   filter.value = "not_a_float";  // Invalid
 
-  SUCCEED() << "Filter validation prevents crashes on invalid float values";
+  storage::FilterValue valid_value = 123.45;
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Float with trailing garbage
@@ -87,7 +90,9 @@ TEST_F(BinlogFilterValidationTest, FloatWithTrailingGarbage) {
   filter.op = "=";
   filter.value = "123.45extra";  // Valid float with trailing garbage
 
-  SUCCEED() << "Filter validation rejects trailing garbage in floats";
+  storage::FilterValue valid_value = 123.45;
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Float out of range
@@ -98,7 +103,9 @@ TEST_F(BinlogFilterValidationTest, FloatOutOfRange) {
   filter.op = "=";
   filter.value = "1e500";  // Too large for double
 
-  SUCCEED() << "Filter validation rejects out-of-range floats";
+  storage::FilterValue valid_value = 123.45;
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Invalid unsigned integer (negative value)
@@ -109,7 +116,9 @@ TEST_F(BinlogFilterValidationTest, InvalidUnsignedInteger) {
   filter.op = "=";
   filter.value = "-123";  // Negative value for unsigned type
 
-  SUCCEED() << "Filter validation rejects negative values for unsigned integers";
+  storage::FilterValue valid_value = static_cast<uint64_t>(123);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Unsigned integer with trailing garbage
@@ -120,7 +129,9 @@ TEST_F(BinlogFilterValidationTest, UnsignedIntegerWithTrailingGarbage) {
   filter.op = "=";
   filter.value = "12345xyz";  // Valid number with trailing garbage
 
-  SUCCEED() << "Filter validation rejects trailing garbage in unsigned integers";
+  storage::FilterValue valid_value = static_cast<uint64_t>(12345);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Unsigned integer out of range
@@ -131,7 +142,9 @@ TEST_F(BinlogFilterValidationTest, UnsignedIntegerOutOfRange) {
   filter.op = "=";
   filter.value = "99999999999999999999999999";  // Too large for uint64_t
 
-  SUCCEED() << "Filter validation rejects out-of-range unsigned integers";
+  storage::FilterValue valid_value = static_cast<uint64_t>(123);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Empty filter value
@@ -142,7 +155,9 @@ TEST_F(BinlogFilterValidationTest, EmptyFilterValue) {
   filter.op = "=";
   filter.value = "";  // Empty string
 
-  SUCCEED() << "Filter validation handles empty values";
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Whitespace-only filter value
@@ -153,7 +168,9 @@ TEST_F(BinlogFilterValidationTest, WhitespaceOnlyFilterValue) {
   filter.op = "=";
   filter.value = "   ";  // Whitespace only
 
-  SUCCEED() << "Filter validation handles whitespace-only values";
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Special characters in numeric filter
@@ -164,7 +181,9 @@ TEST_F(BinlogFilterValidationTest, SpecialCharactersInNumericFilter) {
   filter.op = "=";
   filter.value = "123$#@";  // Number with special characters
 
-  SUCCEED() << "Filter validation rejects special characters";
+  storage::FilterValue valid_value = static_cast<int64_t>(123);
+
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Valid integer filter value (positive test)
@@ -175,7 +194,9 @@ TEST_F(BinlogFilterValidationTest, ValidIntegerFilterValue) {
   filter.op = "=";
   filter.value = "12345";  // Valid integer
 
-  SUCCEED() << "Valid integer filter values should work correctly";
+  storage::FilterValue valid_value = static_cast<int64_t>(12345);
+
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Valid negative integer
@@ -186,7 +207,9 @@ TEST_F(BinlogFilterValidationTest, ValidNegativeInteger) {
   filter.op = "<";
   filter.value = "-100";  // Valid negative integer
 
-  SUCCEED() << "Valid negative integers should work correctly";
+  storage::FilterValue valid_value = static_cast<int64_t>(-200);
+
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Valid float filter value (positive test)
@@ -197,7 +220,9 @@ TEST_F(BinlogFilterValidationTest, ValidFloatFilterValue) {
   filter.op = ">=";
   filter.value = "123.456";  // Valid float
 
-  SUCCEED() << "Valid float filter values should work correctly";
+  storage::FilterValue valid_value = 123.456;
+
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 // Test: Valid scientific notation
@@ -208,7 +233,9 @@ TEST_F(BinlogFilterValidationTest, ValidScientificNotation) {
   filter.op = "=";
   filter.value = "1.23e10";  // Valid scientific notation
 
-  SUCCEED() << "Valid scientific notation should work correctly";
+  storage::FilterValue valid_value = 1.23e10;
+
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(valid_value, filter));
 }
 
 }  // namespace mygramdb::mysql

@@ -17,6 +17,7 @@
 #include "server/thread_pool.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/fd_guard.h"
 #include "utils/network_utils.h"
 #include "utils/structured_log.h"
 
@@ -285,8 +286,12 @@ void ConnectionAcceptor::AcceptLoop() {
     // Submit to thread pool
     if (thread_pool_ != nullptr && connection_handler_) {
       bool submitted = thread_pool_->Submit([this, client_fd]() {
+        // RAII guard to ensure connection is removed from active set
+        // even if connection_handler_ throws an exception
+        mygramdb::utils::ScopeGuard cleanup([this, client_fd]() { RemoveConnection(client_fd); });
+
         connection_handler_(client_fd);
-        RemoveConnection(client_fd);
+        // Note: cleanup will call RemoveConnection on scope exit
       });
 
       if (!submitted) {

@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "cache/cache_key.h"
+#include "query/cache_key.h"
 #include "query/query_parser.h"
 
 namespace mygramdb::cache {

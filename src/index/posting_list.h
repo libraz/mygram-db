@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 namespace mygramdb::index {
@@ -173,6 +174,10 @@ class PostingList {
 
   // Roaring bitmap storage
   roaring_bitmap_t* roaring_bitmap_ = nullptr;
+
+  // Protects all data members for thread-safe read/write operations
+  // Uses shared_mutex to allow concurrent reads while serializing writes
+  mutable std::shared_mutex mutex_;
 
   /**
    * @brief Convert from delta to Roaring
