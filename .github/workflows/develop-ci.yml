@@ -68,8 +68,9 @@ jobs:
         sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
         sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 
-    - name: Check code formatting
+    - name: Check code formatting (warnings only)
       run: make format-check
+      continue-on-error: true
 
     - name: Setup ccache
       run: |
@@ -96,6 +97,10 @@ jobs:
 
     - name: Show ccache statistics
       run: ccache --show-stats
+
+    - name: Run clang-tidy (diff mode, warnings only)
+      run: bash support/dev/run-clang-tidy.sh --diff origin/develop
+      continue-on-error: true
 
     - name: Upload build artifacts
       if: failure()

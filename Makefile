@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint configure run docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-format-check-linux docker-clean-linux docker-ci-check
+.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
 
 # Build directory
 BUILD_DIR := build
@@ -35,7 +35,9 @@ help:
 	@echo "  make uninstall      - Uninstall binaries and files"
 	@echo "  make format         - Format code with clang-format"
 	@echo "  make format-check   - Check code formatting (CI)"
-	@echo "  make lint           - Check code with clang-tidy"
+	@echo "  make lint           - Check all code with clang-tidy"
+	@echo "  make lint-diff      - Check only changed files with clang-tidy (fast)"
+	@echo "  make lint-diff-main - Check files changed from main branch (recommended for CI)"
 	@echo "  make configure      - Configure CMake (for changing options)"
 	@echo "  make run            - Build and run mygramdb"
 	@echo "  make help           - Show this help message"
@@ -57,7 +59,8 @@ help:
 	@echo "  make docker-dev-shell       - Interactive shell in Linux container"
 	@echo "  make docker-build-linux     - Build project in Linux container"
 	@echo "  make docker-test-linux      - Run tests in Linux container"
-	@echo "  make docker-lint-linux      - Run clang-tidy in Linux container"
+	@echo "  make docker-lint-linux      - Run clang-tidy on all files in Linux container"
+	@echo "  make docker-lint-diff-linux - Run clang-tidy on changed files only (fast, recommended)"
 	@echo "  make docker-format-check-linux - Check formatting in Linux container"
 	@echo "  make docker-clean-linux     - Clean build in Linux container"
 	@echo "  make docker-ci-check        - Run full CI checks (format + build + lint + test)"
@@ -160,6 +163,14 @@ format-check:
 # Check code with clang-tidy
 lint: format build
 	@bash support/dev/run-clang-tidy.sh
+
+# Check only changed files with clang-tidy (fast)
+lint-diff: format build
+	@bash support/dev/run-clang-tidy.sh --diff
+
+# Check files changed from main branch with clang-tidy
+lint-diff-main: format build
+	@bash support/dev/run-clang-tidy.sh --diff main
 
 # Build and run mygramdb
 run: build
@@ -265,6 +276,13 @@ docker-lint-linux: docker-build-linux
 	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
 		bash -c "bash support/dev/run-clang-tidy.sh"
 	@echo "Linux lint completed successfully!"
+
+# Run clang-tidy on changed files only in Linux container (fast)
+docker-lint-diff-linux: docker-build-linux
+	@echo "Running clang-tidy (diff mode) in Linux container..."
+	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
+		bash -c "bash support/dev/run-clang-tidy.sh --diff main"
+	@echo "Linux lint (diff) completed successfully!"
 
 # Check code formatting in Linux container
 docker-format-check-linux: docker-dev-build

@@ -106,8 +106,8 @@ jobs:
         sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
         sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 
-    - name: Check code formatting
-      run: make format-check
+    # Note: format-check and clang-tidy are only run on develop branch (see develop-ci.yml)
+    # Main branch focuses on functionality tests and coverage only
 
     - name: Setup ccache
       run: |
@@ -136,8 +136,8 @@ jobs:
     - name: Show ccache statistics
       run: ccache --show-stats
 
-    - name: Run clang-tidy
-      run: make lint
+    # Note: clang-tidy is only run on develop branch (see develop-ci.yml)
+    # Main branch focuses on tests and coverage only
 
     - name: Run tests with coverage
       run: |

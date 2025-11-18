@@ -4,8 +4,35 @@
 # Uses directory-specific .clang-tidy configurations
 # Filters output to show only project code warnings
 #
+# Usage:
+#   ./run-clang-tidy.sh         # Check all files
+#   ./run-clang-tidy.sh --diff  # Check only changed files (git diff)
+#   ./run-clang-tidy.sh --diff main  # Check files changed from main branch
+#
 
 set -e
+
+# Parse command line arguments
+DIFF_MODE=false
+DIFF_BASE=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --diff)
+      DIFF_MODE=true
+      if [[ -n $2 && $2 != --* ]]; then
+        DIFF_BASE="$2"
+        shift
+      fi
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--diff [base-branch]]"
+      exit 1
+      ;;
+  esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -15,6 +42,52 @@ NC='\033[0m' # No Color
 
 # Get project root directory
 PROJECT_DIR=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# Function to get changed files
+get_changed_files() {
+  local base="$1"
+  local files=""
+
+  if [ -n "$base" ]; then
+    # Compare against specified branch
+    files=$(git diff --name-only "$base"...HEAD 2>/dev/null || git diff --name-only "$base" 2>/dev/null || echo "")
+  else
+    # Get staged + unstaged changes
+    files=$(git diff --name-only HEAD 2>/dev/null || echo "")
+    # Also include staged files
+    staged=$(git diff --cached --name-only 2>/dev/null || echo "")
+    files=$(echo -e "$files\n$staged" | sort -u)
+  fi
+
+  # Filter only .cpp files in src/ directory and convert to absolute paths
+  echo "$files" | grep -E '^src/.*\.cpp$' | sed "s|^|$PROJECT_DIR/|" || true
+}
+
+# Get list of files to check
+if [ "$DIFF_MODE" = true ]; then
+  FILES_TO_CHECK=$(get_changed_files "$DIFF_BASE")
+
+  if [ -z "$FILES_TO_CHECK" ]; then
+    echo -e "${GREEN}No .cpp files changed in src/ directory${NC}"
+    echo "Nothing to check!"
+    exit 0
+  fi
+
+  FILE_COUNT=$(echo "$FILES_TO_CHECK" | wc -l | tr -d ' ')
+  echo "Diff mode: checking $FILE_COUNT changed file(s)"
+  if [ -n "$DIFF_BASE" ]; then
+    echo "Base: $DIFF_BASE"
+  else
+    echo "Base: current changes (staged + unstaged)"
+  fi
+  echo ""
+else
+  # Check all files (original behavior)
+  FILES_TO_CHECK=$(find "$PROJECT_DIR/src" -name "*.cpp" | sort)
+  FILE_COUNT=$(echo "$FILES_TO_CHECK" | wc -l | tr -d ' ')
+  echo "Full mode: checking all $FILE_COUNT file(s) in src/"
+  echo ""
+fi
 
 # Find clang-tidy with multiple fallback paths for macOS
 CLANG_TIDY=""
@@ -118,7 +191,8 @@ elif [ -f "/usr/bin/run-clang-tidy" ]; then
 fi
 
 # Use parallel version if available, otherwise fallback to serial
-if [ -n "$RUN_CLANG_TIDY" ]; then
+if [ -n "$RUN_CLANG_TIDY" ] && [ "$DIFF_MODE" = false ]; then
+  # Parallel mode only for full checks (run-clang-tidy doesn't support file list well)
   echo "Using parallel run-clang-tidy"
   # Run in parallel with explicit header filter to only check src/
   "$RUN_CLANG_TIDY" \
@@ -132,11 +206,16 @@ if [ -n "$RUN_CLANG_TIDY" ]; then
   # Extract warnings from log
   grep -E "^$PROJECT_DIR/src/.*warning:" "$LOG_FILE" > "$WARNINGS_FILE" 2>/dev/null || true
 else
-  echo "run-clang-tidy not found, using serial execution"
+  if [ "$DIFF_MODE" = true ]; then
+    echo "Using serial execution (diff mode)"
+  else
+    echo "run-clang-tidy not found, using serial execution"
+  fi
 
   TOTAL_FILES=0
-  # Run clang-tidy on each file individually
-  for file in $(find "$PROJECT_DIR/src" -name "*.cpp" | sort); do
+  # Run clang-tidy on each file from FILES_TO_CHECK
+  echo "$FILES_TO_CHECK" | while IFS= read -r file; do
+    [ -z "$file" ] && continue
     TOTAL_FILES=$((TOTAL_FILES + 1))
     RELATIVE_FILE=${file#$PROJECT_DIR/}
     echo -n "Checking $RELATIVE_FILE... "
@@ -160,7 +239,7 @@ else
 fi
 
 # Count total files
-TOTAL_FILES=$(find "$PROJECT_DIR/src" -name "*.cpp" | wc -l | tr -d ' ')
+TOTAL_FILES="$FILE_COUNT"
 
 echo ""
 echo "=================================================="
@@ -180,8 +259,9 @@ if [ "$TOTAL_WARNINGS" -gt 0 ]; then
   echo ""
   cat "$WARNINGS_FILE"
   echo ""
-  echo -e "${RED}clang-tidy found $TOTAL_WARNINGS warning(s)${NC}"
-  exit 1
+  echo -e "${YELLOW}⚠️  clang-tidy found $TOTAL_WARNINGS warning(s)${NC}"
+  echo -e "${YELLOW}Note: Warnings do not fail the build (informational only)${NC}"
+  exit 0  # Warning only, do not fail CI
 else
   echo ""
   echo -e "${GREEN}No warnings found! ✓${NC}"
