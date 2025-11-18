@@ -13,8 +13,8 @@
 #include "cache/invalidation_manager.h"
 #include "cache/invalidation_queue.h"
 #include "cache/query_cache.h"
-#include "query/query_normalizer.h"
 #include "config/config.h"
+#include "query/query_normalizer.h"
 #include "query/query_parser.h"
 
 namespace mygramdb::server {

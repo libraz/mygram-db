@@ -15,8 +15,8 @@
 #include <unordered_map>
 
 #include "cache/cache_entry.h"
-#include "query/cache_key.h"
 #include "cache/result_compressor.h"
+#include "query/cache_key.h"
 
 namespace mygramdb::cache {
 

@@ -298,7 +298,8 @@ void TcpServer::HandleConnection(int client_fd) {
   socklen_t addr_len = sizeof(addr);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
   if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-    char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Required for inet_ntop
+    char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Required for
+                                   // inet_ntop
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Required for inet_ntop
     inet_ntop(AF_INET, &(addr.sin_addr), ip_str, INET_ADDRSTRLEN);
     client_ip = ip_str;  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Safe implicit conversion

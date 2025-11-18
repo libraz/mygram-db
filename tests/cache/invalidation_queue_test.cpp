@@ -9,10 +9,10 @@
 
 #include <thread>
 
-#include "query/cache_key.h"
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "index/index.h"
+#include "query/cache_key.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
 
