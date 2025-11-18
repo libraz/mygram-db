@@ -1,118 +1,69 @@
-# 設定ガイド
+# MygramDB 設定リファレンス
 
-MygramDB は **YAML** と **JSON** の両方の設定フォーマットに対応しており、自動的に **JSON Schema 検証**を行います。このガイドでは、利用可能なすべての設定オプションを説明します。
+**バージョン**: 1.0
+**最終更新**: 2025-11-18
 
-## 設定ファイルのフォーマット
+---
 
-MygramDB はファイル拡張子に基づいて設定フォーマットを自動検出します：
+## 目次
 
-- `.yaml` または `.yml` → YAML 形式
-- `.json` → JSON 形式
+1. [概要](#概要)
+2. [設定ファイル形式](#設定ファイル形式)
+3. [設定セクション](#設定セクション)
+   - [MySQL接続](#mysql接続)
+   - [テーブル設定](#テーブル設定)
+   - [インデックス構築](#インデックス構築)
+   - [レプリケーション](#レプリケーション)
+   - [メモリ管理](#メモリ管理)
+   - [ダンプ永続化](#ダンプ永続化)
+   - [APIサーバー](#apiサーバー)
+   - [ネットワークセキュリティ](#ネットワークセキュリティ)
+   - [ロギング](#ロギング)
+   - [クエリキャッシュ](#クエリキャッシュ)
+4. [ホットリロード](#ホットリロード)
+5. [本番環境での推奨事項](#本番環境での推奨事項)
+6. [トラブルシューティング](#トラブルシューティング)
 
-すべての設定は起動時に組み込みの JSON Schema に対して自動的に検証され、不正な設定（タイポ、間違った型、未知のキー）が即座に検出されます。
+---
 
-## 設定ファイルの構造
+## 概要
 
-YAML または JSON 形式で設定ファイルを作成します：
+MygramDBは、サーバーの動作、MySQL接続設定、テーブルインデックスパラメータ、および運用ポリシーを定義するために、YAMLまたはJSON設定ファイルを使用します。
 
-### YAML 形式 (config.yaml)
+### 主な機能
+
+- **複数の形式**: YAML (`.yaml`, `.yml`) または JSON (`.json`)
+- **スキーマ検証**: 組み込みJSON Schemaによる自動検証
+- **ホットリロード**: SIGHUP シグナルによるライブ設定更新のサポート
+- **環境別設定**: 開発、ステージング、本番環境向けの簡単なカスタマイズ
+
+### 設定ファイルの場所
+
+- **デフォルト**: カレントディレクトリの `config.yaml`
+- **カスタム**: `--config=/path/to/config.yaml` コマンドラインオプションで指定
+
+---
+
+## 設定ファイル形式
+
+### YAML形式(推奨)
 
 ```yaml
 mysql:
   host: "127.0.0.1"
   port: 3306
   user: "repl_user"
-  password: "your_password_here"
+  password: "your_password"
   database: "mydb"
-  use_gtid: true
-  binlog_format: "ROW"
-  binlog_row_image: "FULL"
-  connect_timeout_ms: 3000
-  read_timeout_ms: 3600000
-  write_timeout_ms: 3600000
-  # TLS/SSL 設定（オプション）
-  ssl_enable: false
-  ssl_ca: ""
-  ssl_cert: ""
-  ssl_key: ""
-  ssl_verify_server_cert: true
 
 tables:
   - name: "articles"
-    primary_key: "id"
     text_source:
       column: "content"
-    required_filters: []
-    filters: []
     ngram_size: 2
-    kanji_ngram_size: 1
-    posting:
-      block_size: 128
-      freq_bits: 0
-      use_roaring: "auto"
-
-build:
-  mode: "select_snapshot"
-  batch_size: 5000
-  parallelism: 2
-  throttle_ms: 0
-
-replication:
-  enable: true
-  server_id: 12345
-  start_from: "snapshot"
-  queue_size: 10000
-  reconnect_backoff_min_ms: 500
-  reconnect_backoff_max_ms: 10000
-
-memory:
-  hard_limit_mb: 8192
-  soft_target_mb: 4096
-  arena_chunk_mb: 64
-  roaring_threshold: 0.18
-  minute_epoch: true
-  normalize:
-    nfkc: true
-    width: "narrow"
-    lower: false
-
-dump:
-  dir: "/var/lib/mygramdb/dumps"
-  default_filename: "mygramdb.dmp"
-  interval_sec: 0                   # 0 = 無効 (7200で120分間隔を推奨)
-  retain: 3
-
-api:
-  tcp:
-    bind: "127.0.0.1"
-    port: 11016
-  http:
-    enable: false                   # デフォルトで無効
-    bind: "127.0.0.1"
-    port: 8080
-    enable_cors: false
-    cors_allow_origin: ""
-  default_limit: 100
-  max_query_length: 128
-  rate_limiting:
-    enable: false
-    capacity: 100
-    refill_rate: 10
-    max_clients: 10000
-
-network:
-  allow_cidrs:
-    - "127.0.0.1/32"
-
-logging:
-  level: "info"
-  json: true
-  file: ""
 ```
 
-### JSON 形式 (config.json)
-
-JSON 形式での同じ設定：
+### JSON形式
 
 ```json
 {
@@ -120,763 +71,867 @@ JSON 形式での同じ設定：
     "host": "127.0.0.1",
     "port": 3306,
     "user": "repl_user",
-    "password": "your_password_here",
-    "database": "mydb",
-    "use_gtid": true,
-    "binlog_format": "ROW",
-    "binlog_row_image": "FULL",
-    "connect_timeout_ms": 3000,
-    "read_timeout_ms": 3600000,
-    "write_timeout_ms": 3600000,
-    "ssl_enable": false,
-    "ssl_ca": "",
-    "ssl_cert": "",
-    "ssl_key": "",
-    "ssl_verify_server_cert": true
+    "password": "your_password",
+    "database": "mydb"
   },
   "tables": [
     {
       "name": "articles",
-      "primary_key": "id",
       "text_source": {
         "column": "content"
       },
-      "required_filters": [],
-      "filters": [],
-      "ngram_size": 2,
-      "kanji_ngram_size": 1,
-      "posting": {
-        "block_size": 128,
-        "freq_bits": 0,
-        "use_roaring": "auto"
-      }
+      "ngram_size": 2
     }
-  ],
-  "build": {
-    "mode": "select_snapshot",
-    "batch_size": 5000,
-    "parallelism": 2,
-    "throttle_ms": 0
-  },
-  "replication": {
-    "enable": true,
-    "server_id": 12345,
-    "start_from": "snapshot",
-    "queue_size": 10000,
-    "reconnect_backoff_min_ms": 500,
-    "reconnect_backoff_max_ms": 10000
-  },
-  "memory": {
-    "hard_limit_mb": 8192,
-    "soft_target_mb": 4096,
-    "arena_chunk_mb": 64,
-    "roaring_threshold": 0.18,
-    "minute_epoch": true,
-    "normalize": {
-      "nfkc": true,
-      "width": "narrow",
-      "lower": false
-    }
-  },
-  "dump": {
-    "dir": "/var/lib/mygramdb/dumps",
-    "default_filename": "mygramdb.dmp",
-    "interval_sec": 0,
-    "retain": 3
-  },
-  "api": {
-    "tcp": {
-      "bind": "127.0.0.1",
-      "port": 11016
-    },
-    "http": {
-      "enable": false,
-      "bind": "127.0.0.1",
-      "port": 8080,
-      "enable_cors": false,
-      "cors_allow_origin": ""
-    },
-    "default_limit": 100,
-    "max_query_length": 128
-    }
-  },
-  "network": {
-    "allow_cidrs": []
-  },
-  "logging": {
-    "level": "info",
-    "json": true
-  }
+  ]
 }
 ```
 
-**注意:** このガイドのすべての例は可読性のため YAML 形式を使用していますが、すべての設定は JSON 形式でも使用できます。
+### スキーマ検証
 
-## MySQL セクション
+MygramDBは、組み込みのJSON Schemaに対して設定ファイルを自動的に検証します。無効な設定(タイプミス、間違った型、不明なキー)は、起動時に検出され報告されます。
 
-MySQL サーバーの接続設定：
+---
 
-- **host**: MySQL サーバーのホスト名または IP アドレス（デフォルト: `127.0.0.1`）
-- **port**: MySQL サーバーのポート（デフォルト: `3306`）
-- **user**: レプリケーション用の MySQL ユーザー名（必須）
-- **password**: MySQL ユーザーのパスワード（必須）
-- **database**: データベース名（必須）
-- **use_gtid**: GTID ベースレプリケーションを有効化（デフォルト: `true`、レプリケーションに必須）
-- **binlog_format**: バイナリログ形式（デフォルト: `ROW`、レプリケーションに必須）
-- **binlog_row_image**: 行イメージ形式（デフォルト: `FULL`、レプリケーションに必須）
-- **connect_timeout_ms**: 接続タイムアウト（ミリ秒、デフォルト: `3000`）
-- **read_timeout_ms**: 読み取りタイムアウト（ミリ秒、デフォルト: `3600000` = 1時間）
-- **write_timeout_ms**: 書き込みタイムアウト（ミリ秒、デフォルト: `3600000` = 1時間）
+## 設定セクション
 
-### TLS/SSL 設定
-
-MygramDB は MySQL 接続に対して **片側 TLS**（サーバー証明書の検証のみ）と **相互 TLS (mTLS)**（クライアントとサーバー両方の証明書検証）の両方をサポートしています。
-
-- **ssl_enable**: MySQL 接続で TLS/SSL を有効化（デフォルト: `false`）
-- **ssl_ca**: サーバー証明書を検証するための CA 証明書ファイルのパス
-- **ssl_cert**: クライアント証明書ファイルのパス（オプション、mTLS に必要）
-- **ssl_key**: クライアント秘密鍵ファイルのパス（オプション、mTLS に必要）
-- **ssl_verify_server_cert**: CA に対してサーバー証明書を検証（デフォルト: `true`）
-
-**片側 TLS（サーバー認証のみ）：**
-
-接続を暗号化し MySQL サーバーの身元を検証したいが、サーバーがクライアント証明書を要求しない場合に使用します。
+### MySQL接続
 
 ```yaml
 mysql:
-  host: "mysql.example.com"
-  port: 3306
-  user: "repl_user"
-  password: "your_password"
-  database: "mydb"
-  ssl_enable: true
-  ssl_ca: "/path/to/ca.pem"
-  ssl_verify_server_cert: true
+  host: "127.0.0.1"                 # MySQLサーバーのホスト名またはIP
+  port: 3306                        # MySQLサーバーのポート
+  user: "repl_user"                 # レプリケーション用のMySQLユーザー名
+  password: "your_password_here"    # MySQLユーザーのパスワード
+  database: "mydb"                  # データベース名
+  use_gtid: true                    # GTIDベースのレプリケーションを有効化(必須)
+  binlog_format: "ROW"              # バイナリログ形式(必須: ROW)
+  binlog_row_image: "FULL"          # 行イメージ形式(必須: FULL)
+  connect_timeout_ms: 3000          # 接続タイムアウト(ミリ秒)
+
+  # SSL/TLS設定(オプションだが本番環境では推奨)
+  ssl_enable: false                 # SSL/TLSを有効化
+  ssl_ca: "/path/to/ca-cert.pem"    # CA証明書
+  ssl_cert: "/path/to/client-cert.pem"  # クライアント証明書
+  ssl_key: "/path/to/client-key.pem"    # クライアント秘密鍵
+  ssl_verify_server_cert: true      # サーバー証明書を検証
 ```
 
-**相互 TLS (mTLS - クライアントとサーバー認証)：**
+#### パラメータ
 
-MySQL サーバーがパスワード認証に加えてクライアント証明書認証を要求する場合に使用します。
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `host` | string | `127.0.0.1` | MySQLサーバーのホスト名またはIPアドレス | ✅ 可能 |
+| `port` | integer | `3306` | MySQLサーバーのポート | ✅ 可能 |
+| `user` | string | *必須* | MySQLユーザー名(REPLICATION SLAVE、REPLICATION CLIENT権限が必要) | ✅ 可能 |
+| `password` | string | *必須* | MySQLユーザーのパスワード | ✅ 可能 |
+| `database` | string | *必須* | MySQLデータベース名 | ❌ 不可(再起動が必要) |
+| `use_gtid` | boolean | `true` | GTIDベースのレプリケーションを有効化(レプリケーションに必須) | ❌ 不可 |
+| `binlog_format` | string | `ROW` | バイナリログ形式(ROWである必要がある) | ❌ 不可 |
+| `binlog_row_image` | string | `FULL` | 行イメージ形式(FULLである必要がある) | ❌ 不可 |
+| `connect_timeout_ms` | integer | `3000` | 接続タイムアウト(ミリ秒) | ✅ 可能 |
+| `ssl_enable` | boolean | `false` | SSL/TLS接続を有効化 | ✅ 可能 |
+| `ssl_ca` | string | `` | CA証明書ファイルへのパス | ✅ 可能 |
+| `ssl_cert` | string | `` | クライアント証明書ファイルへのパス | ✅ 可能 |
+| `ssl_key` | string | `` | クライアント秘密鍵ファイルへのパス | ✅ 可能 |
+| `ssl_verify_server_cert` | boolean | `true` | サーバー証明書を検証 | ✅ 可能 |
+
+#### MySQLユーザー権限
+
+MySQLユーザーは以下の権限を持っている必要があります:
+
+```sql
+GRANT SELECT, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
+FLUSH PRIVILEGES;
+```
+
+#### MySQLサーバーの要件
+
+- **GTIDモード**: 有効化されている必要がある(`gtid_mode=ON`)
+- **バイナリログ形式**: ROWである必要がある(`binlog_format=ROW`)
+- **行イメージ**: FULLである必要がある(`binlog_row_image=FULL`)
+
+以下で確認:
+
+```sql
+SHOW VARIABLES LIKE 'gtid_mode';
+SHOW VARIABLES LIKE 'binlog_format';
+SHOW VARIABLES LIKE 'binlog_row_image';
+```
+
+---
+
+### テーブル設定
 
 ```yaml
-mysql:
-  host: "mysql.example.com"
-  port: 3306
-  user: "repl_user"
-  password: "your_password"
-  database: "mydb"
-  ssl_enable: true
-  ssl_ca: "/path/to/ca.pem"
-  ssl_cert: "/path/to/client-cert.pem"
-  ssl_key: "/path/to/client-key.pem"
-  ssl_verify_server_cert: true
+tables:
+  - name: "articles"                # MySQLデータベース内のテーブル名
+    primary_key: "id"               # プライマリキーカラム名
+
+    # テキストソース設定
+    text_source:
+      column: "content"             # インデックス対象の単一カラム
+      # または
+      # concat: ["title", "body"]   # 連結する複数のカラム
+      # delimiter: " "              # 連結時の区切り文字
+
+    # 必須フィルタ(データ存在条件)
+    required_filters:
+      - name: "enabled"             # カラム名
+        type: "int"                 # カラムの型
+        op: "="                     # 演算子
+        value: 1                    # 比較値
+        bitmap_index: false         # ビットマップインデックスを有効化
+
+      - name: "deleted_at"
+        type: "datetime"
+        op: "IS NULL"               # IS NULL/IS NOT NULLには値不要
+        bitmap_index: false
+
+    # オプションフィルタ(検索時フィルタリング)
+    filters:
+      - name: "status"              # カラム名
+        type: "int"                 # カラムの型
+        dict_compress: false        # 辞書圧縮
+        bitmap_index: false         # ビットマップインデックス
+
+      - name: "category"
+        type: "string"
+        dict_compress: false
+        bitmap_index: false
+
+      - name: "created_at"
+        type: "datetime"
+        # bucket: "minute"          # datetime値をバケット化
+
+    # N-gram設定
+    ngram_size: 2                   # ASCII用のN-gramサイズ(1=unigram, 2=bigram)
+    kanji_ngram_size: 1             # CJK用のN-gramサイズ(0 = ngram_sizeを使用)
+
+    # ポスティングリスト設定
+    posting:
+      block_size: 128               # デルタ符号化のブロックサイズ
+      freq_bits: 0                  # 単語頻度ビット数: 0、4、または8
+      use_roaring: "auto"           # Roaringビットマップの使用: auto、always、never
 ```
 
-**サーバー検証なしの TLS（非推奨）：**
+#### テーブルパラメータ
 
-サーバー証明書の検証を無効にする必要がある場合（例：開発環境での自己署名証明書）：
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `name` | string | *必須* | MySQLテーブル名 | ❌ 不可 |
+| `primary_key` | string | `id` | プライマリキーカラム名(単一カラムのPRIMARY KEYまたはUNIQUE KEYである必要がある) | ❌ 不可 |
+| `text_source.column` | string | *concatが未設定の場合必須* | 全文検索用にインデックス化する単一カラム | ❌ 不可 |
+| `text_source.concat` | array | *columnが未設定の場合必須* | インデックス化のために連結する複数のカラム | ❌ 不可 |
+| `text_source.delimiter` | string | ` ` (スペース) | 複数カラム連結時の区切り文字 | ❌ 不可 |
+| `ngram_size` | integer | `2` | ASCII/英数字用のN-gramサイズ(1-4を推奨) | ⚠️ 部分的(キャッシュクリア) |
+| `kanji_ngram_size` | integer | `0` | CJK文字用のN-gramサイズ(0 = ngram_sizeを使用、1-2を推奨) | ⚠️ 部分的(キャッシュクリア) |
+
+#### 必須フィルタとオプションフィルタの違い
+
+**必須フィルタ**(データ存在条件):
+- どの行をインデックス化するかを定義
+- これらの条件に一致しないデータは**インデックスから除外**される
+- binlogレプリケーション中に変更があると**追加/削除**操作がトリガーされる
+- 使用例:
+  - 公開された記事のみインデックス化: `status = 'published'`
+  - 削除されたレコードを除外: `deleted_at IS NULL`
+  - 有効なレコードのみインデックス化: `enabled = 1`
+
+**オプションフィルタ**(検索時フィルタリング):
+- **検索中**のフィルタリングに使用
+- どのデータをインデックス化するかには影響しない
+- (required_filtersに一致する)すべての行がインデックス化される
+- 使用例:
+  - 検索時にカテゴリ、ステータス、日付範囲でフィルタリング
+  - カスタムカラムでソート
+
+#### フィルタ型
+
+| 型 | MySQLの型 | 説明 |
+|------|-------------|-------------|
+| `tinyint` | TINYINT | 符号付き8ビット整数(-128から127) |
+| `tinyint_unsigned` | TINYINT UNSIGNED | 符号なし8ビット整数(0から255) |
+| `smallint` | SMALLINT | 符号付き16ビット整数 |
+| `smallint_unsigned` | SMALLINT UNSIGNED | 符号なし16ビット整数 |
+| `int` | INT | 符号付き32ビット整数(レガシー: "int"も受け入れる) |
+| `int_unsigned` | INT UNSIGNED | 符号なし32ビット整数 |
+| `bigint` | BIGINT | 符号付き64ビット整数 |
+| `float` | FLOAT | 単精度浮動小数点数 |
+| `double` | DOUBLE | 倍精度浮動小数点数 |
+| `string`, `varchar`, `text` | VARCHAR, TEXT, CHAR | 文字列値 |
+| `datetime`, `date`, `timestamp` | DATETIME, DATE, TIMESTAMP | 日付/時刻値 |
+
+#### 必須フィルタの演算子
+
+| 演算子 | 説明 | 例 |
+|----------|-------------|---------|
+| `=` | 等しい | `status = 'published'` |
+| `!=` | 等しくない | `type != 'draft'` |
+| `<` | より小さい | `priority < 10` |
+| `>` | より大きい | `score > 50` |
+| `<=` | 以下 | `age <= 18` |
+| `>=` | 以上 | `rating >= 4.0` |
+| `IS NULL` | NULLである | `deleted_at IS NULL` |
+| `IS NOT NULL` | NULLでない | `published_at IS NOT NULL` |
+
+#### N-gramサイズの推奨値
+
+| 言語 | コンテンツの種類 | `ngram_size` | `kanji_ngram_size` |
+|----------|--------------|--------------|---------------------|
+| 英語 | 記事、ドキュメント | `2` | `0` または `2` |
+| 日本語 | 混在(漢字/かな/ASCII) | `2` | `1` |
+| 中国語 | 混在(漢字/ASCII) | `2` | `1` |
+| コード | ソースコード | `3` | `0` または `3` |
+
+**トレードオフ**:
+- **小さいN-gram(1)**: 高い再現率、多くの誤検出、大きいインデックス
+- **大きいN-gram(3-4)**: 高い精度、少ない結果、小さいインデックス
+
+#### ポスティングリスト設定
+
+| パラメータ | 型 | デフォルト | 説明 |
+|-----------|------|---------|-------------|
+| `block_size` | integer | `128` | デルタ符号化圧縮のブロックサイズ(64-256を推奨) |
+| `freq_bits` | integer | `0` | 単語頻度ビット数: `0`(ブール値)、`4`、または`8`(ランキングサポート) |
+| `use_roaring` | string | `auto` | Roaringビットマップの使用: `auto`(閾値ベース)、`always`、`never` |
+
+**Roaringビットマップの閾値**: ポスティングリストの密度が18%を超えると自動的にRoaringビットマップに切り替わります(`memory.roaring_threshold`で設定可能)。
+
+---
+
+### インデックス構築
 
 ```yaml
-mysql:
-  ssl_enable: true
-  ssl_ca: "/path/to/ca.pem"
-  ssl_verify_server_cert: false
+build:
+  mode: "select_snapshot"           # 構築モード(現在はselect_snapshotのみ)
+  batch_size: 5000                  # スナップショット中のバッチあたりの行数
+  parallelism: 2                    # 並列構築スレッド数
+  throttle_ms: 0                    # バッチ間のスロットル遅延(ミリ秒)
 ```
 
-**注意事項：**
-- すべての証明書パスは絶対パスまたは作業ディレクトリからの相対パスである必要があります
-- `ssl_cert` と `ssl_key` パラメータはオプションです。片側 TLS の場合は省略してください
-- `ssl_verify_server_cert` が `true` の場合、サーバーの証明書は `ssl_ca` で指定された CA によって署名されている必要があります
-- mTLS は最も強力なセキュリティを提供しますが、両側で適切な証明書管理が必要です
+#### パラメータ
 
-## Tables セクション
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `mode` | string | `select_snapshot` | 構築モード(現在は`select_snapshot`のみ) | ❌ 不可 |
+| `batch_size` | integer | `5000` | スナップショット中にバッチごとに処理する行数 | ❌ 不可 |
+| `parallelism` | integer | `2` | 並列構築スレッド数 | ❌ 不可 |
+| `throttle_ms` | integer | `0` | バッチ間のスロットル遅延(ミリ秒)(0 = スロットルなし) | ❌ 不可 |
 
-テーブル設定（インスタンスごとに1テーブルをサポート）：
+**パフォーマンスチューニング**:
+- **大きい`batch_size`(10000+)**: 初期スナップショットが高速、メモリ使用量が多い
+- **小さい`batch_size`(1000-2000)**: スナップショットが低速、メモリ使用量が少ない
+- **高い`parallelism`**: マルチコアシステムで高速、メモリ使用量が多い
+- **0以外の`throttle_ms`**: スナップショット中のMySQL負荷を軽減(本番データベースで有用)
 
-### 基本設定
+---
 
-- **name**: MySQL データベースのテーブル名（必須）
-- **primary_key**: プライマリキーのカラム名（デフォルト: `id`）
-  - **単一カラムの PRIMARY KEY** または **単一カラムの UNIQUE KEY** である必要があります
-  - 複合（マルチカラム）プライマリキーは**サポートされていません**
-  - 指定されたカラムは行の一意性を保証する必要があります
-  - 起動時/同期開始時に実際のMySQLテーブルスキーマに対して検証されます
-- **ngram_size**: ASCII/英数字文字の N-gram サイズ（デフォルト: `2`）
-  - 1 = ユニグラム、2 = バイグラム等
-  - 多言語混在コンテンツ: 2 を推奨
-  - 英語のみ: 3 以上を使用
-- **kanji_ngram_size**: CJK文字（漢字/仮名/汉字）の N-gram サイズ（デフォルト: `0`）
-  - 0 に設定または省略すると、すべての文字に `ngram_size` の値を使用
-  - 日本語/中国語テキスト: 1（ユニグラム）を推奨
-  - ハイブリッドトークン化: ASCII文字とCJK文字で異なるN-gramサイズを使用可能
-
-### Text Source
-
-全文検索用にインデックス化するカラムを定義：
-
-**単一カラム:**
+### レプリケーション
 
 ```yaml
-text_source:
-  column: "content"
-  delimiter: " "                    # デフォルト: " "（concat 指定時に使用）
+replication:
+  enable: true                      # binlogレプリケーションを有効化
+  auto_initial_snapshot: false      # 起動時に自動的にスナップショットを構築
+  server_id: 12345                  # MySQLサーバーID(一意である必要がある)
+  start_from: "snapshot"            # レプリケーション開始位置
+  queue_size: 10000                 # binlogイベントキューサイズ
+  reconnect_backoff_min_ms: 500     # 最小再接続バックオフ遅延
+  reconnect_backoff_max_ms: 10000   # 最大再接続バックオフ遅延
 ```
 
-**複数カラム（連結）:**
+#### パラメータ
+
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `enable` | boolean | `true` | binlogレプリケーションを有効化 | ❌ 不可 |
+| `auto_initial_snapshot` | boolean | `false` | 起動時に自動的にスナップショットを構築 | ❌ 不可 |
+| `server_id` | integer | *必須* | MySQLサーバーID(0以外でレプリケーショントポロジ内で一意である必要がある) | ❌ 不可 |
+| `start_from` | string | `snapshot` | レプリケーション開始位置: `snapshot`、`latest`、または`gtid=<UUID:txn>` | ❌ 不可 |
+| `queue_size` | integer | `10000` | binlogイベントキューサイズ(リーダーとプロセッサ間のバッファ) | ❌ 不可 |
+| `reconnect_backoff_min_ms` | integer | `500` | 最小再接続バックオフ遅延(ミリ秒) | ❌ 不可 |
+| `reconnect_backoff_max_ms` | integer | `10000` | 最大再接続バックオフ遅延(ミリ秒) | ❌ 不可 |
+
+#### レプリケーション開始位置
+
+| 値 | 説明 | 使用例 |
+|-------|-------------|----------|
+| `snapshot` | スナップショットGTIDから開始(推奨) | スナップショットデータとの整合性を保証 |
+| `latest` | 現在のGTIDから開始(新しい変更のみ) | 履歴データをスキップし、新しい変更のみ追跡 |
+| `gtid=<UUID:txn>` | 特定のGTIDから開始 | 既知の位置から再開 |
+
+**例**:
+```yaml
+start_from: "gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1"
+```
+
+#### サーバーIDの要件
+
+- **0以外である必要がある**
+- **トポロジ内のすべてのMySQLレプリカで一意である必要がある**
+- **推奨**: ランダムな数値を生成するか、環境ごとに一意の値を使用
+
+**ランダムなサーバーIDを生成**:
+```bash
+echo $((RANDOM * RANDOM))
+```
+
+---
+
+### メモリ管理
 
 ```yaml
-text_source:
-  concat: ["title", "body"]
-  delimiter: " "
+memory:
+  hard_limit_mb: 8192               # ハードメモリ制限(MB)
+  soft_target_mb: 4096              # ソフトメモリターゲット(MB)
+  arena_chunk_mb: 64                # アリーナチャンクサイズ(MB)
+  roaring_threshold: 0.18           # Roaringビットマップ閾値(密度)
+  minute_epoch: true                # 分精度エポックを使用
+
+  # テキスト正規化
+  normalize:
+    nfkc: true                      # NFKC正規化
+    width: "narrow"                 # 幅変換: keep、narrow、wide
+    lower: false                    # 小文字変換
 ```
 
-### 必須フィルタ（データ存在条件）
+#### パラメータ
 
-必須フィルタは、データをインデックスに含めるための条件を定義します。この条件に合致しないデータは**一切インデックス化されません**。
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `hard_limit_mb` | integer | `8192` | ハードメモリ制限(MB)(OOM保護) | ❌ 不可 |
+| `soft_target_mb` | integer | `4096` | ソフトメモリターゲット(MB)(退避トリガー) | ❌ 不可 |
+| `arena_chunk_mb` | integer | `64` | アリーナチャンクサイズ(MB)(メモリアロケータ) | ❌ 不可 |
+| `roaring_threshold` | float | `0.18` | Roaringビットマップのポスティングリスト密度閾値(0.0-1.0) | ❌ 不可 |
+| `minute_epoch` | boolean | `true` | タイムスタンプに分精度エポックを使用 | ❌ 不可 |
+| `normalize.nfkc` | boolean | `true` | NFKC正規化を適用(Unicode互換性) | ❌ 不可 |
+| `normalize.width` | string | `narrow` | 幅変換: `keep`、`narrow`、`wide` | ❌ 不可 |
+| `normalize.lower` | boolean | `false` | テキストを小文字に変換 | ❌ 不可 |
 
-Binlogレプリケーション時の動作：
-- この条件から**外れた**データはインデックスから**削除**されます
-- この条件に**入った**データはインデックスに**追加**されます
-- この条件内で変更されたデータは通常通り更新されます
+#### テキスト正規化
+
+**NFKC正規化**(`normalize.nfkc`):
+- **日本語**および**CJK**コンテンツに推奨
+- Unicode互換文字を正規化
+- 例: `㍻`(U+337B) → `平成`(U+5E73 U+6210)
+
+**幅変換**(`normalize.width`):
+- `keep`: 変換なし
+- `narrow`: 全角 → 半角(例: `Ａ` → `A`)
+- `wide`: 半角 → 全角(例: `A` → `Ａ`)
+
+**小文字変換**(`normalize.lower`):
+- `true`: 小文字に変換(大文字小文字を区別しない検索)
+- `false`: 大文字小文字を保持(大文字小文字を区別する検索)
+
+---
+
+### ダンプ永続化
 
 ```yaml
-required_filters:
-  - name: "enabled"                 # カラム名
-    type: "int"                     # カラム型（下記参照）
-    op: "="                         # 演算子
-    value: 1                        # 比較値
-    bitmap_index: false             # 検索時フィルタリング用のビットマップインデックスを有効化
-
-  - name: "deleted_at"
-    type: "datetime"
-    op: "IS NULL"                   # 削除されていないレコードのみインデックス化
-    bitmap_index: false
+dump:
+  dir: "/var/lib/mygramdb/dumps"    # ダンプディレクトリパス
+  default_filename: "mygramdb.dmp"  # 手動ダンプのデフォルトファイル名
+  interval_sec: 0                   # 自動保存間隔(0 = 無効)
+  retain: 3                         # 保持する自動保存ダンプの数
 ```
 
-**サポートされる演算子:**
+#### パラメータ
 
-- 比較演算子: `=`, `!=`, `<`, `>`, `<=`, `>=`
-- NULL チェック: `IS NULL`, `IS NOT NULL`
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `dir` | string | `/var/lib/mygramdb/dumps` | ダンプディレクトリパス(自動的に作成される) | ❌ 不可 |
+| `default_filename` | string | `mygramdb.dmp` | 手動`DUMP SAVE`のデフォルトファイル名 | ❌ 不可 |
+| `interval_sec` | integer | `0` | 自動保存間隔(秒)(0 = 無効) | ✅ 可能 |
+| `retain` | integer | `3` | 保持する自動保存ダンプの数(クリーンアップ) | ✅ 可能 |
 
-**重要な注意事項:**
+#### 自動保存の動作
 
-- すべての `required_filters` 条件は AND ロジックで結合されます
-- `IS NULL` および `IS NOT NULL` 演算子の場合、`value` フィールドは省略する必要があります
-- `required_filters` で使用するカラムはテーブルスキーマに含まれている必要があります
-- これらのフィルタはスナップショットビルド時と Binlog レプリケーション時の両方で評価されます
+**`interval_sec > 0`の場合**:
+- N秒ごとに自動的にスナップショットを保存
+- ファイル名: `auto_YYYYMMDD_HHMMSS.dmp`
+- 古い自動保存ファイルはクリーンアップされる(最新の`retain`個のファイルを保持)
+- 手動ダンプ(`DUMP SAVE`経由)はクリーンアップの**対象外**
 
-### オプションフィルタ（検索時フィルタリング）
+**推奨値**:
+- **開発**: `0`(無効)
+- **本番**: `7200`(2時間)
 
-オプションフィルタは検索時のフィルタリングに使用されます。データのインデックス化には**影響しません**。
+**類似機能**:
+- Redis RDB永続化
 
-```yaml
-filters:
-  - name: "status"
-    type: "int"
-    dict_compress: false            # デフォルト: false
-    bitmap_index: false             # デフォルト: false
+---
 
-  - name: "category"
-    type: "string"
-    dict_compress: false
-    bitmap_index: false
-
-  - name: "created_at"
-    type: "datetime"
-    bucket: "minute"                # オプション: "minute", "hour", "day"
-```
-
-**フィルター型:**
-
-- 整数型: `tinyint`, `tinyint_unsigned`, `smallint`, `smallint_unsigned`, `int`, `int_unsigned`, `mediumint`, `mediumint_unsigned`, `bigint`
-- 浮動小数点型: `float`, `double`
-- 文字列型: `string`, `varchar`, `text`
-- 日付型: `datetime`, `date`, `timestamp`
-
-**フィルターオプション:**
-
-- **dict_compress**: 辞書圧縮を有効化（低カーディナリティカラム推奨）
-- **bitmap_index**: フィルター高速化のためのビットマップインデックスを有効化
-- **bucket**: 日時のバケット化（`minute`, `hour`, `day`）でカーディナリティを削減
-
-### Posting List 設定
-
-転置インデックスの保存方法を制御：
-
-```yaml
-posting:
-  block_size: 128                   # デフォルト: 128
-  freq_bits: 0                      # 0=ブール値、4 または 8 で語頻度（デフォルト: 0）
-  use_roaring: "auto"               # "auto", "always", "never"（デフォルト: auto）
-```
-
-## Build セクション
-
-インデックスビルド設定：
-
-- **mode**: ビルドモード（デフォルト: `select_snapshot`、現在唯一のオプション）
-- **batch_size**: スナップショット時の1バッチあたりの行数（デフォルト: `5000`）
-- **parallelism**: 並列ビルドスレッド数（デフォルト: `2`）
-- **throttle_ms**: バッチ間の遅延（ミリ秒、デフォルト: `0`）
-
-## Replication セクション
-
-MySQL binlog レプリケーション設定：
-
-- **enable**: binlog レプリケーションを有効化（デフォルト: `true`）
-- **server_id**: MySQL サーバー ID（必須、レプリケーショントポロジー内でゼロ以外の一意の値である必要があります）
-  - ランダムな数値を生成するか、環境に応じた一意の値を使用
-  - 例: `12345`
-- **start_from**: レプリケーション開始位置（デフォルト: `snapshot`）
-  - `snapshot`: スナップショット GTID から開始（推奨）
-  - `latest`: 現在の GTID から開始
-  - `gtid=<UUID:txn>`: 特定の GTID から開始（例: `gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1`）
-- **queue_size**: Binlog イベントキューサイズ（デフォルト: `10000`）
-- **reconnect_backoff_min_ms**: 最小再接続バックオフ遅延（デフォルト: `500`）
-- **reconnect_backoff_max_ms**: 最大再接続バックオフ遅延（デフォルト: `10000`）
-
-## Memory セクション
-
-メモリ管理設定：
-
-- **hard_limit_mb**: ハードメモリ制限（MB、デフォルト: `8192`）
-- **soft_target_mb**: ソフトメモリ目標（MB、デフォルト: `4096`）
-- **arena_chunk_mb**: アリーナチャンクサイズ（MB、デフォルト: `64`）
-- **roaring_threshold**: Roaring ビットマップ閾値（デフォルト: `0.18`）
-- **minute_epoch**: 分精度のエポックを使用（デフォルト: `true`）
-
-### テキスト正規化
-
-```yaml
-normalize:
-  nfkc: true                        # デフォルト: true、NFKC 正規化
-  width: "narrow"                   # "keep", "narrow", "wide"（デフォルト: narrow）
-  lower: false                      # 小文字変換（デフォルト: false）
-```
-
-## Dump セクション
-
-ダンプ（スナップショット）の永続化設定と自動バックアップ：
-
-- **dir**: ダンプディレクトリのパス（デフォルト: `/var/lib/mygramdb/dumps`）
-  - ディレクトリが存在しない場合は起動時に自動作成されます
-  - 起動時に書き込み権限が検証されます
-- **default_filename**: 手動`DUMP SAVE`コマンドのデフォルトファイル名（デフォルト: `mygramdb.dmp`）
-- **interval_sec**: 自動保存間隔（秒、デフォルト: `0` = 無効、推奨: `7200` で120分間隔）
-  - 自動ダンプはタイムスタンプベースのファイル名で保存されます：`auto_YYYYMMDD_HHMMSS.dmp`
-  - Redis RDB永続化と同様の仕組み
-- **retain**: 保持する自動保存ダンプ数（デフォルト: `3`）
-  - 古い自動保存ファイルは自動的にクリーンアップされます
-  - 手動ダンプ（`DUMP SAVE`コマンド経由）はクリーンアップの影響を受けません
-
-## API セクション
-
-API サーバー設定：
-
-### TCP API
+### APIサーバー
 
 ```yaml
 api:
   tcp:
-    bind: "127.0.0.1"               # デフォルト: 127.0.0.1。リモート公開時のみ 0.0.0.0 等へ変更
-    port: 11016                     # デフォルト: 11016
-    max_connections: 10000          # 最大同時接続数（デフォルト: 10000）
-```
+    bind: "127.0.0.1"               # TCPバインドアドレス
+    port: 11016                     # TCPポート
+    max_connections: 10000          # 最大同時接続数
 
-- **bind**: TCP サーバーがバインドする IP アドレス（デフォルト: `127.0.0.1`）
-  - `127.0.0.1`: ローカルホストのみアクセス可能（最も安全）
-  - `0.0.0.0`: すべてのネットワークインターフェースから接続を受け付ける
-- **port**: TCP ポート番号（デフォルト: `11016`）
-- **max_connections**: 最大同時 TCP 接続数（デフォルト: `10000`）
-  - **セキュリティ**: ファイルディスクリプタ枯渇およびリソース枯渇攻撃を防止します
-  - この制限を超える接続は即座に拒否され、クローズされます
-  - システムの `ulimit -n`（オープンファイル制限）および利用可能メモリに基づいて設定してください
-  - **本番環境推奨**: システムのファイルディスクリプタ制限の半分に設定
-  - 例: `ulimit -n` が 65536 を返す場合、`max_connections: 30000` を設定
-  - 各接続は 1 つのファイルディスクリプタとバッファ用のメモリを消費します
-
-### HTTP API（オプション）
-
-```yaml
-api:
   http:
-    enable: true                    # デフォルト: false
-    bind: "127.0.0.1"               # デフォルト: 127.0.0.1（ローカルホストのみ）
-    port: 8080                      # デフォルト: 8080
-    enable_cors: false              # デフォルト: false。ブラウザ公開時のみ有効化
-    cors_allow_origin: "https://app.example.com"  # CORS 有効時は必須
-  default_limit: 100                # LIMIT 省略時のデフォルト (5-1000)
-  max_query_length: 128             # クエリ式の最大長 (0 = 無制限)
+    enable: false                   # HTTP/JSON APIを有効化
+    bind: "127.0.0.1"               # HTTPバインドアドレス
+    port: 8080                      # HTTPポート
+    enable_cors: false              # CORSヘッダーを有効化
+    cors_allow_origin: ""           # CORSが有効な場合に許可するOrigin
 
-### クエリ関連のデフォルト
+  default_limit: 100                # 指定されていない場合のデフォルトLIMIT
+  max_query_length: 128             # 最大クエリ式長
 
-- **default_limit**: SEARCH で `LIMIT` を指定しない場合に自動的に適用されます。レスポンス肥大化を防ぐため、5〜1000 の範囲で設定可能（既定 100）。
-- **max_query_length**: 検索語・AND/NOT 条件・FILTER 値を合計したクエリ式の長さ上限です。既定 128 文字、`0` を設定すると無制限。非常に長いクエリによるリソース消費を抑制します。
-
-### レート制限（オプション）
-
-**トークンバケットアルゴリズム**を使用した DoS 攻撃およびリソース枯渇からの保護:
-
-```yaml
-api:
+  # レート制限(オプション)
   rate_limiting:
-    enable: false                   # デフォルト: false（無効）
-    capacity: 100                   # クライアントごとの最大トークン数（バーストサイズ）
-    refill_rate: 10                 # 毎秒追加されるトークン数（クライアントごと）
+    enable: false                   # レート制限を有効化
+    capacity: 100                   # クライアントあたりの最大トークン数(バースト)
+    refill_rate: 10                 # クライアントあたり毎秒追加されるトークン数
     max_clients: 10000              # 追跡する最大クライアント数
 ```
 
-- **enable**: レート制限の有効/無効（デフォルト: `false`）
-  - 無効の場合、レート制限は適用されません
-  - 有効の場合、クライアント IP アドレスごとにリクエストを制限します
-- **capacity**: クライアントごとの最大トークン数（バーストサイズ、デフォルト: `100`）
-  - 最大 N 個のリクエストを瞬間的に許可します
-  - 例: capacity=100 の場合、クライアントは 100 個の即座のリクエストが可能
-- **refill_rate**: 毎秒追加されるトークン数（デフォルト: `10`）
-  - 持続的なレート制限（リクエスト/秒）
-  - 例: refill_rate=10 の場合、クライアントは継続的に毎秒 10 リクエスト可能
-- **max_clients**: 追跡する最大クライアント数（デフォルト: `10000`）
-  - 過度な IP アドレス追跡を防ぐメモリ管理
-  - 非アクティブなクライアントは自動的にクリーンアップされます
+#### TCPサーバーパラメータ
 
-**トークンバケットアルゴリズム:**
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `tcp.bind` | string | `127.0.0.1` | TCPバインドアドレス(すべてのインターフェースには`0.0.0.0`を使用) | ❌ 不可 |
+| `tcp.port` | integer | `11016` | TCPポート | ❌ 不可 |
+| `tcp.max_connections` | integer | `10000` | 最大同時接続数(ファイルディスクリプタ枯渇を防止) | ❌ 不可 |
 
-1. 各クライアントはトークンで満たされたバケットから開始（capacity）
-2. 各リクエストは 1 トークンを消費
-3. トークンは設定されたレートで自動的に補充されます
-4. トークンがない場合、リクエストはレート制限エラーで拒否されます
+**セキュリティ推奨事項**:
+- **開発**: `127.0.0.1`(localhostのみ)
+- **本番**: `network.allow_cidrs`を使用してアクセスを制限
 
-**使用例:**
+#### HTTPサーバーパラメータ
 
-- **高スループット**: `capacity: 1000, refill_rate: 100` - 1000 リクエストバースト、100 req/s 持続
-- **中程度の保護**: `capacity: 100, refill_rate: 10` - 100 リクエストバースト、10 req/s 持続
-- **厳格な制限**: `capacity: 10, refill_rate: 1` - 10 リクエストバースト、1 req/s 持続
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `http.enable` | boolean | `false` | HTTP/JSON APIを有効化(デフォルトで無効) | ❌ 不可 |
+| `http.bind` | string | `127.0.0.1` | HTTPバインドアドレス | ❌ 不可 |
+| `http.port` | integer | `8080` | HTTPポート | ❌ 不可 |
+| `http.enable_cors` | boolean | `false` | ブラウザクライアント用のCORSヘッダーを有効化 | ❌ 不可 |
+| `http.cors_allow_origin` | string | `` | CORSが有効な場合に許可するOrigin(例: `https://app.example.com`) | ❌ 不可 |
 
-**注意:** レート制限はデフォルトで無効です。本番環境では明示的に有効化して不正使用から保護してください。
-```
+**HTTPエンドポイント**:
+- `POST /{table}/search`: 検索クエリ
+- `GET /{table}/:id`: プライマリキーでドキュメントを取得
+- `GET /info`: サーバー情報
+- `GET /health`: ヘルスチェック(Kubernetes対応)
 
-## Network セクション（本番環境では必須）
+#### クエリパラメータ
 
-IP許可リストを使用したネットワークセキュリティ設定（デフォルトで拒否）:
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `default_limit` | integer | `100` | 指定されていない場合のデフォルトLIMIT(5-1000) | ⚠️ 部分的 |
+| `max_query_length` | integer | `128` | 最大クエリ式長(0 = 無制限) | ⚠️ 部分的 |
 
-- **allow_cidrs**: 許可 CIDR リスト（**セキュリティ: 空の場合はデフォルトで拒否**）
-  - TCP/HTTP の両方に適用されます
-  - **空の場合: すべての接続がデフォルトで拒否されます**（fail-closed セキュリティポスチャ）
-  - 指定された場合: これらの IP 範囲からの接続のみが受け入れられます
-  - 標準 CIDR 表記をサポート（例: `192.168.1.0/24`, `10.0.0.0/8`）
-  - 複数の CIDR 範囲を指定可能
+#### レート制限(トークンバケットアルゴリズム)
 
-**重要なセキュリティ変更:** 以前のバージョンでは `allow_cidrs` が空の場合、すべての接続が許可されていました。現在のバージョンでは、セキュリティのため**デフォルトですべての接続を拒否**します。許可する IP 範囲を明示的に設定する必要があります。
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `rate_limiting.enable` | boolean | `false` | クライアントIPごとのレート制限を有効化 | ⚠️ 部分的 |
+| `rate_limiting.capacity` | integer | `100` | クライアントあたりの最大トークン数(バーストサイズ) | ⚠️ 部分的 |
+| `rate_limiting.refill_rate` | integer | `10` | クライアントあたり毎秒追加されるトークン数(持続レート) | ⚠️ 部分的 |
+| `rate_limiting.max_clients` | integer | `10000` | 追跡する最大クライアント数(メモリ管理) | ⚠️ 部分的 |
 
-### 推奨設定
+**動作原理**:
+- 各クライアントIPには`capacity`個のトークンを持つトークンバケットがある
+- 各リクエストは1トークンを消費
+- トークンは毎秒`refill_rate`で補充される
+- バケットが空になると、リクエストはレート制限される(HTTP 429)
 
-**ローカルホストのみ（最も安全）:**
+**例**:
 ```yaml
-network:
-  allow_cidrs:
-    - "127.0.0.1/32"  # ローカル接続のみ
+rate_limiting:
+  enable: true
+  capacity: 100       # 100リクエストのバーストを許可
+  refill_rate: 10     # 持続レート: IPあたり10リクエスト/秒
 ```
-
-**プライベートネットワーク:**
-```yaml
-network:
-  allow_cidrs:
-    - "127.0.0.1/32"      # ローカルホスト
-    - "192.168.1.0/24"    # ローカルサブネット
-    - "10.0.0.0/8"        # プライベートネットワーク
-```
-
-**すべて許可（本番環境では非推奨）:**
-```yaml
-network:
-  allow_cidrs:
-    - "0.0.0.0/0"  # 警告: どこからでも接続を許可
-```
-
-**一般的な CIDR 範囲:**
-
-- **ローカルホスト:** `127.0.0.1/32`（単一 IP、ローカルアクセス専用で最も安全）
-- **プライベートネットワーク:**
-  - `10.0.0.0/8` - クラス A プライベートネットワーク (10.0.0.0 - 10.255.255.255)
-  - `172.16.0.0/12` - クラス B プライベートネットワーク (172.16.0.0 - 172.31.255.255)
-  - `192.168.0.0/16` - クラス C プライベートネットワーク (192.168.0.0 - 192.168.255.255)
-- **単一 IP:** `192.168.1.100/32`（この特定の IP のみ）
-- **すべて許可:** `0.0.0.0/0`（**非推奨** - すべての IP アドレスを許可）
-
-## Logging セクション
-
-ロギング設定：
-
-- **level**: ログレベル（デフォルト: `info`）
-  - オプション: `debug`, `info`, `warn`, `error`
-- **json**: JSON 形式出力（デフォルト: `true`）
-- **file**: ログファイルパス（デフォルト: `""` = 標準出力）
-  - 空文字列: 標準出力へ出力（systemd/Docker環境推奨）
-  - ファイルパス: ファイルへ出力（例: `/var/log/mygramdb/mygramdb.log`）
-  - **`-d`/`--daemon` オプション使用時は必須**（デーモンモードでは標準出力が `/dev/null` にリダイレクトされます）
-
-```yaml
-logging:
-  level: "info"
-  json: true
-  file: ""                          # 空 = 標準出力、またはファイルパスを指定
-```
-
-**systemd/Docker（推奨）**:
-```yaml
-logging:
-  file: ""                          # 標準出力へ、systemd journalに記録される
-```
-
-**デーモンモード（`-d` オプション）**:
-```yaml
-logging:
-  file: "/var/log/mygramdb/mygramdb.log"  # デーモンモードではファイル指定必須
-```
-
-## Cache セクション
-
-クエリ結果キャッシュの設定：
-
-```yaml
-cache:
-  enabled: true                       # デフォルト: true（有効）
-  max_memory_mb: 32                   # デフォルト: 32MB
-  min_query_cost_ms: 10.0             # デフォルト: 10.0ms
-  ttl_seconds: 3600                   # デフォルト: 3600（1時間）
-  invalidation_strategy: "ngram"      # デフォルト: "ngram"
-  compression_enabled: true           # デフォルト: true（LZ4）
-  eviction_batch_size: 10             # デフォルト: 10
-  invalidation:
-    batch_size: 1000                  # デフォルト: 1000
-    max_delay_ms: 100                 # デフォルト: 100ms
-```
-
-**設定項目：**
-
-- **enabled**: クエリキャッシュの有効/無効（デフォルト: `true`）
-- **max_memory_mb**: キャッシュの最大メモリ使用量（MB）（デフォルト: `32`）
-  - メモリ制限に達すると、古いエントリが自動的に削除されます
-- **min_query_cost_ms**: キャッシュする最小クエリ実行時間（デフォルト: `10.0`）
-  - この閾値より長く実行されたクエリのみキャッシュされます
-  - 非常に高速なクエリをキャッシュすることを防ぎます
-- **ttl_seconds**: キャッシュエントリの有効期間（秒）（デフォルト: `3600`、0 = TTL なし）
-  - エントリはこの期間後に自動的に期限切れになります
-- **invalidation_strategy**: データ変更時のキャッシュ無効化方法（デフォルト: `"ngram"`）
-  - `"ngram"`: 影響を受ける n-gram に一致するエントリを無効化（精密、推奨）
-  - `"table"`: テーブルのすべてのエントリを無効化（シンプル、効率は低い）
-- **compression_enabled**: キャッシュ結果の LZ4 圧縮を有効化（デフォルト: `true`）
-  - 大きな結果セットのメモリ使用量を削減
-  - 圧縮/展開による小さな CPU オーバーヘッド
-- **eviction_batch_size**: メモリ不足時に一度に削除するエントリ数（デフォルト: `10`）
-
-**無効化キュー設定：**
-
-- **invalidation.batch_size**: N 個のユニークな（テーブル、n-gram）ペア後に無効化を処理（デフォルト: `1000`）
-- **invalidation.max_delay_ms**: 無効化処理前の最大遅延（デフォルト: `100`）
-
-**動作原理：**
-
-1. クエリ実行時間が `min_query_cost_ms` を超える場合、初回実行後に結果がキャッシュされます
-2. 同一クエリの再実行時は、キャッシュされた結果を即座に返します（1ms 未満）
-3. binlog レプリケーション経由でデータが変更された場合：
-   - 影響を受ける n-gram が特定されます
-   - それらの n-gram に一致するキャッシュエントリが無効化されます
-   - 次回のクエリでキャッシュエントリが再構築されます
-4. データが変更されていなくても、`ttl_seconds` 後にエントリは期限切れになります
-
-**パフォーマンスへの影響：**
-
-- キャッシュヒット: < 1ms（メモリルックアップ + オプションの展開）
-- キャッシュミス: 通常のクエリ時間 + 小さなキャッシュオーバーヘッド
-- メモリ使用量: `max_memory_mb` で制御、自動削除あり
-
-**使用を推奨する場合：**
-
-- 頻繁に繰り返されるクエリ（検索候補、人気の検索）
-- クエリコストが高いクエリ（複雑なフィルタ、大きな結果セット）
-- 読み取り中心のワークロードで繰り返しパターンがある場合
-
-**無効化を推奨する場合：**
-
-- 非常にユニークなクエリパターン（繰り返しが少ない）
-- 非常に高速なクエリ（常に < 10ms）
-- メモリの制約が厳しい場合
-
-## 自動検証
-
-MygramDB は起動時に組み込みの JSON Schema を使用して、すべての設定ファイル（YAML と JSON）を自動的に検証します。この検証により以下が保証されます：
-
-- **構文の正しさ**: 有効な YAML/JSON 形式
-- **型チェック**: すべてのフィールドの正しいデータ型
-- **必須フィールド**: すべての必須設定が存在
-- **値の制約**: 値が有効な範囲と列挙値内にある
-- **未知のキー**: タイポやサポートされていないオプションを検出
-
-検証が失敗した場合、MygramDB は問題の正確な位置を示す詳細なエラーメッセージを表示します。
-
-## 実行時設定ヘルプ
-
-MygramDB は、サーバーを再起動せずに設定オプションを探索し、現在の設定を表示し、設定ファイルを検証するための実行時コマンドを提供します。
-
-### 設定ヘルプの取得
-
-実行時に `CONFIG HELP` コマンドを使用して設定のヘルプを照会できます:
-
-```bash
-# すべての設定セクションを表示
-echo "CONFIG HELP" | nc localhost 11016
-```
-
-**出力例:**
-```
-+OK
-Available configuration sections:
-  mysql        - MySQL接続設定
-  tables       - テーブル設定（複数テーブル対応）
-  build        - インデックスビルド設定
-  replication  - レプリケーション設定
-  memory       - メモリ管理
-  ...
-```
-
-### 詳細なヘルプの表示
-
-特定の設定オプションのヘルプを取得:
-
-```bash
-# MySQL セクションのヘルプ
-echo "CONFIG HELP mysql" | nc localhost 11016
-
-# 特定プロパティのヘルプ
-echo "CONFIG HELP mysql.port" | nc localhost 11016
-```
-
-これにより以下が表示されます:
-- プロパティの型（文字列、整数、ブール値など）
-- デフォルト値
-- 有効な範囲または許可される値
-- 説明
-- フィールドが必須かどうか
-
-### 現在の設定の表示
-
-機密フィールドをマスクした実行中の設定を表示:
-
-```bash
-# 設定全体を表示
-echo "CONFIG SHOW" | nc localhost 11016
-
-# 特定セクションを表示
-echo "CONFIG SHOW mysql" | nc localhost 11016
-
-# 特定プロパティを表示
-echo "CONFIG SHOW mysql.port" | nc localhost 11016
-```
-
-**注意**: 機密フィールド（パスワード、シークレット、キー、トークン）は出力で自動的に `***` としてマスクされます。
-
-### 設定ファイルの検証
-
-デプロイ前に設定ファイルを検証:
-
-```bash
-echo "CONFIG VERIFY /path/to/config.yaml" | nc localhost 11016
-```
-
-これにより、実行中のサーバーにロードすることなく設定を検証します。設定が有効な場合、サマリーが表示されます:
-
-```
-+OK
-Configuration is valid
-  Tables: 2 (articles, products)
-  MySQL: repl_user@127.0.0.1:3306
-```
-
-無効な場合、詳細なエラーメッセージが表示されます:
-
-```
--ERR Configuration validation failed:
-  - mysql.port: value 99999 exceeds maximum 65535
-  - tables[0].name: missing required field
-```
-
-完全な CONFIG コマンド構文については、[プロトコルリファレンス](protocol.md#config-コマンド)を参照してください。
 
 ---
 
-## 設定のテスト
+### ネットワークセキュリティ
 
-サーバーを起動する前に、設定ファイルをテストできます:
-
-```bash
-# YAML 設定をテスト
-./build/bin/mygramdb -t config.yaml
-
-# JSON 設定をテスト
-./build/bin/mygramdb -t config.json
-
-# またはロングオプションを使用
-./build/bin/mygramdb --config-test config.yaml
+```yaml
+network:
+  allow_cidrs:                      # 許可するCIDRリスト(フェイルクローズ)
+    - "127.0.0.1/32"                # localhostのみ(最も安全)
+    # - "192.168.1.0/24"            # ローカルネットワーク
+    # - "10.0.0.0/8"                # プライベートネットワーク
+    # - "0.0.0.0/0"                 # 警告: すべて許可(非推奨)
 ```
 
-これにより以下が実行されます:
+#### パラメータ
 
-1. 設定ファイルを解析
-2. JSON Schema に対して検証
-3. 有効な場合は設定サマリーを表示
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `allow_cidrs` | array | *必須* | 許可するCIDRリスト(空 = **すべて拒否**) | ❌ 不可 |
 
-設定が有効な場合、以下を表示します:
+**セキュリティポリシー**:
+- **フェイルクローズ**: 空の`allow_cidrs`はすべての接続を拒否
+- **明示的許可リスト**: 許可するIP範囲を明示的に設定する必要がある
+- **適用対象**: TCPとHTTP APIの両方
 
-- MySQL 接続設定
-- テーブル設定
-- API サーバー設定
-- レプリケーション状態
-- ロギングレベル
+**例**:
+```yaml
+# localhostのみ(最も安全)
+allow_cidrs:
+  - "127.0.0.1/32"
+  - "::1/128"  # IPv6 localhost
 
-### カスタムスキーマ（上級者向け）
+# ローカルネットワーク
+allow_cidrs:
+  - "192.168.1.0/24"
 
-設定の拡張やテストのため、カスタムスキーマに対して検証することができます:
+# プライベートネットワーク
+allow_cidrs:
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
 
-```bash
-./build/bin/mygramdb config.yaml --schema custom-schema.json
+# すべて許可(本番環境では非推奨)
+allow_cidrs:
+  - "0.0.0.0/0"
+  - "::/0"
 ```
 
-## 設定例
+---
 
-すべての利用可能なオプションを含む完全な設定例:
-- YAML: `examples/config.yaml`
-- JSON: `examples/config.json`
+### ロギング
 
-クイックスタート用の最小限の設定例:
-- YAML: `examples/config-minimal.yaml`
-- JSON: `examples/config-minimal.json`
-
-各サンプルファイルの詳細については `examples/README.md` を参照してください。
-
-## 使い方
-
-設定ファイルを作成したら、MygramDB を起動できます：
-
-```bash
-# ヘルプを表示
-./build/bin/mygramdb --help
-
-# バージョンを表示
-./build/bin/mygramdb --version
-
-# 設定をテスト
-./build/bin/mygramdb -t config.yaml
-
-# サーバーを起動（両方の形式をサポート）
-./build/bin/mygramdb -c config.yaml
-# または
-./build/bin/mygramdb config.yaml
+```yaml
+logging:
+  level: "info"                     # ログレベル
+  json: true                        # JSON形式出力
+  file: ""                          # ログファイルパス(空 = stdout)
 ```
 
-**コマンドラインオプション:**
-- `-c, --config <file>` - 設定ファイルのパス
-- `-t, --config-test` - 設定をテストして終了
-- `-h, --help` - ヘルプメッセージを表示
-- `-v, --version` - バージョン情報を表示
-- `-s, --schema <file>` - カスタム JSON Schema を使用（上級者向け）
+#### パラメータ
+
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `level` | string | `info` | ログレベル: `debug`、`info`、`warn`、`error` | ✅ 可能 |
+| `json` | boolean | `true` | JSON形式出力(本番環境で推奨) | ❌ 不可 |
+| `file` | string | `` | ログファイルパス(空 = stdout、デーモンモードでは必須) | ❌ 不可 |
+
+**ログレベル**:
+- **`debug`**: 詳細ログ(開発のみ)
+- **`info`**: 標準的な操作メッセージ(本番環境で推奨)
+- **`warn`**: 警告(即座の対応が不要な異常)
+- **`error`**: エラー(注意が必要)
+
+**JSONロギング**:
+- **本番環境**で推奨(解析が容易、構造化されている)
+- **開発環境**では無効化(人間が読みやすい)
+
+**ログ出力**:
+- **空の`file`**: stdoutに出力(Docker/systemdで推奨)
+- **パス**: ファイルに出力(例: `/var/log/mygramdb/mygramdb.log`)
+- **デーモンモード**: `-d/--daemon`使用時には`file`が**必須**
+
+---
+
+### クエリキャッシュ
+
+```yaml
+cache:
+  enabled: true                     # クエリ結果キャッシュを有効化
+  max_memory_mb: 32                 # 最大キャッシュメモリ(MB)
+  min_query_cost_ms: 10.0           # キャッシュする最小クエリコスト(ミリ秒)
+  ttl_seconds: 3600                 # キャッシュエントリのTTL(0 = TTLなし)
+  invalidation_strategy: "ngram"    # 無効化戦略
+
+  # 詳細チューニング
+  compression_enabled: true         # LZ4圧縮を有効化
+  eviction_batch_size: 10           # 退避バッチサイズ
+
+  # 無効化キュー
+  invalidation:
+    batch_size: 1000                # N個の一意なペア後に処理
+    max_delay_ms: 100               # 処理前の最大遅延(ミリ秒)
+```
+
+#### パラメータ
+
+| パラメータ | 型 | デフォルト | 説明 | ホットリロード |
+|-----------|------|---------|-------------|------------|
+| `enabled` | boolean | `true` | クエリ結果キャッシュを有効化 | ⚠️ 部分的(キャッシュクリア) |
+| `max_memory_mb` | integer | `32` | 最大キャッシュメモリ(MB) | ⚠️ 部分的 |
+| `min_query_cost_ms` | float | `10.0` | キャッシュする最小クエリコスト(ミリ秒) | ⚠️ 部分的 |
+| `ttl_seconds` | integer | `3600` | キャッシュエントリのTTL(秒)(0 = TTLなし) | ⚠️ 部分的 |
+| `invalidation_strategy` | string | `ngram` | 無効化戦略: `ngram`、`table` | ⚠️ 部分的 |
+| `compression_enabled` | boolean | `true` | キャッシュされた結果のLZ4圧縮を有効化 | ⚠️ 部分的 |
+| `eviction_batch_size` | integer | `10` | 一度に退避するエントリ数 | ⚠️ 部分的 |
+| `invalidation.batch_size` | integer | `1000` | N個の一意な(table, ngram)ペア後に無効化を処理 | ⚠️ 部分的 |
+| `invalidation.max_delay_ms` | integer | `100` | 無効化処理前の最大遅延 | ⚠️ 部分的 |
+
+#### 無効化戦略
+
+**`ngram`(推奨)**:
+- **精度**: 変更されたN-gramを使用するクエリのみを無効化
+- **効率**: 最小限のキャッシュ無効化
+- **使用例**: 本番環境
+
+**`table`**:
+- **積極的**: 任意の変更でテーブルキャッシュ全体を無効化
+- **シンプル**: N-gram追跡のオーバーヘッドなし
+- **使用例**: 非常に高い書き込みレート、小さいキャッシュ
+
+#### キャッシュチューニング
+
+**`min_query_cost_ms`**:
+- この閾値より長いクエリのみをキャッシュ
+- **高い値**: キャッシュされるクエリが少ない、メモリ使用量が少ない
+- **低い値**: キャッシュされるクエリが多い、メモリ使用量が多い
+- **推奨**: 10-50ミリ秒
+
+**`ttl_seconds`**:
+- キャッシュエントリの有効期間
+- **0**: TTLなし(無効化または退避されるまでキャッシュ)
+- **3600**: 1時間(頻繁に変更されるデータに推奨)
+
+**`compression_enabled`**:
+- キャッシュされた結果のLZ4圧縮
+- **true**: メモリ使用量が少ない、わずかなCPUオーバーヘッド
+- **false**: メモリ使用量が多い、CPUオーバーヘッドなし
+
+---
+
+## ホットリロード
+
+### SIGHUPによるサポート
+
+MygramDBは、`SIGHUP`シグナルを送信することで、再起動せずに**ライブ設定リロード**をサポートします:
+
+```bash
+# プロセスIDを検索
+ps aux | grep mygramdb
+
+# SIGHUPシグナルを送信
+kill -HUP <pid>
+
+# またはsystemdを使用
+systemctl reload mygramdb
+```
+
+### リロード可能な設定
+
+| セクション | 設定 | リロード動作 |
+|---------|---------|-----------------|
+| **Logging** | `level` | ✅ 即座に適用 |
+| **MySQL** | `host`、`port`、`user`、`password` | ✅ 新しいMySQLサーバーに再接続 |
+| **MySQL** | `ssl_*` | ✅ 新しいSSL設定で再接続 |
+| **Dump** | `interval_sec`、`retain` | ✅ スケジューラ設定を更新 |
+| **Cache** | すべての設定 | ⚠️ キャッシュクリア、新しい設定を適用 |
+| **API** | `default_limit`、`max_query_length` | ⚠️ 新しいクエリに適用 |
+| **API** | `rate_limiting.*` | ⚠️ レート制限リセット |
+
+### リロード不可能な設定(再起動が必要)
+
+| セクション | 設定 | 理由 |
+|---------|---------|--------|
+| **MySQL** | `database` | データベース接続は変更できない |
+| **MySQL** | `use_gtid`、`binlog_format`、`binlog_row_image` | レプリケーションモードは変更できない |
+| **Tables** | すべての設定 | テーブルスキーマとインデックス構造は変更できない |
+| **Build** | すべての設定 | 構築設定は起動時のみ |
+| **Replication** | `enable`、`server_id`、`start_from`、`queue_size` | レプリケーション設定は起動時のみ |
+| **Memory** | すべての設定 | メモリアロケータは変更できない |
+| **API** | `tcp.bind`、`tcp.port`、`http.bind`、`http.port` | ソケットは再バインドできない |
+| **Network** | `allow_cidrs` | ネットワークセキュリティポリシーは変更できない |
+| **Logging** | `json`、`file` | ログ出力は変更できない |
+
+### リロードワークフロー
+
+1. **設定ファイルを編集**:
+   ```bash
+   vim /etc/mygramdb/config.yaml
+   ```
+
+2. **設定を検証**(オプション):
+   ```bash
+   mygramdb --config=/etc/mygramdb/config.yaml --validate
+   ```
+
+3. **SIGHUPシグナルを送信**:
+   ```bash
+   kill -HUP $(cat /var/run/mygramdb.pid)
+   ```
+
+4. **リロードを確認**:
+   ```bash
+   tail -f /var/log/mygramdb/mygramdb.log
+   ```
+
+   期待される出力:
+   ```
+   Configuration reload requested (SIGHUP received)
+   Logging level changed: info -> debug
+   Configuration reload completed successfully
+   ```
+
+### リロード失敗時の処理
+
+設定リロードが失敗した場合:
+- **現在の設定が継続**(ダウンタイムなし)
+- **詳細とともにエラーがログに記録**
+- **サーバーは古い設定で動作を継続**
+
+```
+Failed to reload configuration: Invalid YAML syntax at line 42
+Continuing with current configuration
+```
+
+---
+
+## 本番環境での推奨事項
+
+### セキュリティ
+
+1. **MySQL接続**:
+   - ✅ SSL/TLSを有効化(`ssl_enable: true`)
+   - ✅ 強力なパスワードを使用
+   - ✅ MySQLユーザー権限を制限(SELECT、REPLICATION SLAVE、REPLICATION CLIENTのみ)
+
+2. **ネットワークセキュリティ**:
+   - ✅ `network.allow_cidrs`を設定(デフォルトでフェイルクローズ)
+   - ✅ localhostのみのアクセスには`tcp.bind: 127.0.0.1`を使用
+   - ✅ インターネット公開デプロイにはリバースプロキシ(nginx、haproxy)を使用
+
+3. **レート制限**:
+   - ✅ DoS攻撃を防ぐために`rate_limiting`を有効化
+   - ✅ システムの`ulimit -n`に基づいて`tcp.max_connections`を設定
+
+### パフォーマンス
+
+1. **メモリ**:
+   - ✅ `memory.hard_limit_mb`をシステムRAMの50-70%に設定
+   - ✅ `memory.soft_target_mb`を`hard_limit_mb`の50%に設定
+
+2. **キャッシュ**:
+   - ✅ キャッシュを有効化(`cache.enabled: true`)
+   - ✅ `ngram`無効化戦略を使用
+   - ✅ `min_query_cost_ms`を10-50ミリ秒に設定
+
+3. **ダンプ永続化**:
+   - ✅ 自動保存を有効化(`dump.interval_sec: 7200`で2時間)
+   - ✅ 3-7個のスナップショットを保持(`dump.retain: 3-7`)
+
+4. **レプリケーション**:
+   - ✅ `queue_size: 10000`に設定(デフォルトで十分)
+   - ✅ `REPLICATION STATUS`でキューサイズを監視
+
+### モニタリング
+
+1. **ロギング**:
+   - ✅ JSONロギングを使用(`logging.json: true`)
+   - ✅ 集中ログ(ELK、Lokiなど)にログを送信
+
+2. **ヘルスチェック**:
+   - ✅ KubernetesプローブにはHTTP `/health`エンドポイントを使用
+   - ✅ `INFO`統計を監視
+
+3. **メトリクス**:
+   - ✅ キャッシュヒット率を追跡
+   - ✅ レプリケーションラグを監視
+   - ✅ 接続失敗時にアラート
+
+### 高可用性
+
+1. **ダンプ永続化**:
+   - ✅ 高速再起動のために自動保存を有効化
+   - ✅ ダンプファイルをS3/GCSにバックアップ
+
+2. **レプリケーション**:
+   - ✅ 整合性のために`start_from: "snapshot"`を使用
+   - ✅ binlogリーダーのステータスを監視
+
+3. **フェイルオーバー**:
+   - ✅ MygramDBは接続喪失時に自動的にMySQLに再接続
+   - ✅ フェイルオーバーにはMySQLレプリケーション(マスター-スレーブ)を使用
+
+---
+
+## トラブルシューティング
+
+### 設定検証エラー
+
+**問題**: 設定ファイルに無効な構文または未知のキーがある
+
+**解決方法**:
+```bash
+# 設定を検証
+mygramdb --config=/path/to/config.yaml --validate
+
+# JSON Schema検証エラーを確認
+mygramdb --config=/path/to/config.yaml 2>&1 | grep -A5 "Schema validation failed"
+```
+
+### MySQL接続エラー
+
+**問題**: MySQLに接続できない
+
+**診断**:
+```bash
+# MySQL接続を確認
+mysql -h <host> -P <port> -u <user> -p<password>
+
+# GTIDモードを確認
+mysql> SHOW VARIABLES LIKE 'gtid_mode';
+
+# binlog形式を確認
+mysql> SHOW VARIABLES LIKE 'binlog_format';
+
+# ユーザー権限を確認
+mysql> SHOW GRANTS FOR 'repl_user'@'%';
+```
+
+**解決方法**:
+- MySQLでGTIDモードを有効化
+- binlog形式をROWに設定
+- REPLICATION SLAVE、REPLICATION CLIENT権限を付与
+
+### ホットリロードが機能しない
+
+**問題**: SIGHUPシグナルが設定リロードをトリガーしない
+
+**診断**:
+```bash
+# プロセスが実行中か確認
+ps aux | grep mygramdb
+
+# SIGHUPを送信
+kill -HUP <pid>
+
+# ログを確認
+tail -f /var/log/mygramdb/mygramdb.log
+```
+
+**解決方法**:
+- 設定ファイルに構文エラーがないことを確認
+- ファイルパスが正しいことを確認
+- エラーの詳細についてログ出力を確認
+
+### キャッシュが機能しない
+
+**問題**: キャッシュヒット率が0%
+
+**診断**:
+```bash
+# キャッシュ統計を確認
+CACHE STATS
+
+# キャッシュが有効か確認
+grep "cache.enabled" config.yaml
+```
+
+**解決方法**:
+- キャッシュを有効化: `cache.enabled: true`
+- `max_memory_mb`を増やす
+- `min_query_cost_ms`を下げる
+
+---
+
+## 参照
+
+- [アーキテクチャリファレンス](architecture.md)
+- [APIリファレンス](api.md)
+- [デプロイメントガイド](deployment.md)
+- [開発ガイド](development.md)

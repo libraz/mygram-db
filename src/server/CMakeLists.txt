@@ -3,6 +3,7 @@ add_library(mygramdb_server STATIC
   http_server.cpp
   thread_pool.cpp
   server_stats.cpp
+  server_lifecycle_manager.cpp
   response_formatter.cpp
   statistics_service.cpp
   table_catalog.cpp

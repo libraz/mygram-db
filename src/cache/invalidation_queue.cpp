@@ -30,13 +30,21 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
   }
 
-  if (!running_.load()) {
-    // If worker not running, process immediately
-    if (invalidation_mgr_ != nullptr) {
-      auto affected_keys =
-          invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
+  // Phase 1: Immediate invalidation (mark entries)
+  std::unordered_set<CacheKey> affected_keys;
+  if (invalidation_mgr_ != nullptr) {
+    affected_keys =
+        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
+  }
 
-      // Phase 2: Erase from cache immediately (no queuing)
+  // Phase 2: Queue for deferred deletion or process immediately
+  // Check running_ inside lock to prevent TOCTOU race condition
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+
+    if (!running_.load()) {
+      // If worker not running, process immediately (while holding lock)
+      // This ensures UnregisterCacheEntry is always called
       for (const auto& key : affected_keys) {
         // Unregister metadata first to prevent memory leak even if Erase throws
         invalidation_mgr_->UnregisterCacheEntry(key);
@@ -45,21 +53,10 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
           cache_->Erase(key);
         }
       }
+      return;
     }
-    return;
-  }
 
-  // Phase 1: Immediate invalidation (mark entries)
-  std::unordered_set<CacheKey> affected_keys;
-  if (invalidation_mgr_ != nullptr) {
-    affected_keys =
-        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
-  }
-
-  // Phase 2: Queue for deferred deletion
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-
+    // Worker is running, add to queue
     // Add affected keys to pending set
     // Always update timestamp even if key exists to ensure proper batch processing
     for (const auto& key : affected_keys) {
@@ -68,13 +65,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     }
   }
 
-  // Wake up worker if batch size reached
-  // Check running_ again to handle race condition where Stop() was called
-  // between initial check and queue insertion
-  if (running_.load()) {
-    queue_cv_.notify_one();
-  }
-  // Note: If worker stopped, Stop() will call ProcessBatch() to handle remaining items
+  // Wake up worker (running_ already verified inside lock)
+  queue_cv_.notify_one();
 }
 
 void InvalidationQueue::Start() {

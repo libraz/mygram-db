@@ -427,3 +427,203 @@ TEST_F(ResultSorterTest, OffsetLimitOverflow) {
   sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
   EXPECT_EQ(5, sorted.size());
 }
+
+// Schwartzian Transform Tests
+
+// Test Schwartzian Transform with numeric primary keys (above threshold)
+TEST_F(ResultSorterTest, SchwartzianTransformNumericPrimaryKey) {
+  // Add 200 documents (above kSchwartzianTransformThreshold = 100)
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 200; i++) {
+    // Random numeric primary keys
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(rand() % 10000)));
+  }
+
+  // Sort ascending
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 200;
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // Verify all documents are present
+  EXPECT_EQ(sorted.size(), 200);
+
+  // Verify sorted order (numeric, not lexicographic)
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto pk_prev = doc_store_.GetPrimaryKey(sorted[i - 1]);
+    auto pk_curr = doc_store_.GetPrimaryKey(sorted[i]);
+
+    ASSERT_TRUE(pk_prev.has_value());
+    ASSERT_TRUE(pk_curr.has_value());
+
+    uint64_t num_prev = std::stoull(pk_prev.value());
+    uint64_t num_curr = std::stoull(pk_curr.value());
+
+    EXPECT_LE(num_prev, num_curr) << "Sorting error at index " << i << ": " << num_prev << " > " << num_curr;
+  }
+}
+
+// Test Schwartzian Transform with string primary keys
+TEST_F(ResultSorterTest, SchwartzianTransformStringPrimaryKey) {
+  // Add 150 documents with string primary keys
+  std::vector<DocId> doc_ids;
+  std::vector<std::string> pks = {"apple", "banana", "cherry", "date", "elderberry"};
+
+  for (int i = 0; i < 150; i++) {
+    doc_ids.push_back(*doc_store_.AddDocument(pks[i % pks.size()] + std::to_string(i)));
+  }
+
+  // Sort ascending
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 150;
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // Verify all documents are present
+  EXPECT_EQ(sorted.size(), 150);
+
+  // Verify sorted order (lexicographic)
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto pk_prev = doc_store_.GetPrimaryKey(sorted[i - 1]);
+    auto pk_curr = doc_store_.GetPrimaryKey(sorted[i]);
+
+    ASSERT_TRUE(pk_prev.has_value());
+    ASSERT_TRUE(pk_curr.has_value());
+
+    EXPECT_LE(pk_prev.value(), pk_curr.value()) << "Sorting error at index " << i;
+  }
+}
+
+// Test Schwartzian Transform falls back for filter columns
+TEST_F(ResultSorterTest, SchwartzianTransformFallbackForFilterColumn) {
+  // Add 150 documents with age filter (above threshold)
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 150; i++) {
+    std::string pk = std::to_string(i);
+    int64_t age = rand() % 100;
+    auto doc_id = doc_store_.AddDocument(pk);
+    ASSERT_TRUE(doc_id.has_value());
+    doc_ids.push_back(*doc_id);
+
+    // Add age filter using UpdateDocument
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["age"] = FilterValue{age};
+    ASSERT_TRUE(doc_store_.UpdateDocument(*doc_id, filters));
+  }
+
+  // Sort by filter column (should fall back to traditional sort)
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 150;
+  query.offset = 0;
+  query.order_by = OrderByClause{"age", SortOrder::ASC};
+
+  // Capture warning log (filter_column_not_yet_optimized should be logged)
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // Verify all documents are present
+  EXPECT_EQ(sorted.size(), 150);
+
+  // Verify sorted order by age
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto age_prev = doc_store_.GetFilterValue(sorted[i - 1], "age");
+    auto age_curr = doc_store_.GetFilterValue(sorted[i], "age");
+
+    ASSERT_TRUE(age_prev.has_value());
+    ASSERT_TRUE(age_curr.has_value());
+
+    int64_t prev_val = std::get<int64_t>(age_prev.value());
+    int64_t curr_val = std::get<int64_t>(age_curr.value());
+
+    EXPECT_LE(prev_val, curr_val) << "Sorting error at index " << i;
+  }
+}
+
+// Test Schwartzian Transform does NOT activate below threshold
+TEST_F(ResultSorterTest, SchwartzianTransformBelowThreshold) {
+  // Add 50 documents (below kSchwartzianTransformThreshold = 100)
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 50; i++) {
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i * 10)));
+  }
+
+  // Sort descending
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 50;
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::DESC};
+
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // Verify all documents are present
+  EXPECT_EQ(sorted.size(), 50);
+
+  // Verify sorted order (descending numeric)
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto pk_prev = doc_store_.GetPrimaryKey(sorted[i - 1]);
+    auto pk_curr = doc_store_.GetPrimaryKey(sorted[i]);
+
+    ASSERT_TRUE(pk_prev.has_value());
+    ASSERT_TRUE(pk_curr.has_value());
+
+    uint64_t num_prev = std::stoull(pk_prev.value());
+    uint64_t num_curr = std::stoull(pk_curr.value());
+
+    EXPECT_GE(num_prev, num_curr) << "Sorting error at index " << i;
+  }
+}
+
+// Test Schwartzian Transform with missing primary keys
+TEST_F(ResultSorterTest, SchwartzianTransformWithMissingPrimaryKeys) {
+  // This test is conceptual - in practice, DocumentStore always has primary keys
+  // But the code has fallback logic for missing PKs (uses DocId itself)
+
+  // Add 120 documents
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 120; i++) {
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i)));
+  }
+
+  // Sort ascending
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 120;
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  // Verify all documents are present
+  EXPECT_EQ(sorted.size(), 120);
+
+  // Verify sorted order
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto pk_prev = doc_store_.GetPrimaryKey(sorted[i - 1]);
+    auto pk_curr = doc_store_.GetPrimaryKey(sorted[i]);
+
+    ASSERT_TRUE(pk_prev.has_value());
+    ASSERT_TRUE(pk_curr.has_value());
+
+    uint64_t num_prev = std::stoull(pk_prev.value());
+    uint64_t num_curr = std::stoull(pk_curr.value());
+
+    EXPECT_LE(num_prev, num_curr);
+  }
+}

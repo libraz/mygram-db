@@ -12,17 +12,28 @@
 namespace mygramdb::server {
 
 // Forward declarations
-struct SyncState;
-class TcpServer;
+class SyncOperationManager;
 
 /**
  * @brief Handler for SYNC commands
  *
  * Handles SYNC and SYNC STATUS commands for manual snapshot synchronization.
+ *
+ * Design Pattern: Dependency Injection
+ * - Takes SyncOperationManager* instead of TcpServer&
+ * - Eliminates circular dependency between handlers and server
+ * - Handler depends only on what it actually needs
  */
 class SyncHandler : public CommandHandler {
  public:
-  SyncHandler(HandlerContext& ctx, TcpServer& server) : CommandHandler(ctx), server_(server) {}
+  /**
+   * @brief Construct SyncHandler with dependencies
+   *
+   * @param ctx Handler context with shared server state
+   * @param sync_manager SyncOperationManager for SYNC operations (non-owning pointer)
+   */
+  SyncHandler(HandlerContext& ctx, SyncOperationManager* sync_manager)
+      : CommandHandler(ctx), sync_manager_(sync_manager) {}
 
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
 
@@ -37,7 +48,7 @@ class SyncHandler : public CommandHandler {
    */
   std::string HandleSyncStatus(const query::Query& query);
 
-  TcpServer& server_;
+  SyncOperationManager* sync_manager_;  // Non-owning pointer
 };
 
 }  // namespace mygramdb::server

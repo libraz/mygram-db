@@ -11,7 +11,7 @@
 
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
-#include "server/tcp_server.h"
+#include "server/sync_operation_manager.h"
 
 namespace mygramdb::server {
 
@@ -26,11 +26,17 @@ std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& co
 }
 
 std::string SyncHandler::HandleSync(const query::Query& query) {
-  return server_.StartSync(query.table);
+  if (sync_manager_ == nullptr) {
+    return ResponseFormatter::FormatError("SYNC manager not initialized");
+  }
+  return sync_manager_->StartSync(query.table);
 }
 
 std::string SyncHandler::HandleSyncStatus(const query::Query& query) {
-  return server_.GetSyncStatus();
+  if (sync_manager_ == nullptr) {
+    return "status=IDLE message=\"SYNC manager not initialized\"";
+  }
+  return sync_manager_->GetSyncStatus();
 }
 
 }  // namespace mygramdb::server

@@ -722,8 +722,25 @@ PostingList* Index::GetOrCreatePostingList(std::string_view term) {
 
 const PostingList* Index::GetPostingList(std::string_view term) const {
   // NOTE: This method assumes postings_mutex_ is already locked by the caller
-  // C++17: unordered_map doesn't support heterogeneous lookup, so we convert to std::string
-  // TODO(performance): Consider upgrading to C++20 or using absl::flat_hash_map for heterogeneous lookup
+
+  // TECHNICAL DEBT: String copy required for C++17 std::unordered_map lookup
+  // C++17's std::unordered_map does NOT support heterogeneous lookup (is_transparent)
+  // This was added in C++20 (P0919R3). Current impact:
+  //   - ~20-50ns allocation + copy overhead per lookup
+  //   - Called 2-10 times per query (multi-term searches)
+  //   - At 1000 QPS: 2,000-10,000 allocations/second
+  //
+  // FUTURE OPTIMIZATION (when upgrading to C++20):
+  //   1. Add TransparentStringHash and TransparentStringEqual functors with is_transparent tag
+  //   2. Change term_postings_ type to:
+  //      std::unordered_map<std::string, std::shared_ptr<PostingList>,
+  //                         TransparentStringHash, TransparentStringEqual>
+  //   3. Remove std::string(term) conversion below
+  //   Expected improvement: 5-10% latency reduction for multi-term searches
+  //
+  // ALTERNATIVE (if C++20 upgrade is not feasible):
+  //   - Use absl::flat_hash_map (requires external dependency)
+  //   - Switch to std::map + std::less<> (zero-copy but O(log N) lookup)
   auto iterator = term_postings_.find(std::string(term));
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }

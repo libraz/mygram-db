@@ -40,6 +40,7 @@
 #include "cache/cache_manager.h"
 #include "server/connection_io_handler.h"
 #include "server/response_formatter.h"
+#include "server/server_lifecycle_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/fd_guard.h"
 #include "utils/network_utils.h"
@@ -148,21 +149,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     return MakeUnexpected(error);
   }
 
-  // 1. Create thread pool
-  thread_pool_ =
-      std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, kThreadPoolQueueSize);
-
-  // 2. Create table catalog
-  table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
-
-  // 2.5. Create cache manager (if configured)
-  if (full_config_ != nullptr && full_config_->cache.enabled) {
-    // Pass table_contexts to support per-table ngram settings
-    cache_manager_ = std::make_unique<cache::CacheManager>(full_config_->cache, table_contexts_);
-    spdlog::info("Cache manager initialized with per-table ngram settings");
-  }
-
-  // 2.5.1. Create rate limiter (if configured)
+  // Create rate limiter (if configured) - needed by HandleConnection
+  // Note: RateLimiter is NOT managed by ServerLifecycleManager because it's only used in TcpServer
   if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
     rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
@@ -173,84 +161,49 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   }
 
 #ifdef USE_MYSQL
-  // 2.6. Create SYNC operation manager (if MySQL enabled)
+  // Create SYNC operation manager (if MySQL enabled) - needed before ServerLifecycleManager
+  // Note: Must be created before lifecycle manager because SyncHandler needs it
   sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_);
 #endif
 
-  // 3. Initialize handler context
-  handler_context_ = std::make_unique<HandlerContext>(HandlerContext{
-      .table_catalog = table_catalog_.get(),
-      .table_contexts = table_contexts_,
-      .stats = stats_,
-      .full_config = full_config_,
-      .dump_dir = dump_dir_,
-      .loading = loading_,
-      .read_only = read_only_,
-      .optimization_in_progress = optimization_in_progress_,
+  // Initialize all server components via ServerLifecycleManager
+  // This centralizes component creation and dependency ordering
+  ServerLifecycleManager lifecycle_manager(config_, table_contexts_, dump_dir_, full_config_, stats_, loading_,
+                                           read_only_, optimization_in_progress_,
 #ifdef USE_MYSQL
-      .binlog_reader = binlog_reader_,
-      .syncing_tables = sync_manager_->GetSyncingTablesRef(),
-      .syncing_tables_mutex = sync_manager_->GetSyncingTablesMutex(),
+                                           binlog_reader_, sync_manager_.get()
 #else
-      .binlog_reader = binlog_reader_,
+                                           binlog_reader_
 #endif
-      .cache_manager = cache_manager_.get(),
-  });
+  );
 
-  // 4. Initialize command handlers
-  search_handler_ = std::make_unique<SearchHandler>(*handler_context_);
-  document_handler_ = std::make_unique<DocumentHandler>(*handler_context_);
-  dump_handler_ = std::make_unique<DumpHandler>(*handler_context_);
-  admin_handler_ = std::make_unique<AdminHandler>(*handler_context_);
-  replication_handler_ = std::make_unique<ReplicationHandler>(*handler_context_);
-  debug_handler_ = std::make_unique<DebugHandler>(*handler_context_);
-  cache_handler_ = std::make_unique<CacheHandler>(*handler_context_);
+  auto components_result = lifecycle_manager.Initialize();
+  if (!components_result) {
+    return MakeUnexpected(components_result.error());
+  }
+
+  // Take ownership of all initialized components
+  auto& components = *components_result;
+  thread_pool_ = std::move(components.thread_pool);
+  table_catalog_ = std::move(components.table_catalog);
+  cache_manager_ = std::move(components.cache_manager);
+  handler_context_ = std::move(components.handler_context);
+  search_handler_ = std::move(components.search_handler);
+  document_handler_ = std::move(components.document_handler);
+  dump_handler_ = std::move(components.dump_handler);
+  admin_handler_ = std::move(components.admin_handler);
+  replication_handler_ = std::move(components.replication_handler);
+  debug_handler_ = std::move(components.debug_handler);
+  cache_handler_ = std::move(components.cache_handler);
 #ifdef USE_MYSQL
-  sync_handler_ = std::make_unique<SyncHandler>(*handler_context_, *this);
+  sync_handler_ = std::move(components.sync_handler);
 #endif
+  dispatcher_ = std::move(components.dispatcher);
+  acceptor_ = std::move(components.acceptor);
+  scheduler_ = std::move(components.scheduler);
 
-  // 5. Setup dispatcher
-  dispatcher_ = std::make_unique<RequestDispatcher>(*handler_context_, config_);
-  dispatcher_->RegisterHandler(query::QueryType::SEARCH, search_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::COUNT, search_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::GET, document_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DUMP_SAVE, dump_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DUMP_LOAD, dump_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DUMP_VERIFY, dump_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DUMP_INFO, dump_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::INFO, admin_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CONFIG_HELP, admin_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CONFIG_SHOW, admin_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CONFIG_VERIFY, admin_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::REPLICATION_STATUS, replication_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::REPLICATION_STOP, replication_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::REPLICATION_START, replication_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DEBUG_ON, debug_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::DEBUG_OFF, debug_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::OPTIMIZE, debug_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CACHE_CLEAR, cache_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CACHE_STATS, cache_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CACHE_ENABLE, cache_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::CACHE_DISABLE, cache_handler_.get());
-#ifdef USE_MYSQL
-  dispatcher_->RegisterHandler(query::QueryType::SYNC, sync_handler_.get());
-  dispatcher_->RegisterHandler(query::QueryType::SYNC_STATUS, sync_handler_.get());
-#endif
-
-  // 6. Start connection acceptor
-  acceptor_ = std::make_unique<ConnectionAcceptor>(config_, thread_pool_.get());
+  // Set connection handler callback (must be done after acceptor_ is assigned)
   acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-  auto start_result = acceptor_->Start();
-  if (!start_result) {
-    return MakeUnexpected(start_result.error());
-  }
-
-  // 7. Start snapshot scheduler (if configured)
-  if (full_config_ != nullptr && full_config_->dump.interval_sec > 0) {
-    scheduler_ = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog_.get(), full_config_, dump_dir_,
-                                                     binlog_reader_);
-    scheduler_->Start();
-  }
 
   spdlog::info("TCP server started on {}:{}", config_.host, acceptor_->GetPort());
   return {};

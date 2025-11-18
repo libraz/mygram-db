@@ -11,6 +11,7 @@ configure_file(
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Subdirectories
+add_subdirectory(app)
 add_subdirectory(config)
 add_subdirectory(mysql)
 add_subdirectory(index)
@@ -26,6 +27,7 @@ add_subdirectory(client)
 add_executable(mygramdb main.cpp)
 
 target_link_libraries(mygramdb PRIVATE
+  mygramdb_app        # Application layer (includes all other modules)
   mygramdb_server     # Includes config, cache, query, index, storage transitively
 )
 

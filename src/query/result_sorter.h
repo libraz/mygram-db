@@ -52,6 +52,26 @@ class ResultSorter {
 
  private:
   /**
+   * @brief Threshold for using Schwartzian Transform optimization
+   *
+   * For result sets smaller than this threshold, the overhead of pre-computing
+   * sort keys is not justified. Use traditional comparison-based sorting instead.
+   *
+   * Rationale:
+   * - N < 100: ~664 comparisons → ~1,328 lookups (manageable)
+   * - N >= 100: O(N log N) lookups vs O(N) pre-computation (significant win)
+   */
+  static constexpr size_t kSchwartzianTransformThreshold = 100;
+
+  /**
+   * @brief Entry for Schwartzian Transform (pre-computed sort key)
+   */
+  struct SortEntry {
+    DocId doc_id;
+    std::string sort_key;
+  };
+
+  /**
    * @brief Get sort value for a document
    *
    * @param doc_id Document ID
@@ -60,6 +80,30 @@ class ResultSorter {
    * @return Sort key as string (for comparison)
    */
   static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store, const OrderByClause& order_by);
+
+  /**
+   * @brief Sort using Schwartzian Transform (pre-compute sort keys)
+   *
+   * This optimization eliminates repeated GetPrimaryKey()/GetSortKey() calls
+   * during sorting by pre-computing all sort keys once, then sorting based on
+   * the pre-computed keys.
+   *
+   * Performance characteristics:
+   * - Traditional sort: O(N log N) comparisons × O(1) lock+hash = O(N log N) lookups
+   * - Schwartzian Transform: O(N) lookups + O(N log N) string comparisons
+   *
+   * Expected improvement: 30-50% reduction in sort time for N >= 10,000
+   *
+   * Memory overhead: ~50 bytes per entry × N (temporary allocation)
+   *
+   * @param results Document IDs to sort
+   * @param doc_store Document store for retrieving sort keys
+   * @param order_by ORDER BY clause (must be primary key)
+   * @return Sorted document IDs
+   */
+  static std::vector<DocId> SortWithSchwartzianTransform(const std::vector<DocId>& results,
+                                                         const storage::DocumentStore& doc_store,
+                                                         const OrderByClause& order_by);
 
   /**
    * @brief Compare function for sorting

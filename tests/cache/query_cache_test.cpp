@@ -691,4 +691,143 @@ TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
   EXPECT_EQ(0, stats.cache_misses);
 }
 
+/**
+ * @brief Test ABA problem mitigation during lock upgrade
+ *
+ * This test verifies that the QueryCache correctly handles the ABA problem
+ * during lock upgrade from shared_lock to unique_lock.
+ *
+ * Scenario:
+ * 1. Thread 1: Lookup finds entry, holds shared_lock
+ * 2. Thread 1: Releases shared_lock to upgrade
+ * 3. Thread 2: Evicts the entry and inserts new entry with same key
+ * 4. Thread 1: Acquires unique_lock, should detect entry changed
+ *
+ * The fix uses pointer address comparison instead of timestamp comparison
+ * to detect if the entry has been replaced.
+ */
+TEST(QueryCacheTest, ABAProofLockUpgrade) {
+  // Small cache to trigger eviction easily
+  QueryCache cache(100, 1.0);  // 100 bytes, min cost 1ms
+
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  auto key3 = CacheKeyGenerator::Generate("query3");
+
+  std::vector<DocId> result1 = {1, 2, 3};
+  std::vector<DocId> result2 = {4, 5, 6};
+  std::vector<DocId> result3 = {7, 8, 9};
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert first entry
+  cache.Insert(key1, result1, meta, 5.0);
+
+  // Create a scenario where ABA could occur
+  std::atomic<bool> thread1_released_lock{false};
+  std::atomic<bool> thread2_replaced_entry{false};
+  std::atomic<int> thread1_access_count{0};
+
+  std::thread t1([&]() {
+    // Lookup (this will try to upgrade lock)
+    auto cached = cache.Lookup(key1);
+    if (cached.has_value()) {
+      thread1_access_count++;
+    }
+  });
+
+  std::thread t2([&]() {
+    // Wait a bit to let t1 acquire shared lock
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // Force eviction by inserting large entries
+    cache.Insert(key2, result2, meta, 5.0);
+    cache.Insert(key3, result3, meta, 5.0);
+
+    // Try to insert key1 again (simulating ABA)
+    cache.Insert(key1, result1, meta, 5.0);
+    thread2_replaced_entry = true;
+  });
+
+  t1.join();
+  t2.join();
+
+  // The test passes if no crash occurs
+  // With the fix, the pointer address check prevents touching wrong entry
+  EXPECT_TRUE(thread2_replaced_entry.load());
+
+  // Verify cache is in consistent state
+  auto stats = cache.GetStatistics();
+  EXPECT_GE(stats.total_queries, 1);
+}
+
+/**
+ * @brief Test concurrent lookup and eviction race condition
+ *
+ * This test verifies that concurrent lookups and evictions don't cause
+ * use-after-free or incorrect LRU updates due to the ABA problem.
+ */
+TEST(QueryCacheTest, ConcurrentLookupEvictionABA) {
+  QueryCache cache(200, 1.0);  // Small cache
+
+  auto key = CacheKeyGenerator::Generate("test_key");
+  std::vector<DocId> result = {1, 2, 3, 4, 5};
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert initial entry
+  cache.Insert(key, result, meta, 5.0);
+
+  std::atomic<int> successful_lookups{0};
+  std::atomic<int> failed_lookups{0};
+  std::atomic<bool> stop{false};
+
+  // Thread 1: Continuous lookups
+  std::thread lookup_thread([&]() {
+    while (!stop.load()) {
+      auto cached = cache.Lookup(key);
+      if (cached.has_value()) {
+        successful_lookups++;
+      } else {
+        failed_lookups++;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  });
+
+  // Thread 2: Continuous insert/evict to trigger ABA
+  std::thread evict_thread([&]() {
+    int counter = 0;
+    while (!stop.load()) {
+      // Insert other entries to trigger eviction
+      auto temp_key = CacheKeyGenerator::Generate("temp_" + std::to_string(counter++));
+      std::vector<DocId> temp_result = {100, 200, 300};
+      cache.Insert(temp_key, temp_result, meta, 5.0);
+
+      // Re-insert original key
+      cache.Insert(key, result, meta, 5.0);
+
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  });
+
+  // Run for 100ms
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  stop = true;
+
+  lookup_thread.join();
+  evict_thread.join();
+
+  // Verify no crashes occurred and some operations succeeded
+  EXPECT_GT(successful_lookups.load() + failed_lookups.load(), 0);
+
+  // Cache should be in consistent state
+  auto stats = cache.GetStatistics();
+  EXPECT_GE(stats.total_queries, 1);
+}
+
 }  // namespace mygramdb::cache

@@ -48,12 +48,28 @@ size_t CalculateQueryExpressionLength(const Query& query) {
 
 /**
  * @brief Convert string to uppercase
+ * @deprecated Use EqualsIgnoreCase for comparisons to avoid unnecessary allocations
  */
 std::string ToUpper(std::string_view str) {
   std::string result(str);
   std::transform(result.begin(), result.end(), result.begin(),
                  [](unsigned char character) { return std::toupper(character); });
   return result;
+}
+
+/**
+ * @brief Case-insensitive string comparison (optimized, no allocations)
+ * @param lhs First string
+ * @param rhs Second string
+ * @return true if strings are equal ignoring case
+ */
+bool EqualsIgnoreCase(std::string_view lhs, std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  return std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](unsigned char lhs_char, unsigned char rhs_char) {
+    return std::tolower(lhs_char) == std::tolower(rhs_char);
+  });
 }
 
 }  // namespace
@@ -114,24 +130,25 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  std::string command = ToUpper(tokens[0]);
+  // Use string_view for zero-copy comparison
+  std::string_view command = tokens[0];
 
-  if (command == "SEARCH") {
+  if (EqualsIgnoreCase(command, "SEARCH")) {
     return ParseSearch(tokens);
   }
-  if (command == "COUNT") {
+  if (EqualsIgnoreCase(command, "COUNT")) {
     return ParseCount(tokens);
   }
-  if (command == "GET") {
+  if (EqualsIgnoreCase(command, "GET")) {
     return ParseGet(tokens);
   }
-  if (command == "INFO") {
+  if (EqualsIgnoreCase(command, "INFO")) {
     Query query;
     query.type = QueryType::INFO;
     query.table = "";  // INFO doesn't need a table
     return query;
   }
-  if (command == "SAVE") {
+  if (EqualsIgnoreCase(command, "SAVE")) {
     Query query;
     query.type = QueryType::SAVE;
     query.table = "";  // SAVE doesn't need a table
@@ -142,7 +159,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     }
     return query;
   }
-  if (command == "LOAD") {
+  if (EqualsIgnoreCase(command, "LOAD")) {
     Query query;
     query.type = QueryType::LOAD;
     query.table = "";  // LOAD doesn't need a table
@@ -153,7 +170,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     }
     return query;
   }
-  if (command == "DUMP") {
+  if (EqualsIgnoreCase(command, "DUMP")) {
     // DUMP SAVE | LOAD | VERIFY | INFO
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: DUMP + subcommand
@@ -316,7 +333,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     query.table = "";  // OPTIMIZE doesn't need a table
     return query;
   }
-  if (command == "DEBUG") {
+  if (EqualsIgnoreCase(command, "DEBUG")) {
     // DEBUG ON | OFF
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: DEBUG + mode (ON/OFF)
@@ -324,16 +341,16 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
-    std::string mode = ToUpper(tokens[1]);
+    std::string_view mode = tokens[1];
     Query query;
     query.table = "";  // DEBUG doesn't need a table
 
-    if (mode == "ON") {
+    if (EqualsIgnoreCase(mode, "ON")) {
       query.type = QueryType::DEBUG_ON;
-    } else if (mode == "OFF") {
+    } else if (EqualsIgnoreCase(mode, "OFF")) {
       query.type = QueryType::DEBUG_OFF;
     } else {
-      SetError("DEBUG requires ON or OFF, got: " + mode);
+      SetError("DEBUG requires ON or OFF, got: " + std::string(mode));
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
@@ -372,7 +389,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     return query;
   }
 
-  SetError("Unknown command: " + command);
+  SetError("Unknown command: " + std::string(command));
   return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
 }
 

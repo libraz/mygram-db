@@ -34,6 +34,23 @@ gtest_discover_tests(response_formatter_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# ServerLifecycleManager tests
+
+add_executable(server_lifecycle_manager_test
+  server_lifecycle_manager_test.cpp
+)
+
+target_link_libraries(server_lifecycle_manager_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(server_lifecycle_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 # TCP Server tests (split into focused files)
 
 add_executable(tcp_server_basic_test
