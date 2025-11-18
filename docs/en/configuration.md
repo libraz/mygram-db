@@ -600,7 +600,7 @@ allow_cidrs:
 ```yaml
 logging:
   level: "info"                     # Log level
-  json: true                        # JSON format output
+  format: "json"                    # Log output format: "json" or "text"
   file: ""                          # Log file path (empty = stdout)
 ```
 
@@ -609,7 +609,7 @@ logging:
 | Parameter | Type | Default | Description | Hot Reload |
 |-----------|------|---------|-------------|------------|
 | `level` | string | `info` | Log level: `debug`, `info`, `warn`, `error` | ✅ Yes |
-| `json` | boolean | `true` | JSON format output (recommended for production) | ❌ No |
+| `format` | string | `json` | Log output format: `json` (structured) or `text` (human-readable) | ❌ No |
 | `file` | string | `` | Log file path (empty = stdout, required for daemon mode) | ❌ No |
 
 **Log Levels**:
@@ -618,9 +618,9 @@ logging:
 - **`warn`**: Warnings (anomalies that don't require immediate action)
 - **`error`**: Errors (require attention)
 
-**JSON Logging**:
-- Recommended for **production** (easier to parse, structured)
-- Disable for **development** (human-readable)
+**Log Formats**:
+- **`json`**: Structured JSON format (recommended for production, easier to parse)
+- **`text`**: Human-readable key=value format (recommended for development)
 
 **Log Output**:
 - **Empty `file`**: Log to stdout (recommended for Docker/systemd)

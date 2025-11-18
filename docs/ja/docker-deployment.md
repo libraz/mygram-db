@@ -96,7 +96,7 @@ API_PORT=11016                      # APIポート
 #### ロギング
 ```bash
 LOG_LEVEL=info                      # ログレベル: debug, info, warn, error
-LOG_JSON=true                       # JSON形式のログ
+LOG_FORMAT=json                     # ログ形式: json または text
 ```
 
 ### カスタム設定ファイル
@@ -169,7 +169,7 @@ API_PORT=11016
 
 # 本番ロギング
 LOG_LEVEL=info
-LOG_JSON=true
+LOG_FORMAT=json
 ```
 
 3. 本番設定で起動：

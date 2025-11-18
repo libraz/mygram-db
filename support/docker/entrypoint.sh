@@ -57,7 +57,7 @@ API_BIND=${API_BIND:-0.0.0.0}
 API_PORT=${API_PORT:-11016}
 
 LOG_LEVEL=${LOG_LEVEL:-info}
-LOG_JSON=${LOG_JSON:-true}
+LOG_FORMAT=${LOG_FORMAT:-json}
 
 CONFIG_FILE=${CONFIG_FILE:-/etc/mygramdb/config.yaml}
 
@@ -133,7 +133,7 @@ api:
 # Logging
 logging:
   level: "${LOG_LEVEL}"
-  json: ${LOG_JSON}
+  format: "${LOG_FORMAT}"
 EOF
 
 echo "Configuration file generated at: $CONFIG_FILE"

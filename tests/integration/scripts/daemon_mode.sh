@@ -66,7 +66,7 @@ api:
 
 logging:
   level: "info"
-  json: true
+  format: "json"
   file: "/tmp/mygramdb_daemon_test.log"
 EOF
 

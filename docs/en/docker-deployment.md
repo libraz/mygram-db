@@ -96,7 +96,7 @@ API_PORT=11016                      # API port
 #### Logging
 ```bash
 LOG_LEVEL=info                      # Log level: debug, info, warn, error
-LOG_JSON=true                       # JSON log format
+LOG_FORMAT=json                     # Log format: json or text
 ```
 
 ### Custom Configuration File
@@ -169,7 +169,7 @@ API_PORT=11016
 
 # Production logging
 LOG_LEVEL=info
-LOG_JSON=true
+LOG_FORMAT=json
 ```
 
 3. Start with production configuration:

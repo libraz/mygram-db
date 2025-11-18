@@ -88,7 +88,7 @@ services:
 
       # Logging Configuration
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      LOG_JSON: ${LOG_JSON:-true}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "${API_PORT:-11016}:${API_PORT:-11016}"
     volumes:
