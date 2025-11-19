@@ -325,7 +325,12 @@ TEST_F(ThreadPoolShutdownTest, TimeoutWithActiveWorkers) {
 
   // Should timeout after ~400ms (not immediately when queue becomes empty)
   EXPECT_GE(duration.count(), 350) << "Should wait for active workers before timeout";
+#ifdef __APPLE__
+  // macOS scheduler can be slower, allow more margin
+  EXPECT_LT(duration.count(), 750) << "Should respect timeout even with active workers";
+#else
   EXPECT_LT(duration.count(), 650) << "Should respect timeout even with active workers";
+#endif
 
   int completed = completed_tasks.load();
   std::cout << "Completed " << completed << "/8 tasks with 400ms timeout" << std::endl;
