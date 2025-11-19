@@ -282,7 +282,7 @@ TEST_F(HealthEndpointTest, ConcurrentHealthChecks) {
   // Most requests should succeed (allowing some failures due to timing)
 #ifdef __APPLE__
   // macOS network stack is more sensitive to concurrent connections, allow lower threshold
-  EXPECT_GT(success_count, num_requests * 0.8) << "At least 80% of concurrent requests should succeed on macOS";
+  EXPECT_GE(success_count, num_requests * 0.8) << "At least 80% of concurrent requests should succeed on macOS";
 #else
   EXPECT_GT(success_count, num_requests * 0.9) << "At least 90% of concurrent requests should succeed";
 #endif
