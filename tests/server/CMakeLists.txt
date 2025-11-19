@@ -143,11 +143,22 @@ target_link_libraries(thread_pool_shutdown_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
-gtest_discover_tests(thread_pool_shutdown_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
-)
+# On macOS, run serially to avoid scheduler timing issues
+if(APPLE)
+  gtest_discover_tests(thread_pool_shutdown_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RESOURCE_LOCK thread_resources
+      RUN_SERIAL TRUE
+  )
+else()
+  gtest_discover_tests(thread_pool_shutdown_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES RESOURCE_LOCK thread_resources
+  )
+endif()
 
 # HTTP Server tests (split into focused files)
 
@@ -424,9 +435,20 @@ target_link_libraries(health_endpoint_test
 target_include_directories(health_endpoint_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
-gtest_discover_tests(health_endpoint_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
-)
+# On macOS, run serially to avoid network stack resource contention
+if(APPLE)
+  gtest_discover_tests(health_endpoint_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RESOURCE_LOCK server_port
+      RUN_SERIAL TRUE
+  )
+else()
+  gtest_discover_tests(health_endpoint_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES RESOURCE_LOCK server_port
+  )
+endif()
 

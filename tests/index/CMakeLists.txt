@@ -130,9 +130,20 @@ target_link_libraries(optimize_concurrency_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(optimize_concurrency_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    RESOURCE_LOCK optimize_concurrent_lock
-)
+# On macOS, run serially to avoid scheduler timing issues
+if(APPLE)
+  gtest_discover_tests(optimize_concurrency_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RESOURCE_LOCK optimize_concurrent_lock
+      RUN_SERIAL TRUE
+  )
+else()
+  gtest_discover_tests(optimize_concurrency_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RESOURCE_LOCK optimize_concurrent_lock
+  )
+endif()
