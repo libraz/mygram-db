@@ -93,6 +93,25 @@ API_BIND=0.0.0.0                    # Bind address
 API_PORT=11016                      # API port
 ```
 
+#### Network Configuration
+```bash
+# Network ACL (Access Control List)
+# IMPORTANT: Configure this for security in production environments
+NETWORK_ALLOW_CIDRS=0.0.0.0/0       # Allowed IP ranges (comma-separated)
+
+# Examples:
+# Development (allow all):
+# NETWORK_ALLOW_CIDRS=0.0.0.0/0
+
+# Production (restrict to specific networks):
+# NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
+
+# Production (single application server):
+# NETWORK_ALLOW_CIDRS=192.168.1.100/32
+```
+
+**Security Warning:** If `NETWORK_ALLOW_CIDRS` is not set or empty, **all connections will be denied** by default. Always configure this setting.
+
 #### Logging
 ```bash
 LOG_LEVEL=info                      # Log level: debug, info, warn, error

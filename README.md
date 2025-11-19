@@ -70,6 +70,7 @@ docker run -d --name mygramdb \
   -e TABLE_TEXT_COLUMN=content \
   -e TABLE_NGRAM_SIZE=2 \
   -e REPLICATION_SERVER_ID=12345 \
+  -e NETWORK_ALLOW_CIDRS=0.0.0.0/0 \
   ghcr.io/libraz/mygram-db:latest
 
 # Check logs
@@ -80,6 +81,12 @@ docker exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # Try a search
 docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
+```
+
+**Security Note:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` allows connections from any IP address. For production, restrict to specific IP ranges:
+```bash
+# Production example: Allow only from application servers
+-e NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
 ```
 
 ### Docker Compose (with Test MySQL)

@@ -44,8 +44,8 @@ CLAUDE.md
 core
 core.*
 
-# Test outputs
-Testing/
+# Test outputs (CMake CTest output directory)
+/Testing/
 *.gcov
 *.gcda
 *.gcno
@@ -81,3 +81,5 @@ logs/
 # Coverage reports
 coverage/
 *.info
+
+# RPM test files

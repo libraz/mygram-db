@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: mygramdb_rpm_test_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secure_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-mydb}
+      MYSQL_USER: ${MYSQL_USER:-repl_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-your_secure_password}
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --mysql-native-password=ON
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_rpm_test_data:/var/lib/mysql
+      - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_secure_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - mygramdb_rpm_test_network
+
+  mygramdb:
+    image: mygramdb-rpm-test:latest
+    container_name: mygramdb_rpm_test_app
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile.rpm-test
+      args:
+        MYGRAMDB_VERSION: ${MYGRAMDB_VERSION:-latest}
+    entrypoint: []
+    command: ["/usr/bin/mygramdb", "-c", "/etc/mygramdb/config.yaml"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "11017:11016"
+    volumes:
+      - mygramdb_rpm_test_data:/var/lib/mygramdb
+      - ./config-rpm-test.yaml:/etc/mygramdb/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "mygramdb"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - mygramdb_rpm_test_network
+
+volumes:
+  mysql_rpm_test_data:
+    driver: local
+  mygramdb_rpm_test_data:
+    driver: local
+
+networks:
+  mygramdb_rpm_test_network:
+    driver: bridge

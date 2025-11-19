@@ -56,6 +56,8 @@ DUMP_RETAIN=${DUMP_RETAIN:-3}
 API_BIND=${API_BIND:-0.0.0.0}
 API_PORT=${API_PORT:-11016}
 
+NETWORK_ALLOW_CIDRS=${NETWORK_ALLOW_CIDRS:-""}
+
 LOG_LEVEL=${LOG_LEVEL:-info}
 LOG_FORMAT=${LOG_FORMAT:-json}
 
@@ -135,6 +137,23 @@ logging:
   level: "${LOG_LEVEL}"
   format: "${LOG_FORMAT}"
 EOF
+
+# Add network ACL configuration if specified
+if [ -n "$NETWORK_ALLOW_CIDRS" ]; then
+  cat >> "$CONFIG_FILE" << 'EOF'
+
+# Network Configuration
+network:
+  allow_cidrs:
+EOF
+  # Convert comma-separated list to YAML list
+  IFS=',' read -ra CIDRS <<< "$NETWORK_ALLOW_CIDRS"
+  for cidr in "${CIDRS[@]}"; do
+    # Trim whitespace
+    cidr=$(echo "$cidr" | xargs)
+    echo "    - \"$cidr\"" >> "$CONFIG_FILE"
+  done
+fi
 
 echo "Configuration file generated at: $CONFIG_FILE"
 echo "MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}"

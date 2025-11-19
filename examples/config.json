@@ -8,7 +8,8 @@
     "use_gtid": true,
     "binlog_format": "ROW",
     "binlog_row_image": "FULL",
-    "connect_timeout_ms": 3000
+    "connect_timeout_ms": 3000,
+    "ssl_enable": false
   },
   "tables": [
     {
@@ -90,7 +91,7 @@
   "dump": {
     "dir": "/var/lib/mygramdb/dumps",
     "default_filename": "mygramdb.dmp",
-    "interval_sec": 600,
+    "interval_sec": 0,
     "retain": 3
   },
   "api": {
@@ -100,7 +101,7 @@
       "max_connections": 10000
     },
     "http": {
-      "enable": true,
+      "enable": false,
       "bind": "127.0.0.1",
       "port": 8080,
       "enable_cors": false,
@@ -116,11 +117,12 @@
     }
   },
   "network": {
-    "allow_cidrs": ["127.0.0.1/32"]
+    "allow_cidrs": ["0.0.0.0/0"]
   },
   "logging": {
     "level": "info",
-    "format": "json"
+    "format": "json",
+    "file": ""
   },
   "cache": {
     "enabled": true,
