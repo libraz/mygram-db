@@ -17,4 +17,4 @@ replication:
 
 network:
   allow_cidrs:
-    - "127.0.0.1/32"
+    - "0.0.0.0/0"  # Allow all (for development/testing only, restrict in production)

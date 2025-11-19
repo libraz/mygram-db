@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Updated `.gitignore` to use `/Testing/` instead of `Testing/` to avoid excluding support/testing directory
+- Aligned example configuration files (YAML/JSON) with consistent defaults
+  - Changed `allow_cidrs` from `127.0.0.1/32` to `0.0.0.0/0` for easier initial setup
+  - Fixed JSON configs: added `ssl_enable`, corrected `dump.interval_sec`, `api.http.enable`, `logging.file`
 
 ### Documentation
 

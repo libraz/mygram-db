@@ -201,10 +201,10 @@ api:
 # You MUST explicitly configure allowed IP ranges
 network:
   allow_cidrs:                      # Allow CIDR list applied to TCP/HTTP
-    - "127.0.0.1/32"                # RECOMMENDED: Localhost only (most secure)
+    - "0.0.0.0/0"                   # Allow all (for development/testing, restrict in production)
+    # - "127.0.0.1/32"              # Example: Localhost only (most secure for production)
     # - "192.168.1.0/24"            # Example: Local network
     # - "10.0.0.0/8"                # Example: Private network
-    # - "0.0.0.0/0"                 # WARNING: Allow all (NOT RECOMMENDED for production)
 
 # Logging Configuration
 logging:
