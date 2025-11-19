@@ -208,7 +208,9 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 
 ## コントリビューション
 
-コントリビューションを歓迎します！[開発ガイド](docs/ja/development.md) を参照してください。
+コントリビューションを歓迎します！ガイドラインは [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。
+
+開発環境のセットアップは [開発ガイド](docs/ja/development.md) を参照してください。
 
 ## 作者
 

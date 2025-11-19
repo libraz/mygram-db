@@ -334,26 +334,25 @@ make docker-dev-shell         # Enter Linux container for debugging
 
 See [Linux Testing Guide](./linux-testing.md) for details.
 
-## Contributing
+## My Development Workflow (Optional Reference)
 
-Before submitting changes:
+This is my personal workflow for maintaining code quality. **You don't need to follow this exactly** - the main requirement is that your PR passes CI checks.
+
+### What I typically do before committing:
 
 1. **Write code** following Google C++ Style Guide
 2. **Run `make format`** to auto-format code
-3. **Run `make format-check`** to verify formatting (CI equivalent)
-4. **Run `make lint`** to check code quality (optional locally, required in CI)
-5. **Run `make test`** to ensure all tests pass
-6. **[macOS only] Run `make docker-ci-check`** to verify Linux CI compatibility
-7. **Commit changes** if all checks pass
+3. **Run `make lint`** to catch issues early (slow, but worth it)
+4. **Run `make test`** to ensure all tests pass
+5. **Run `make docker-ci-check`** to verify Linux compatibility (macOS only)
 
-Checklist:
-- [ ] Code follows Google C++ Style Guide (120 char line limit)
-- [ ] All comments and documentation are in English
-- [ ] Doxygen comments added for public APIs
-- [ ] Unit tests added/updated
-- [ ] All tests pass (`make test`)
-- [ ] Code formatted (`make format-check` passes)
-- [ ] No clang-tidy warnings (`make lint` passes)
-- [ ] No compiler warnings
-- [ ] [macOS only] Linux CI checks pass (`make docker-ci-check`)
-- [ ] Documentation updated (if needed)
+### CI Requirements
+
+The following are automatically checked by CI:
+- ✅ Code formatting (clang-format)
+- ✅ Static analysis (clang-tidy)
+- ✅ All tests pass
+- ✅ No compiler warnings
+- ✅ Linux build compatibility
+
+**You can rely on CI to check these if you prefer.** Just make sure your PR passes all CI checks before merging.

@@ -208,7 +208,9 @@ See [Installation Guide](docs/en/installation.md) for details.
 
 ## Contributing
 
-Contributions welcome! See [Development Guide](docs/en/development.md).
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+For development environment setup, see [Development Guide](docs/en/development.md).
 
 ## Authors
 

@@ -184,6 +184,13 @@ jobs:
           cp "docs/releases/v${{ steps.version.outputs.version }}.md" \
              "dist/RELEASE_NOTES_v${{ steps.version.outputs.version }}.md"
 
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist/rpm
+          sha256sum *.rpm > SHA256SUMS
+          echo "Generated checksums:"
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -193,6 +200,7 @@ jobs:
           generate_release_notes: false
           files: |
             dist/rpm/*.rpm
+            dist/rpm/SHA256SUMS
             dist/RELEASE_NOTES_*.md
           fail_on_unmatched_files: false
           body: |

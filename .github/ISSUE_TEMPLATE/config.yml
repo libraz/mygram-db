@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/libraz/mygram-db/blob/main/README.md
+    about: Check the documentation for guides and references
+  - name: Development Guide
+    url: https://github.com/libraz/mygram-db/blob/main/docs/en/development.md
+    about: Setup instructions for contributors
