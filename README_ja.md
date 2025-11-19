@@ -171,6 +171,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 
 ## ドキュメント
 
+- **[CHANGELOG](CHANGELOG.md)** - バージョン履歴とリリースノート
 - [Docker デプロイメントガイド](docs/ja/docker-deployment.md) - 本番環境Dockerセットアップ
 - [設定ガイド](docs/ja/configuration.md) - すべての設定オプション
 - [プロトコルリファレンス](docs/ja/protocol.md) - 完全なコマンドリファレンス
@@ -181,6 +182,11 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - [インストールガイド](docs/ja/installation.md) - ソースからビルド
 - [開発ガイド](docs/ja/development.md) - コントリビューションガイドライン
 - [クライアントライブラリ](docs/ja/libmygramclient.md) - C/C++ クライアントライブラリ
+
+### リリースノート
+
+- [最新リリース](https://github.com/libraz/mygram-db/releases/latest) - バイナリダウンロード
+- [詳細リリースノート](docs/releases/) - バージョン別マイグレーションガイド
 
 ## 要件
 

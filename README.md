@@ -171,6 +171,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 
 ## Documentation
 
+- **[CHANGELOG](CHANGELOG.md)** - Version history and release notes
 - [Docker Deployment Guide](docs/en/docker-deployment.md) - Production Docker setup
 - [Configuration Guide](docs/en/configuration.md) - All configuration options
 - [Protocol Reference](docs/en/protocol.md) - Complete command reference
@@ -181,6 +182,11 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - [Installation Guide](docs/en/installation.md) - Build from source
 - [Development Guide](docs/en/development.md) - Contributing guidelines
 - [Client Library](docs/en/libmygramclient.md) - C/C++ client library
+
+### Release Notes
+
+- [Latest Release](https://github.com/libraz/mygram-db/releases/latest) - Download binaries
+- [Detailed Release Notes](docs/releases/) - Version-specific migration guides
 
 ## Requirements
 

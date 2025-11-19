@@ -166,19 +166,74 @@ jobs:
           echo "Downloaded RPM packages:"
           ls -lh dist/rpm/
 
+      - name: Check for release notes
+        id: check_notes
+        run: |
+          NOTES_FILE="docs/releases/v${{ steps.version.outputs.version }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "Release notes found: $NOTES_FILE"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "Release notes not found: $NOTES_FILE"
+          fi
+
+      - name: Copy release notes to dist (if exists)
+        if: steps.check_notes.outputs.found == 'true'
+        run: |
+          cp "docs/releases/v${{ steps.version.outputs.version }}.md" \
+             "dist/RELEASE_NOTES_v${{ steps.version.outputs.version }}.md"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
-          generate_release_notes: true
-          files: dist/rpm/*.rpm
-          fail_on_unmatched_files: true
+          generate_release_notes: false
+          files: |
+            dist/rpm/*.rpm
+            dist/RELEASE_NOTES_*.md
+          fail_on_unmatched_files: false
           body: |
             ## MygramDB ${{ steps.version.outputs.version }}
 
-            ### Installation (RHEL/AlmaLinux/Rocky Linux 9)
+            > **📋 Release Notes**: See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for summary or [docs/releases/v${{ steps.version.outputs.version }}.md](https://github.com/${{ github.repository }}/blob/main/docs/releases/v${{ steps.version.outputs.version }}.md) for detailed notes.
+
+            ### 🐳 Docker Images (Recommended)
+
+            Multi-architecture Docker images available on GitHub Container Registry:
+
+            ```bash
+            # Pull specific version
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+
+            # Pull latest
+            docker pull ghcr.io/${{ github.repository }}:latest
+            ```
+
+            **Supported architectures**: linux/amd64, linux/arm64
+
+            **Quick Start**:
+            ```bash
+            docker run -d --name mygramdb \
+              -p 11016:11016 \
+              -p 8080:8080 \
+              -e MYSQL_HOST=your-mysql-host \
+              -e MYSQL_USER=repl_user \
+              -e MYSQL_PASSWORD=your_password \
+              -e MYSQL_DATABASE=mydb \
+              -e TABLE_NAME=articles \
+              -e TABLE_PRIMARY_KEY=id \
+              -e TABLE_TEXT_COLUMN=content \
+              ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+            ```
+
+            See [Docker Deployment Guide](https://github.com/${{ github.repository }}/blob/main/docs/en/docker-deployment.md) for details.
+
+            ---
+
+            ### 📦 RPM Packages (RHEL/AlmaLinux/Rocky Linux 9)
 
             #### For x86_64 (Intel/AMD):
             ```bash
