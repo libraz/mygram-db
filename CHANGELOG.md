@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2025-11-19
+
+### Added
+
+- Added `NETWORK_ALLOW_CIDRS` environment variable support to Docker entrypoint
+  - Enables easy network ACL configuration in Docker environments
+  - Supports comma-separated CIDR list (e.g., `10.0.0.0/8,172.16.0.0/12`)
+  - Default value: `0.0.0.0/0` (allow all) for development convenience
+- Added RPM testing environment in `support/testing/`
+  - Docker-based environment for testing RPM packages
+  - Includes Rocky Linux 9 and MySQL 8.4 setup
+
+### Fixed
+
+- Fixed MySQL 8.4 compatibility in docker-compose.yml
+  - Replaced deprecated `--default-authentication-plugin` with `--mysql-native-password=ON`
+- Fixed connection refused errors when using Docker without custom config
+  - Network ACL is now properly configured via environment variables
+
+### Changed
+
+- Updated `.gitignore` to use `/Testing/` instead of `Testing/` to avoid excluding support/testing directory
+
+### Documentation
+
+- Added network ACL configuration examples to Docker deployment guide
+- Added security warnings for production environments in README
+- Updated configuration reference with Docker environment variable examples
+- Added comprehensive documentation for network security settings
+
 ## [1.2.0] - 2025-11-19
 
 ### ⚠️ BREAKING CHANGES
@@ -138,7 +168,8 @@ Initial release of MygramDB with core search engine functionality and MySQL repl
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/libraz/mygram-db/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/libraz/mygram-db/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/libraz/mygram-db/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/libraz/mygram-db/releases/tag/v1.0.0

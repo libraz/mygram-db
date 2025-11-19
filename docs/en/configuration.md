@@ -570,6 +570,19 @@ network:
 - **Explicit allowlist**: You must explicitly configure allowed IP ranges
 - **Applied to**: Both TCP and HTTP APIs
 
+**Docker Environment Variable**:
+When using Docker, you can configure this via the `NETWORK_ALLOW_CIDRS` environment variable (comma-separated):
+```bash
+# Single CIDR
+NETWORK_ALLOW_CIDRS=192.168.1.0/24
+
+# Multiple CIDRs
+NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+# Allow all (development only)
+NETWORK_ALLOW_CIDRS=0.0.0.0/0
+```
+
 **Examples**:
 ```yaml
 # Localhost only (most secure)

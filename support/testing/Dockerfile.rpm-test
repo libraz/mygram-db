@@ -1,0 +1,68 @@
+# RPM-based Docker image for testing released packages
+FROM rockylinux:9
+
+# Install MySQL repository and dependencies
+RUN dnf install -y \
+    https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm \
+    && dnf install -y --nogpgcheck \
+    libstdc++ \
+    mysql-community-libs \
+    lz4-libs \
+    libicu \
+    readline \
+    ca-certificates \
+    wget \
+    procps-ng \
+    && dnf clean all
+
+# Download and install the latest MygramDB RPM from GitHub Releases
+# Replace VERSION with the actual version or use "latest" redirect
+ARG MYGRAMDB_VERSION=latest
+RUN ARCH=$(uname -m) && \
+    if [ "$MYGRAMDB_VERSION" = "latest" ]; then \
+      DOWNLOAD_URL=$(wget -qO- https://api.github.com/repos/libraz/mygram-db/releases/latest | \
+        grep "browser_download_url.*${ARCH}\.rpm" | \
+        grep -v "debuginfo" | grep -v "debugsource" | grep -v "\.src\.rpm" | \
+        head -n 1 | cut -d '"' -f 4); \
+    else \
+      DOWNLOAD_URL="https://github.com/libraz/mygram-db/releases/download/v${MYGRAMDB_VERSION}/mygramdb-${MYGRAMDB_VERSION}-1.el9.${ARCH}.rpm"; \
+    fi && \
+    echo "Downloading: $DOWNLOAD_URL" && \
+    wget -O /tmp/mygramdb.rpm "$DOWNLOAD_URL" && \
+    dnf install -y /tmp/mygramdb.rpm && \
+    rm -f /tmp/mygramdb.rpm
+
+# Create non-root user if not already created by RPM
+RUN id mygramdb &>/dev/null || (groupadd -g 1000 mygramdb && useradd -r -u 1000 -g mygramdb -s /bin/bash mygramdb)
+
+# Create directories
+RUN mkdir -p /var/lib/mygramdb /etc/mygramdb && \
+    chown -R mygramdb:mygramdb /var/lib/mygramdb /etc/mygramdb
+
+# Create symlinks for entrypoint script compatibility
+# RPM installs to /usr/bin, entrypoint expects /usr/local/bin
+RUN ln -sf /usr/bin/mygramdb /usr/local/bin/mygramdb && \
+    ln -sf /usr/bin/mygram-cli /usr/local/bin/mygram-cli
+
+# Copy entrypoint script (reuse existing one)
+COPY support/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Switch to non-root user
+USER mygramdb
+
+# Set working directory
+WORKDIR /var/lib/mygramdb
+
+# Expose default port
+EXPOSE 11016
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD pgrep -x mygramdb || exit 1
+
+# Entrypoint script handles configuration generation from env vars
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Default command
+CMD ["mygramdb"]

@@ -1,0 +1,70 @@
+# MygramDB Configuration for RPM Testing
+
+# MySQL Connection
+mysql:
+  host: "mysql"
+  port: 3306
+  user: "repl_user"
+  password: "your_secure_password"
+  database: "mydb"
+  use_gtid: true
+  connect_timeout_ms: 3000
+
+# Table Configuration
+tables:
+  - name: "articles"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+# Index Build Configuration
+build:
+  mode: "select_snapshot"
+  batch_size: 5000
+  parallelism: 2
+  throttle_ms: 0
+
+# Replication Configuration
+replication:
+  enable: true
+  server_id: 12345
+  start_from: "snapshot"
+  queue_size: 10000
+  reconnect_backoff_min_ms: 500
+  reconnect_backoff_max_ms: 10000
+
+# Memory Management
+memory:
+  hard_limit_mb: 8192
+  soft_target_mb: 4096
+  arena_chunk_mb: 64
+  roaring_threshold: 0.18
+  minute_epoch: true
+  normalize:
+    nfkc: true
+    width: "narrow"
+    lower: false
+
+# Dump Persistence
+dump:
+  dir: "/var/lib/mygramdb/dumps"
+  interval_sec: 0
+  retain: 3
+
+# API Server
+api:
+  tcp:
+    bind: "0.0.0.0"
+    port: 11016
+
+# Network Configuration (allow all for testing)
+network:
+  allow_cidrs:
+    - "0.0.0.0/0"
+
+# Logging
+logging:
+  level: "info"
+  format: "json"
