@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "client/mygramclient.h"
+#include "client/search_expression.h"
 
 using namespace mygramdb::client;
 
@@ -464,6 +465,63 @@ void mygramclient_free_server_info(MygramServerInfo_C* info) {
 
 void mygramclient_free_string(char* str) {
   free(str);
+}
+
+int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed) {
+  if (expression == nullptr || parsed == nullptr) {
+    return -1;
+  }
+
+  // Parse using SimplifySearchExpression
+  std::string main_term;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+
+  if (!SimplifySearchExpression(expression, main_term, and_terms, not_terms)) {
+    return -1;
+  }
+
+  // Also parse to get optional terms
+  auto expr_result = ParseSearchExpression(expression);
+  if (!expr_result) {
+    return -1;
+  }
+
+  // Allocate result
+  auto* result = static_cast<MygramParsedExpression_C*>(malloc(sizeof(MygramParsedExpression_C)));
+  if (result == nullptr) {
+    return -1;
+  }
+
+  // Copy main term
+  result->main_term = strdup_safe(main_term);
+
+  // Copy AND terms
+  result->and_count = and_terms.size();
+  result->and_terms = string_vector_to_c_array(and_terms);
+
+  // Copy NOT terms
+  result->not_count = not_terms.size();
+  result->not_terms = string_vector_to_c_array(not_terms);
+
+  // Copy optional terms
+  result->optional_count = expr_result->optional_terms.size();
+  result->optional_terms = string_vector_to_c_array(expr_result->optional_terms);
+
+  *parsed = result;
+  return 0;
+}
+
+void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
+  if (parsed == nullptr) {
+    return;
+  }
+
+  free(parsed->main_term);
+  free_c_string_array(parsed->and_terms, parsed->and_count);
+  free_c_string_array(parsed->not_terms, parsed->not_count);
+  free_c_string_array(parsed->optional_terms, parsed->optional_count);
+  free(parsed);
 }
 
 // NOLINTEND(readability-identifier-naming, cppcoreguidelines-owning-memory,
