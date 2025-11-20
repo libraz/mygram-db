@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2025-11-20
+
+### Fixed
+
+- Fixed Docker entrypoint script POSIX compatibility issue
+  - Replaced bashism (`<<<` here-string and array syntax) with POSIX-compliant code
+  - Script now works correctly in Docker containers where `/bin/sh` is linked to `dash`
+  - Fixes "Syntax error: redirection unexpected" error when using `NETWORK_ALLOW_CIDRS`
+
 ## [1.2.1] - 2025-11-19
 
 ### Added
@@ -171,7 +180,8 @@ Initial release of MygramDB with core search engine functionality and MySQL repl
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/libraz/mygram-db/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/libraz/mygram-db/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/libraz/mygram-db/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/libraz/mygram-db/compare/v1.0.0...v1.1.0

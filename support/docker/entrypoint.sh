@@ -147,11 +147,13 @@ network:
   allow_cidrs:
 EOF
   # Convert comma-separated list to YAML list
-  IFS=',' read -ra CIDRS <<< "$NETWORK_ALLOW_CIDRS"
-  for cidr in "${CIDRS[@]}"; do
+  # Use POSIX-compliant method instead of bashism (<<<)
+  echo "$NETWORK_ALLOW_CIDRS" | tr ',' '\n' | while read -r cidr; do
     # Trim whitespace
     cidr=$(echo "$cidr" | xargs)
-    echo "    - \"$cidr\"" >> "$CONFIG_FILE"
+    if [ -n "$cidr" ]; then
+      echo "    - \"$cidr\"" >> "$CONFIG_FILE"
+    fi
   done
 fi
 
