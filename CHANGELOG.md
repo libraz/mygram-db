@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2025-11-20
+
+### Added
+
+- Configurable MySQL session timeout to prevent disconnection during long operations
+  - New configuration option: `replication.session_timeout_sec` (default: 28800 seconds / 8 hours)
+  - Automatically sets `wait_timeout` and `interactive_timeout` on MySQL connection
+  - Prevents timeout issues during large table synchronization or slow binlog processing
+- C API for parsing web-style search expressions
+  - New public API: `mygram_parse_search_expr()` for parsing search queries
+  - Enables integration with other C/C++ applications
+  - Supports all existing query syntax (SEARCH, FILTER, SORT, LIMIT)
+
 ## [1.2.2] - 2025-11-20
 
 ### Fixed
@@ -180,7 +193,8 @@ Initial release of MygramDB with core search engine functionality and MySQL repl
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/libraz/mygram-db/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/libraz/mygram-db/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/libraz/mygram-db/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/libraz/mygram-db/compare/v1.1.0...v1.2.0
