@@ -107,6 +107,8 @@ mysql:
   binlog_format: "ROW"              # Binary log format (required: ROW)
   binlog_row_image: "FULL"          # Row image format (required: FULL)
   connect_timeout_ms: 3000          # Connection timeout in milliseconds
+  session_timeout_sec: 3600         # Session timeout in seconds (default: 3600 = 1 hour)
+                                    # Prevents disconnection during long operations like snapshot building
 
   # SSL/TLS settings (optional but recommended for production)
   ssl_enable: false                 # Enable SSL/TLS
@@ -129,6 +131,7 @@ mysql:
 | `binlog_format` | string | `ROW` | Binary log format (must be ROW) | ❌ No |
 | `binlog_row_image` | string | `FULL` | Row image format (must be FULL) | ❌ No |
 | `connect_timeout_ms` | integer | `3000` | Connection timeout in milliseconds | ✅ Yes |
+| `session_timeout_sec` | integer | `3600` | Session timeout in seconds - prevents disconnection during long operations like snapshot building | ✅ Yes |
 | `ssl_enable` | boolean | `false` | Enable SSL/TLS connection | ✅ Yes |
 | `ssl_ca` | string | `` | Path to CA certificate file | ✅ Yes |
 | `ssl_cert` | string | `` | Path to client certificate file | ✅ Yes |

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 
+#include "client/mygramclient_c.h"
 #include "index/index.h"
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
@@ -580,4 +581,224 @@ TEST_F(MygramClientTest, LargeResponseHandling) {
   EXPECT_TRUE(received_pks.count("doc_1") > 0);
   EXPECT_TRUE(received_pks.count("doc_" + std::to_string(num_docs / 2)) > 0);
   EXPECT_TRUE(received_pks.count("doc_" + std::to_string(num_docs)) > 0);
+}
+
+/**
+ * @brief Test fixture for C API tests
+ */
+class MygramClientCApiTest : public ::testing::Test {
+ protected:
+  void SetUp() override {}
+  void TearDown() override {}
+};
+
+/**
+ * @brief Test C API parse_search_expression - simple case
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_Simple) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("golang tutorial", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be "golang"
+  ASSERT_NE(parsed->main_term, nullptr);
+  EXPECT_STREQ(parsed->main_term, "golang");
+
+  // AND terms should contain "tutorial"
+  EXPECT_EQ(parsed->and_count, 1);
+  ASSERT_NE(parsed->and_terms, nullptr);
+  EXPECT_STREQ(parsed->and_terms[0], "tutorial");
+
+  // No NOT terms
+  EXPECT_EQ(parsed->not_count, 0);
+
+  // No optional terms (all are treated as required)
+  EXPECT_EQ(parsed->optional_count, 0);
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - with NOT terms
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_WithNotTerms) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("+golang -old -deprecated", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be "golang"
+  ASSERT_NE(parsed->main_term, nullptr);
+  EXPECT_STREQ(parsed->main_term, "golang");
+
+  // No additional AND terms
+  EXPECT_EQ(parsed->and_count, 0);
+
+  // Two NOT terms
+  EXPECT_EQ(parsed->not_count, 2);
+  ASSERT_NE(parsed->not_terms, nullptr);
+  EXPECT_STREQ(parsed->not_terms[0], "old");
+  EXPECT_STREQ(parsed->not_terms[1], "deprecated");
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - with AND terms
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_WithAndTerms) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("+golang +tutorial +2024", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be "golang"
+  ASSERT_NE(parsed->main_term, nullptr);
+  EXPECT_STREQ(parsed->main_term, "golang");
+
+  // Two additional AND terms
+  EXPECT_EQ(parsed->and_count, 2);
+  ASSERT_NE(parsed->and_terms, nullptr);
+  EXPECT_STREQ(parsed->and_terms[0], "tutorial");
+  EXPECT_STREQ(parsed->and_terms[1], "2024");
+
+  // No NOT terms
+  EXPECT_EQ(parsed->not_count, 0);
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - complex expression
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_Complex) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("+golang +tutorial -old", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term
+  EXPECT_STREQ(parsed->main_term, "golang");
+
+  // AND terms
+  EXPECT_EQ(parsed->and_count, 1);
+  EXPECT_STREQ(parsed->and_terms[0], "tutorial");
+
+  // NOT terms
+  EXPECT_EQ(parsed->not_count, 1);
+  EXPECT_STREQ(parsed->not_terms[0], "old");
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - Japanese text
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_Japanese) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("日本語 チュートリアル -古い", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be "日本語"
+  EXPECT_STREQ(parsed->main_term, "日本語");
+
+  // AND term should be "チュートリアル"
+  EXPECT_EQ(parsed->and_count, 1);
+  EXPECT_STREQ(parsed->and_terms[0], "チュートリアル");
+
+  // NOT term should be "古い"
+  EXPECT_EQ(parsed->not_count, 1);
+  EXPECT_STREQ(parsed->not_terms[0], "古い");
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - with emojis
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_Emoji) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("😀 tutorial -🎉", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be "😀"
+  EXPECT_STREQ(parsed->main_term, "😀");
+
+  // AND term should be "tutorial"
+  EXPECT_EQ(parsed->and_count, 1);
+  EXPECT_STREQ(parsed->and_terms[0], "tutorial");
+
+  // NOT term should be "🎉"
+  EXPECT_EQ(parsed->not_count, 1);
+  EXPECT_STREQ(parsed->not_terms[0], "🎉");
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - quoted phrase
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_QuotedPhrase) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("\"machine learning\" tutorial", &parsed);
+
+  ASSERT_EQ(result, 0);
+  ASSERT_NE(parsed, nullptr);
+
+  // Main term should be the quoted phrase
+  EXPECT_STREQ(parsed->main_term, "\"machine learning\"");
+
+  // AND term should be "tutorial"
+  EXPECT_EQ(parsed->and_count, 1);
+  EXPECT_STREQ(parsed->and_terms[0], "tutorial");
+
+  mygramclient_free_parsed_expression(parsed);
+}
+
+/**
+ * @brief Test C API parse_search_expression - NULL input
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_NullInput) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression(nullptr, &parsed);
+
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(parsed, nullptr);
+}
+
+/**
+ * @brief Test C API parse_search_expression - NULL output pointer
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_NullOutputPointer) {
+  int result = mygramclient_parse_search_expression("golang tutorial", nullptr);
+
+  EXPECT_EQ(result, -1);
+}
+
+/**
+ * @brief Test C API parse_search_expression - empty expression
+ */
+TEST_F(MygramClientCApiTest, ParseSearchExpression_EmptyExpression) {
+  MygramParsedExpression_C* parsed = nullptr;
+  int result = mygramclient_parse_search_expression("", &parsed);
+
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(parsed, nullptr);
+}
+
+/**
+ * @brief Test C API free_parsed_expression - NULL safety
+ */
+TEST_F(MygramClientCApiTest, FreeParseExpression_NullSafety) {
+  // Should not crash
+  mygramclient_free_parsed_expression(nullptr);
 }

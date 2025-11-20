@@ -107,6 +107,8 @@ mysql:
   binlog_format: "ROW"              # バイナリログ形式(必須: ROW)
   binlog_row_image: "FULL"          # 行イメージ形式(必須: FULL)
   connect_timeout_ms: 3000          # 接続タイムアウト(ミリ秒)
+  session_timeout_sec: 3600         # セッションタイムアウト(秒、デフォルト: 3600 = 1時間)
+                                    # スナップショット作成などの長時間処理中の切断を防ぐ
 
   # SSL/TLS設定(オプションだが本番環境では推奨)
   ssl_enable: false                 # SSL/TLSを有効化
@@ -129,6 +131,7 @@ mysql:
 | `binlog_format` | string | `ROW` | バイナリログ形式(ROWである必要がある) | ❌ 不可 |
 | `binlog_row_image` | string | `FULL` | 行イメージ形式(FULLである必要がある) | ❌ 不可 |
 | `connect_timeout_ms` | integer | `3000` | 接続タイムアウト(ミリ秒) | ✅ 可能 |
+| `session_timeout_sec` | integer | `3600` | セッションタイムアウト(秒) - スナップショット作成などの長時間処理中の切断を防ぐ | ✅ 可能 |
 | `ssl_enable` | boolean | `false` | SSL/TLS接続を有効化 | ✅ 可能 |
 | `ssl_ca` | string | `` | CA証明書ファイルへのパス | ✅ 可能 |
 | `ssl_cert` | string | `` | クライアント証明書ファイルへのパス | ✅ 可能 |

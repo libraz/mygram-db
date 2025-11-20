@@ -22,6 +22,7 @@ constexpr int kMysqlPort = 3306;
 constexpr int kMysqlConnectTimeoutMs = 3000;
 constexpr int kMysqlReadTimeoutMs = 3600000;   // 1 hour (for long-running binlog connections)
 constexpr int kMysqlWriteTimeoutMs = 3600000;  // 1 hour
+constexpr int kMysqlSessionTimeoutSec = 3600;  // 1 hour (prevents disconnection during snapshot building)
 
 // Posting list defaults
 constexpr int kPostingBlockSize = 128;
@@ -71,6 +72,7 @@ struct MysqlConfig {
   int connect_timeout_ms = defaults::kMysqlConnectTimeoutMs;
   int read_timeout_ms = defaults::kMysqlReadTimeoutMs;
   int write_timeout_ms = defaults::kMysqlWriteTimeoutMs;
+  int session_timeout_sec = defaults::kMysqlSessionTimeoutSec;
   // SSL/TLS settings
   bool ssl_enable = false;
   std::string ssl_ca;

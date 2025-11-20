@@ -77,6 +77,13 @@
           "minimum": 1000,
           "maximum": 86400000
         },
+        "session_timeout_sec": {
+          "type": "integer",
+          "description": "Session timeout in seconds (wait_timeout and interactive_timeout) - prevents disconnection during long operations like snapshot building",
+          "default": 3600,
+          "minimum": 60,
+          "maximum": 86400
+        },
         "ssl_enable": {
           "type": "boolean",
           "description": "Enable SSL/TLS for MySQL connection",

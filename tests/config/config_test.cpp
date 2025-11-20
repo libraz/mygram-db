@@ -34,6 +34,7 @@ TEST(ConfigTest, LoadValidConfig) {
   EXPECT_EQ(config.mysql.connect_timeout_ms, 5000);
   EXPECT_EQ(config.mysql.read_timeout_ms, 7200000);
   EXPECT_EQ(config.mysql.write_timeout_ms, 7200000);
+  EXPECT_EQ(config.mysql.session_timeout_sec, 3600);  // Default value
 
   // Tables
   ASSERT_EQ(config.tables.size(), 1);
@@ -668,4 +669,187 @@ TEST(ConfigTest, CacheDisabledNoMemoryValidation) {
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
   EXPECT_FALSE(config.cache.enabled);
+}
+
+/**
+ * @brief Test session_timeout_sec default value
+ */
+TEST(ConfigTest, SessionTimeoutDefault) {
+  std::string config_yaml = R"(
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "test_user"
+  password: "test_pass"
+  database: "testdb"
+tables:
+  - name: "test_table"
+    primary_key: "id"
+    text_source:
+      column: "content"
+build:
+  mode: "select_snapshot"
+replication:
+  enable: false
+memory:
+  hard_limit_mb: 512
+api:
+  tcp:
+    bind: "127.0.0.1"
+    port: 11016
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"
+)";
+
+  std::ofstream f("test_session_timeout_default.yaml");
+  f << config_yaml;
+  f.close();
+
+  auto config_result = LoadConfig("test_session_timeout_default.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
+
+  // Should use default value (3600 seconds = 1 hour)
+  EXPECT_EQ(config.mysql.session_timeout_sec, 3600);
+
+  std::remove("test_session_timeout_default.yaml");
+}
+
+/**
+ * @brief Test session_timeout_sec custom value
+ */
+TEST(ConfigTest, SessionTimeoutCustomValue) {
+  std::string config_yaml = R"(
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "test_user"
+  password: "test_pass"
+  database: "testdb"
+  session_timeout_sec: 7200
+tables:
+  - name: "test_table"
+    primary_key: "id"
+    text_source:
+      column: "content"
+build:
+  mode: "select_snapshot"
+replication:
+  enable: false
+memory:
+  hard_limit_mb: 512
+api:
+  tcp:
+    bind: "127.0.0.1"
+    port: 11016
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"
+)";
+
+  std::ofstream f("test_session_timeout_custom.yaml");
+  f << config_yaml;
+  f.close();
+
+  auto config_result = LoadConfig("test_session_timeout_custom.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
+
+  // Should use custom value (7200 seconds = 2 hours)
+  EXPECT_EQ(config.mysql.session_timeout_sec, 7200);
+
+  std::remove("test_session_timeout_custom.yaml");
+}
+
+/**
+ * @brief Test session_timeout_sec validation (minimum)
+ */
+TEST(ConfigTest, SessionTimeoutValidationMin) {
+  std::string config_yaml = R"(
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "test_user"
+  password: "test_pass"
+  database: "testdb"
+  session_timeout_sec: 30
+tables:
+  - name: "test_table"
+    primary_key: "id"
+    text_source:
+      column: "content"
+build:
+  mode: "select_snapshot"
+replication:
+  enable: false
+memory:
+  hard_limit_mb: 512
+api:
+  tcp:
+    bind: "127.0.0.1"
+    port: 11016
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"
+)";
+
+  std::ofstream f("test_session_timeout_min.yaml");
+  f << config_yaml;
+  f.close();
+
+  auto config_result = LoadConfig("test_session_timeout_min.yaml");
+  // Should fail validation (minimum is 60)
+  EXPECT_FALSE(config_result);
+  if (!config_result) {
+    EXPECT_TRUE(config_result.error().message().find("session_timeout_sec") != std::string::npos);
+  }
+
+  std::remove("test_session_timeout_min.yaml");
+}
+
+/**
+ * @brief Test session_timeout_sec validation (maximum)
+ */
+TEST(ConfigTest, SessionTimeoutValidationMax) {
+  std::string config_yaml = R"(
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "test_user"
+  password: "test_pass"
+  database: "testdb"
+  session_timeout_sec: 90000
+tables:
+  - name: "test_table"
+    primary_key: "id"
+    text_source:
+      column: "content"
+build:
+  mode: "select_snapshot"
+replication:
+  enable: false
+memory:
+  hard_limit_mb: 512
+api:
+  tcp:
+    bind: "127.0.0.1"
+    port: 11016
+network:
+  allow_cidrs:
+    - "127.0.0.1/32"
+)";
+
+  std::ofstream f("test_session_timeout_max.yaml");
+  f << config_yaml;
+  f.close();
+
+  auto config_result = LoadConfig("test_session_timeout_max.yaml");
+  // Should fail validation (maximum is 86400 = 24 hours)
+  EXPECT_FALSE(config_result);
+  if (!config_result) {
+    EXPECT_TRUE(config_result.error().message().find("session_timeout_sec") != std::string::npos);
+  }
+
+  std::remove("test_session_timeout_max.yaml");
 }

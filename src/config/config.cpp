@@ -104,6 +104,9 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   if (json_obj.contains("write_timeout_ms")) {
     config.write_timeout_ms = json_obj["write_timeout_ms"].get<int>();
   }
+  if (json_obj.contains("session_timeout_sec")) {
+    config.session_timeout_sec = json_obj["session_timeout_sec"].get<int>();
+  }
   if (json_obj.contains("ssl_enable")) {
     config.ssl_enable = json_obj["ssl_enable"].get<bool>();
   }
