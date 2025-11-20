@@ -48,12 +48,23 @@ SET GLOBAL binlog_format = ROW;
 -- レプリケーションユーザーを作成
 CREATE USER 'repl_user'@'%' IDENTIFIED BY 'your_password';
 
--- レプリケーション権限を付与
+-- レプリケーション権限を付与（binlog読み取りとGTID情報取得用）
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
+
+-- スナップショット作成用のSELECT権限を付与（必須）
+-- 注意: 対象テーブルに対するSELECT権限が必要です
+GRANT SELECT ON database_name.table_name TO 'repl_user'@'%';
 
 -- 変更を適用
 FLUSH PRIVILEGES;
 ```
+
+**重要な注意事項:**
+
+1. **REPLICATION CLIENT権限は必須**: GTID情報を取得するために必要です
+2. **SELECT権限は必須**: 初期スナップショット作成時にテーブルデータを読み取るために必要です
+3. **権限の追加は再起動不要**: `GRANT`文はオンラインで即座に反映されます
+4. **最小権限の原則**: 複数のテーブルを同期する場合は、各テーブルごとにSELECT権限を付与してください
 
 ### セキュリティ上の注意
 

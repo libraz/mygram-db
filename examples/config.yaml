@@ -20,6 +20,8 @@ mysql:
   binlog_format: "ROW"              # Binary log format (default: ROW, required for replication)
   binlog_row_image: "FULL"          # Row image format (default: FULL, required for replication)
   connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
+  session_timeout_sec: 3600         # Session timeout in seconds (default: 3600 = 1 hour)
+                                    # Prevents disconnection during long operations like snapshot building
   # SSL/TLS settings (optional but highly recommended for production)
   ssl_enable: false                 # Enable SSL/TLS (default: false)
   # ssl_ca: "/path/to/ca-cert.pem" # CA certificate for SSL/TLS

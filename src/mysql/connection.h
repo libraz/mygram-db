@@ -78,9 +78,11 @@ class Connection {
     std::string user;
     std::string password;
     std::string database;
-    uint32_t connect_timeout = 10;  // Default timeout in seconds
-    uint32_t read_timeout = 30;     // Default timeout in seconds
-    uint32_t write_timeout = 30;    // Default timeout in seconds
+    uint32_t connect_timeout = 10;        // Default timeout in seconds
+    uint32_t read_timeout = 30;           // Default timeout in seconds
+    uint32_t write_timeout = 30;          // Default timeout in seconds
+    uint32_t session_timeout_sec = 3600;  // Session timeout in seconds (default: 1 hour)
+                                          // Prevents disconnection during long operations like snapshot building
     // SSL/TLS settings
     bool ssl_enable = false;
     std::string ssl_ca;

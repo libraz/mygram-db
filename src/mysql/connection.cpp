@@ -147,6 +147,20 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         MakeError(ErrorCode::kMySQLConnectionFailed, last_error_, config_.host + ":" + std::to_string(config_.port)));
   }
 
+  // Set session timeout to prevent disconnection during long-running operations
+  // (e.g., snapshot building which can take several minutes)
+  // This only affects the current session and does not impact other MySQL connections
+  const std::string set_timeout_query =
+      "SET SESSION wait_timeout = " + std::to_string(config_.session_timeout_sec) +
+      ", SESSION interactive_timeout = " + std::to_string(config_.session_timeout_sec);
+  if (mysql_query(mysql_, set_timeout_query.c_str()) != 0) {
+    // Log warning but don't fail connection - timeout setting is not critical
+    SetMySQLError();
+    spdlog::warn("Failed to set session timeouts (non-critical): {}", last_error_);
+  } else {
+    spdlog::debug("Session timeouts set to {} seconds", config_.session_timeout_sec);
+  }
+
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
   std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";

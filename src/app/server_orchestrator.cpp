@@ -212,6 +212,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   mysql_config.connect_timeout = deps_.config.mysql.connect_timeout_ms / kMillisecondsPerSecond;
   mysql_config.read_timeout = deps_.config.mysql.read_timeout_ms / kMillisecondsPerSecond;
   mysql_config.write_timeout = deps_.config.mysql.write_timeout_ms / kMillisecondsPerSecond;
+  mysql_config.session_timeout_sec = deps_.config.mysql.session_timeout_sec;
   mysql_config.ssl_enable = deps_.config.mysql.ssl_enable;
   mysql_config.ssl_ca = deps_.config.mysql.ssl_ca;
   mysql_config.ssl_cert = deps_.config.mysql.ssl_cert;
@@ -440,6 +441,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::HandleMy
       .connect_timeout = static_cast<uint32_t>(new_config.mysql.connect_timeout_ms / kMillisecondsPerSecond),
       .read_timeout = static_cast<uint32_t>(new_config.mysql.read_timeout_ms / kMillisecondsPerSecond),
       .write_timeout = static_cast<uint32_t>(new_config.mysql.write_timeout_ms / kMillisecondsPerSecond),
+      .session_timeout_sec = static_cast<uint32_t>(new_config.mysql.session_timeout_sec),
       .ssl_enable = new_config.mysql.ssl_enable,
       .ssl_ca = new_config.mysql.ssl_ca,
       .ssl_cert = new_config.mysql.ssl_cert,

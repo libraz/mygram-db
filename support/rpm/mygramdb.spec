@@ -59,9 +59,9 @@ find %{buildroot}/usr/lib64 -name '*.so*' -delete 2>/dev/null || true
 find %{buildroot}/usr/lib -name 'libmygramclient.a' -delete 2>/dev/null || true
 find %{buildroot}/usr/lib -name 'libmygramclient.so*' -delete 2>/dev/null || true
 
-# Create config directory
+# Create config directory and install example config
 install -d %{buildroot}%{_sysconfdir}/%{name}
-install -m 644 examples/config-minimal.yaml %{buildroot}%{_sysconfdir}/%{name}/config.yaml.example
+install -m 644 examples/config.yaml %{buildroot}%{_sysconfdir}/%{name}/config.yaml.example
 
 # Create systemd service file
 install -d %{buildroot}/usr/lib/systemd/system
@@ -87,14 +87,16 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/mygramdb
+ReadWritePaths=/var/lib/mygramdb /var/log/mygramdb
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Create data directory
+# Create data directories
 install -d %{buildroot}%{_sharedstatedir}/%{name}
+install -d %{buildroot}%{_sharedstatedir}/%{name}/dumps
+install -d %{buildroot}%{_localstatedir}/log/%{name}
 
 %pre
 getent group mygramdb >/dev/null || groupadd -r mygramdb
@@ -105,8 +107,12 @@ exit 0
 
 %post
 %systemd_post %{name}.service
+# Set ownership for data and log directories
 if [ -d %{_sharedstatedir}/%{name} ]; then
     chown -R mygramdb:mygramdb %{_sharedstatedir}/%{name}
+fi
+if [ -d %{_localstatedir}/log/%{name} ]; then
+    chown -R mygramdb:mygramdb %{_localstatedir}/log/%{name}
 fi
 
 %preun
@@ -124,6 +130,8 @@ fi
 %dir %{_sysconfdir}/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}/config.yaml.example
 %dir %attr(0755,mygramdb,mygramdb) %{_sharedstatedir}/%{name}
+%dir %attr(0755,mygramdb,mygramdb) %{_sharedstatedir}/%{name}/dumps
+%dir %attr(0755,mygramdb,mygramdb) %{_localstatedir}/log/%{name}
 
 # Static build - no devel package needed
 

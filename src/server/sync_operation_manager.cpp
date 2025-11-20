@@ -74,6 +74,13 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
     return ResponseFormatter::FormatError("Memory critically low. Cannot start SYNC.");
   }
 
+  // Log session timeout warning
+  uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
+  spdlog::info(
+      "Starting SYNC for table '{}' with MySQL session_timeout_sec={} "
+      "(ensure this is sufficient for snapshot duration)",
+      table_name, session_timeout);
+
   // Mark as syncing
   {
     std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
@@ -255,11 +262,13 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     }
 
     // Connect to MySQL
-    mysql::Connection::Config mysql_config{.host = full_config_->mysql.host,
-                                           .port = static_cast<uint16_t>(full_config_->mysql.port),
-                                           .user = full_config_->mysql.user,
-                                           .password = full_config_->mysql.password,
-                                           .database = full_config_->mysql.database};
+    mysql::Connection::Config mysql_config{
+        .host = full_config_->mysql.host,
+        .port = static_cast<uint16_t>(full_config_->mysql.port),
+        .user = full_config_->mysql.user,
+        .password = full_config_->mysql.password,
+        .database = full_config_->mysql.database,
+        .session_timeout_sec = static_cast<uint32_t>(full_config_->mysql.session_timeout_sec)};
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
@@ -377,6 +386,18 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       }
     } else {
       std::string error_msg = result.error().message();
+
+      // Check if error might be session timeout related
+      bool is_timeout_related =
+          (error_msg.find("disconnected") != std::string::npos || error_msg.find("timeout") != std::string::npos ||
+           error_msg.find("connection") != std::string::npos || error_msg.find("Lost connection") != std::string::npos);
+
+      if (is_timeout_related) {
+        uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
+        error_msg += " (check if session_timeout_sec=" + std::to_string(session_timeout) +
+                     " is sufficient for snapshot duration)";
+      }
+
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
         state.error_message = error_msg;

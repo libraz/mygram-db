@@ -48,12 +48,23 @@ Create a user with replication privileges:
 -- Create replication user
 CREATE USER 'repl_user'@'%' IDENTIFIED BY 'your_password';
 
--- Grant replication privileges
+-- Grant replication privileges (for binlog reading and GTID information)
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
+
+-- Grant SELECT privilege for snapshot creation (REQUIRED)
+-- Note: SELECT privilege on target tables is necessary for snapshot building
+GRANT SELECT ON database_name.table_name TO 'repl_user'@'%';
 
 -- Apply changes
 FLUSH PRIVILEGES;
 ```
+
+**Important Notes:**
+
+1. **REPLICATION CLIENT privilege is required**: Necessary for retrieving GTID information
+2. **SELECT privilege is required**: Necessary for reading table data during initial snapshot creation
+3. **No restart required**: `GRANT` statements are applied online and take effect immediately
+4. **Principle of least privilege**: When synchronizing multiple tables, grant SELECT privilege for each table individually
 
 ### Security Considerations
 

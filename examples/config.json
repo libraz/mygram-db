@@ -9,6 +9,7 @@
     "binlog_format": "ROW",
     "binlog_row_image": "FULL",
     "connect_timeout_ms": 3000,
+    "session_timeout_sec": 3600,
     "ssl_enable": false
   },
   "tables": [
