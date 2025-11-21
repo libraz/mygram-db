@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.4] - 2025-11-21
+
+### Fixed
+
+- **Critical: Fixed GTID parsing crash during replication startup (MySQL 8.4 compatibility)**
+  - MySQL 8.4 returns GTID strings with embedded newlines for readability (e.g., `uuid1:1-100,\nuuid2:1-200`)
+  - Long GTID strings from multiple replication sources would cause `std::invalid_argument` crash
+  - Now properly removes whitespace from GTID strings, following MySQL's official parser behavior
+  - Affects systems replicating from multiple MySQL sources (6+ UUIDs)
+- Fixed RPM package upgrade failures
+  - Added error suppression to `%systemd_preun` macro
+  - Eliminates "fg: no job control" errors during package updates
+  - Ensures smooth upgrades without manual intervention
+
+### Added
+
+- Comprehensive GTID whitespace handling tests
+  - 5 test cases covering various whitespace patterns (newlines, spaces, tabs)
+  - Real-world 6-UUID production scenario validation
+  - Documented MySQL 8.4 GTID formatting behavior
+
 ## [1.2.3] - 2025-11-20
 
 ### Added

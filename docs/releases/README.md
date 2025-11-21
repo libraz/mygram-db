@@ -4,7 +4,11 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.2.0](v1.2.0.md) - Latest release (2025-11-19)
+- [v1.2.4](v1.2.4.md) - Latest release (2025-11-21) - Critical Bug Fix
+- [v1.2.3](v1.2.3.md) - 2025-11-20
+- [v1.2.2](v1.2.2.md) - 2025-11-20
+- [v1.2.1](v1.2.1.md) - 2025-11-19
+- [v1.2.0](v1.2.0.md) - 2025-11-19
 - [v1.1.0](v1.1.0.md) - Production-ready release (2025-11-17)
 - v1.0.0 - Initial release (2025-11-13)
 
