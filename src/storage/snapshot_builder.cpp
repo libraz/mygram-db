@@ -20,6 +20,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 
@@ -106,6 +107,12 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
     MYSQL_ROW row = mysql_fetch_row(gtid_result_exp->get());
     if (row != nullptr && row[0] != nullptr) {
       snapshot_gtid_ = std::string(row[0]);
+      // Remove all whitespace (newlines, spaces, tabs) from GTID string
+      // MySQL may return GTID with newlines when it's long
+      snapshot_gtid_.erase(
+          std::remove_if(snapshot_gtid_.begin(), snapshot_gtid_.end(),
+                         [](unsigned char c) { return std::isspace(c); }),
+          snapshot_gtid_.end());
     }
     // gtid_result_exp automatically freed by MySQLResult destructor
   }

@@ -116,7 +116,7 @@ if [ -d %{_localstatedir}/log/%{name} ]; then
 fi
 
 %preun
-%systemd_preun %{name}.service
+%systemd_preun %{name}.service || :
 
 %postun
 %systemd_postun_with_restart %{name}.service
