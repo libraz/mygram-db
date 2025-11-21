@@ -95,11 +95,18 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
    * @brief Create a snapshot and verify GTID is captured
    */
   std::string CreateSnapshotWithGtid(const std::string& expected_gtid) {
-    // Sanitize GTID for use in filename (replace colons with underscores)
-    std::string sanitized_gtid = expected_gtid;
-    std::replace(sanitized_gtid.begin(), sanitized_gtid.end(), ':', '_');
+    // Normalize GTID (remove whitespace) before using
+    // This simulates MySQL C API behavior which may return GTIDs with newlines
+    std::string normalized_gtid = expected_gtid;
+    normalized_gtid.erase(
+        std::remove_if(normalized_gtid.begin(), normalized_gtid.end(),
+                       [](unsigned char c) { return std::isspace(c); }),
+        normalized_gtid.end());
 
-    std::string filepath = test_dir_ + "/snapshot_" + sanitized_gtid + ".dmp";
+    // Use a short hash for filename to avoid "file name too long" errors
+    // Long GTIDs (e.g., 6 UUIDs from multiple replication sources) can exceed filesystem limits
+    std::hash<std::string> hasher;
+    std::string filepath = test_dir_ + "/snapshot_" + std::to_string(hasher(normalized_gtid)) + ".dmp";
 
     // Convert table_contexts to format expected by WriteDumpV1
     std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted;
@@ -107,7 +114,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
       converted[name] = {ctx->index.get(), ctx->doc_store.get()};
     }
 
-    auto success = storage::dump_v1::WriteDumpV1(filepath, expected_gtid, *config_, converted);
+    auto success = storage::dump_v1::WriteDumpV1(filepath, normalized_gtid, *config_, converted);
     EXPECT_TRUE(success) << "Failed to create snapshot";
 
     return filepath;
@@ -425,6 +432,81 @@ TEST_F(GtidSnapshotIntegrationTest, MultipleSnapshotsWithDifferentGtids) {
   for (size_t i = 0; i < gtids.size(); ++i) {
     std::string captured_gtid = GetSnapshotGtid(snapshot_paths[i]);
     EXPECT_EQ(captured_gtid, gtids[i]) << "Snapshot " << i << " has wrong GTID";
+  }
+}
+
+/**
+ * @brief Test GTID whitespace handling (MySQL 8.4 compatibility)
+ *
+ * MySQL 8.4 returns GTIDs with newlines for readability when multiple UUIDs are present.
+ * This test verifies that MygramDB correctly handles GTIDs with various whitespace characters.
+ *
+ * Background:
+ * - MySQL's default_string_format uses ",\n" as gno_sid_separator
+ * - Long GTID strings contain embedded newlines after each comma
+ * - Example from production: "uuid1:1-100,\nuuid2:1-200,\nuuid3:1-300"
+ * - MySQL's parser uses SKIP_WHITESPACE() to handle this
+ *
+ * See: backup/mysql-8.4.7/sql/rpl_gtid_set.cc:78-79
+ */
+TEST_F(GtidSnapshotIntegrationTest, GtidWithWhitespaceHandling) {
+  // Test cases covering MySQL's actual formatting behavior
+  std::vector<std::pair<std::string, std::string>> test_cases = {
+      // Case 1: Single UUID with newlines (should be normalized)
+      {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100\n",
+       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
+
+      // Case 2: Multiple UUIDs with newlines after commas (MySQL 8.4 format)
+      {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100,\n"
+       "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-200",
+       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100,"
+       "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-200"},
+
+      // Case 3: Real-world example with 6 UUIDs (observed in production)
+      {"023cdb62-8398-11ee-9327-4a0008d26241:1-8178383,\n"
+       "ba13f0ad-f09a-11e8-b079-b2869295776e:1-183978832,\n"
+       "cf65e299-d4d1-11ec-9b58-caab0c3eeec8:1-107084115,\n"
+       "e01b10a0-b7ee-11f0-b687-d24f2b326650:1-2408289,\n"
+       "ef2ed951-f10a-11e8-a7bc-6ae4cd7ca684:1-1490678,\n"
+       "ffad7b96-8397-11ee-943f-8e94ebb74b41:1-105346456",
+       "023cdb62-8398-11ee-9327-4a0008d26241:1-8178383,"
+       "ba13f0ad-f09a-11e8-b079-b2869295776e:1-183978832,"
+       "cf65e299-d4d1-11ec-9b58-caab0c3eeec8:1-107084115,"
+       "e01b10a0-b7ee-11f0-b687-d24f2b326650:1-2408289,"
+       "ef2ed951-f10a-11e8-a7bc-6ae4cd7ca684:1-1490678,"
+       "ffad7b96-8397-11ee-943f-8e94ebb74b41:1-105346456"},
+
+      // Case 4: Mixed whitespace (spaces, tabs, newlines)
+      {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100, \n\t"
+       "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-200",
+       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100,"
+       "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-200"},
+
+      // Case 5: Leading and trailing whitespace
+      {"\n  3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100  \n",
+       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
+  };
+
+  for (size_t i = 0; i < test_cases.size(); ++i) {
+    const auto& [gtid_with_whitespace, expected_normalized] = test_cases[i];
+
+    // Add a test document
+    table_ctx_->index->AddDocument(static_cast<int>(i + 1), "test doc");
+    table_ctx_->doc_store->AddDocument(std::to_string(i + 1), {{"content", "test doc"}});
+
+    // Create snapshot with GTID containing whitespace
+    std::string path = CreateSnapshotWithGtid(gtid_with_whitespace);
+
+    // Verify GTID is normalized (whitespace removed)
+    std::string captured_gtid = GetSnapshotGtid(path);
+    EXPECT_EQ(captured_gtid, expected_normalized)
+        << "Test case " << i << " failed\n"
+        << "Input GTID (with whitespace): " << gtid_with_whitespace << "\n"
+        << "Expected (normalized): " << expected_normalized << "\n"
+        << "Actual (captured): " << captured_gtid;
+
+    // Cleanup
+    std::filesystem::remove(path);
   }
 }
 

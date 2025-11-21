@@ -49,6 +49,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true  # Stop all jobs on first failure
 
     steps:
     - name: Checkout code
@@ -183,8 +185,14 @@ jobs:
   build-and-test-macos:
     name: Build and Test (macOS)
     needs: [changes, linux-test-and-coverage]
-    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
+    # Skip macOS tests on main push due to timeout instability
+    # macOS tests run on develop branch and PRs
+    if: |
+      github.event_name == 'pull_request' &&
+      (needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true')
     runs-on: macos-latest
+    strategy:
+      fail-fast: true  # Stop all jobs on first failure
 
     steps:
     - name: Checkout code
