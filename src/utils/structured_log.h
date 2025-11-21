@@ -170,6 +170,11 @@ class StructuredLog {
   void Info() { spdlog::info("{}", Build()); }
 
   /**
+   * @brief Log as debug level
+   */
+  void Debug() { spdlog::debug("{}", Build()); }
+
+  /**
    * @brief Log as critical level
    */
   void Critical() { spdlog::critical("{}", Build()); }
