@@ -200,12 +200,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_debug")
-            .Field("type", "unknown_table_id")
-            .Field("event_type", "write_rows")
-            .Field("table_id", table_id)
-            .Debug();
+        spdlog::debug("Unknown table_id in write_rows event: {}", table_id);
         return std::nullopt;
       }
 
@@ -288,12 +283,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_debug")
-            .Field("type", "unknown_table_id")
-            .Field("event_type", "update_rows")
-            .Field("table_id", table_id)
-            .Debug();
+        spdlog::debug("Unknown table_id in update_rows event: {}", table_id);
         return std::nullopt;
       }
 
@@ -380,12 +370,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_debug")
-            .Field("type", "unknown_table_id")
-            .Field("event_type", "delete_rows")
-            .Field("table_id", table_id)
-            .Debug();
+        spdlog::debug("Unknown table_id in delete_rows event: {}", table_id);
         return std::nullopt;
       }
 
