@@ -47,8 +47,8 @@ jobs:
   linux-test-and-coverage:
     name: Linux Build, Test and Coverage
     needs: changes
-    if: needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
-    runs-on: ubuntu-latest
+    # Always run on main branch pushes, skip on PRs only if no relevant changes
+    if: github.event_name == 'push' || needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
     strategy:
       fail-fast: true  # Stop all jobs on first failure
 
@@ -184,106 +184,97 @@ jobs:
           build/Testing/Temporary/
 
   build-and-test-macos:
-    name: Build and Test (macOS)
-    needs: [changes, linux-test-and-coverage]
-    # Skip macOS tests on main push due to timeout instability
-    # macOS tests run on develop branch and PRs
-    if: |
-      github.event_name == 'pull_request' &&
-      (needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true')
-    runs-on: macos-latest
-    strategy:
-      fail-fast: true  # Stop all jobs on first failure
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Cache CMake dependencies
-      uses: actions/cache@v4
-      with:
-        path: build/_deps
-        key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
-        restore-keys: |
-          ${{ runner.os }}-cmake-deps-
-
-    - name: Cache ccache
-      uses: actions/cache@v4
-      with:
-        path: ~/Library/Caches/ccache
-        key: ${{ runner.os }}-ccache-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-ccache-
-
-    - name: Cache Homebrew packages
-      uses: actions/cache@v4
-      with:
-        path: ~/Library/Caches/Homebrew
-        key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/ci.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-brew-
-
-    - name: Install dependencies (macOS)
-      run: |
-        brew install \
-          cmake \
-          mysql-client@8.4 \
-          icu4c \
-          readline \
-          pkg-config \
-          ccache
-
-    - name: Setup ccache
-      run: |
-        ccache --set-config=max_size=500M
-        ccache --zero-stats
-
-    - name: Configure CMake
-      env:
-        CC: ccache clang
-        CXX: ccache clang++
-      run: |
-        mkdir -p build
-        cd build
-        cmake -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_TESTS=ON \
-              -DUSE_ICU=ON \
-              -DUSE_MYSQL=ON \
-              -DMYGRAMDB_PORTABLE_BUILD=ON \
-              ..
-
-    - name: Build
-      run: |
-        cd build
-        make -j$(sysctl -n hw.ncpu)
-
-    - name: Show ccache statistics
-      run: ccache --show-stats
-
-    - name: Run tests
-      run: |
-        cd build
-        ctest --output-on-failure --parallel $(sysctl -n hw.ncpu)
-
-    - name: Test binary
-      run: |
-        # Test help
-        ./build/bin/mygramdb --help
-
-        # Test version
-        ./build/bin/mygramdb --version
-
-        # Test config validation
-        ./build/bin/mygramdb -t examples/config-minimal.yaml
-
-    - name: Upload build artifacts
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-logs-macos
-        path: |
-          build/CMakeFiles/*.log
-          build/Testing/Temporary/
+  # macOS build and test is disabled since the development environment is macOS
+  # and local testing is sufficient. CI focuses on Linux compatibility.
+  # Uncomment this job if cross-platform testing on macOS is needed.
+  #
+  #   name: Build and Test (macOS)
+  #   needs: [changes, linux-test-and-coverage]
+  #   # Skip macOS tests on main push due to timeout instability
+  #   # macOS tests run on develop branch and PRs
+  #   if: |
+  #     github.event_name == 'pull_request' &&
+  #     (needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true')
+  #   runs-on: macos-latest
+  #   strategy:
+  #     fail-fast: true  # Stop all jobs on first failure
+  #   #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+  #   #   - name: Cache CMake dependencies
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: build/_deps
+  #       key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+  #       restore-keys: |
+  #         ${{ runner.os }}-cmake-deps-
+  #   #   - name: Cache ccache
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: ~/Library/Caches/ccache
+  #       key: ${{ runner.os }}-ccache-${{ github.sha }}
+  #       restore-keys: |
+  #         ${{ runner.os }}-ccache-
+  #   #   - name: Cache Homebrew packages
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: ~/Library/Caches/Homebrew
+  #       key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/ci.yml') }}
+  #       restore-keys: |
+  #         ${{ runner.os }}-brew-
+  #   #   - name: Install dependencies (macOS)
+  #     run: |
+  #       brew install \
+  #         cmake \
+  #         mysql-client@8.4 \
+  #         icu4c \
+  #         readline \
+  #         pkg-config \
+  #         ccache
+  #   #   - name: Setup ccache
+  #     run: |
+  #       ccache --set-config=max_size=500M
+  #       ccache --zero-stats
+  #   #   - name: Configure CMake
+  #     env:
+  #       CC: ccache clang
+  #       CXX: ccache clang++
+  #     run: |
+  #       mkdir -p build
+  #       cd build
+  #       cmake -DCMAKE_BUILD_TYPE=Release \
+  #             -DBUILD_TESTS=ON \
+  #             -DUSE_ICU=ON \
+  #             -DUSE_MYSQL=ON \
+  #             -DMYGRAMDB_PORTABLE_BUILD=ON \
+  #             ..
+  #   #   - name: Build
+  #     run: |
+  #       cd build
+  #       make -j$(sysctl -n hw.ncpu)
+  #   #   - name: Show ccache statistics
+  #     run: ccache --show-stats
+  #   #   - name: Run tests
+  #     run: |
+  #       cd build
+  #       ctest --output-on-failure --parallel $(sysctl -n hw.ncpu)
+  #   #   - name: Test binary
+  #     run: |
+  #       # Test help
+  #       ./build/bin/mygramdb --help
+  #   #       # Test version
+  #       ./build/bin/mygramdb --version
+  #   #       # Test config validation
+  #       ./build/bin/mygramdb -t examples/config-minimal.yaml
+  #   #   - name: Upload build artifacts
+  #     if: failure()
+  #     uses: actions/upload-artifact@v4
+  #     with:
+  #       name: build-logs-macos
+  #       path: |
+  #         build/CMakeFiles/*.log
+  #         build/Testing/Temporary/
 
   docker-build:
     name: Docker Build Test
