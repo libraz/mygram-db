@@ -175,6 +175,9 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
             oss << filter_value;
           } else if constexpr (std::is_same_v<T, double>) {
             oss << std::fixed << std::setprecision(kDefaultDoublePrecision) << filter_value;
+          } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+            // TimeValue: output as seconds
+            oss << filter_value.seconds;
           } else {
             oss << filter_value;
           }

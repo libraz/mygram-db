@@ -78,7 +78,9 @@ class BinlogReaderFixture : public ::testing::Test {
    * @brief Recreate BinlogReader with current configuration
    */
   void ResetReader() {
-    reader_ = std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, reader_config_);
+    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+    reader_ =
+        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
   }
 
   /**
@@ -267,7 +269,8 @@ TEST(BinlogReaderTest, Construction) {
   reader_config.start_gtid = "uuid:1";
   reader_config.queue_size = 1000;
 
-  BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config);
 
   // Should construct successfully
   EXPECT_FALSE(reader.IsRunning());
@@ -291,7 +294,8 @@ TEST(BinlogReaderTest, InitialState) {
   BinlogReader::Config reader_config;
   reader_config.start_gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:100";
 
-  BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config);
 
   EXPECT_FALSE(reader.IsRunning());
   EXPECT_EQ(reader.GetCurrentGTID(), "3E11FA47-71CA-11E1-9E33-C80AA9429562:100");
@@ -498,7 +502,8 @@ TEST(BinlogReaderTest, DestructorCallsStop) {
 
   // Create reader in a scope
   {
-    BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+    BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config);
     EXPECT_FALSE(reader.IsRunning());
 
     // Simulate having a binlog connection

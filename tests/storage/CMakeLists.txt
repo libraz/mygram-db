@@ -112,4 +112,26 @@ if(USE_MYSQL AND MYSQL_FOUND)
     mygramdb_config # Includes mygramdb_mysql transitively
     GTest::gtest_main
   )
+
+  # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+  gtest_discover_tests(dump_save_load_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES RESOURCE_LOCK storage_io
+  )
+
+  # SnapshotBuilder query generation logic tests
+  add_executable(snapshot_builder_query_test
+    snapshot_builder_query_test.cpp
+  )
+
+  target_link_libraries(snapshot_builder_query_test
+    mygramdb_config   # For TableConfig
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(snapshot_builder_query_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
 endif()

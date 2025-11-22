@@ -79,7 +79,9 @@ class BinlogReaderFixture : public ::testing::Test {
    * @brief Recreate BinlogReader with current configuration
    */
   void ResetReader() {
-    reader_ = std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, reader_config_);
+    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+    reader_ =
+        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
   }
 
   /**

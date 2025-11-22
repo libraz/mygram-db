@@ -152,7 +152,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
     TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
-    const config::TableConfig* table_config, bool multi_table_mode) {
+    const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone) {
   if ((buffer == nullptr) || length < 20) {
     // Minimum event size is 20 bytes (1 byte OK packet + 19 bytes binlog header)
     return std::nullopt;
@@ -248,7 +248,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Extract all filters (required + optional) from row data
       // Note: Filter extraction is done by caller (BinlogFilterEvaluator)
-      event.filters = ExtractFilters(row, current_config->filters);
+      event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
 
       // Also extract required_filters as FilterConfig format
       std::vector<config::FilterConfig> required_as_filters;
@@ -260,7 +260,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(row, required_as_filters);
+      auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
       spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
@@ -335,7 +335,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       event.gtid = current_gtid;
 
       // Extract all filters from after image
-      event.filters = ExtractFilters(after_row, current_config->filters);
+      event.filters = ExtractFilters(after_row, current_config->filters, datetime_timezone);
 
       // Also extract required_filters
       std::vector<config::FilterConfig> required_as_filters;
@@ -347,7 +347,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(after_row, required_as_filters);
+      auto required_filters = ExtractFilters(after_row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
       spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
@@ -418,7 +418,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       event.gtid = current_gtid;
 
       // Extract all filters from row data (before image for DELETE)
-      event.filters = ExtractFilters(row, current_config->filters);
+      event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
 
       // Also extract required_filters
       std::vector<config::FilterConfig> required_as_filters;
@@ -430,7 +430,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(row, required_as_filters);
+      auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
       spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),

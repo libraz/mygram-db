@@ -247,7 +247,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     spdlog::info("This may take a while for large tables. Please wait...");
 
     storage::SnapshotBuilder snapshot_builder(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
-                                              deps_.config.build);
+                                              deps_.config.mysql, deps_.config.build);
 
     auto snapshot_result = snapshot_builder.Build([this, &table_config, &snapshot_builder](const auto& progress) {
       // Check cancellation flag in progress callback
@@ -338,7 +338,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   binlog_config.start_gtid = start_gtid;
   binlog_config.queue_size = deps_.config.replication.queue_size;
 
-  binlog_reader_ = std::make_unique<mysql::BinlogReader>(*mysql_connection_, table_contexts_ptrs, binlog_config);
+  binlog_reader_ =
+      std::make_unique<mysql::BinlogReader>(*mysql_connection_, table_contexts_ptrs, deps_.config.mysql, binlog_config);
 
   // Save GTID for Start() method
   snapshot_gtid_ = start_gtid;

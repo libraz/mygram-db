@@ -99,8 +99,7 @@ class GtidSnapshotIntegrationTest : public ::testing::Test {
     // This simulates MySQL C API behavior which may return GTIDs with newlines
     std::string normalized_gtid = expected_gtid;
     normalized_gtid.erase(
-        std::remove_if(normalized_gtid.begin(), normalized_gtid.end(),
-                       [](unsigned char c) { return std::isspace(c); }),
+        std::remove_if(normalized_gtid.begin(), normalized_gtid.end(), [](unsigned char c) { return std::isspace(c); }),
         normalized_gtid.end());
 
     // Use a short hash for filename to avoid "file name too long" errors
@@ -453,8 +452,7 @@ TEST_F(GtidSnapshotIntegrationTest, GtidWithWhitespaceHandling) {
   // Test cases covering MySQL's actual formatting behavior
   std::vector<std::pair<std::string, std::string>> test_cases = {
       // Case 1: Single UUID with newlines (should be normalized)
-      {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100\n",
-       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
+      {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100\n", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
 
       // Case 2: Multiple UUIDs with newlines after commas (MySQL 8.4 format)
       {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100,\n"
@@ -483,8 +481,7 @@ TEST_F(GtidSnapshotIntegrationTest, GtidWithWhitespaceHandling) {
        "4E11FA47-71CA-11E1-9E33-C80AA9429562:1-200"},
 
       // Case 5: Leading and trailing whitespace
-      {"\n  3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100  \n",
-       "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
+      {"\n  3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100  \n", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100"},
   };
 
   for (size_t i = 0; i < test_cases.size(); ++i) {
@@ -500,11 +497,10 @@ TEST_F(GtidSnapshotIntegrationTest, GtidWithWhitespaceHandling) {
 
     // Verify GTID is normalized (whitespace removed)
     std::string captured_gtid = GetSnapshotGtid(path);
-    EXPECT_EQ(captured_gtid, expected_normalized)
-        << "Test case " << i << " failed\n"
-        << "Input GTID (with whitespace): " << gtid_with_whitespace << "\n"
-        << "Expected (normalized): " << expected_normalized << "\n"
-        << "Actual (captured): " << captured_gtid;
+    EXPECT_EQ(captured_gtid, expected_normalized) << "Test case " << i << " failed\n"
+                                                  << "Input GTID (with whitespace): " << gtid_with_whitespace << "\n"
+                                                  << "Expected (normalized): " << expected_normalized << "\n"
+                                                  << "Actual (captured): " << captured_gtid;
 
     // Cleanup
     std::filesystem::remove(path);

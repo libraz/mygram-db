@@ -10,6 +10,7 @@
     "binlog_row_image": "FULL",
     "connect_timeout_ms": 3000,
     "session_timeout_sec": 3600,
+    "datetime_timezone": "+00:00",
     "ssl_enable": false
   },
   "tables": [

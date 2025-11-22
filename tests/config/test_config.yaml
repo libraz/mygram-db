@@ -10,6 +10,7 @@ mysql:
   connect_timeout_ms: 5000
   read_timeout_ms: 7200000
   write_timeout_ms: 7200000
+  datetime_timezone: "+00:00"  # Timezone for DATETIME columns (default: "+00:00" UTC)
 
 tables:
   - name: test_table

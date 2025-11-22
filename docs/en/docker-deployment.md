@@ -20,6 +20,7 @@ nano .env
 ```
 
 **Important:** Change the following default values in `.env`:
+
 - `MYSQL_ROOT_PASSWORD` - MySQL root password
 - `MYSQL_PASSWORD` - MySQL replication user password
 - `REPLICATION_SERVER_ID` - Unique server ID for this MygramDB instance
@@ -54,6 +55,7 @@ docker-compose down -v
 All configuration is done via environment variables in the `.env` file:
 
 #### MySQL Configuration
+
 ```bash
 MYSQL_HOST=mysql                    # MySQL host
 MYSQL_PORT=3306                     # MySQL port
@@ -64,6 +66,7 @@ MYSQL_USE_GTID=true                 # Use GTID-based replication
 ```
 
 #### Table Configuration
+
 ```bash
 TABLE_NAME=articles                 # Table to index
 TABLE_PRIMARY_KEY=id                # Primary key column
@@ -73,6 +76,7 @@ TABLE_KANJI_NGRAM_SIZE=1            # N-gram size for CJK
 ```
 
 #### Replication Configuration
+
 ```bash
 REPLICATION_ENABLE=true             # Enable replication
 REPLICATION_SERVER_ID=12345         # Unique server ID (IMPORTANT)
@@ -80,6 +84,7 @@ REPLICATION_START_FROM=snapshot     # Start from: snapshot, latest, or gtid=<UUI
 ```
 
 #### Memory Management
+
 ```bash
 MEMORY_HARD_LIMIT_MB=8192           # Hard memory limit
 MEMORY_SOFT_TARGET_MB=4096          # Soft memory target
@@ -88,12 +93,14 @@ MEMORY_NORMALIZE_WIDTH=narrow       # Width normalization
 ```
 
 #### API Server
+
 ```bash
 API_BIND=0.0.0.0                    # Bind address
 API_PORT=11016                      # API port
 ```
 
 #### Network Configuration
+
 ```bash
 # Network ACL (Access Control List)
 # IMPORTANT: Configure this for security in production environments
@@ -113,6 +120,7 @@ NETWORK_ALLOW_CIDRS=0.0.0.0/0       # Allowed IP ranges (comma-separated)
 **Security Warning:** If `NETWORK_ALLOW_CIDRS` is not set or empty, **all connections will be denied** by default. Always configure this setting.
 
 #### Logging
+
 ```bash
 LOG_LEVEL=info                      # Log level: debug, info, warn, error
 LOG_FORMAT=json                     # Log format: json or text
@@ -152,6 +160,26 @@ docker run -d --name mygramdb \
 ```
 
 ## Production Deployment
+
+### Building Docker Images
+
+To build a Docker image with proper version tagging:
+
+```bash
+# Get the current version from git tag
+VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+
+# Build with version argument
+docker build --build-arg MYGRAMDB_VERSION=$VERSION -t mygramdb:$VERSION .
+
+# Or specify version manually
+docker build --build-arg MYGRAMDB_VERSION=1.2.5 -t mygramdb:1.2.5 .
+
+# Tag as latest
+docker tag mygramdb:$VERSION mygramdb:latest
+```
+
+**Note:** If `MYGRAMDB_VERSION` build argument is not provided, the build will use version 0.0.0 or attempt to read from git tags if the `.git` directory is present in the build context.
 
 ### Using Pre-built Images
 
@@ -201,10 +229,12 @@ docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d
 Production compose file includes resource limits:
 
 **MySQL:**
+
 - CPU: 2-4 cores
 - Memory: 2-4 GB
 
 **MygramDB:**
+
 - CPU: 4-8 cores
 - Memory: 10-20 GB
 

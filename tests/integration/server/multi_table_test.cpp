@@ -526,7 +526,8 @@ TEST(BinlogReaderMultiTableTest, EventRoutingToDifferentTables) {
   reader_config.start_gtid = "test-uuid:1";
   reader_config.queue_size = 100;
 
-  mygramdb::mysql::BinlogReader reader(conn, table_contexts, reader_config);
+  mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
 
   // Verify initial state
   EXPECT_FALSE(reader.IsRunning());
@@ -565,7 +566,8 @@ TEST(BinlogReaderMultiTableTest, UnknownTableEventIgnored) {
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "test-uuid:1";
 
-  mygramdb::mysql::BinlogReader reader(conn, table_contexts, reader_config);
+  mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
 
   // Verify that the reader is configured correctly
   EXPECT_FALSE(reader.IsRunning());
@@ -630,7 +632,8 @@ TEST(BinlogReaderMultiTableTest, MultipleEventTypesAcrossTables) {
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "test-uuid:1";
 
-  mygramdb::mysql::BinlogReader reader(conn, table_contexts, reader_config);
+  mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
 
   // Verify all tables are empty initially
   EXPECT_EQ(table1.doc_store->Size(), 0);
@@ -684,7 +687,8 @@ TEST(BinlogReaderMultiTableTest, MultiTableModeConfiguration) {
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "server-uuid:100";
 
-  mygramdb::mysql::BinlogReader reader(conn, table_contexts, reader_config);
+  mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
 
   // Verify configuration
   EXPECT_FALSE(reader.IsRunning());

@@ -79,17 +79,19 @@ class BinlogReader {
    * @deprecated Use multi-table constructor instead
    */
   BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
-               config::TableConfig table_config, const Config& config, server::ServerStats* stats = nullptr);
+               config::TableConfig table_config, config::MysqlConfig mysql_config, const Config& config,
+               server::ServerStats* stats = nullptr);
 
   /**
    * @brief Construct binlog reader (multi-table mode)
    * @param connection MySQL connection
    * @param table_contexts Map of table name to TableContext pointer
+   * @param mysql_config MySQL connection configuration (for datetime_timezone)
    * @param config Binlog reader configuration
    * @param stats Server statistics tracker (optional)
    */
   BinlogReader(Connection& connection, std::unordered_map<std::string, server::TableContext*> table_contexts,
-               const Config& config, server::ServerStats* stats = nullptr);
+               config::MysqlConfig mysql_config, const Config& config, server::ServerStats* stats = nullptr);
 
   ~BinlogReader();
 
@@ -160,6 +162,7 @@ class BinlogReader {
   storage::DocumentStore* doc_store_ = nullptr;
   config::TableConfig table_config_;
 
+  config::MysqlConfig mysql_config_;
   Config config_;
 
   std::atomic<bool> running_{false};

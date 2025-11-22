@@ -26,7 +26,7 @@ constexpr size_t kBytesPerMegabyte = kBytesPerKilobyte * 1024;
 
 // FilterValue type indices for serialization
 // These map to std::variant<std::monostate, bool, int8_t, uint8_t, int16_t, uint16_t, int32_t,
-// uint32_t, int64_t, uint64_t, std::string, double>
+// uint32_t, int64_t, uint64_t, TimeValue, std::string, double>
 constexpr uint8_t kTypeIndexMonostate = 0;
 constexpr uint8_t kTypeIndexBool = 1;
 constexpr uint8_t kTypeIndexInt8 = 2;
@@ -37,8 +37,9 @@ constexpr uint8_t kTypeIndexInt32 = 6;
 constexpr uint8_t kTypeIndexUInt32 = 7;
 constexpr uint8_t kTypeIndexInt64 = 8;
 constexpr uint8_t kTypeIndexUInt64 = 9;
-constexpr uint8_t kTypeIndexString = 10;
-constexpr uint8_t kTypeIndexDouble = 11;
+constexpr uint8_t kTypeIndexTimeValue = 10;
+constexpr uint8_t kTypeIndexString = 11;
+constexpr uint8_t kTypeIndexDouble = 12;
 
 /**
  * @brief Helper to write binary data to output stream
@@ -473,6 +474,8 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                     auto str_len = static_cast<uint32_t>(filter_value.size());
                     WriteBinary(ofs, str_len);
                     ofs.write(filter_value.data(), str_len);
+                  } else if constexpr (std::is_same_v<T, TimeValue>) {
+                    WriteBinary(ofs, filter_value.seconds);
                   } else {
                     WriteBinary(ofs, filter_value);
                   }
@@ -688,6 +691,12 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
               value = uint64_value;
               break;
             }
+            case kTypeIndexTimeValue: {  // TimeValue
+              TimeValue time_value{};
+              ReadBinary(ifs, time_value.seconds);
+              value = time_value;
+              break;
+            }
             case kTypeIndexString: {  // std::string
               uint32_t str_len = 0;
               ReadBinary(ifs, str_len);
@@ -824,6 +833,8 @@ Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
                     auto str_len = static_cast<uint32_t>(filter_value.size());
                     WriteBinary(output_stream, str_len);
                     output_stream.write(filter_value.data(), static_cast<std::streamsize>(str_len));
+                  } else if constexpr (std::is_same_v<T, TimeValue>) {
+                    WriteBinary(output_stream, filter_value.seconds);
                   } else {
                     WriteBinary(output_stream, filter_value);
                   }
@@ -1049,6 +1060,12 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
               uint64_t uint64_value = 0;
               ReadBinary(input_stream, uint64_value);
               value = uint64_value;
+              break;
+            }
+            case kTypeIndexTimeValue: {  // TimeValue
+              TimeValue time_value{};
+              ReadBinary(input_stream, time_value.seconds);
+              value = time_value;
               break;
             }
             case kTypeIndexString: {  // std::string

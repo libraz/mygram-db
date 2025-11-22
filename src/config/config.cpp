@@ -16,6 +16,7 @@
 #include <stdexcept>
 
 #include "config_schema_embedded.h"  // Auto-generated embedded schema
+#include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 
@@ -121,6 +122,9 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   }
   if (json_obj.contains("ssl_verify_server_cert")) {
     config.ssl_verify_server_cert = json_obj["ssl_verify_server_cert"].get<bool>();
+  }
+  if (json_obj.contains("datetime_timezone")) {
+    config.datetime_timezone = json_obj["datetime_timezone"].get<std::string>();
   }
 
   return config;
@@ -936,6 +940,15 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
       err_msg << "  Please ensure the file has the correct extension and valid syntax.";
       return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, err_msg.str(), path));
   }
+}
+
+mygram::utils::Expected<mygramdb::utils::DateTimeProcessor, mygram::utils::Error> MysqlConfig::CreateDateTimeProcessor()
+    const {
+  auto timezone_result = mygramdb::utils::TimezoneOffset::Parse(datetime_timezone);
+  if (!timezone_result) {
+    return MakeUnexpected(timezone_result.error());
+  }
+  return mygramdb::utils::DateTimeProcessor(*timezone_result);
 }
 
 }  // namespace mygramdb::config

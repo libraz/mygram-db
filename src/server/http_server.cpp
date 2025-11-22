@@ -80,6 +80,9 @@ json FilterValueToJson(const storage::FilterValue& value) {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, std::monostate>) {
           serialized = nullptr;
+        } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+          // TimeValue: serialize as seconds
+          serialized = arg.seconds;
         } else {
           serialized = arg;
         }
@@ -433,7 +436,19 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         // Apply ORDER BY, LIMIT, OFFSET on cached results
         std::vector<DocId> sorted_results;
         if (query->order_by.has_value()) {
-          sorted_results = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, *query);
+          // Get primary key column name from table config
+          std::string pk_col = "id";
+          auto tbl_it = table_contexts_.find(table);
+          if (tbl_it != table_contexts_.end()) {
+            pk_col = tbl_it->second->config.primary_key;
+          }
+
+          auto result = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, *query, pk_col);
+          if (!result.has_value()) {
+            SendError(res, kHttpBadRequest, result.error().message());
+            return;
+          }
+          sorted_results = std::move(result.value());
         } else {
           size_t start_idx = std::min(static_cast<size_t>(query->offset), cached_doc_ids.size());
           size_t end_idx = std::min(start_idx + query->limit, cached_doc_ids.size());
@@ -652,6 +667,30 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
                     default:
                       return false;
                   }
+                } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+                  // TIME value comparison: treat as signed integer (seconds)
+                  int64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoll(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;  // Invalid number
+                  }
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val.seconds == filter_val;
+                    case query::FilterOp::NE:
+                      return val.seconds != filter_val;
+                    case query::FilterOp::GT:
+                      return val.seconds > filter_val;
+                    case query::FilterOp::GTE:
+                      return val.seconds >= filter_val;
+                    case query::FilterOp::LT:
+                      return val.seconds < filter_val;
+                    case query::FilterOp::LTE:
+                      return val.seconds <= filter_val;
+                    default:
+                      return false;
+                  }
                 } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
                                      std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
                   // Unsigned integer comparison - use unsigned parsing to handle large values
@@ -737,8 +776,20 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Only use ResultSorter if ORDER BY is explicitly specified
     std::vector<DocId> sorted_results;
     if (query->order_by.has_value()) {
+      // Get primary key column name from table config
+      std::string pk_col = "id";
+      auto tbl_it = table_contexts_.find(table);
+      if (tbl_it != table_contexts_.end()) {
+        pk_col = tbl_it->second->config.primary_key;
+      }
+
       // Use ResultSorter for ORDER BY support (same as TCP)
-      sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query);
+      auto result = query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, pk_col);
+      if (!result.has_value()) {
+        SendError(res, kHttpBadRequest, result.error().message());
+        return;
+      }
+      sorted_results = std::move(result.value());
     } else {
       // No ORDER BY: apply limit/offset directly (preserve DocID order)
       size_t start_idx = std::min(static_cast<size_t>(query->offset), results.size());
@@ -1072,6 +1123,30 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
                       return val < filter_val;
                     case query::FilterOp::LTE:
                       return val <= filter_val;
+                    default:
+                      return false;
+                  }
+                } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+                  // TIME value comparison: treat as signed integer (seconds)
+                  int64_t filter_val = 0;
+                  try {
+                    filter_val = std::stoll(filter_cond.value);
+                  } catch (const std::exception&) {
+                    return false;  // Invalid number
+                  }
+                  switch (filter_cond.op) {
+                    case query::FilterOp::EQ:
+                      return val.seconds == filter_val;
+                    case query::FilterOp::NE:
+                      return val.seconds != filter_val;
+                    case query::FilterOp::GT:
+                      return val.seconds > filter_val;
+                    case query::FilterOp::GTE:
+                      return val.seconds >= filter_val;
+                    case query::FilterOp::LT:
+                      return val.seconds < filter_val;
+                    case query::FilterOp::LTE:
+                      return val.seconds <= filter_val;
                     default:
                       return false;
                   }

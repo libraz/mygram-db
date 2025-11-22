@@ -54,7 +54,22 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         // Cache stores full results (before pagination) to allow different OFFSET/LIMIT on same query
         auto full_results = cached_lookup.value().results;
         size_t total_results = full_results.size();
-        auto paginated_results = query::ResultSorter::SortAndPaginate(full_results, *current_doc_store, query);
+
+        // Get primary key column name from table config
+        std::string primary_key_column = "id";  // default
+        auto table_it = ctx_.table_contexts.find(query.table);
+        if (table_it != ctx_.table_contexts.end()) {
+          primary_key_column = table_it->second->config.primary_key;
+        }
+
+        auto paginated_result =
+            query::ResultSorter::SortAndPaginate(full_results, *current_doc_store, query, primary_key_column);
+
+        if (!paginated_result.has_value()) {
+          return paginated_result.error();
+        }
+
+        auto paginated_results = std::move(paginated_result.value());
 
         if (conn_ctx.debug_mode) {
           query::DebugInfo debug_info;
@@ -250,7 +265,21 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   if (!can_optimize) {
     total_results = results.size();
   }
-  auto sorted_results = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query);
+
+  // Get primary key column name from table config
+  std::string primary_key_column = "id";  // default
+  auto table_it = ctx_.table_contexts.find(query.table);
+  if (table_it != ctx_.table_contexts.end()) {
+    primary_key_column = table_it->second->config.primary_key;
+  }
+
+  auto sorted_result = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query, primary_key_column);
+
+  if (!sorted_result.has_value()) {
+    return sorted_result.error();
+  }
+
+  auto sorted_results = std::move(sorted_result.value());
 
   // Calculate query execution time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -588,6 +617,30 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
                   return val < filter_val;
                 case query::FilterOp::LTE:
                   return val <= filter_val;
+                default:
+                  return false;
+              }
+            } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+              // TIME value comparison: treat as signed integer (seconds)
+              int64_t filter_val = 0;
+              try {
+                filter_val = std::stoll(filter_cond.value);
+              } catch (const std::exception&) {
+                return false;  // Invalid number
+              }
+              switch (filter_cond.op) {
+                case query::FilterOp::EQ:
+                  return val.seconds == filter_val;
+                case query::FilterOp::NE:
+                  return val.seconds != filter_val;
+                case query::FilterOp::GT:
+                  return val.seconds > filter_val;
+                case query::FilterOp::GTE:
+                  return val.seconds >= filter_val;
+                case query::FilterOp::LT:
+                  return val.seconds < filter_val;
+                case query::FilterOp::LTE:
+                  return val.seconds <= filter_val;
                 default:
                   return false;
               }

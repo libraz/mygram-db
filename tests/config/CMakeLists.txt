@@ -7,9 +7,11 @@ target_link_libraries(config_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(config_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
 )
 
 # Required filters test
@@ -22,9 +24,11 @@ target_link_libraries(required_filters_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(required_filters_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
 )
 
 # Required filters formatting test
@@ -37,9 +41,11 @@ target_link_libraries(required_filters_formatting_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(required_filters_formatting_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
 )
 
 # Config help test
@@ -52,9 +58,11 @@ target_link_libraries(config_help_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(config_help_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
 )
 
 # Logging config test
@@ -67,9 +75,11 @@ target_link_libraries(logging_config_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(logging_config_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
 )
 
 # Rate limiting config test

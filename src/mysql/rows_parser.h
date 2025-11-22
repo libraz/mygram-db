@@ -81,10 +81,12 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
  *
  * @param row_data Parsed row data with all columns as strings
  * @param filter_configs Vector of filter configurations
+ * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
  * @return Map of filter name to typed FilterValue
  */
 std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
-    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs);
+    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
+    const std::string& datetime_timezone = "+00:00");
 
 }  // namespace mygramdb::mysql
 

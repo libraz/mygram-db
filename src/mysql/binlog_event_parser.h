@@ -32,13 +32,14 @@ class BinlogEventParser {
    * @param table_contexts Map of table name to TableContext (multi-table mode)
    * @param table_config Single table config (single-table mode, can be nullptr)
    * @param multi_table_mode Whether operating in multi-table mode
+   * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
    * @return BinlogEvent if successfully parsed, nullopt otherwise
    */
   static std::optional<BinlogEvent> ParseBinlogEvent(
       const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
       TableMetadataCache& table_metadata_cache,
       const std::unordered_map<std::string, server::TableContext*>& table_contexts,
-      const config::TableConfig* table_config, bool multi_table_mode);
+      const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone = "+00:00");
 
   /**
    * @brief Extract GTID from GTID_LOG_EVENT

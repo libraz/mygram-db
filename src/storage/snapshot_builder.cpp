@@ -23,7 +23,10 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include <unordered_set>
+#include <vector>
 
+#include "utils/datetime_converter.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -35,11 +38,13 @@ constexpr size_t kDefaultBatchSize = 1000;
 }  // namespace
 
 SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
-                                 config::TableConfig table_config, config::BuildConfig build_config)
+                                 config::TableConfig table_config, config::MysqlConfig mysql_config,
+                                 config::BuildConfig build_config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
       table_config_(std::move(table_config)),
+      mysql_config_(std::move(mysql_config)),
       build_config_(std::move(build_config)) {}
 
 mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
@@ -109,10 +114,9 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
       snapshot_gtid_ = std::string(row[0]);
       // Remove all whitespace (newlines, spaces, tabs) from GTID string
       // MySQL may return GTID with newlines when it's long
-      snapshot_gtid_.erase(
-          std::remove_if(snapshot_gtid_.begin(), snapshot_gtid_.end(),
-                         [](unsigned char c) { return std::isspace(c); }),
-          snapshot_gtid_.end());
+      snapshot_gtid_.erase(std::remove_if(snapshot_gtid_.begin(), snapshot_gtid_.end(),
+                                          [](unsigned char character) { return std::isspace(character); }),
+                           snapshot_gtid_.end());
     }
     // gtid_result_exp automatically freed by MySQLResult destructor
   }
@@ -297,26 +301,48 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
   std::ostringstream query;
   query << "SELECT ";
 
-  // Primary key
-  query << table_config_.primary_key;
+  // Collect all columns to SELECT (avoiding duplicates, preserving order)
+  std::vector<std::string> selected_columns;
+  std::unordered_set<std::string> seen_columns;
+
+  // Helper to add column if not already added
+  auto add_column = [&](const std::string& col) {
+    if (seen_columns.find(col) == seen_columns.end()) {
+      selected_columns.push_back(col);
+      seen_columns.insert(col);
+    }
+  };
+
+  // Primary key (always first)
+  add_column(table_config_.primary_key);
 
   // Text source columns
   if (!table_config_.text_source.column.empty()) {
-    query << ", " << table_config_.text_source.column;
+    add_column(table_config_.text_source.column);
   } else {
     for (const auto& col : table_config_.text_source.concat) {
-      query << ", " << col;
+      add_column(col);
     }
   }
 
   // Required filter columns (for binlog replication condition checking)
   for (const auto& filter : table_config_.required_filters) {
-    query << ", " << filter.name;
+    add_column(filter.name);
   }
 
   // Optional filter columns (for search-time filtering)
   for (const auto& filter : table_config_.filters) {
-    query << ", " << filter.name;
+    add_column(filter.name);
+  }
+
+  // Build SELECT clause from collected columns
+  bool first = true;
+  for (const auto& col : selected_columns) {
+    if (!first) {
+      query << ", ";
+    }
+    query << col;
+    first = false;
   }
 
   query << " FROM " << table_config_.name;
@@ -501,9 +527,62 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
       else if (type == "string" || type == "varchar" || type == "text") {
         filters[filter_config.name] = value_str;
       }
-      // Date/time types (store as string)
-      else if (type == "datetime" || type == "date" || type == "timestamp") {
-        filters[filter_config.name] = value_str;
+      // Date/time types (convert to epoch seconds)
+      else if (type == "datetime" || type == "date") {
+        // DATETIME/DATE: Convert using configured timezone
+        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
+        if (epoch_opt) {
+          filters[filter_config.name] = *epoch_opt;
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("storage_warning")
+              .Field("operation", "extract_filters")
+              .Field("type", "datetime_conversion_failed")
+              .Field("value", value_str)
+              .Field("field", filter_config.name)
+              .Field("timezone", mysql_config_.datetime_timezone)
+              .Warn();
+        }
+      } else if (type == "timestamp") {
+        // TIMESTAMP: Already in epoch seconds (UTC)
+        try {
+          filters[filter_config.name] = static_cast<uint64_t>(std::stoull(value_str));
+        } catch (const std::exception& e) {
+          mygram::utils::StructuredLog()
+              .Event("storage_warning")
+              .Field("operation", "extract_filters")
+              .Field("type", "timestamp_conversion_failed")
+              .Field("value", value_str)
+              .Field("field", filter_config.name)
+              .Field("error", e.what())
+              .Warn();
+        }
+      } else if (type == "time") {
+        // TIME: Convert to seconds since midnight using DateTimeProcessor
+        auto processor_result = mysql_config_.CreateDateTimeProcessor();
+        if (!processor_result) {
+          mygram::utils::StructuredLog()
+              .Event("storage_warning")
+              .Field("operation", "extract_filters")
+              .Field("type", "datetime_processor_creation_failed")
+              .Field("field", filter_config.name)
+              .Field("error", processor_result.error().message())
+              .Warn();
+        } else {
+          auto seconds_result = processor_result->TimeToSeconds(value_str);
+          if (seconds_result) {
+            filters[filter_config.name] = TimeValue{*seconds_result};
+          } else {
+            mygram::utils::StructuredLog()
+                .Event("storage_warning")
+                .Field("operation", "extract_filters")
+                .Field("type", "time_conversion_failed")
+                .Field("value", value_str)
+                .Field("field", filter_config.name)
+                .Field("error", seconds_result.error().message())
+                .Warn();
+          }
+        }
       } else {
         mygram::utils::StructuredLog()
             .Event("storage_warning")

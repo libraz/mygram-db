@@ -59,6 +59,14 @@ jobs:
           type=semver,pattern={{major}}
           type=raw,value=latest,enable={{is_default_branch}}
 
+    - name: Extract version from tag
+      id: version
+      run: |
+        # Extract version from git tag (remove 'v' prefix if present)
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version: $VERSION"
+
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
@@ -68,6 +76,8 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          MYGRAMDB_VERSION=${{ steps.version.outputs.version }}
         cache-from: |
           type=gha,scope=docker-build
           type=gha,scope=docker-release

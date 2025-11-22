@@ -109,6 +109,8 @@ mysql:
   connect_timeout_ms: 3000          # 接続タイムアウト(ミリ秒)
   session_timeout_sec: 3600         # セッションタイムアウト(秒、デフォルト: 3600 = 1時間)
                                     # スナップショット作成などの長時間処理中の切断を防ぐ
+  datetime_timezone: "+00:00"       # DATETIME/DATEカラムのタイムゾーン(デフォルト: "+00:00" UTC)
+                                    # 形式: [+-]HH:MM (例: "+09:00" JST, "-05:00" EST)
 
   # SSL/TLS設定(オプションだが本番環境では推奨)
   ssl_enable: false                 # SSL/TLSを有効化
@@ -132,6 +134,7 @@ mysql:
 | `binlog_row_image` | string | `FULL` | 行イメージ形式(FULLである必要がある) | ❌ 不可 |
 | `connect_timeout_ms` | integer | `3000` | 接続タイムアウト(ミリ秒) | ✅ 可能 |
 | `session_timeout_sec` | integer | `3600` | セッションタイムアウト(秒) - スナップショット作成などの長時間処理中の切断を防ぐ | ✅ 可能 |
+| `datetime_timezone` | string | `+00:00` | DATETIME/DATEカラムのタイムゾーン。形式: `[+-]HH:MM`。TIMESTAMPカラムは常にUTC。 | ❌ 不可(再起動が必要) |
 | `ssl_enable` | boolean | `false` | SSL/TLS接続を有効化 | ✅ 可能 |
 | `ssl_ca` | string | `` | CA証明書ファイルへのパス | ✅ 可能 |
 | `ssl_cert` | string | `` | クライアント証明書ファイルへのパス | ✅ 可能 |
@@ -262,7 +265,10 @@ tables:
 | `float` | FLOAT | 単精度浮動小数点数 |
 | `double` | DOUBLE | 倍精度浮動小数点数 |
 | `string`, `varchar`, `text` | VARCHAR, TEXT, CHAR | 文字列値 |
-| `datetime`, `date`, `timestamp` | DATETIME, DATE, TIMESTAMP | 日付/時刻値 |
+| `datetime` | DATETIME | 日付/時刻値(タイムゾーン対応、`datetime_timezone`で設定可能) |
+| `date` | DATE | 日付値(タイムゾーン対応、`datetime_timezone`で設定可能) |
+| `timestamp` | TIMESTAMP | タイムスタンプ値(常にUTC、`datetime_timezone`の影響を受けない) |
+| `time` | TIME | 時刻値(00:00:00からの秒数として格納、負数サポート) |
 
 #### 必須フィルタの演算子
 

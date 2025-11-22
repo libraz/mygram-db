@@ -32,6 +32,7 @@
 #include <sstream>
 
 #include "mysql/binlog_util.h"
+#include "utils/datetime_converter.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -1113,7 +1114,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
 }
 
 std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
-    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs) {
+    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
+    const std::string& datetime_timezone) {
   std::unordered_map<std::string, storage::FilterValue> filters;
 
   for (const auto& filter_config : filter_configs) {
@@ -1153,9 +1155,61 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
         filters[filter_config.name] = static_cast<int64_t>(std::stoll(value_str));
       } else if (filter_config.type == "float" || filter_config.type == "double") {
         filters[filter_config.name] = std::stod(value_str);
-      } else if (filter_config.type == "string" || filter_config.type == "varchar" || filter_config.type == "text" ||
-                 filter_config.type == "datetime" || filter_config.type == "date" ||
-                 filter_config.type == "timestamp") {
+      } else if (filter_config.type == "datetime" || filter_config.type == "date") {
+        // DATETIME/DATE: Convert to epoch seconds using timezone
+        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, datetime_timezone);
+        if (epoch_opt) {
+          filters[filter_config.name] = *epoch_opt;
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "datetime_conversion_failed")
+              .Field("value", value_str)
+              .Field("column_name", filter_config.name)
+              .Field("timezone", datetime_timezone)
+              .Warn();
+        }
+      } else if (filter_config.type == "timestamp") {
+        // TIMESTAMP: Already in epoch seconds (UTC), no timezone conversion needed
+        try {
+          filters[filter_config.name] = static_cast<uint64_t>(std::stoull(value_str));
+        } catch (const std::exception& e) {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "timestamp_conversion_failed")
+              .Field("value", value_str)
+              .Field("column_name", filter_config.name)
+              .Field("error", e.what())
+              .Error();
+        }
+      } else if (filter_config.type == "time") {
+        // TIME: Convert to seconds since midnight using DateTimeProcessor
+        // Create a temporary MysqlConfig to use DateTimeProcessor
+        config::MysqlConfig temp_config;
+        temp_config.datetime_timezone = datetime_timezone;
+        auto processor_result = temp_config.CreateDateTimeProcessor();
+        if (!processor_result) {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "datetime_processor_creation_failed")
+              .Field("column_name", filter_config.name)
+              .Field("error", processor_result.error().message())
+              .Error();
+        } else {
+          auto seconds_result = processor_result->TimeToSeconds(value_str);
+          if (seconds_result) {
+            filters[filter_config.name] = storage::TimeValue{*seconds_result};
+          } else {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "time_conversion_failed")
+                .Field("value", value_str)
+                .Field("column_name", filter_config.name)
+                .Field("error", seconds_result.error().message())
+                .Warn();
+          }
+        }
+      } else if (filter_config.type == "string" || filter_config.type == "varchar" || filter_config.type == "text") {
         filters[filter_config.name] = value_str;
       } else if (filter_config.type == "boolean") {
         // Boolean: "1"/"true" = true, "0"/"false" = false

@@ -30,23 +30,26 @@ namespace mygramdb::mysql {
 
 // Single-table mode constructor (deprecated)
 BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
-                           config::TableConfig table_config, const Config& config, server::ServerStats* stats)
+                           config::TableConfig table_config, config::MysqlConfig mysql_config, const Config& config,
+                           server::ServerStats* stats)
     : connection_(connection),
 
       index_(&index),
       doc_store_(&doc_store),
       table_config_(std::move(table_config)),
+      mysql_config_(std::move(mysql_config)),
       config_(config),
       current_gtid_(config.start_gtid),
       server_stats_(stats) {}
 
 // Multi-table mode constructor
 BinlogReader::BinlogReader(Connection& connection,
-                           std::unordered_map<std::string, server::TableContext*> table_contexts, const Config& config,
-                           server::ServerStats* stats)
+                           std::unordered_map<std::string, server::TableContext*> table_contexts,
+                           config::MysqlConfig mysql_config, const Config& config, server::ServerStats* stats)
     : connection_(connection),
       table_contexts_(std::move(table_contexts)),
       multi_table_mode_(true),
+      mysql_config_(std::move(mysql_config)),
       config_(config),
       current_gtid_(config.start_gtid),
       server_stats_(stats) {}
@@ -540,7 +543,7 @@ void BinlogReader::ReaderThreadFunc() {
       // Parse the binlog event using BinlogEventParser
       auto event_opt = BinlogEventParser::ParseBinlogEvent(
           rpl.buffer, rpl.size, current_gtid_, table_metadata_cache_, table_contexts_,
-          multi_table_mode_ ? nullptr : &table_config_, multi_table_mode_);
+          multi_table_mode_ ? nullptr : &table_config_, multi_table_mode_, mysql_config_.datetime_timezone);
 
       if (event_opt) {
         spdlog::debug("Parsed event: type={}, table={}", static_cast<int>(event_opt->type), event_opt->table_name);
@@ -682,7 +685,8 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   }
 
   // Delegate to BinlogEventProcessor
-  return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, server_stats_);
+  return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
+                                            server_stats_);
 }
 
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {

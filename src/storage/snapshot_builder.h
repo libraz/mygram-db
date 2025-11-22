@@ -45,10 +45,12 @@ class SnapshotBuilder {
    * @param index N-gram index
    * @param doc_store Document store
    * @param table_config Table configuration
+   * @param mysql_config MySQL connection configuration (for datetime_timezone)
    * @param build_config Build configuration (batch_size, parallelism)
    */
   SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
-                  config::TableConfig table_config, config::BuildConfig build_config = {});
+                  config::TableConfig table_config, config::MysqlConfig mysql_config = {},
+                  config::BuildConfig build_config = {});
 
   /**
    * @brief Build snapshot from SELECT query with consistent GTID
@@ -87,6 +89,7 @@ class SnapshotBuilder {
   index::Index& index_;
   DocumentStore& doc_store_;
   config::TableConfig table_config_;
+  config::MysqlConfig mysql_config_;
   config::BuildConfig build_config_;
 
   uint64_t processed_rows_ = 0;

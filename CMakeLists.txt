@@ -4,7 +4,7 @@ cmake_policy(SET CMP0048 NEW)
 cmake_policy(SET CMP0077 NEW)
 
 # Get version from environment variable or git tag
-if(DEFINED ENV{MYGRAMDB_VERSION})
+if(DEFINED ENV{MYGRAMDB_VERSION} AND NOT "$ENV{MYGRAMDB_VERSION}" STREQUAL "")
   set(PROJECT_VERSION_FROM_ENV "$ENV{MYGRAMDB_VERSION}")
   message(STATUS "Version from environment: ${PROJECT_VERSION_FROM_ENV}")
   project(MygramDB VERSION ${PROJECT_VERSION_FROM_ENV} LANGUAGES CXX C)

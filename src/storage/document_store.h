@@ -28,6 +28,23 @@ using mygram::utils::MakeUnexpected;
 using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::DocId)
 
 /**
+ * @brief TIME value representation
+ *
+ * Stores MySQL TIME type as seconds since midnight
+ * Range: -3020399 to 3020399 (-838:59:59 to 838:59:59)
+ */
+struct TimeValue {
+  int64_t seconds;  // Seconds since midnight (can be negative)
+
+  bool operator==(const TimeValue& other) const { return seconds == other.seconds; }
+  bool operator!=(const TimeValue& other) const { return seconds != other.seconds; }
+  bool operator<(const TimeValue& other) const { return seconds < other.seconds; }
+  bool operator<=(const TimeValue& other) const { return seconds <= other.seconds; }
+  bool operator>(const TimeValue& other) const { return seconds > other.seconds; }
+  bool operator>=(const TimeValue& other) const { return seconds >= other.seconds; }
+};
+
+/**
  * @brief Filter value types
  *
  * Supports multiple types for memory efficiency:
@@ -41,6 +58,7 @@ using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::Doc
  * - uint32_t: INT UNSIGNED (0 to 4B)
  * - int64_t: BIGINT
  * - uint64_t: DATETIME/TIMESTAMP (epoch timestamp)
+ * - TimeValue: TIME (seconds since midnight, -3020399 to 3020399)
  * - double: FLOAT/DOUBLE
  * - std::string: VARCHAR/TEXT
  */
@@ -54,6 +72,7 @@ using FilterValue = std::variant<std::monostate,  // NULL value
                                  uint32_t,        // INT UNSIGNED
                                  int64_t,         // BIGINT
                                  uint64_t,        // DATETIME/TIMESTAMP (epoch timestamp)
+                                 TimeValue,       // TIME (seconds since midnight)
                                  std::string,     // VARCHAR/TEXT
                                  double           // FLOAT/DOUBLE
                                  >;

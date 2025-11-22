@@ -2,6 +2,13 @@
 # Stage 1: Builder - Build the application
 FROM ubuntu:22.04 AS builder
 
+# Build argument for version (pass with --build-arg MYGRAMDB_VERSION=x.y.z)
+ARG MYGRAMDB_VERSION
+
+# Set version as environment variable for CMake
+# If not provided, CMake will use git tag or default to 0.0.0
+ENV MYGRAMDB_VERSION=${MYGRAMDB_VERSION}
+
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -25,8 +32,12 @@ WORKDIR /build
 COPY . .
 
 # Build the project
-RUN mkdir -p build && \
-    cd build && \
+RUN mkdir -p build && cd build && \
+    if [ -n "$MYGRAMDB_VERSION" ]; then \
+      echo "Building with version: $MYGRAMDB_VERSION"; \
+    else \
+      echo "MYGRAMDB_VERSION not set, CMake will use git tag or default to 0.0.0"; \
+    fi && \
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_TESTS=OFF \
           -DUSE_ICU=ON \

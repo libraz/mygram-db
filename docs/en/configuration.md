@@ -109,6 +109,8 @@ mysql:
   connect_timeout_ms: 3000          # Connection timeout in milliseconds
   session_timeout_sec: 3600         # Session timeout in seconds (default: 3600 = 1 hour)
                                     # Prevents disconnection during long operations like snapshot building
+  datetime_timezone: "+00:00"       # Timezone for DATETIME/DATE columns (default: "+00:00" UTC)
+                                    # Format: [+-]HH:MM (e.g., "+09:00" for JST, "-05:00" for EST)
 
   # SSL/TLS settings (optional but recommended for production)
   ssl_enable: false                 # Enable SSL/TLS
@@ -132,6 +134,7 @@ mysql:
 | `binlog_row_image` | string | `FULL` | Row image format (must be FULL) | ❌ No |
 | `connect_timeout_ms` | integer | `3000` | Connection timeout in milliseconds | ✅ Yes |
 | `session_timeout_sec` | integer | `3600` | Session timeout in seconds - prevents disconnection during long operations like snapshot building | ✅ Yes |
+| `datetime_timezone` | string | `+00:00` | Timezone for DATETIME/DATE columns. Format: `[+-]HH:MM`. TIMESTAMP columns are always UTC. | ❌ No (requires restart) |
 | `ssl_enable` | boolean | `false` | Enable SSL/TLS connection | ✅ Yes |
 | `ssl_ca` | string | `` | Path to CA certificate file | ✅ Yes |
 | `ssl_cert` | string | `` | Path to client certificate file | ✅ Yes |
@@ -262,7 +265,10 @@ tables:
 | `float` | FLOAT | Single-precision floating-point |
 | `double` | DOUBLE | Double-precision floating-point |
 | `string`, `varchar`, `text` | VARCHAR, TEXT, CHAR | String values |
-| `datetime`, `date`, `timestamp` | DATETIME, DATE, TIMESTAMP | Date/time values |
+| `datetime` | DATETIME | Date/time values (timezone-aware, configurable via `datetime_timezone`) |
+| `date` | DATE | Date values (timezone-aware, configurable via `datetime_timezone`) |
+| `timestamp` | TIMESTAMP | Timestamp values (always UTC, not affected by `datetime_timezone`) |
+| `time` | TIME | Time values (stored as seconds from 00:00:00, supports negative values) |
 
 #### Required Filter Operators
 

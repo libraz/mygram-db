@@ -47,8 +47,9 @@ class ResultSorter {
    * @param query Query with ORDER BY, LIMIT, OFFSET clauses
    * @return Sorted and paginated document IDs
    */
-  static std::vector<DocId> SortAndPaginate(std::vector<DocId>& results, const storage::DocumentStore& doc_store,
-                                            const Query& query);
+  static mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> SortAndPaginate(
+      std::vector<DocId>& results, const storage::DocumentStore& doc_store, const Query& query,
+      const std::string& primary_key_column = "id");
 
  private:
   /**
@@ -77,9 +78,11 @@ class ResultSorter {
    * @param doc_id Document ID
    * @param doc_store Document store
    * @param order_by ORDER BY clause
+   * @param primary_key_column Primary key column name (for distinguishing PK sort from filter sort)
    * @return Sort key as string (for comparison)
    */
-  static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store, const OrderByClause& order_by);
+  static std::string GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store, const OrderByClause& order_by,
+                                const std::string& primary_key_column = "id");
 
   /**
    * @brief Sort using Schwartzian Transform (pre-compute sort keys)
@@ -99,11 +102,13 @@ class ResultSorter {
    * @param results Document IDs to sort
    * @param doc_store Document store for retrieving sort keys
    * @param order_by ORDER BY clause (must be primary key)
+   * @param primary_key_column Primary key column name (for distinguishing PK sort from filter sort)
    * @return Sorted document IDs
    */
   static std::vector<DocId> SortWithSchwartzianTransform(const std::vector<DocId>& results,
                                                          const storage::DocumentStore& doc_store,
-                                                         const OrderByClause& order_by);
+                                                         const OrderByClause& order_by,
+                                                         const std::string& primary_key_column = "id");
 
   /**
    * @brief Compare function for sorting
@@ -111,10 +116,15 @@ class ResultSorter {
   struct SortComparator {
     const storage::DocumentStore& doc_store_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     const OrderByClause& order_by_;            // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    const std::string& primary_key_column_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     bool ascending_;
 
-    SortComparator(const storage::DocumentStore& doc_store, const OrderByClause& order_by)
-        : doc_store_(doc_store), order_by_(order_by), ascending_(order_by.order == SortOrder::ASC) {}
+    SortComparator(const storage::DocumentStore& doc_store, const OrderByClause& order_by,
+                   const std::string& primary_key_column)
+        : doc_store_(doc_store),
+          order_by_(order_by),
+          primary_key_column_(primary_key_column),
+          ascending_(order_by.order == SortOrder::ASC) {}
 
     bool operator()(DocId lhs, DocId rhs) const;
   };

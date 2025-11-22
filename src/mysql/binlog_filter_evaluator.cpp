@@ -13,6 +13,7 @@
 #include <cmath>
 
 #include "mysql/rows_parser.h"
+#include "utils/datetime_converter.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -20,7 +21,8 @@
 namespace mygramdb::mysql {
 
 bool BinlogFilterEvaluator::EvaluateRequiredFilters(
-    const std::unordered_map<std::string, storage::FilterValue>& filters, const config::TableConfig& table_config) {
+    const std::unordered_map<std::string, storage::FilterValue>& filters, const config::TableConfig& table_config,
+    const std::string& datetime_timezone) {
   // If no required_filters, all data is accepted
   if (table_config.required_filters.empty()) {
     return true;
@@ -28,7 +30,7 @@ bool BinlogFilterEvaluator::EvaluateRequiredFilters(
 
   // Check each required filter condition
   return std::all_of(table_config.required_filters.begin(), table_config.required_filters.end(),
-                     [&filters](const auto& required_filter) {
+                     [&filters, &datetime_timezone](const auto& required_filter) {
                        auto filter_iter = filters.find(required_filter.name);
                        if (filter_iter == filters.end()) {
                          mygram::utils::StructuredLog()
@@ -38,12 +40,13 @@ bool BinlogFilterEvaluator::EvaluateRequiredFilters(
                              .Warn();
                          return false;
                        }
-                       return CompareFilterValue(filter_iter->second, required_filter);
+                       return CompareFilterValue(filter_iter->second, required_filter, datetime_timezone);
                      });
 }
 
 bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value,
-                                               const config::RequiredFilterConfig& filter) {
+                                               const config::RequiredFilterConfig& filter,
+                                               const std::string& datetime_timezone) {
   // SECURITY: Limit filter value size to prevent memory exhaustion attacks
   // A malicious binlog event could contain multi-GB filter values
   constexpr size_t MAX_FILTER_VALUE_SIZE = 1024 * 1024;  // 1MB
@@ -214,18 +217,125 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     // Datetime/timestamp (stored as uint64_t epoch)
     uint64_t val = std::get<uint64_t>(value);
 
-    // For datetime comparison, we need to parse target value
-    // For now, assume target is numeric (epoch timestamp)
-    // TODO: Add proper datetime parsing if needed
-    uint64_t target = 0;
+    // Parse target value: support both epoch seconds and ISO8601 format
+    auto target_opt = mygramdb::utils::ParseDatetimeValue(filter.value, datetime_timezone);
+    if (!target_opt) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_datetime_filter")
+          .Field("reason", "parse_error")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Field("timezone", datetime_timezone)
+          .Warn();
+      return false;  // Fail-closed: reject document on invalid filter
+    }
+    uint64_t target = *target_opt;
+
+    // Perform comparison
+    if (filter.op == "=") {
+      return val == target;
+    }
+    if (filter.op == "!=") {
+      return val != target;
+    }
+    if (filter.op == "<") {
+      return val < target;
+    }
+    if (filter.op == ">") {
+      return val > target;
+    }
+    if (filter.op == "<=") {
+      return val <= target;
+    }
+    if (filter.op == ">=") {
+      return val >= target;
+    }
+
+  } else if (std::holds_alternative<storage::TimeValue>(value)) {
+    // TIME comparison (stored as TimeValue with seconds)
+    storage::TimeValue val = std::get<storage::TimeValue>(value);
+
+    // Parse target value: support both seconds (numeric) and HH:MM:SS format
+    // For simplicity, try to parse as integer first, then try TimeToSeconds
+    int64_t target = 0;
     try {
       size_t pos = 0;
-      target = std::stoull(filter.value, &pos);
+      target = std::stoll(filter.value, &pos);
+      // If entire string was consumed, it's a valid integer
+      if (pos != filter.value.length()) {
+        // Not a pure integer, might be HH:MM:SS format
+        // TODO: Use DateTimeProcessor::TimeToSeconds when available
+        // For now, reject non-integer formats
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_time_filter")
+            .Field("reason", "unsupported_format")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
+        return false;  // Fail-closed: reject document on invalid filter
+      }
+    } catch (const std::exception& e) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_time_filter")
+          .Field("reason", "parse_error")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
+      return false;  // Fail-closed: reject document on invalid filter
+    }
+
+    // Perform comparison
+    if (filter.op == "=") {
+      return val.seconds == target;
+    }
+    if (filter.op == "!=") {
+      return val.seconds != target;
+    }
+    if (filter.op == "<") {
+      return val.seconds < target;
+    }
+    if (filter.op == ">") {
+      return val.seconds > target;
+    }
+    if (filter.op == "<=") {
+      return val.seconds <= target;
+    }
+    if (filter.op == ">=") {
+      return val.seconds >= target;
+    }
+
+  } else if (std::holds_alternative<int32_t>(value) || std::holds_alternative<uint32_t>(value) ||
+             std::holds_alternative<int16_t>(value) || std::holds_alternative<uint16_t>(value) ||
+             std::holds_alternative<int8_t>(value) || std::holds_alternative<uint8_t>(value)) {
+    // Handle other integer types that might not be int64_t
+    // Convert to int64_t for comparison
+    int64_t val = 0;
+    if (std::holds_alternative<int32_t>(value)) {
+      val = std::get<int32_t>(value);
+    } else if (std::holds_alternative<uint32_t>(value)) {
+      val = static_cast<int64_t>(std::get<uint32_t>(value));
+    } else if (std::holds_alternative<int16_t>(value)) {
+      val = std::get<int16_t>(value);
+    } else if (std::holds_alternative<uint16_t>(value)) {
+      val = std::get<uint16_t>(value);
+    } else if (std::holds_alternative<int8_t>(value)) {
+      val = std::get<int8_t>(value);
+    } else if (std::holds_alternative<uint8_t>(value)) {
+      val = std::get<uint8_t>(value);
+    }
+
+    int64_t target = 0;
+    try {
+      size_t pos = 0;
+      target = std::stoll(filter.value, &pos);
       // SECURITY: Validate that entire string was consumed (no trailing garbage)
       if (pos != filter.value.length()) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_warning")
-            .Field("type", "invalid_unsigned_integer_filter")
+            .Field("type", "invalid_integer_filter")
             .Field("reason", "trailing_characters")
             .Field("value", filter.value)
             .Field("column_name", filter.name)
@@ -235,7 +345,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     } catch (const std::invalid_argument& e) {
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
-          .Field("type", "invalid_unsigned_integer_filter")
+          .Field("type", "invalid_integer_filter")
           .Field("reason", "parse_error")
           .Field("value", filter.value)
           .Field("column_name", filter.name)
@@ -244,7 +354,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     } catch (const std::out_of_range& e) {
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
-          .Field("type", "invalid_unsigned_integer_filter")
+          .Field("type", "invalid_integer_filter")
           .Field("reason", "out_of_range")
           .Field("value", filter.value)
           .Field("column_name", filter.name)
@@ -277,7 +387,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
 }
 
 std::unordered_map<std::string, storage::FilterValue> BinlogFilterEvaluator::ExtractAllFilters(
-    const RowData& row_data, const config::TableConfig& table_config) {
+    const RowData& row_data, const config::TableConfig& table_config, const std::string& datetime_timezone) {
   std::unordered_map<std::string, storage::FilterValue> all_filters;
 
   // Convert required_filters to FilterConfig format for extraction
@@ -292,11 +402,11 @@ std::unordered_map<std::string, storage::FilterValue> BinlogFilterEvaluator::Ext
   }
 
   // Extract required_filters columns
-  auto required_filters = ExtractFilters(row_data, required_as_filters);
+  auto required_filters = ExtractFilters(row_data, required_as_filters, datetime_timezone);
   all_filters.insert(required_filters.begin(), required_filters.end());
 
   // Extract optional filters columns
-  auto optional_filters = ExtractFilters(row_data, table_config.filters);
+  auto optional_filters = ExtractFilters(row_data, table_config.filters, datetime_timezone);
   all_filters.insert(optional_filters.begin(), optional_filters.end());
 
   return all_filters;

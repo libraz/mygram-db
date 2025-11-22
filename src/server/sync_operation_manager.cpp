@@ -312,7 +312,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     }
 
     // Build snapshot
-    storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->build);
+    storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
+                                     full_config_->build);
 
     RegisterBuilder(table_name, &builder);
 

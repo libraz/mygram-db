@@ -83,8 +83,8 @@ TEST_F(BinlogReaderResourceTest, StartFailsWithoutConnection) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   // Start without connecting to MySQL should fail
   auto result = reader_->Start();
@@ -112,8 +112,8 @@ TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   // Perform multiple Start/Stop cycles
   for (int i = 0; i < 3; ++i) {
@@ -154,8 +154,8 @@ TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   std::atomic<int> successful_starts{0};
   std::atomic<int> failed_starts{0};
@@ -192,8 +192,8 @@ TEST_F(BinlogReaderResourceTest, StopAfterFailedStart) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   // Start without connection (will fail)
   auto start_result = reader_->Start();
@@ -222,7 +222,8 @@ TEST_F(BinlogReaderResourceTest, DestructorCleanup) {
   reader_config.queue_size = 100;
 
   {
-    BinlogReader reader(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+    BinlogReader reader(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{}, reader_config,
+                        stats_.get());
 
     auto start_result = reader.Start();
     if (start_result) {
@@ -253,8 +254,8 @@ TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 10;  // Small queue to test backpressure
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   auto start_result = reader_->Start();
   if (!start_result) {
@@ -287,8 +288,8 @@ TEST_F(BinlogReaderResourceTest, GTIDPersistence) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
 
-  reader_ =
-      std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, reader_config, stats_.get());
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+                                           reader_config, stats_.get());
 
   // Set initial GTID
   std::string initial_gtid = "test-uuid:1-100";

@@ -12,6 +12,11 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 
+// Forward declarations
+namespace mygramdb::utils {
+class DateTimeProcessor;
+}
+
 namespace mygramdb::config {
 
 // Default values for configuration
@@ -79,6 +84,18 @@ struct MysqlConfig {
   std::string ssl_cert;
   std::string ssl_key;
   bool ssl_verify_server_cert = true;
+
+  // Timezone for interpreting DATETIME columns (default: UTC)
+  // TIMESTAMP columns are always in UTC regardless of this setting
+  // Note: This is stored as string for YAML/JSON serialization, but converted to
+  // TimezoneOffset during initialization
+  std::string datetime_timezone = "+00:00";
+
+  /**
+   * @brief Create DateTimeProcessor from configured timezone
+   * @return DateTimeProcessor or Error if timezone is invalid
+   */
+  mygram::utils::Expected<mygramdb::utils::DateTimeProcessor, mygram::utils::Error> CreateDateTimeProcessor() const;
 };
 
 /**

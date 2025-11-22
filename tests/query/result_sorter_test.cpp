@@ -11,6 +11,7 @@
 
 #include "query/query_parser.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
 
 using namespace mygramdb::query;
 using namespace mygramdb::storage;
@@ -41,7 +42,9 @@ TEST_F(ResultSorterTest, SortByPrimaryKeyDesc) {
   // order_by not set = defaults to primary key DESC
 
   // Sort
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify result size
   ASSERT_EQ(sorted.size(), 4);
@@ -76,7 +79,9 @@ TEST_F(ResultSorterTest, SortByPrimaryKeyAsc) {
   query.order_by = OrderByClause{"", SortOrder::ASC};  // Empty = primary key
 
   // Sort
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify ascending order: 50, 100, 200
   ASSERT_EQ(sorted.size(), 3);
@@ -107,7 +112,9 @@ TEST_F(ResultSorterTest, SortByFilterColumn) {
   query.offset = 0;
   query.order_by = OrderByClause{"score", SortOrder::DESC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify descending order by score: 200, 100, 50
   ASSERT_EQ(sorted.size(), 3);
@@ -137,7 +144,9 @@ TEST_F(ResultSorterTest, ApplyLimit) {
   query.limit = 5;
   query.offset = 0;
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Should return only 5 results
   EXPECT_EQ(sorted.size(), 5);
@@ -162,7 +171,9 @@ TEST_F(ResultSorterTest, ApplyOffset) {
   query.offset = 2;
   query.order_by = OrderByClause{"", SortOrder::ASC};  // ASC for easier testing
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Should return documents 3 and 4 (0-indexed: skip 0,1, return 2,3)
   ASSERT_EQ(sorted.size(), 2);
@@ -174,12 +185,204 @@ TEST_F(ResultSorterTest, ApplyOffset) {
   EXPECT_EQ(pk2.value(), "4");
 }
 
-// Test invalid column (now treated as NULL, with warning)
-TEST_F(ResultSorterTest, InvalidColumn) {
-  // Add documents without "invalid_column"
+/**
+ * @brief Test sorting by primary key column name
+ *
+ * This test verifies that when a column name is specified in SORT clause
+ * and that column is the primary key (not a filter column), sorting works correctly.
+ *
+ * Example: SEARCH threads 漫画 SORT id DESC
+ * where "id" is the primary key column name (not a filter column)
+ */
+TEST_F(ResultSorterTest, SortByPrimaryKeyColumnName) {
+  // Add documents with numeric primary keys (simulating an "id" column)
+  // These are NOT filter columns, just primary keys
   std::vector<DocId> doc_ids;
-  doc_ids.push_back(*doc_store_.AddDocument("doc1", {{"score", int32_t(100)}}));
-  doc_ids.push_back(*doc_store_.AddDocument("doc2", {{"score", int32_t(50)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("100"));
+  doc_ids.push_back(*doc_store_.AddDocument("50"));
+  doc_ids.push_back(*doc_store_.AddDocument("200"));
+  doc_ids.push_back(*doc_store_.AddDocument("150"));
+
+  // Sort by column name "id" in DESC order
+  // Since there's no filter column called "id", it should fall back to primary key
+  Query query_desc;
+  query_desc.type = QueryType::SEARCH;
+  query_desc.table = "test";
+  query_desc.search_text = "test";
+  query_desc.limit = 10;
+  query_desc.offset = 0;
+  query_desc.order_by = OrderByClause{"id", SortOrder::DESC};  // Column name (not empty)
+
+  auto result_desc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_desc);
+  ASSERT_TRUE(result_desc.has_value()) << result_desc.error().message();
+  auto sorted_desc = result_desc.value();
+
+  // Verify descending order: 200, 150, 100, 50
+  ASSERT_EQ(sorted_desc.size(), 4);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[0]).value(), "200");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[1]).value(), "150");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[2]).value(), "100");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[3]).value(), "50");
+
+  // Sort by column name "id" in ASC order
+  Query query_asc;
+  query_asc.type = QueryType::SEARCH;
+  query_asc.table = "test";
+  query_asc.search_text = "test";
+  query_asc.limit = 10;
+  query_asc.offset = 0;
+  query_asc.order_by = OrderByClause{"id", SortOrder::ASC};  // Column name (not empty)
+
+  auto result_asc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_asc);
+  ASSERT_TRUE(result_asc.has_value()) << result_asc.error().message();
+  auto sorted_asc = result_asc.value();
+
+  // Verify ascending order: 50, 100, 150, 200
+  ASSERT_EQ(sorted_asc.size(), 4);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_asc[0]).value(), "50");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_asc[1]).value(), "100");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_asc[2]).value(), "150");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_asc[3]).value(), "200");
+
+  // Verify that ASC and DESC are exact reverses of each other
+  for (size_t i = 0; i < sorted_asc.size(); i++) {
+    size_t reverse_idx = sorted_asc.size() - 1 - i;
+    EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_asc[i]).value(),
+              doc_store_.GetPrimaryKey(sorted_desc[reverse_idx]).value())
+        << "ASC[" << i << "] should equal DESC[" << reverse_idx << "]";
+  }
+}
+
+/**
+ * @brief Test sorting by primary key column name with non-default column name
+ *
+ * This test verifies that when the primary key column name is NOT "id",
+ * sorting by that column name works correctly.
+ */
+TEST_F(ResultSorterTest, SortByNonDefaultPrimaryKeyColumnName) {
+  // Add documents with numeric primary keys
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("100"));
+  doc_ids.push_back(*doc_store_.AddDocument("50"));
+  doc_ids.push_back(*doc_store_.AddDocument("200"));
+
+  // Sort by column name "user_id" (non-default primary key column name)
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+  query.order_by = OrderByClause{"user_id", SortOrder::DESC};
+
+  // Pass "user_id" as primary key column name
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query, "user_id");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Verify descending order: 200, 100, 50
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "200");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "100");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "50");
+}
+
+/**
+ * @brief Test filter column takes precedence over primary key column
+ *
+ * When both filter column and primary key have the same name,
+ * filter column should be used for sorting.
+ */
+TEST_F(ResultSorterTest, FilterColumnTakesPrecedenceOverPrimaryKey) {
+  // Add documents where filter column "id" has different values from primary key
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk_100", {{"id", int32_t(1)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk_50", {{"id", int32_t(3)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk_200", {{"id", int32_t(2)}}));
+
+  // Sort by "id" - should use filter column values (1, 2, 3), not primary keys
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+  query.order_by = OrderByClause{"id", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query, "id");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Should be sorted by filter column values: 1, 2, 3
+  // NOT by primary keys: pk_100, pk_200, pk_50
+  ASSERT_EQ(sorted.size(), 3);
+  auto val1 = doc_store_.GetFilterValue(sorted[0], "id");
+  auto val2 = doc_store_.GetFilterValue(sorted[1], "id");
+  auto val3 = doc_store_.GetFilterValue(sorted[2], "id");
+
+  EXPECT_EQ(std::get<int32_t>(val1.value()), 1);
+  EXPECT_EQ(std::get<int32_t>(val2.value()), 2);
+  EXPECT_EQ(std::get<int32_t>(val3.value()), 3);
+}
+
+/**
+ * @brief Test Schwartzian Transform with primary key column name
+ *
+ * When sorting >= 100 documents by primary key column name,
+ * Schwartzian Transform should be used and work correctly.
+ */
+TEST_F(ResultSorterTest, SchwartzianTransformWithPrimaryKeyColumnName) {
+  // Add 150 documents (above kSchwartzianTransformThreshold = 100)
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 150; i++) {
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i * 10)));
+  }
+
+  // Sort by column name "id" in DESC order
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 150;  // Request all results
+  query.offset = 0;
+  query.order_by = OrderByClause{"id", SortOrder::DESC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query, "id");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Verify descending order
+  ASSERT_EQ(sorted.size(), 150);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "1490");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "1480");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[149]).value(), "0");
+
+  // Verify complete order
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto pk_prev = doc_store_.GetPrimaryKey(sorted[i - 1]);
+    auto pk_curr = doc_store_.GetPrimaryKey(sorted[i]);
+    uint64_t num_prev = std::stoull(pk_prev.value());
+    uint64_t num_curr = std::stoull(pk_curr.value());
+    EXPECT_GE(num_prev, num_curr) << "Descending order violation at index " << i;
+  }
+}
+
+/**
+ * @brief Test invalid column error
+ *
+ * This test verifies that specifying a non-existent column name
+ * returns an error (not just a warning).
+ *
+ * Note: The current implementation allows primary key fallback,
+ * so this test uses string primary keys (not numeric) to ensure
+ * the invalid column is truly not found.
+ */
+TEST_F(ResultSorterTest, InvalidColumn) {
+  // Add documents with STRING primary keys and a filter column "score"
+  // This ensures "invalid_column" won't match the primary key pattern
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk_alpha", {{"score", int32_t(100)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk_beta", {{"score", int32_t(50)}}));
 
   // Try to sort by non-existent column
   Query query;
@@ -188,13 +391,20 @@ TEST_F(ResultSorterTest, InvalidColumn) {
   query.search_text = "test";
   query.limit = 10;
   query.offset = 0;
-  query.order_by = OrderByClause{"invalid_column", SortOrder::DESC};
+  query.order_by = OrderByClause{"nonexistent_column", SortOrder::DESC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
 
-  // Should still succeed (warning logged, but no error)
-  // Documents without the column are treated as NULL and sorted accordingly
-  EXPECT_EQ(sorted.size(), 2);
+  // Should now return error for non-existent column
+  ASSERT_FALSE(result.has_value()) << "Expected error for invalid column";
+
+  // Verify error message content
+  std::string error_msg = result.error().message();
+  EXPECT_NE(error_msg.find("not found"), std::string::npos) << "Error message: " << error_msg;
+  EXPECT_NE(error_msg.find("nonexistent_column"), std::string::npos) << "Column name should be in error message";
+
+  // Verify error code
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kInvalidArgument);
 }
 
 // Test empty results
@@ -208,7 +418,9 @@ TEST_F(ResultSorterTest, EmptyResults) {
   query.limit = 10;
   query.offset = 0;
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Should succeed with empty results
   EXPECT_TRUE(sorted.empty());
@@ -231,7 +443,9 @@ TEST_F(ResultSorterTest, PartialSortOptimization) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::DESC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Should return top 10 in descending order
   ASSERT_EQ(sorted.size(), 10);
@@ -258,7 +472,9 @@ TEST_F(ResultSorterTest, StringPrimaryKey) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify alphabetical order
   ASSERT_EQ(sorted.size(), 3);
@@ -297,7 +513,9 @@ TEST_F(ResultSorterTest, NumericPrimaryKeySortingNotLexicographic) {
   query_asc.offset = 0;
   query_asc.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted_asc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_asc);
+  auto result_asc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_asc);
+  ASSERT_TRUE(result_asc.has_value()) << result_asc.error().message();
+  auto sorted_asc = result_asc.value();
   ASSERT_EQ(sorted_asc.size(), 5);
 
   // Verify numeric ascending order: 1, 2, 3, 10, 20
@@ -316,7 +534,9 @@ TEST_F(ResultSorterTest, NumericPrimaryKeySortingNotLexicographic) {
   query_desc.offset = 0;
   query_desc.order_by = OrderByClause{"", SortOrder::DESC};
 
-  auto sorted_desc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_desc);
+  auto result_desc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query_desc);
+  ASSERT_TRUE(result_desc.has_value()) << result_desc.error().message();
+  auto sorted_desc = result_desc.value();
   ASSERT_EQ(sorted_desc.size(), 5);
 
   // Verify numeric descending order: 20, 10, 3, 2, 1
@@ -349,7 +569,9 @@ TEST_F(ResultSorterTest, MixedNumericAndNonNumericPrimaryKeys) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
   ASSERT_EQ(sorted.size(), 5);
 
   // Numeric keys sorted numerically: 1, 2, 10
@@ -408,7 +630,9 @@ TEST_F(ResultSorterTest, OffsetLimitOverflow) {
   query.order_by = OrderByClause{"score", SortOrder::ASC};
 
   // Should not crash or cause undefined behavior
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // With such a large offset, no results should be returned
   EXPECT_TRUE(sorted.empty());
@@ -417,14 +641,18 @@ TEST_F(ResultSorterTest, OffsetLimitOverflow) {
   query.offset = UINT32_MAX;
   query.limit = 1;
 
-  sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  sorted = result.value();
   EXPECT_TRUE(sorted.empty());
 
   // Test case 3: Normal case for comparison
   query.offset = 10;
   query.limit = 5;
 
-  sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  sorted = result.value();
   EXPECT_EQ(5, sorted.size());
 }
 
@@ -448,7 +676,9 @@ TEST_F(ResultSorterTest, SchwartzianTransformNumericPrimaryKey) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify all documents are present
   EXPECT_EQ(sorted.size(), 200);
@@ -487,7 +717,9 @@ TEST_F(ResultSorterTest, SchwartzianTransformStringPrimaryKey) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify all documents are present
   EXPECT_EQ(sorted.size(), 150);
@@ -531,7 +763,9 @@ TEST_F(ResultSorterTest, SchwartzianTransformFallbackForFilterColumn) {
   query.order_by = OrderByClause{"age", SortOrder::ASC};
 
   // Capture warning log (filter_column_not_yet_optimized should be logged)
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify all documents are present
   EXPECT_EQ(sorted.size(), 150);
@@ -568,7 +802,9 @@ TEST_F(ResultSorterTest, SchwartzianTransformBelowThreshold) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::DESC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify all documents are present
   EXPECT_EQ(sorted.size(), 50);
@@ -608,7 +844,9 @@ TEST_F(ResultSorterTest, SchwartzianTransformWithMissingPrimaryKeys) {
   query.offset = 0;
   query.order_by = OrderByClause{"", SortOrder::ASC};
 
-  auto sorted = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
 
   // Verify all documents are present
   EXPECT_EQ(sorted.size(), 120);

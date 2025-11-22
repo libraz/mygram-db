@@ -79,7 +79,9 @@ class BinlogReaderFixture : public ::testing::Test {
    * @brief Recreate BinlogReader with current configuration
    */
   void ResetReader() {
-    reader_ = std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, reader_config_);
+    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+    reader_ =
+        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
   }
 
   /**
@@ -130,7 +132,8 @@ TEST_F(BinlogReaderFixture, MultiTableProcessesCorrectTable) {
       {comments_ctx.name, &comments_ctx},
   };
 
-  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
 
   BinlogEvent comment_event = MakeEvent(BinlogEventType::INSERT, "300", 1, "Comment");
   comment_event.table_name = "comments";
@@ -153,7 +156,8 @@ TEST_F(BinlogReaderFixture, MultiTableSkipsUnknownTable) {
       {articles_ctx.name, &articles_ctx},
   };
 
-  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
   BinlogEvent other_event = MakeEvent(BinlogEventType::INSERT, "400", 1, "Ignored");
   other_event.table_name = "not_tracked";
   ASSERT_TRUE(multi_reader.ProcessEvent(other_event));
@@ -184,7 +188,8 @@ TEST(BinlogReaderTest, ServerStatsIntegration) {
   server::ServerStats stats;
 
   // Create BinlogReader with ServerStats
-  BinlogReader reader(conn, idx, doc_store, table_config, reader_config, &stats);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config, &stats);
 
   // Verify initial statistics are zero
   EXPECT_EQ(stats.GetReplInsertsApplied(), 0);
@@ -212,7 +217,8 @@ TEST(BinlogReaderTest, SetServerStats) {
   BinlogReader::Config reader_config;
 
   // Create BinlogReader without ServerStats
-  BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config);
 
   // Create ServerStats and set it
   server::ServerStats stats;
@@ -254,7 +260,8 @@ TEST(BinlogReaderTest, MultiTableModeWithServerStats) {
   server::ServerStats stats;
 
   // Create BinlogReader in multi-table mode with ServerStats
-  BinlogReader reader(conn, table_contexts, reader_config, &stats);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, table_contexts, mysql_config, reader_config, &stats);
 
   // Verify initial statistics are zero
   EXPECT_EQ(stats.GetReplInsertsApplied(), 0);
@@ -288,7 +295,8 @@ TEST(BinlogReaderTest, StopDoesNotCauseUseAfterFree) {
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
   BinlogReader::Config reader_config;
-  BinlogReader reader(conn, table_contexts, reader_config);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
 
   // Start and immediately stop
   // (Start will fail without real connection, but that's ok for this test)
@@ -378,7 +386,8 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
       {comments_ctx.name, &comments_ctx},
   };
 
-  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
 
   // Test ExtractAllFilters with articles config
   RowData article_row;
@@ -450,7 +459,8 @@ TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
       {draft_ctx.name, &draft_ctx},
   };
 
-  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
 
   // Filters with status = 1
   std::unordered_map<std::string, storage::FilterValue> filters_published;
@@ -501,7 +511,8 @@ TEST_F(BinlogReaderFixture, MultiTableModeDifferentTextSources) {
       {users_ctx.name, &users_ctx},
   };
 
-  BinlogReader multi_reader(connection_, contexts, reader_config_);
+  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
+  BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
 
   // Verify each table has correct configuration
   EXPECT_FALSE(products_ctx.config.text_source.column.empty());

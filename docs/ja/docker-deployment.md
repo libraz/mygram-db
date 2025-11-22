@@ -20,6 +20,7 @@ nano .env
 ```
 
 **重要:** `.env` 内の以下のデフォルト値を変更してください：
+
 - `MYSQL_ROOT_PASSWORD` - MySQL root パスワード
 - `MYSQL_PASSWORD` - MySQL レプリケーションユーザーのパスワード
 - `REPLICATION_SERVER_ID` - この MygramDB インスタンスの一意なサーバーID
@@ -54,6 +55,7 @@ docker-compose down -v
 すべての設定は `.env` ファイルの環境変数で行います：
 
 #### MySQL 設定
+
 ```bash
 MYSQL_HOST=mysql                    # MySQL ホスト
 MYSQL_PORT=3306                     # MySQL ポート
@@ -64,6 +66,7 @@ MYSQL_USE_GTID=true                 # GTID ベースのレプリケーション�
 ```
 
 #### テーブル設定
+
 ```bash
 TABLE_NAME=articles                 # インデックス対象のテーブル
 TABLE_PRIMARY_KEY=id                # プライマリキーカラム
@@ -73,6 +76,7 @@ TABLE_KANJI_NGRAM_SIZE=1            # CJK用のN-gramサイズ
 ```
 
 #### レプリケーション設定
+
 ```bash
 REPLICATION_ENABLE=true             # レプリケーションを有効化
 REPLICATION_SERVER_ID=12345         # 一意なサーバーID（重要）
@@ -80,6 +84,7 @@ REPLICATION_START_FROM=snapshot     # 開始位置: snapshot, latest, または 
 ```
 
 #### メモリ管理
+
 ```bash
 MEMORY_HARD_LIMIT_MB=8192           # ハードメモリ制限
 MEMORY_SOFT_TARGET_MB=4096          # ソフトメモリ目標
@@ -88,12 +93,14 @@ MEMORY_NORMALIZE_WIDTH=narrow       # 幅の正規化
 ```
 
 #### APIサーバー
+
 ```bash
 API_BIND=0.0.0.0                    # バインドアドレス
 API_PORT=11016                      # APIポート
 ```
 
 #### ロギング
+
 ```bash
 LOG_LEVEL=info                      # ログレベル: debug, info, warn, error
 LOG_FORMAT=json                     # ログ形式: json または text
@@ -133,6 +140,26 @@ docker run -d --name mygramdb \
 ```
 
 ## 本番環境へのデプロイ
+
+### Docker イメージのビルド
+
+適切なバージョンタグを付けてDockerイメージをビルドする方法：
+
+```bash
+# git タグから現在のバージョンを取得
+VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+
+# バージョン引数を指定してビルド
+docker build --build-arg MYGRAMDB_VERSION=$VERSION -t mygramdb:$VERSION .
+
+# または、バージョンを手動で指定
+docker build --build-arg MYGRAMDB_VERSION=1.2.5 -t mygramdb:1.2.5 .
+
+# latest タグを付与
+docker tag mygramdb:$VERSION mygramdb:latest
+```
+
+**注意:** `MYGRAMDB_VERSION` ビルド引数が指定されない場合、ビルドはバージョン0.0.0を使用するか、ビルドコンテキストに `.git` ディレクトリが存在する場合は git タグから読み取りを試みます。
 
 ### ビルド済みイメージの使用
 
@@ -182,10 +209,12 @@ docker-compose -f docker-compose.prod.yml --env-file .env.prod up -d
 本番用 compose ファイルにはリソース制限が含まれています：
 
 **MySQL:**
+
 - CPU: 2-4 コア
 - メモリ: 2-4 GB
 
 **MygramDB:**
+
 - CPU: 4-8 コア
 - メモリ: 10-20 GB
 

@@ -69,7 +69,8 @@ int main() {
   std::cout << "✓ Connected to MySQL" << std::endl;
 
   // Build snapshot
-  mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store, table_config);
+  mygramdb::config::MysqlConfig mysql_cfg;  // Use default timezone (+00:00)
+  mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store, table_config, mysql_cfg);
 
   auto result = snapshot_builder.Build([](const auto& progress) {
     if (progress.processed_rows % 5000 == 0 && progress.processed_rows > 0) {

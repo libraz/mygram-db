@@ -49,9 +49,11 @@ target_link_libraries(file_logging_test PRIVATE
   GTest::gtest_main
 )
 
+# RESOURCE_LOCK: Prevent parallel execution to avoid logging file I/O conflicts
 gtest_discover_tests(file_logging_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK logging_file_io
 )
 
 add_executable(daemon_utils_test
@@ -124,6 +126,20 @@ target_link_libraries(structured_log_test PRIVATE
 )
 
 gtest_discover_tests(structured_log_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(datetime_converter_test
+  datetime_converter_test.cpp
+)
+
+target_link_libraries(datetime_converter_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(datetime_converter_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )

@@ -1083,12 +1083,12 @@ TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
   filters_draft["status"] = static_cast<int64_t>(0);
 
   // Published table should accept status=1, reject status=0
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, published_ctx.config));
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, published_ctx.config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, published_ctx.config, "+00:00"));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, published_ctx.config, "+00:00"));
 
   // Draft table should accept status=0, reject status=1
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, draft_ctx.config));
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, draft_ctx.config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, draft_ctx.config, "+00:00"));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, draft_ctx.config, "+00:00"));
 }
 
 /**

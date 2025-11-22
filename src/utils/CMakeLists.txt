@@ -3,6 +3,7 @@ add_library(mygramdb_utils STATIC
   network_utils.cpp
   memory_utils.cpp
   daemon_utils.cpp
+  datetime_converter.cpp
 )
 
 target_include_directories(mygramdb_utils PUBLIC

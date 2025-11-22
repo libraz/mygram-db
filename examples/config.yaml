@@ -22,6 +22,9 @@ mysql:
   connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
   session_timeout_sec: 3600         # Session timeout in seconds (default: 3600 = 1 hour)
                                     # Prevents disconnection during long operations like snapshot building
+  datetime_timezone: "+00:00"       # Timezone for DATETIME/DATE columns (default: "+00:00" UTC)
+                                    # Format: [+-]HH:MM (e.g., "+09:00" for JST, "-05:00" for EST)
+                                    # TIMESTAMP columns are always stored as UTC (not affected by this setting)
   # SSL/TLS settings (optional but highly recommended for production)
   ssl_enable: false                 # Enable SSL/TLS (default: false)
   # ssl_ca: "/path/to/ca-cert.pem" # CA certificate for SSL/TLS

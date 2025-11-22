@@ -20,10 +20,11 @@ namespace mygramdb::mysql {
 
 bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
-                                        server::ServerStats* stats) {
+                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats) {
   try {
     // Evaluate required_filters to determine if data should exist in index
-    bool matches_required = BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config);
+    bool matches_required =
+        BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config, mysql_config.datetime_timezone);
 
     // Check if document already exists in index
     auto doc_id_opt = doc_store.GetDocId(event.primary_key);

@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD024 -->
 # Changelog
 
 All notable changes to MygramDB will be documented in this file.
@@ -6,6 +7,100 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.3.0] - 2025-11-22
+
+### ⚠️ BREAKING CHANGES
+
+- **Dump file format incompatibility for DATETIME/DATE/TIME columns**
+  - DATETIME, DATE, and TIME filter values changed from string storage to epoch seconds (uint64_t)
+  - **Impact**: Dump files from v1.2.x containing these column types cannot be loaded by v1.3.0
+  - **Action required**: Delete old dump files and rebuild snapshot from MySQL after upgrading
+  - **Reason**: Performance improvement and proper timezone support
+  - **Safe scenarios**: Tables with only `string`, `int`, `float` filter columns (no rebuild needed)
+  - **Affected scenarios**: Tables with `datetime`, `date`, or `time` filter columns (snapshot rebuild required)
+  - **Migration**: Remove old dump file before starting v1.3.0, allow snapshot to rebuild from MySQL
+  - **Rollback**: Dump files from v1.3.0 cannot be loaded by v1.2.5 (MySQL rebuild required)
+
+### Added
+
+- **MySQL TIME type support**
+  - Full support for MySQL TIME columns in filters and sorting
+  - Range: -838:59:59 to 838:59:59 (stored as signed seconds from midnight)
+  - New `TimeValue` structure for type-safe TIME handling
+  - Filter operators: `=`, `!=`, `<`, `<=`, `>`, `>=`
+  - Proper sorting with ASC/DESC directives
+  - Use cases: duration tracking, time-of-day scheduling, elapsed time calculations
+  - Implementation: `src/storage/document_store.h`, `src/mysql/rows_parser.cpp`, `src/query/result_sorter.cpp`
+  - Tests: 266 test cases in `tests/utils/datetime_converter_test.cpp`
+
+- **Timezone-aware DATETIME/DATE processing**
+  - New configuration option: `mysql.datetime_timezone` (format: `[+-]HH:MM`)
+  - Default: UTC (+00:00)
+  - DATETIME and DATE columns now interpret values in configured timezone
+  - TIMESTAMP columns always stored as UTC (MySQL spec)
+  - Supports all standard UTC offsets from -12:00 to +14:00
+  - ⚠️ Requires server restart when changed (not hot-reloadable)
+  - Implementation: `src/utils/datetime_converter.h/cpp` (664 lines of timezone logic)
+  - Configuration: `src/config/config.h/cpp`
+  - Integration: `src/mysql/binlog_filter_evaluator.cpp`, `src/storage/snapshot_builder.cpp`
+
+- **Bug fix: Primary key column name sorting**
+  - **Critical**: Fixed `SORT id ASC` and `SORT id DESC` to work as documented
+  - **Issue**: Documentation has always stated full syntax should work, but it was non-functional
+  - Only shorthand syntax (`SORT ASC/DESC`) worked before v1.3.0
+  - **Root cause**: `result_sorter.cpp` only checked empty column names for primary key path
+  - **Fix**: Detect when sort column matches primary key column name (`src/query/result_sorter.cpp:79-103`)
+  - **Impact**: High - fixes documentation vs. implementation mismatch
+  - Backward compatible - shorthand syntax still works
+  - Improved NULL value handling: ASC (NULL first), DESC (NULL last) - MySQL semantics
+  - Tests: 314 comprehensive test cases in `tests/query/result_sorter_asc_desc_test.cpp`
+
+- **Query parameter support in snapshot API**
+  - Filter and sort during snapshot creation
+  - HTTP endpoints: `GET /table/snapshot?filter=col:val&sort=col&order=desc`
+  - Use cases: export subsets, sorted dumps, category-specific backups
+  - Tests: 252 test cases in `tests/storage/snapshot_builder_query_test.cpp`
+
+### Changed
+
+- Updated configuration examples to include `datetime_timezone`
+  - `examples/config.yaml`, `examples/config.json`: Added with detailed comments
+  - `examples/config-minimal.yaml`, `examples/config-minimal.json`: Added with usage note
+- Documentation updates for TIME type and timezone support
+  - `docs/en/configuration.md`, `docs/ja/configuration.md`: TIME type, timezone configuration
+  - Marked `datetime_timezone` as not hot-reloadable (requires restart)
+
+### Fixed
+
+- **Critical: Primary key column name sorting** (`SORT id ASC/DESC`)
+  - Fixed documented but non-functional syntax: `SORT <primary_key_column> ASC/DESC`
+  - Documentation (docs/en/query_syntax.md:310-314) has always specified this should work
+  - Only shorthand syntax (`SORT ASC/DESC`) was functional before v1.3.0
+  - Root cause: `result_sorter.cpp` only checked empty column names for primary key path
+  - Impact: High - fixes long-standing doc/implementation mismatch
+  - Files: `src/query/result_sorter.cpp:79-103`, `src/server/handlers/search_handler.cpp`
+  - Tests: 314 test cases in `tests/query/result_sorter_asc_desc_test.cpp`
+
+- Sort key generation for filter columns
+  - When column name matches both primary key and filter column, filter value takes precedence
+  - Minimal impact - affects only tables with primary key column also configured as filter
+
+### Documentation
+
+- Comprehensive TIME type documentation in configuration guides
+- Timezone configuration reference (format, supported offsets, hot reload restrictions)
+- Enhanced sorting examples (primary key column name, ASC/DESC, NULL handling)
+- Migration guide for timezone configuration
+- Security considerations for non-UTC timezones
+
+### Testing
+
+- 832 new test cases across 3 new test files
+- DateTime converter: 266 tests (timezone parsing, conversion, edge cases)
+- Result sorter ASC/DESC: 314 tests (all data types, NULL handling, TIME sorting)
+- Snapshot builder query: 252 tests (filter, sort, combined scenarios)
+- Total changes: 57 files (+2,621 lines, -176 lines)
 
 ## [1.2.5] - 2025-11-22
 

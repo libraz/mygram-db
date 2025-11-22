@@ -6,6 +6,7 @@ mysql:
   user: "repl_user"
   password: "your_password"
   database: "mydb"
+  datetime_timezone: "+00:00"  # Timezone for DATETIME/DATE columns (UTC). Change to your timezone if needed (e.g., "+09:00" for JST)
 
 tables:
   - name: "articles"

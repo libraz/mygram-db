@@ -9,6 +9,8 @@
 
 #include <variant>
 
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::query {
@@ -34,7 +36,7 @@ constexpr double kPartialSortThreshold = 0.5;
 }  // namespace
 
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
-                                     const OrderByClause& order_by) {
+                                     const OrderByClause& order_by, const std::string& primary_key_column) {
   // If ordering by primary key (empty column name)
   if (order_by.IsPrimaryKey()) {
     // Get primary key as sort key
@@ -77,7 +79,35 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
   // Ordering by filter column
   auto filter_val = doc_store.GetFilterValue(doc_id, order_by.column);
   if (!filter_val.has_value()) {
-    // NULL value: treat as empty string (sorts first)
+    // Filter column not found - check if the column name matches the primary key column
+    // This allows sorting by primary key column name (e.g., SORT id DESC)
+    if (order_by.column == primary_key_column) {
+      // Treat as primary key sort
+      auto pk_opt = doc_store.GetPrimaryKey(doc_id);
+      if (pk_opt.has_value()) {
+        const auto& pk_str = pk_opt.value();
+
+        // Numeric primary keys: pad with zeros for proper lexicographic ordering
+        if (!pk_str.empty() &&
+            std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+          try {
+            uint64_t num = std::stoull(pk_str);
+            char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(num));
+            return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          } catch (const std::exception&) {
+            // Overflow or parse error - fall through to string comparison
+          }
+        }
+
+        // String primary key or numeric overflow: use as-is
+        return pk_str;
+      }
+    }
+
+    // Filter column not found and not primary key column: treat as NULL (empty string)
+    // NULL values sort first in ascending order, last in descending order
     return "";
   }
 
@@ -92,6 +122,13 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
           return arg ? "1" : "0";
         } else if constexpr (std::is_same_v<T, std::string>) {
           return arg;
+        } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+          // TimeValue: sort by seconds (can be negative)
+          // Add offset to make all values positive for sorting
+          char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          snprintf(buf, sizeof(buf), "%0*lld", kNumericWidth, arg.seconds + kSignedOffset);
+          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
         } else {
           // Numeric types: pad with zeros for lexicographic comparison
           // This ensures proper numeric ordering
@@ -118,7 +155,8 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
 
 std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<DocId>& results,
                                                               const storage::DocumentStore& doc_store,
-                                                              const OrderByClause& order_by) {
+                                                              const OrderByClause& order_by,
+                                                              const std::string& primary_key_column) {
   // Schwartzian Transform: Pre-compute sort keys once, then sort
   // This eliminates repeated GetPrimaryKey() calls during O(N log N) comparisons
   //
@@ -140,7 +178,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
 
     // Fallback: use traditional in-place sort (no pre-allocation needed)
     std::vector<DocId> sorted_results = results;
-    SortComparator comparator(doc_store, order_by);
+    SortComparator comparator(doc_store, order_by, primary_key_column);
     std::sort(sorted_results.begin(), sorted_results.end(), comparator);
     return sorted_results;
   }
@@ -148,7 +186,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
   // GetSortKey() handles both primary keys and filter columns
   for (const auto& doc_id : results) {
-    std::string sort_key = GetSortKey(doc_id, doc_store, order_by);
+    std::string sort_key = GetSortKey(doc_id, doc_store, order_by, primary_key_column);
     entries.push_back({doc_id, std::move(sort_key)});
   }
 
@@ -204,19 +242,25 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
 
   // For filter columns, we need to get the filter values
   // This generates strings for numeric types, but it's unavoidable
-  std::string key_lhs = GetSortKey(lhs, doc_store_, order_by_);
-  std::string key_rhs = GetSortKey(rhs, doc_store_, order_by_);
+  std::string key_lhs = GetSortKey(lhs, doc_store_, order_by_, primary_key_column_);
+  std::string key_rhs = GetSortKey(rhs, doc_store_, order_by_, primary_key_column_);
 
   // String comparison
   int cmp = key_lhs.compare(key_rhs);
   return ascending_ ? (cmp < 0) : (cmp > 0);
 }
 
-std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, const storage::DocumentStore& doc_store,
-                                                 const Query& query) {
+mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::SortAndPaginate(
+    std::vector<DocId>& results, const storage::DocumentStore& doc_store, const Query& query,
+    const std::string& primary_key_column) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // No results to sort
   if (results.empty()) {
-    return {};
+    return std::vector<DocId>{};
   }
 
   // Determine ORDER BY clause (default: primary key DESC)
@@ -241,24 +285,41 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     constexpr size_t kSampleSize = 100;
     size_t check_count = std::min(results.size(), kSampleSize);
 
-    bool column_found = false;
+    bool column_found_as_filter = false;
+    bool column_found_as_primary_key = false;
+
     for (size_t i = 0; i < check_count; ++i) {
       auto filter_val = doc_store.GetFilterValue(results[i], order_by.column);
       if (filter_val.has_value()) {
-        column_found = true;
+        column_found_as_filter = true;
         break;
       }
     }
 
-    if (!column_found) {
-      // Warning: column not found in sample
-      // Note: This is not a hard error - documents without the column will be sorted as NULL
+    // If not found as filter column, check if the column name matches the primary key column
+    // This allows sorting by primary key column name (e.g., SORT id DESC)
+    if (!column_found_as_filter) {
+      column_found_as_primary_key = (order_by.column == primary_key_column);
+    }
+
+    if (!column_found_as_filter && !column_found_as_primary_key) {
+      // Error: column not found in sample
+      // Return error since this likely indicates a typo in the column name
       mygram::utils::StructuredLog()
-          .Event("query_warning")
+          .Event("query_error")
           .Field("type", "order_by_column_not_found")
           .Field("column", order_by.column)
           .Field("check_count", static_cast<uint64_t>(check_count))
-          .Warn();
+          .Error();
+
+      return MakeUnexpected(MakeError(
+          ErrorCode::kInvalidArgument,
+          "Sort column '" + order_by.column +
+              "' not found. Column does not exist as filter column or primary key. Check column name spelling."));
+    }
+    if (!column_found_as_filter && column_found_as_primary_key) {
+      // Info: sorting by primary key column name (not filter column)
+      spdlog::debug("Sorting by primary key column '{}' (not found as filter column)", order_by.column);
     }
   }
 
@@ -294,7 +355,7 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     // Schwartzian Transform: Pre-compute sort keys, then sort
     // Expected: 30-50% reduction in sort time for N >= 10,000
     // Memory: ~50 bytes per entry × N (temporary allocation)
-    auto sorted_results = SortWithSchwartzianTransform(results, doc_store, order_by);
+    auto sorted_results = SortWithSchwartzianTransform(results, doc_store, order_by, primary_key_column);
     results = std::move(sorted_results);
 
     spdlog::trace("Used Schwartzian Transform for {} results", results.size());
@@ -303,7 +364,7 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     // For 800K results with K=100: ~800K * log2(100) ≈ 5.3M operations
     // vs full sort: 800K * log2(800K) ≈ 15.9M operations
     // Memory: in-place, no additional allocation
-    SortComparator comparator(doc_store, order_by);
+    SortComparator comparator(doc_store, order_by, primary_key_column);
     std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
                       comparator);
 
@@ -312,7 +373,7 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
     // Full sort: O(N * log(N))
     // Use when we need most of the results anyway OR result set is too small for Schwartzian Transform
     // Memory: in-place, no additional allocation
-    SortComparator comparator(doc_store, order_by);
+    SortComparator comparator(doc_store, order_by, primary_key_column);
     std::sort(results.begin(), results.end(), comparator);
 
     spdlog::trace("Used full sort for {} results", results.size());
@@ -325,7 +386,7 @@ std::vector<DocId> ResultSorter::SortAndPaginate(std::vector<DocId>& results, co
   // Return paginated slice (minimal copy, only final results)
   auto start_iter = results.begin() + static_cast<ptrdiff_t>(start);
   auto end_iter = results.begin() + static_cast<ptrdiff_t>(end);
-  return {start_iter, end_iter};
+  return std::vector<DocId>{start_iter, end_iter};
 }
 
 }  // namespace mygramdb::query

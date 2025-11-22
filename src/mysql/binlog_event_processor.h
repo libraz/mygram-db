@@ -34,11 +34,13 @@ class BinlogEventProcessor {
    * @param index Index to update
    * @param doc_store Document store to update
    * @param table_config Table configuration
+   * @param mysql_config MySQL configuration (for timezone handling)
    * @param stats Optional server statistics tracker
    * @return true if successfully processed
    */
   static bool ProcessEvent(const BinlogEvent& event, index::Index& index, storage::DocumentStore& doc_store,
-                           const config::TableConfig& table_config, server::ServerStats* stats = nullptr);
+                           const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
+                           server::ServerStats* stats = nullptr);
 };
 
 }  // namespace mygramdb::mysql
