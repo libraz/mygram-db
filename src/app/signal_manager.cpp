@@ -30,8 +30,6 @@ namespace {
 void SignalHandlerFunction(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
     SignalManager::signal_flags_.shutdown_requested = 1;
-  } else if (signal == SIGHUP) {
-    SignalManager::signal_flags_.reload_config_requested = 1;
   }
 }
 
@@ -54,14 +52,6 @@ SignalManager::~SignalManager() {
 
 bool SignalManager::IsShutdownRequested() {  // static
   return signal_flags_.shutdown_requested != 0;
-}
-
-bool SignalManager::CheckAndResetConfigReload() {  // static
-  if (signal_flags_.reload_config_requested != 0) {
-    signal_flags_.reload_config_requested = 0;
-    return true;
-  }
-  return false;
 }
 
 Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {
@@ -88,16 +78,6 @@ Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {
                                  "Failed to register SIGTERM handler: " + std::string(std::strerror(errno))));
   }
 
-  // Register SIGHUP handler
-  if (sigaction(SIGHUP, &sig_action, &original_sighup_) != 0) {
-    // Restore SIGINT and SIGTERM before returning error
-    sigaction(SIGINT, &original_sigint_, nullptr);
-    sigaction(SIGTERM, &original_sigterm_, nullptr);
-    return MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "Failed to register SIGHUP handler: " + std::string(std::strerror(errno))));
-  }
-
   return {};
 }
 
@@ -105,7 +85,6 @@ void SignalManager::RestoreHandlers() {
   // Restore original signal handlers (ignore errors - best effort cleanup)
   sigaction(SIGINT, &original_sigint_, nullptr);
   sigaction(SIGTERM, &original_sigterm_, nullptr);
-  sigaction(SIGHUP, &original_sighup_, nullptr);
 }
 
 }  // namespace mygramdb::app

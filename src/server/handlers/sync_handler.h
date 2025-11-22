@@ -30,10 +30,16 @@ class SyncHandler : public CommandHandler {
    * @brief Construct SyncHandler with dependencies
    *
    * @param ctx Handler context with shared server state
-   * @param sync_manager SyncOperationManager for SYNC operations (non-owning pointer)
+   * @param sync_manager SyncOperationManager for SYNC operations (non-owning pointer, MUST be non-null)
+   *
+   * @throws std::invalid_argument if sync_manager is nullptr
    */
   SyncHandler(HandlerContext& ctx, SyncOperationManager* sync_manager)
-      : CommandHandler(ctx), sync_manager_(sync_manager) {}
+      : CommandHandler(ctx), sync_manager_(sync_manager) {
+    if (sync_manager_ == nullptr) {
+      throw std::invalid_argument("SyncHandler: sync_manager must be non-null");
+    }
+  }
 
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
 

@@ -20,10 +20,6 @@
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 
-#ifdef USE_MYSQL
-#include "mysql/connection.h"
-#endif
-
 namespace mygramdb::config {
 
 namespace {
@@ -431,20 +427,8 @@ Config ParseConfigFromJson(const json& root) {
       // If gtid= format, validate the GTID format
       if (start.find("gtid=") == 0) {
         std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
-#ifdef USE_MYSQL
-        auto gtid = mysql::GTID::Parse(gtid_str);
-        if (!gtid) {
-          std::stringstream err_msg;
-          err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
-          err_msg << "  Expected format: gtid=UUID:transaction_id\n";
-          err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1\n";
-          err_msg << "  Where:\n";
-          err_msg << "    - UUID is the MySQL server UUID\n";
-          err_msg << "    - transaction_id is the transaction number";
-          throw std::runtime_error(err_msg.str());
-        }
-#else
-        // Basic GTID format check when MySQL is not available
+        // Basic GTID format check: UUID:transaction_id
+        // Full validation will be done when connecting to MySQL
         if (gtid_str.find(':') == std::string::npos) {
           std::stringstream err_msg;
           err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
@@ -452,7 +436,6 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1";
           throw std::runtime_error(err_msg.str());
         }
-#endif
       }
     }
   }

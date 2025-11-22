@@ -41,12 +41,6 @@ class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
-#ifdef USE_MYSQL
-namespace mygramdb::storage {
-class SnapshotBuilder;
-}  // namespace mygramdb::storage
-#endif
-
 namespace mygramdb::server {
 
 // Forward declaration
@@ -58,6 +52,10 @@ class SyncOperationManager;
 namespace mygramdb::cache {
 class CacheManager;
 }  // namespace mygramdb::cache
+
+namespace mygramdb::config {
+class RuntimeVariableManager;
+}  // namespace mygramdb::config
 
 namespace mygramdb::server {
 
@@ -150,6 +148,18 @@ class TcpServer {
    * @brief Get cache manager pointer (for HttpServer)
    */
   cache::CacheManager* GetCacheManager() { return cache_manager_.get(); }
+
+  /**
+   * @brief Get runtime variable manager pointer (for ServerOrchestrator to set callbacks)
+   */
+  config::RuntimeVariableManager* GetVariableManager() {
+    return handler_context_ ? handler_context_->variable_manager : nullptr;
+  }
+
+  /**
+   * @brief Get rate limiter pointer (for ServerOrchestrator to set callbacks)
+   */
+  RateLimiter* GetRateLimiter() { return rate_limiter_.get(); }
 
 #ifdef USE_MYSQL
   /**

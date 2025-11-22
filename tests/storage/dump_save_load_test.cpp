@@ -8,9 +8,9 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "loader/initial_loader.h"
 #include "mysql/connection.h"
 #include "storage/document_store.h"
-#include "storage/snapshot_builder.h"
 
 int main() {
   spdlog::set_level(spdlog::level::info);
@@ -68,11 +68,11 @@ int main() {
   }
   std::cout << "✓ Connected to MySQL" << std::endl;
 
-  // Build snapshot
+  // Build initial data
   mygramdb::config::MysqlConfig mysql_cfg;  // Use default timezone (+00:00)
-  mygramdb::storage::SnapshotBuilder snapshot_builder(*mysql_conn, *index, *doc_store, table_config, mysql_cfg);
+  mygramdb::loader::InitialLoader initial_loader(*mysql_conn, *index, *doc_store, table_config, mysql_cfg);
 
-  auto result = snapshot_builder.Build([](const auto& progress) {
+  auto result = initial_loader.Load([](const auto& progress) {
     if (progress.processed_rows % 5000 == 0 && progress.processed_rows > 0) {
       std::cout << "  Processed " << progress.processed_rows << " rows (" << progress.rows_per_second << " rows/s)"
                 << std::endl;
@@ -80,14 +80,14 @@ int main() {
   });
 
   if (!result) {
-    std::cerr << "Failed to build snapshot: " << result.error().message() << std::endl;
+    std::cerr << "Failed to load initial data: " << result.error().message() << std::endl;
     return 1;
   }
 
-  uint64_t original_rows = snapshot_builder.GetProcessedRows();
-  std::string snapshot_gtid = snapshot_builder.GetSnapshotGTID();
-  std::cout << "✓ Snapshot built: " << original_rows << " rows" << std::endl;
-  std::cout << "✓ Snapshot GTID: " << snapshot_gtid << std::endl;
+  uint64_t original_rows = initial_loader.GetProcessedRows();
+  std::string start_gtid = initial_loader.GetStartGTID();
+  std::cout << "✓ Initial data loaded: " << original_rows << " rows" << std::endl;
+  std::cout << "✓ Start GTID: " << start_gtid << std::endl;
 
   // Test GetDocId for a known document
   auto test_doc_id = doc_store->GetDocId("100");
@@ -105,7 +105,7 @@ int main() {
   }
   std::cout << "✓ Index saved to " << index_file << std::endl;
 
-  if (!doc_store->SaveToFile(docstore_file, snapshot_gtid)) {
+  if (!doc_store->SaveToFile(docstore_file, start_gtid)) {
     std::cerr << "Failed to save document store" << std::endl;
     return 1;
   }
@@ -133,9 +133,9 @@ int main() {
   std::cout << "✓ Loaded GTID: " << loaded_gtid << std::endl;
 
   // Verify GTID
-  if (snapshot_gtid != loaded_gtid) {
+  if (start_gtid != loaded_gtid) {
     std::cerr << "✗ GTID mismatch!" << std::endl;
-    std::cerr << "  Original: " << snapshot_gtid << std::endl;
+    std::cerr << "  Original: " << start_gtid << std::endl;
     std::cerr << "  Loaded: " << loaded_gtid << std::endl;
     return 1;
   }

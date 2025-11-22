@@ -4,6 +4,7 @@ add_library(mygramdb_app STATIC
   application.cpp
   command_line_parser.cpp
   configuration_manager.cpp
+  mysql_reconnection_handler.cpp
   server_orchestrator.cpp
   signal_manager.cpp
 )
@@ -19,9 +20,10 @@ target_link_libraries(mygramdb_app PUBLIC
   spdlog::spdlog
 )
 
-# Link MySQL libraries if enabled
+# Link MySQL and loader libraries if enabled
 if(USE_MYSQL)
   target_link_libraries(mygramdb_app PUBLIC
     mygramdb_mysql
+    mygramdb_loader
   )
 endif()

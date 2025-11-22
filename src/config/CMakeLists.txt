@@ -26,6 +26,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 add_library(mygramdb_config STATIC
   config.cpp
   config_help.cpp
+  runtime_variable_manager.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_schema_embedded.h  # Add as source to track changes
 )
 
@@ -40,11 +41,5 @@ target_link_libraries(mygramdb_config PUBLIC
   nlohmann_json_schema_validator
   spdlog::spdlog
   mygramdb_utils
+  mygramdb_cache  # For CacheManager methods called by RuntimeVariableManager
 )
-
-# Link MySQL library if available (for GTID validation)
-if(USE_MYSQL AND MYSQL_FOUND)
-  target_link_libraries(mygramdb_config PRIVATE
-    mygramdb_mysql
-  )
-endif()

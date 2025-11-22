@@ -108,6 +108,16 @@ class BinlogReader {
   mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
+   * @brief Start reading binlog events from specific GTID
+   * @param gtid GTID position to start from
+   * @return Expected<void, Error> - success or start error
+   *
+   * This is used for MySQL reconnection/failover to resume replication
+   * from a saved GTID position.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> StartFromGtid(const std::string& gtid);
+
+  /**
    * @brief Stop reading binlog events
    */
   void Stop();

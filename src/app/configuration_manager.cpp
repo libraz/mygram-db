@@ -34,52 +34,6 @@ ConfigurationManager::ConfigurationManager(std::string config_file, std::string 
                                            config::Config initial_config)
     : config_file_(std::move(config_file)), schema_file_(std::move(schema_file)), config_(std::move(initial_config)) {}
 
-mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reload() {
-  spdlog::info("Reloading configuration from: {}", config_file_);
-
-  // Load new configuration
-  auto reload_result = config::LoadConfig(config_file_, schema_file_);
-  if (!reload_result) {
-    // Log error but don't update config (keep old config)
-    mygram::utils::StructuredLog()
-        .Event("config_error")
-        .Field("type", "reload_failed")
-        .Field("config_file", config_file_)
-        .Field("error", reload_result.error().to_string())
-        .Error();
-    spdlog::warn("Continuing with current configuration");
-    return mygram::utils::MakeUnexpected(reload_result.error());
-  }
-
-  config::Config new_config = std::move(*reload_result);
-
-  // Apply logging level changes
-  if (new_config.logging.level != config_.logging.level) {
-    if (new_config.logging.level == "debug") {
-      spdlog::set_level(spdlog::level::debug);
-    } else if (new_config.logging.level == "info") {
-      spdlog::set_level(spdlog::level::info);
-    } else if (new_config.logging.level == "warn") {
-      spdlog::set_level(spdlog::level::warn);
-    } else if (new_config.logging.level == "error") {
-      spdlog::set_level(spdlog::level::err);
-    }
-    spdlog::info("Logging level changed: {} -> {}", config_.logging.level, new_config.logging.level);
-  }
-
-  // Apply log format changes
-  if (new_config.logging.format != config_.logging.format) {
-    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(new_config.logging.format));
-    spdlog::info("Logging format changed: {} -> {}", config_.logging.format, new_config.logging.format);
-  }
-
-  // Update config (atomic replacement)
-  config_ = std::move(new_config);
-
-  spdlog::info("Configuration reload completed successfully");
-  return {};
-}
-
 int ConfigurationManager::PrintConfigTest() const {
   std::cout << "Configuration file syntax is OK\n";
   std::cout << "Configuration details:\n";

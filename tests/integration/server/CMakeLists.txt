@@ -67,3 +67,20 @@ gtest_discover_tests(stress_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES TIMEOUT 300  # 5 minutes timeout
 )
+
+# Variable Handler Integration Tests
+add_executable(variable_handler_integration_test
+  variable_handler_test.cpp
+)
+
+target_link_libraries(variable_handler_integration_test
+  mygramdb_server  # Includes mygramdb_config transitively
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
+gtest_discover_tests(variable_handler_integration_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)

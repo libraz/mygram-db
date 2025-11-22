@@ -90,8 +90,11 @@ graph TB
     subgraph "Data Access Layer"
         DocStore[Document Store]
         Posting[Posting List]
-        Snapshot[Snapshot Builder]
         Dump[Dump Manager]
+    end
+
+    subgraph "Data Loading Layer"
+        Loader[Initial Loader]
     end
 
     subgraph "Background Services"
@@ -196,11 +199,12 @@ graph TB
   - `GetPrimaryKey(DocId)`: Retrieve primary key
   - `GetFilterValue(DocId, column)`: Get filter value
 
-**SnapshotBuilder** (`snapshot_builder.h`)
-- **Responsibility**: Initial index construction from MySQL
+**InitialLoader** (`loader/initial_loader.h`)
+- **Responsibility**: Initial data loading from MySQL to build index
+- **Module**: Data Loading Layer (separate from storage)
 - **Features**:
   - `START TRANSACTION WITH CONSISTENT SNAPSHOT` for consistency
-  - Captures GTID at snapshot time
+  - Captures GTID at load time for binlog replication continuity
   - Progress callbacks for monitoring
   - Cancelable operations
 
@@ -488,7 +492,7 @@ The application layer orchestrates the entire application lifecycle from command
 ```mermaid
 flowchart TD
     MySQL[MySQL Table]
-    Snapshot[Snapshot Builder]
+    Loader[Initial Loader]
     Start[START TRANSACTION<br/>WITH CONSISTENT SNAPSHOT]
     Select[SELECT * FROM table<br/>WHERE required_filters]
     GTID[Capture GTID]
@@ -914,7 +918,7 @@ class InvalidationManager {
 ### Between MySQL and Index
 
 - **BinlogReader** → reads binlog → **BinlogEventProcessor** → applies to **Index + DocumentStore**
-- **SnapshotBuilder** → SELECT from MySQL → **Index batch add** + **DocumentStore**
+- **InitialLoader** → SELECT from MySQL → **Index batch add** + **DocumentStore**
 
 ### Between Query and Cache
 

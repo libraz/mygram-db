@@ -1,6 +1,6 @@
 /**
- * @file snapshot_builder_query_test.cpp
- * @brief Unit tests for SnapshotBuilder SELECT query generation
+ * @file initial_loader_query_test.cpp
+ * @brief Unit tests for InitialLoader SELECT query generation
  *
  * These tests verify that duplicate columns are avoided in SELECT queries.
  * While we cannot directly test the private BuildSelectQuery() method,
@@ -21,13 +21,13 @@
 
 #include "config/config.h"
 
-namespace mygramdb::storage {
+namespace mygramdb::loader {
 
 /**
  * @brief Test fixture for SELECT query generation logic
  *
  * These tests document the expected behavior of BuildSelectQuery().
- * The actual implementation in snapshot_builder.cpp should:
+ * The actual implementation in initial_loader.cpp should:
  * - Collect all columns from primary_key, text_source, required_filters, and filters
  * - Avoid duplicates using an unordered_set for tracking
  * - Preserve insertion order using a vector for output
@@ -247,6 +247,6 @@ TEST_F(SelectQueryLogicTest, CollectColumns_NoDuplicatesWithConcat) {
   EXPECT_EQ(title_count, 1);
 }
 
-}  // namespace mygramdb::storage
+}  // namespace mygramdb::loader
 
 #endif  // USE_MYSQL

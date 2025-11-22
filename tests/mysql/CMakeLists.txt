@@ -73,8 +73,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(rows_parser_test
-    mygramdb_mysql
-    mygramdb_config
+    mygramdb_mysql  # Includes mygramdb_storage and mygramdb_config transitively
     GTest::gtest_main
   )
 
@@ -127,8 +126,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(binlog_parsing_test
-    mygramdb_mysql
-    mygramdb_config
+    mygramdb_mysql  # Includes mygramdb_storage and mygramdb_config transitively
     GTest::gtest_main
   )
 

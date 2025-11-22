@@ -1,6 +1,6 @@
 /**
- * @file snapshot_builder.h
- * @brief Snapshot builder for initial index construction from MySQL
+ * @file initial_loader.h
+ * @brief Initial data loader for constructing index from MySQL
  */
 
 #pragma once
@@ -18,29 +18,30 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 
-namespace mygramdb::storage {
+namespace mygramdb::loader {
 
 /**
- * @brief Snapshot builder progress callback
+ * @brief Initial data loading progress callback
  */
-struct SnapshotProgress {
+struct LoadProgress {
   uint64_t total_rows = 0;       // Total rows to process
   uint64_t processed_rows = 0;   // Rows processed so far
   double elapsed_seconds = 0.0;  // Elapsed time
   double rows_per_second = 0.0;  // Processing rate
 };
 
-using ProgressCallback = std::function<void(const SnapshotProgress&)>;
+using ProgressCallback = std::function<void(const LoadProgress&)>;
 
 /**
- * @brief Snapshot builder for initial index construction
+ * @brief Initial data loader for index construction
  *
- * Builds index and document store from MySQL SELECT query
+ * Loads initial data from MySQL and builds index and document store.
+ * This is used for initial setup before starting binlog replication.
  */
-class SnapshotBuilder {
+class InitialLoader {
  public:
   /**
-   * @brief Construct snapshot builder
+   * @brief Construct initial loader
    * @param connection MySQL connection
    * @param index N-gram index
    * @param doc_store Document store
@@ -48,12 +49,12 @@ class SnapshotBuilder {
    * @param mysql_config MySQL connection configuration (for datetime_timezone)
    * @param build_config Build configuration (batch_size, parallelism)
    */
-  SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
-                  config::TableConfig table_config, config::MysqlConfig mysql_config = {},
-                  config::BuildConfig build_config = {});
+  InitialLoader(mysql::Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
+                config::TableConfig table_config, config::MysqlConfig mysql_config = {},
+                config::BuildConfig build_config = {});
 
   /**
-   * @brief Build snapshot from SELECT query with consistent GTID
+   * @brief Load initial data from MySQL with consistent GTID
    *
    * Uses START TRANSACTION WITH CONSISTENT SNAPSHOT to ensure
    * data consistency and captures the GTID at snapshot time.
@@ -61,18 +62,18 @@ class SnapshotBuilder {
    * @param progress_callback Optional progress callback
    * @return Expected<void, Error> on success or error
    */
-  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> Build(
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> Load(
       const ProgressCallback& progress_callback = {});
 
   /**
-   * @brief Get GTID captured at snapshot time
+   * @brief Get GTID captured at load time
    *
-   * This GTID represents the state of the database when the snapshot
-   * was taken. Binlog replication should start from this GTID.
+   * This GTID represents the state of the database when the initial load
+   * was performed. Binlog replication should start from this GTID.
    *
    * @return GTID string or empty if not available
    */
-  const std::string& GetSnapshotGTID() const { return snapshot_gtid_; }
+  const std::string& GetStartGTID() const { return start_gtid_; }
 
   /**
    * @brief Get total rows processed
@@ -80,24 +81,24 @@ class SnapshotBuilder {
   uint64_t GetProcessedRows() const { return processed_rows_; }
 
   /**
-   * @brief Cancel ongoing build
+   * @brief Cancel ongoing load
    */
   void Cancel() { cancelled_ = true; }
 
  private:
   mysql::Connection& connection_;
   index::Index& index_;
-  DocumentStore& doc_store_;
+  storage::DocumentStore& doc_store_;
   config::TableConfig table_config_;
   config::MysqlConfig mysql_config_;
   config::BuildConfig build_config_;
 
   uint64_t processed_rows_ = 0;
   std::atomic<bool> cancelled_{false};
-  std::string snapshot_gtid_;  // GTID captured at snapshot time
+  std::string start_gtid_;  // GTID captured at load time
 
   /**
-   * @brief Build SELECT query for snapshot
+   * @brief Build SELECT query for initial load
    */
   std::string BuildSelectQuery() const;
 
@@ -125,8 +126,8 @@ class SnapshotBuilder {
   /**
    * @brief Extract filter values from row
    */
-  std::unordered_map<std::string, FilterValue> ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                              unsigned int num_fields) const;
+  std::unordered_map<std::string, storage::FilterValue> ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                       unsigned int num_fields) const;
 
   /**
    * @brief Find field index by name
@@ -134,6 +135,6 @@ class SnapshotBuilder {
   static int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields);
 };
 
-}  // namespace mygramdb::storage
+}  // namespace mygramdb::loader
 
 #endif  // USE_MYSQL

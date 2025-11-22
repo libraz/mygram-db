@@ -32,8 +32,6 @@ using mygram::utils::Expected;
 struct SignalFlags {
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
   volatile std::sig_atomic_t shutdown_requested = 0;
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-  volatile std::sig_atomic_t reload_config_requested = 0;
 };
 
 /**
@@ -48,7 +46,7 @@ struct SignalFlags {
  * - No mutexes or locks required
  *
  * Lifecycle:
- * - Create() registers signal handlers (SIGINT, SIGTERM, SIGHUP)
+ * - Create() registers signal handlers (SIGINT, SIGTERM)
  * - Destructor restores original signal handlers
  * - RAII ensures cleanup even on exception
  */
@@ -61,7 +59,6 @@ class SignalManager {
    * This factory method creates a SignalManager and registers handlers for:
    * - SIGINT (Ctrl+C): Sets shutdown_requested flag
    * - SIGTERM (kill): Sets shutdown_requested flag
-   * - SIGHUP (reload): Sets reload_config_requested flag
    *
    * Original signal handlers are saved and restored in destructor.
    */
@@ -87,20 +84,6 @@ class SignalManager {
    */
   static bool IsShutdownRequested();
 
-  /**
-   * @brief Check if config reload was requested (SIGHUP)
-   * @return True if SIGHUP signal was received
-   *
-   * This method reads AND resets the reload_config_requested flag.
-   * This ensures config reload is triggered only once per SIGHUP.
-   *
-   * Thread Safety: Read-modify-write is safe because:
-   * - Only application thread calls this method (no concurrent readers)
-   * - Signal handler only writes 1 (never reads)
-   * - sig_atomic_t guarantees atomic operations
-   */
-  static bool CheckAndResetConfigReload();
-
   // Static signal flags (shared with signal handler)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
   static SignalFlags signal_flags_;
@@ -122,7 +105,6 @@ class SignalManager {
   // Original signal handlers (for restoration in destructor)
   struct sigaction original_sigint_ {};
   struct sigaction original_sigterm_ {};
-  struct sigaction original_sighup_ {};
 };
 
 }  // namespace mygramdb::app

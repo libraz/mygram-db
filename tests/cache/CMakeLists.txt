@@ -100,8 +100,7 @@ add_executable(cache_manager_test
 )
 
 target_link_libraries(cache_manager_test PRIVATE
-  mygramdb_cache   # Includes mygramdb_query transitively
-  mygramdb_config
+  mygramdb_cache  # Includes mygramdb_query, mygramdb_storage, mygramdb_config transitively
   GTest::gtest_main
 )
 

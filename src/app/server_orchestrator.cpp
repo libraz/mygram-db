@@ -7,10 +7,12 @@
 
 #include <spdlog/spdlog.h>
 
+#include "app/mysql_reconnection_handler.h"
 #include "app/signal_manager.h"
+#include "config/runtime_variable_manager.h"
+#include "loader/initial_loader.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
-#include "storage/snapshot_builder.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
@@ -159,24 +161,6 @@ bool ServerOrchestrator::IsRunning() const {
   return started_;
 }
 
-mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::ReloadConfig(const config::Config& new_config) {
-#ifdef USE_MYSQL
-  // Check if MySQL connection settings changed
-  bool mysql_changed =
-      (new_config.mysql.host != deps_.config.mysql.host) || (new_config.mysql.port != deps_.config.mysql.port) ||
-      (new_config.mysql.user != deps_.config.mysql.user) || (new_config.mysql.password != deps_.config.mysql.password);
-
-  if (mysql_changed) {
-    auto handle_result = HandleMySQLConfigChange(new_config);
-    if (!handle_result) {
-      return mygram::utils::MakeUnexpected(handle_result.error());
-    }
-  }
-#endif
-
-  return {};
-}
-
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeTables() {
   spdlog::info("Initializing {} table(s)...", deps_.config.tables.size());
 
@@ -246,14 +230,14 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     spdlog::info("Building snapshot from table: {}", table_config.name);
     spdlog::info("This may take a while for large tables. Please wait...");
 
-    storage::SnapshotBuilder snapshot_builder(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
-                                              deps_.config.mysql, deps_.config.build);
+    loader::InitialLoader initial_loader(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
+                                         deps_.config.mysql, deps_.config.build);
 
-    auto snapshot_result = snapshot_builder.Build([this, &table_config, &snapshot_builder](const auto& progress) {
+    auto load_result = initial_loader.Load([this, &table_config, &initial_loader](const auto& progress) {
       // Check cancellation flag in progress callback
       if (SignalManager::IsShutdownRequested()) {
-        spdlog::info("Snapshot cancellation requested during build");
-        snapshot_builder.Cancel();
+        spdlog::info("Initial load cancellation requested during build");
+        initial_loader.Cancel();
       }
 
       if (progress.processed_rows % kProgressLogInterval == 0) {
@@ -264,21 +248,21 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
 
     // Check if shutdown was requested
     if (SignalManager::IsShutdownRequested()) {
-      spdlog::warn("Snapshot build cancelled by shutdown signal for table: {}", table_config.name);
+      spdlog::warn("Initial load cancelled by shutdown signal for table: {}", table_config.name);
       return mygram::utils::MakeUnexpected(
-          mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Snapshot build cancelled"));
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Initial load cancelled"));
     }
 
-    if (!snapshot_result) {
-      return mygram::utils::MakeUnexpected(snapshot_result.error());
+    if (!load_result) {
+      return mygram::utils::MakeUnexpected(load_result.error());
     }
 
-    spdlog::info("Snapshot build completed - table: {}, documents: {}", table_config.name,
-                 snapshot_builder.GetProcessedRows());
+    spdlog::info("Initial load completed - table: {}, documents: {}", table_config.name,
+                 initial_loader.GetProcessedRows());
 
-    // Capture GTID from first table's snapshot
+    // Capture GTID from first table's initial load
     if (snapshot_gtid_.empty() && deps_.config.replication.enable) {
-      snapshot_gtid_ = snapshot_builder.GetSnapshotGTID();
+      snapshot_gtid_ = initial_loader.GetStartGTID();
       if (!snapshot_gtid_.empty()) {
         spdlog::info("Captured snapshot GTID for replication: {}", snapshot_gtid_);
       }
@@ -392,6 +376,37 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   spdlog::info("TCP server initialized");
 
+#ifdef USE_MYSQL
+  // Setup MySQL reconnection callback for RuntimeVariableManager
+  if (mysql_connection_ && binlog_reader_) {
+    auto* variable_manager = tcp_server_->GetVariableManager();
+    if (variable_manager != nullptr) {
+      // Create reconnection handler (use shared_ptr so it can be captured in std::function)
+      auto reconnection_handler =
+          std::make_shared<MysqlReconnectionHandler>(mysql_connection_.get(), binlog_reader_.get());
+
+      // Set callback that captures the reconnection handler
+      variable_manager->SetMysqlReconnectCallback([handler = reconnection_handler](const std::string& host, int port) {
+        return handler->Reconnect(host, port);
+      });
+
+      spdlog::info("MySQL reconnection callback registered");
+    }
+  }
+#endif
+
+  // Setup rate limiter callback for RuntimeVariableManager
+  {
+    auto* variable_manager = tcp_server_->GetVariableManager();
+    auto* rate_limiter = tcp_server_->GetRateLimiter();
+    if (variable_manager != nullptr && rate_limiter != nullptr) {
+      variable_manager->SetRateLimiterCallback([rate_limiter](size_t capacity, size_t refill_rate) {
+        rate_limiter->UpdateParameters(capacity, refill_rate);
+      });
+      spdlog::info("Rate limiter callback registered");
+    }
+  }
+
   // Initialize HTTP server (if enabled)
   if (deps_.config.api.http.enable) {
     server::HttpServerConfig http_config;
@@ -413,75 +428,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
     spdlog::info("HTTP server initialized");
   }
-
-  return {};
-}
-
-mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::HandleMySQLConfigChange(
-    const config::Config& new_config) {
-#ifdef USE_MYSQL
-  spdlog::info("MySQL connection settings changed, reconnecting...");
-
-  // Stop binlog reader if running
-  bool was_running = false;
-  if (binlog_reader_ && binlog_reader_->IsRunning()) {
-    was_running = true;
-    spdlog::info("Stopping binlog reader for reconnection");
-    binlog_reader_->Stop();
-  }
-
-  // Close and recreate connection
-  mysql_connection_->Close();
-
-  mysql::Connection::Config mysql_config{
-      .host = new_config.mysql.host,
-      .port = static_cast<uint16_t>(new_config.mysql.port),
-      .user = new_config.mysql.user,
-      .password = new_config.mysql.password,
-      .database = new_config.mysql.database,
-      .connect_timeout = static_cast<uint32_t>(new_config.mysql.connect_timeout_ms / kMillisecondsPerSecond),
-      .read_timeout = static_cast<uint32_t>(new_config.mysql.read_timeout_ms / kMillisecondsPerSecond),
-      .write_timeout = static_cast<uint32_t>(new_config.mysql.write_timeout_ms / kMillisecondsPerSecond),
-      .session_timeout_sec = static_cast<uint32_t>(new_config.mysql.session_timeout_sec),
-      .ssl_enable = new_config.mysql.ssl_enable,
-      .ssl_ca = new_config.mysql.ssl_ca,
-      .ssl_cert = new_config.mysql.ssl_cert,
-      .ssl_key = new_config.mysql.ssl_key,
-      .ssl_verify_server_cert = new_config.mysql.ssl_verify_server_cert,
-  };
-
-  mysql_connection_ = std::make_unique<mysql::Connection>(mysql_config);
-
-  auto connect_result = mysql_connection_->Connect("config-reload");
-  if (!connect_result) {
-    mygram::utils::StructuredLog()
-        .Event("mysql_error")
-        .Field("type", "reconnect_failed")
-        .Field("context", "config_reload")
-        .Field("error", connect_result.error().to_string())
-        .Error();
-    spdlog::warn("Binlog replication will remain stopped until manual restart");
-    return mygram::utils::MakeUnexpected(connect_result.error());
-  }
-
-  spdlog::info("Successfully reconnected to MySQL: {}@{}:{}", new_config.mysql.user, new_config.mysql.host,
-               new_config.mysql.port);
-
-  // Restart binlog reader if it was running
-  if (was_running && binlog_reader_) {
-    auto start_result = binlog_reader_->Start();
-    if (!start_result) {
-      mygram::utils::StructuredLog()
-          .Event("binlog_error")
-          .Field("type", "restart_failed")
-          .Field("context", "config_reload")
-          .Field("error", start_result.error().to_string())
-          .Error();
-      return mygram::utils::MakeUnexpected(start_result.error());
-    }
-    spdlog::info("Binlog reader restarted successfully");
-  }
-#endif
 
   return {};
 }

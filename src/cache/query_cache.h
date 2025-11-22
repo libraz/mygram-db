@@ -242,6 +242,20 @@ class QueryCache {
    */
   void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
 
+  /**
+   * @brief Set minimum query cost threshold for caching
+   * @param min_query_cost_ms New minimum query cost in milliseconds
+   *
+   * Queries with cost less than this threshold will not be cached.
+   * Changes apply to future Insert() calls.
+   */
+  void SetMinQueryCost(double min_query_cost_ms) { min_query_cost_ms_ = min_query_cost_ms; }
+
+  /**
+   * @brief Get current minimum query cost threshold
+   */
+  [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_; }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;

@@ -20,7 +20,7 @@
    - [Network Security](#network-security)
    - [Logging](#logging)
    - [Query Cache](#query-cache)
-4. [Hot Reload](#hot-reload)
+4. [Runtime Variables](#runtime-variables)
 5. [Production Recommendations](#production-recommendations)
 6. [Troubleshooting](#troubleshooting)
 
@@ -34,7 +34,7 @@ MygramDB uses YAML or JSON configuration files to define server behavior, MySQL 
 
 - **Multiple formats**: YAML (`.yaml`, `.yml`) or JSON (`.json`)
 - **Schema validation**: Automatic validation against built-in JSON Schema
-- **Hot reload**: SIGHUP signal support for live configuration updates
+- **Runtime variables**: MySQL-style SET/SHOW VARIABLES for live updates without restart
 - **Environment-specific**: Easy customization for development, staging, production
 
 ### Location
@@ -717,88 +717,156 @@ cache:
 
 ---
 
-## Hot Reload
+## Runtime Variables
 
-### Supported via SIGHUP
+MygramDB supports **live configuration changes** without restart using MySQL-compatible SET and SHOW VARIABLES commands.
 
-MygramDB supports **live configuration reload** without restart by sending a `SIGHUP` signal:
+### Basic Usage
 
-```bash
-# Find process ID
-ps aux | grep mygramdb
+```sql
+-- Show all runtime variables
+SHOW VARIABLES;
 
-# Send SIGHUP signal
-kill -HUP <pid>
+-- Show specific variable pattern
+SHOW VARIABLES LIKE 'mysql%';
+SHOW VARIABLES LIKE 'cache%';
 
-# Or use systemd
-systemctl reload mygramdb
+-- Set a single variable
+SET logging.level = 'debug';
+SET mysql.host = '192.168.1.100';
+
+-- Set multiple variables
+SET api.default_limit = 200, api.max_query_length = 256;
 ```
 
-### Reloadable Settings
+### Variable Categories
 
-| Section | Setting | Reload Behavior |
-|---------|---------|-----------------|
-| **Logging** | `level` | ✅ Applied immediately |
-| **MySQL** | `host`, `port`, `user`, `password` | ✅ Reconnects to new MySQL server |
-| **MySQL** | `ssl_*` | ✅ Reconnects with new SSL settings |
-| **Dump** | `interval_sec`, `retain` | ✅ Updates scheduler settings |
-| **Cache** | All settings | ⚠️ Cache cleared, new settings applied |
-| **API** | `default_limit`, `max_query_length` | ⚠️ Applied to new queries |
-| **API** | `rate_limiting.*` | ⚠️ Rate limiter reset |
+#### Mutable Variables (Runtime Changeable)
 
-### Non-Reloadable Settings (Require Restart)
+These variables can be changed at runtime using `SET` commands:
 
-| Section | Setting | Reason |
-|---------|---------|--------|
-| **MySQL** | `database` | Database connection cannot change |
-| **MySQL** | `use_gtid`, `binlog_format`, `binlog_row_image` | Replication mode cannot change |
-| **Tables** | All settings | Table schema and index structure cannot change |
-| **Build** | All settings | Build configuration is startup-only |
-| **Replication** | `enable`, `server_id`, `start_from`, `queue_size` | Replication configuration is startup-only |
-| **Memory** | All settings | Memory allocator cannot change |
-| **API** | `tcp.bind`, `tcp.port`, `http.bind`, `http.port` | Sockets cannot be rebound |
-| **Network** | `allow_cidrs` | Network security policy cannot change |
-| **Logging** | `json`, `file` | Log output cannot change |
+| Variable | Type | Description | Example |
+|----------|------|-------------|---------|
+| **Logging** ||||
+| `logging.level` | string | Log level: debug, info, warn, error | `SET logging.level = 'debug'` |
+| `logging.format` | string | Log format: json, text | `SET logging.format = 'json'` |
+| **MySQL Failover** ||||
+| `mysql.host` | string | MySQL server hostname or IP | `SET mysql.host = '192.168.1.100'` |
+| `mysql.port` | integer | MySQL server port | `SET mysql.port = 3307` |
+| **Cache** ||||
+| `cache.enabled` | boolean | Enable/disable query cache | `SET cache.enabled = true` |
+| `cache.min_query_cost_ms` | float | Minimum query cost to cache (ms) | `SET cache.min_query_cost_ms = 20.0` |
+| `cache.ttl_seconds` | integer | Cache entry TTL (0 = no TTL) | `SET cache.ttl_seconds = 7200` |
+| **API** ||||
+| `api.default_limit` | integer | Default LIMIT when not specified | `SET api.default_limit = 200` |
+| `api.max_query_length` | integer | Maximum query expression length | `SET api.max_query_length = 256` |
+| **Rate Limiting** ||||
+| `rate_limiting.capacity` | integer | Maximum tokens per client (burst) | `SET rate_limiting.capacity = 200` |
+| `rate_limiting.refill_rate` | integer | Tokens per second per client | `SET rate_limiting.refill_rate = 20` |
 
-### Reload Workflow
+#### Immutable Variables (Restart Required)
 
-1. **Edit configuration file**:
-   ```bash
-   vim /etc/mygramdb/config.yaml
-   ```
+These variables cannot be changed at runtime and require server restart:
 
-2. **Validate configuration** (optional):
-   ```bash
-   mygramdb --config=/etc/mygramdb/config.yaml --validate
-   ```
+| Category | Variables | Reason |
+|----------|-----------|--------|
+| **MySQL** | `database`, `user`, `password`, `use_gtid`, `binlog_format`, `binlog_row_image`, `datetime_timezone` | Core replication configuration |
+| **Tables** | `tables[*].*` | Table schema and index structure |
+| **Build** | `build.*` | Build configuration is startup-only |
+| **Replication** | `enable`, `server_id`, `start_from`, `queue_size` | Replication initialization |
+| **Memory** | `memory.*` | Memory allocator configuration |
+| **API** | `tcp.bind`, `tcp.port`, `http.bind`, `http.port`, `max_connections` | Network socket binding |
+| **Network** | `allow_cidrs` | Network security policy |
+| **Logging** | `file` | Log output destination |
 
-3. **Send SIGHUP signal**:
-   ```bash
-   kill -HUP $(cat /var/run/mygramdb.pid)
-   ```
+### MySQL Failover Example
 
-4. **Verify reload**:
-   ```bash
-   tail -f /var/log/mygramdb/mygramdb.log
-   ```
+When your MySQL primary fails, switch to a replica without restarting MygramDB:
 
-   Expected output:
-   ```
-   Configuration reload requested (SIGHUP received)
-   Logging level changed: info -> debug
-   Configuration reload completed successfully
-   ```
+```sql
+-- Check current MySQL connection
+SHOW VARIABLES LIKE 'mysql%';
 
-### Reload Failure Handling
+-- Switch to new MySQL primary (GTID position is preserved)
+SET mysql.host = '192.168.1.101', mysql.port = 3306;
 
-If configuration reload fails:
-- **Current configuration continues** (no downtime)
-- **Error logged** with details
-- **Server continues operating** with old configuration
-
+-- Verify reconnection
+SHOW VARIABLES LIKE 'mysql%';
 ```
-Failed to reload configuration: Invalid YAML syntax at line 42
-Continuing with current configuration
+
+**How it works**:
+1. MygramDB saves current GTID position
+2. Stops binlog reader
+3. Closes old connection and opens new connection
+4. Validates new MySQL server (GTID mode, binlog format)
+5. Restarts binlog reader from saved GTID position
+
+**Requirements**:
+- New MySQL server must have GTID mode enabled
+- New server must have same binlog format (ROW)
+- GTID set must contain the saved position
+
+### Cache Control Example
+
+```sql
+-- Disable cache during maintenance
+SET cache.enabled = false;
+
+-- Re-enable cache after maintenance
+SET cache.enabled = true;
+
+-- Adjust cache behavior
+SET cache.min_query_cost_ms = 50.0;  -- Only cache slow queries
+SET cache.ttl_seconds = 3600;        -- 1 hour TTL
+```
+
+### Variable Validation
+
+SET commands validate values before applying:
+
+```sql
+-- Invalid value type (error)
+SET api.default_limit = 'invalid';
+ERROR: Invalid value for api.default_limit: must be integer
+
+-- Out of range (error)
+SET api.default_limit = 99999;
+ERROR: Invalid value for api.default_limit: must be between 5 and 1000
+
+-- Unknown variable (error)
+SET unknown.variable = 'value';
+ERROR: Unknown variable: unknown.variable
+
+-- Immutable variable (error)
+SET mysql.database = 'newdb';
+ERROR: Variable mysql.database is immutable (requires restart)
+```
+
+### Checking Variable Values
+
+```sql
+-- Show all variables
+SHOW VARIABLES;
+
+-- Show variables by prefix
+SHOW VARIABLES LIKE 'cache%';
+SHOW VARIABLES LIKE 'mysql%';
+SHOW VARIABLES LIKE 'api%';
+
+-- Show specific pattern
+SHOW VARIABLES LIKE '%_limit';
+SHOW VARIABLES LIKE '%port%';
+```
+
+Output format (MySQL-compatible table):
+```
++-------------------------+-----------------+
+| Variable_name           | Value           |
++-------------------------+-----------------+
+| cache.enabled           | true            |
+| cache.min_query_cost_ms | 10.0            |
+| cache.ttl_seconds       | 3600            |
++-------------------------+-----------------+
 ```
 
 ---
@@ -910,26 +978,26 @@ mysql> SHOW GRANTS FOR 'repl_user'@'%';
 - Set binlog format to ROW
 - Grant REPLICATION SLAVE, REPLICATION CLIENT privileges
 
-### Hot Reload Not Working
+### Runtime Variables Not Working
 
-**Problem**: SIGHUP signal does not trigger configuration reload
+**Problem**: SET commands return errors or don't apply changes
 
 **Diagnosis**:
-```bash
-# Check process is running
-ps aux | grep mygramdb
+```sql
+-- Test basic SET command
+SET logging.level = 'debug';
 
-# Send SIGHUP
-kill -HUP <pid>
+-- Verify variable value changed
+SHOW VARIABLES LIKE 'logging%';
 
-# Check logs
-tail -f /var/log/mygramdb/mygramdb.log
+-- Check server logs
 ```
 
 **Solution**:
-- Ensure configuration file has no syntax errors
-- Verify file path is correct
-- Check log output for error details
+- Ensure variable name is correct (case-sensitive after the dot)
+- Check value type matches (string, integer, float, boolean)
+- Verify variable is mutable (not immutable)
+- Check server logs for detailed error messages
 
 ### Cache Not Working
 

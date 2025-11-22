@@ -127,8 +127,27 @@ class CacheManager {
    */
   void Disable();
 
+  /**
+   * @brief Set minimum query cost threshold for caching
+   * @param min_query_cost_ms New minimum query cost in milliseconds
+   *
+   * Only queries with execution time >= min_query_cost_ms will be cached.
+   * Changes apply immediately to future cache inserts.
+   */
+  void SetMinQueryCost(double min_query_cost_ms);
+
+  /**
+   * @brief Set TTL for cache entries
+   * @param ttl_seconds Time-to-live in seconds
+   *
+   * Note: TTL-based expiration is not yet implemented.
+   * This updates the configuration for future use.
+   */
+  void SetTtl(int ttl_seconds);
+
  private:
   bool enabled_;
+  int ttl_seconds_;  // TTL configuration (not yet used for expiration)
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

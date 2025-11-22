@@ -90,8 +90,11 @@ graph TB
     subgraph "Data Access Layer"
         DocStore[Document Store]
         Posting[Posting List]
-        Snapshot[Snapshot Builder]
         Dump[Dump Manager]
+    end
+
+    subgraph "Data Loading Layer"
+        Loader[Initial Loader]
     end
 
     subgraph "Background Services"
@@ -196,11 +199,12 @@ graph TB
   - `GetPrimaryKey(DocId)`: プライマリキーを取得
   - `GetFilterValue(DocId, column)`: フィルタ値を取得
 
-**SnapshotBuilder** (`snapshot_builder.h`)
-- **責務**: MySQLからの初期インデックス構築
+**InitialLoader** (`loader/initial_loader.h`)
+- **責務**: MySQLからの初期データロードによるインデックス構築
+- **モジュール**: データロード層（ストレージとは分離）
 - **機能**:
   - 一貫性のための`START TRANSACTION WITH CONSISTENT SNAPSHOT`
-  - スナップショット時にGTIDを捕捉
+  - バイナリログレプリケーション継続のためロード時にGTIDを捕捉
   - モニタリング用の進捗コールバック
   - キャンセル可能な操作
 
@@ -488,7 +492,7 @@ graph TB
 ```mermaid
 flowchart TD
     MySQL[MySQL Table]
-    Snapshot[Snapshot Builder]
+    Loader[Initial Loader]
     Start[START TRANSACTION<br/>WITH CONSISTENT SNAPSHOT]
     Select[SELECT * FROM table<br/>WHERE required_filters]
     GTID[Capture GTID]
@@ -915,7 +919,7 @@ class InvalidationManager {
 ### MySQLとIndexの間
 
 - **BinlogReader** → バイナリログを読み取り → **BinlogEventProcessor** → **Index + DocumentStore**に適用
-- **SnapshotBuilder** → MySQLからSELECT → **Indexバッチ追加** + **DocumentStore**
+- **InitialLoader** → MySQLからSELECT → **Indexバッチ追加** + **DocumentStore**
 
 ### QueryとCacheの間
 

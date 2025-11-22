@@ -28,6 +28,10 @@ namespace mygramdb::cache {
 class CacheManager;
 }  // namespace mygramdb::cache
 
+namespace mygramdb::config {
+class RuntimeVariableManager;
+}  // namespace mygramdb::config
+
 namespace mygramdb::server {
 
 // Forward declarations
@@ -109,6 +113,7 @@ struct HandlerContext {
   void* binlog_reader;
 #endif
   cache::CacheManager* cache_manager = nullptr;
+  config::RuntimeVariableManager* variable_manager = nullptr;
 };
 
 }  // namespace mygramdb::server

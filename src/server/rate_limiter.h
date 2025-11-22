@@ -97,6 +97,16 @@ class RateLimiter {
   bool AllowRequest(const std::string& client_ip);
 
   /**
+   * @brief Update rate limiting parameters for new clients
+   * @param capacity New maximum tokens per client (burst size)
+   * @param refill_rate New tokens added per second per client
+   *
+   * Note: This updates the parameters used for creating new TokenBuckets.
+   * Existing client buckets are not affected.
+   */
+  void UpdateParameters(size_t capacity, size_t refill_rate);
+
+  /**
    * @brief Get statistics for monitoring
    */
   struct Stats {

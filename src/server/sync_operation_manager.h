@@ -23,8 +23,8 @@ namespace mygramdb::mysql {
 class BinlogReader;
 }
 
-namespace mygramdb::storage {
-class SnapshotBuilder;
+namespace mygramdb::loader {
+class InitialLoader;
 }
 
 namespace mygramdb::server {
@@ -150,8 +150,8 @@ class SyncOperationManager {
   std::unordered_set<std::string> syncing_tables_;
   mutable std::mutex syncing_tables_mutex_;
 
-  std::unordered_map<std::string, storage::SnapshotBuilder*> active_builders_;
-  mutable std::mutex builders_mutex_;
+  std::unordered_map<std::string, loader::InitialLoader*> active_loaders_;
+  mutable std::mutex loaders_mutex_;
 
   // Sync threads tracking (non-detached for proper cleanup)
   // Protected by sync_mutex_ to prevent race conditions with sync_states_
@@ -160,20 +160,20 @@ class SyncOperationManager {
   std::atomic<bool> shutdown_requested_{false};
 
   /**
-   * @brief Build snapshot asynchronously for a table
+   * @brief Build initial data load asynchronously for a table
    * @param table_name Table to synchronize
    */
   void BuildSnapshotAsync(const std::string& table_name);
 
   /**
-   * @brief Register active snapshot builder
+   * @brief Register active initial loader
    */
-  void RegisterBuilder(const std::string& table_name, storage::SnapshotBuilder* builder);
+  void RegisterLoader(const std::string& table_name, loader::InitialLoader* loader);
 
   /**
-   * @brief Unregister active snapshot builder
+   * @brief Unregister active initial loader
    */
-  void UnregisterBuilder(const std::string& table_name);
+  void UnregisterLoader(const std::string& table_name);
 };
 
 }  // namespace mygramdb::server

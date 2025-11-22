@@ -1,112 +1,226 @@
-# 設定ホットリロード & MySQL フェイルオーバー検出 - 運用ガイド
+# ランタイム変数 & MySQL フェイルオーバー - 運用ガイド
 
 ## 概要
 
 本ガイドでは、運用の信頼性を高める2つの重要な機能について説明します：
 
-1. **設定ホットリロード (SIGHUP)**: サーバー再起動なしに設定を再読み込み
-2. **MySQL フェイルオーバー検出**: MySQL レプリケーションの自動検証とフェイルオーバー検出
+1. **ランタイム変数 (SET/SHOW VARIABLES)**: MySQL互換コマンドを使用して、サーバー再起動なしにランタイムで設定を変更
+2. **MySQL フェイルオーバー**: GTID位置を保持しながら、ランタイムでMySQLサーバーを切り替え
 
 これらの機能により、ゼロダウンタイムでの設定更新と、MySQL マスターのフェイルオーバーシナリオの安全な処理が可能になります。
 
-## 1. 設定ホットリロード (SIGHUP)
+## 1. ランタイム変数 (SET/SHOW VARIABLES)
 
-`SIGHUP` シグナルを送信することで、実行中のサーバーの設定を再読み込みできます。サーバーを再起動する必要がありません。
+MygramDBは、サーバー再起動なしにランタイム設定を変更するための、MySQL互換のSETおよびSHOW VARIABLESコマンドをサポートしています。
 
-### サポートされる設定変更
+### 概要
 
-#### ✅ 自動適用される設定
+ランタイム変数により、以下が可能です：
+- ログレベルをオンザフライで変更
+- フェイルオーバー時にMySQLサーバーを切り替え（GTID位置は保持）
+- キャッシュ動作を調整
+- APIとレート制限パラメータを変更
 
-- **ログレベル**: 即座に変更が反映されます
-- **MySQL 接続設定**: 変更された場合、サーバーは以下を実行します：
-  - 現在の BinlogReader を停止
-  - 既存の MySQL 接続を切断
-  - 新しい設定で再接続
-  - 最後の GTID から BinlogReader を再起動
-  - 新しいサーバーを検証
+### 基本的なコマンド
 
-#### ⚠️ 再起動が必要な設定
+```sql
+-- すべての変数を表示
+SHOW VARIABLES;
 
-以下の設定変更はホットリロード**不可**で、サーバーの完全な再起動が必要です：
+-- 特定のパターンを表示
+SHOW VARIABLES LIKE 'mysql%';
+SHOW VARIABLES LIKE 'cache%';
 
-- サーバーのポート/バインドアドレス
-- テーブル設定（名前、プライマリキー、テキストカラム）
-- インデックス設定（n-gram サイズ、ハイブリッドモード）
-- キャッシュ設定
-- ワーカースレッドプールサイズ
+-- 単一の変数を設定
+SET logging.level = 'debug';
+SET mysql.host = '192.168.1.100';
 
-### 使用方法
-
-#### SIGHUP シグナルの送信
-
-```bash
-# プロセス ID を確認
-ps aux | grep mygramdb
-
-# SIGHUP シグナルを送信（<PID> を実際のプロセス ID に置き換え）
-kill -SIGHUP <PID>
-
-# または PID ファイルを使用する場合
-kill -SIGHUP $(cat /var/run/mygramdb.pid)
+-- 複数の変数を設定
+SET api.default_limit = 200, cache.enabled = true;
 ```
 
-#### リロードの確認
+### 可変変数 vs 不変変数
 
-サーバーログで確認します：
+#### ✅ 可変（ランタイム変更可能）
+
+| 変数 | 説明 | 例 |
+|----------|-------------|---------|
+| `logging.level` | ログレベル (debug/info/warn/error) | `SET logging.level = 'debug'` |
+| `logging.format` | ログフォーマット (json/text) | `SET logging.format = 'json'` |
+| `mysql.host` | MySQLサーバーホスト名 | `SET mysql.host = '192.168.1.101'` |
+| `mysql.port` | MySQLサーバーポート | `SET mysql.port = 3306` |
+| `cache.enabled` | クエリキャッシュの有効/無効 | `SET cache.enabled = false` |
+| `cache.min_query_cost_ms` | キャッシュする最小クエリコスト | `SET cache.min_query_cost_ms = 20.0` |
+| `cache.ttl_seconds` | キャッシュTTL秒数 | `SET cache.ttl_seconds = 7200` |
+| `api.default_limit` | デフォルトLIMIT値 | `SET api.default_limit = 200` |
+| `api.max_query_length` | 最大クエリ式長 | `SET api.max_query_length = 256` |
+| `rate_limiting.capacity` | トークンバケット容量 | `SET rate_limiting.capacity = 200` |
+| `rate_limiting.refill_rate` | 秒あたりトークン数 | `SET rate_limiting.refill_rate = 20` |
+
+#### ⚠️ 不変（再起動が必要）
+
+- サーバーポート/バインドアドレス（`tcp.bind`, `tcp.port`, `http.bind`, `http.port`）
+- テーブル設定（名前、プライマリキー、テキストカラム）
+- MySQLデータベース名、ユーザー、パスワード
+- レプリケーション設定（`server_id`, `start_from`）
+- メモリアロケータ設定
+- ネットワークセキュリティ（`allow_cidrs`）
+
+### 使用例
+
+#### ログレベルの変更
+
+```sql
+-- デバッグ用に詳細度を上げる
+SET logging.level = 'debug';
+
+-- 変更を確認
+SHOW VARIABLES LIKE 'logging%';
+
+-- 通常に戻す
+SET logging.level = 'info';
+```
+
+#### メンテナンス中のキャッシュ無効化
+
+```sql
+-- メンテナンス前にキャッシュを無効化
+SET cache.enabled = false;
+
+-- メンテナンス作業を実行...
+
+-- キャッシュを再有効化
+SET cache.enabled = true;
+```
+
+#### API制限の調整
+
+```sql
+-- 一時的にバルク操作用に制限を増やす
+SET api.default_limit = 1000;
+SET api.max_query_length = 512;
+
+-- 現在の値を確認
+SHOW VARIABLES LIKE 'api%';
+```
+
+### 検証とエラーハンドリング
+
+SETコマンドは適用前に値を検証します：
+
+```sql
+-- 型不一致エラー
+SET api.default_limit = 'invalid';
+ERROR: Invalid value for api.default_limit: must be integer
+
+-- 範囲外エラー
+SET api.default_limit = 99999;
+ERROR: Invalid value for api.default_limit: must be between 5 and 1000
+
+-- 未知の変数エラー
+SET unknown.variable = 'value';
+ERROR: Unknown variable: unknown.variable
+
+-- 不変変数エラー
+SET mysql.database = 'newdb';
+ERROR: Variable mysql.database is immutable (requires restart)
+```
+
+変数は適用**前**に検証されるため、無効な値が提供されてもサーバーは一貫した状態を保ちます。
+
+### 変数変更のモニタリング
+
+変数変更をサーバーログで監視：
+
+```bash
+# 変数変更を監視
+tail -f /var/log/mygramdb/server.log | grep -i "variable"
+
+# 現在の設定を確認
+mygramclient -c "SHOW VARIABLES;"
+```
+
+## 2. ランタイム変数を使用したMySQLフェイルオーバー
+
+MygramDBは、SETコマンドを使用したゼロダウンタイムのMySQLフェイルオーバーをサポートしています。新しいMySQLサーバーに切り替える際、GTID位置は保持されます。
+
+### フェイルオーバーワークフロー
+
+```sql
+-- 1. 現在のMySQL接続を確認
+SHOW VARIABLES LIKE 'mysql%';
+
+-- 2. 新しいMySQLサーバーに切り替え（レプリカをプライマリに昇格）
+SET mysql.host = '192.168.1.101', mysql.port = 3306;
+
+-- 3. 再接続が成功したことを確認
+SHOW VARIABLES LIKE 'mysql%';
+```
+
+### 仕組み
+
+`SET mysql.host/port` を実行すると：
+
+1. **GTID位置を保存**: 現在のGTID位置を保存
+2. **Binlogリーダーを停止**: 旧サーバーからの読み取りを正常に停止
+3. **旧接続を切断**: 旧MySQLサーバーへの接続を切断
+4. **新接続を作成**: 新MySQLサーバーに接続
+5. **新サーバーを検証**: GTIDモード、binlogフォーマット、テーブル存在を確認
+6. **GTIDから再開**: 保存されたGTID位置からbinlogリーダーを再起動
+
+### 要件
+
+新しいMySQLサーバーは以下を満たす必要があります：
+- GTIDモードが有効（`gtid_mode=ON`）
+- ROW binlogフォーマットを使用（`binlog_format=ROW`）
+- 保存されたGTID位置がGTIDセットに含まれている
+- 設定で定義された全テーブルを保有
+
+### 例：計画的フェイルオーバー
+
+```sql
+-- フェイルオーバー前：mysql-primary-1に接続
+SHOW VARIABLES LIKE 'mysql.host';
+-- 出力: mysql-primary-1.example.com
+
+-- レプリカを新プライマリに昇格
+-- （MySQLレプリケーション管理で外部的に実行）
+
+-- MygramDBを新プライマリに切り替え
+SET mysql.host = 'mysql-primary-2.example.com';
+
+-- フェイルオーバーを確認
+SHOW VARIABLES LIKE 'mysql.host';
+-- 出力: mysql-primary-2.example.com
+```
+
+サーバーログに以下が表示されます：
 
 ```log
-[info] Configuration reload requested (SIGHUP received)
-[info] Logging level changed from 'info' to 'debug'
-[info] MySQL connection settings changed, reconnecting...
+[info] Reconnecting to MySQL: mysql-primary-2.example.com:3306
 [info] Stopping binlog reader...
 [info] Binlog reader stopped. Processed 12345 events
-[info] Creating new MySQL connection with updated settings...
-[info] Binlog connection validated successfully
-[info] Binlog reader started from GTID: <last-gtid>
-[info] Configuration reload completed successfully
+[info] Creating new MySQL connection: mysql-primary-2.example.com:3306
+[info] Connection validated successfully
+[info] Binlog reader started from GTID: <saved-gtid>
 ```
 
-#### エラーハンドリング
+### エラーハンドリング
 
-設定の再読み込みに失敗した場合、サーバーは**現在の設定**で動作を継続します：
+フェイルオーバーが失敗した場合、サーバーはレプリケーションを停止し、詳細なエラーをログに記録します：
 
 ```log
-[error] Failed to reload configuration: Invalid YAML syntax at line 42
-[warn] Continuing with current configuration
+[error] Failed to reconnect to new MySQL server: Connection refused
+[error] Binlog replication stopped. Manual intervention required.
 ```
 
-このグレースフル・デグラデーションにより、新しい設定が無効な場合でもサーバーは稼働し続けます。
+この場合：
+1. 新MySQLサーバーがアクセス可能か確認
+2. ネットワーク接続を確認
+3. MySQL認証情報を確認
+4. SETコマンドを再試行するか、サーバーを再起動
 
-### 例：MySQL 接続設定の変更
-
-```yaml
-# config.yaml
-mysql:
-  host: "mysql-master-new.example.com"  # 旧ホストから変更
-  port: 3306
-  user: "replicator"
-  password: "new-password"  # パスワード更新
-  database: "myapp"
-```
-
-```bash
-# 再起動なしで変更を適用
-kill -SIGHUP $(pidof mygramdb)
-```
-
-### 設定リロードのモニタリング
-
-構造化ログを使用して設定リロードイベントを監視：
-
-```bash
-# 設定リロードイベントをフィルタ
-tail -f /var/log/mygramdb/server.log | grep "Configuration reload"
-
-# 失敗をチェック
-tail -f /var/log/mygramdb/server.log | grep -E "(reload.*failed|Continuing with current)"
-```
-
-## 2. MySQL フェイルオーバー検出
+## 3. MySQL フェイルオーバー検出
 
 サーバーは MySQL 接続を自動的に検証し、以下を検出します：
 
@@ -217,8 +331,7 @@ grep 'Server UUID changed' /var/log/mygramdb/server.log
    - レプリケーション遅延をチェック
 
 2. **フェイルオーバー中**:
-   - MySQL 接続の DNS/IP を更新
-   - mygramdb に SIGHUP を送信（ホットリロード設定）
+   - SETコマンドで新しいMySQLサーバーに切り替え
    - ログでフェイルオーバー検出を監視
 
 3. **フェイルオーバー後**:
@@ -252,15 +365,14 @@ grep 'Server UUID changed' /var/log/mygramdb/server.log
 
 3. **復旧**:
    ```bash
-   # 誤ったサーバーの場合、設定を更新してリロード
-   vim /etc/mygramdb/config.yaml  # MySQL ホスト/ポートを修正
-   kill -SIGHUP $(pidof mygramdb)
+   # 誤ったサーバーの場合、SETコマンドで修正
+   mygramclient -c "SET mysql.host = 'correct-host.example.com', mysql.port = 3306;"
 
    # 正しいサーバーだが検証失敗の場合、mygramdb を再起動
    systemctl restart mygramdb
    ```
 
-## 3. ヘルスモニタリング統合
+## 4. ヘルスモニタリング統合
 
 ### ヘルスチェックエンドポイント
 
@@ -314,27 +426,27 @@ curl http://localhost:8080/health/detail
    - トリガー: `binlog_reader.running = false`（ヘルスエンドポイント）
    - アクション: オンコール呼び出し、即座に調査
 
-4. **設定リロード失敗** (WARNING)
-   - トリガー: `Failed to reload configuration`
-   - アクション: 設定構文をチェック、オペレーターに通知
+4. **変数設定失敗** (WARNING)
+   - トリガー: SET コマンドでのエラー応答
+   - アクション: 値の検証をチェック、オペレーターに通知
 
-## 4. テストと検証
+## 5. テストと検証
 
-### SIGHUP リロードのテスト
+### ランタイム変数のテスト
 
 ```bash
 # 1. サーバー起動
 ./bin/mygramdb --config config.yaml
 
-# 2. 設定を変更
-vim config.yaml  # ログレベルを変更
+# 2. 現在の変数を確認
+mygramclient -c "SHOW VARIABLES LIKE 'logging%';"
 
-# 3. SIGHUP を送信
-kill -SIGHUP $(pidof mygramdb)
+# 3. 変数を変更
+mygramclient -c "SET logging.level = 'debug';"
 
 # 4. ログを確認
 tail -f /var/log/mygramdb/server.log
-# 期待値: "Configuration reload completed successfully"
+# 期待値: デバッグレベルのログが表示される
 ```
 
 ### フェイルオーバー検出のテスト
@@ -367,32 +479,30 @@ ctest -R ConnectionValidatorIntegrationTest -V
 # 1. mysql-server-1 に接続した mygramdb を起動
 ./bin/mygramdb --config config.yaml
 
-# 2. 設定を mysql-server-2 に変更
-vim config.yaml
-# 変更: host: "mysql-server-2.example.com"
+# 2. 現在の接続を確認
+mygramclient -c "SHOW VARIABLES LIKE 'mysql.host';"
 
-# 3. リロードをトリガー
-kill -SIGHUP $(pidof mygramdb)
+# 3. 新しいMySQLサーバーに切り替え
+mygramclient -c "SET mysql.host = 'mysql-server-2.example.com';"
 
 # 4. ログでフェイルオーバー検出を確認
 tail -100 /var/log/mygramdb/server.log | grep -E "(failover|UUID changed)"
 ```
 
-## 5. トラブルシューティング
+## 6. トラブルシューティング
 
-### 問題：設定リロード失敗
+### 問題：変数設定失敗
 
 **症状**:
-```log
-[error] Failed to reload configuration: <error message>
-[warn] Continuing with current configuration
+```
+ERROR: Invalid value for api.default_limit: must be between 5 and 1000
 ```
 
 **解決策**:
-1. YAML 構文をチェック: `yamllint config.yaml`
-2. ファイルパーミッションを確認: `ls -la config.yaml`
-3. ログで JSON スキーマ検証エラーを確認
-4. 設定を手動でテスト: `./bin/mygramdb --config config.yaml --validate-config`
+1. 変数名を確認: `SHOW VARIABLES LIKE 'variable_name';`
+2. 有効な値の範囲を確認（ドキュメント参照）
+3. 変数が可変かどうか確認（不変変数は再起動が必要）
+4. ログで検証エラーを確認
 
 ### 問題：再接続後にレプリケーション停止
 
@@ -451,18 +561,19 @@ tail -100 /var/log/mygramdb/server.log | grep -E "(failover|UUID changed)"
 4. ファイアウォールルールを確認
 5. 設定で `mysql.connect_timeout_ms` の増加を検討
 
-## 6. パフォーマンスへの影響
+## 7. パフォーマンスへの影響
 
-### SIGHUP リロードの影響
+### ランタイム変数変更の影響
 
 - **ログレベル変更**: 影響なし、即座に反映
-- **MySQL 再接続**: 短時間の中断（1〜5秒）
+- **キャッシュパラメータ変更**: 影響なし、即座に反映
+- **MySQL 再接続** (SET mysql.host/port): 短時間の中断（1〜5秒）
   - Binlog reader が正常に停止
   - 既存のクエリは正常に完了
   - 検索/挿入操作は継続（既存の接続を使用）
   - 最後の GTID からレプリケーション再開
 
-**推奨**: 可能であれば、トラフィックの少ない時間帯に実施
+**推奨**: MySQL再接続は可能であれば、トラフィックの少ない時間帯に実施
 
 ### 検証のオーバーヘッド
 
@@ -476,7 +587,7 @@ tail -100 /var/log/mygramdb/server.log | grep -E "(failover|UUID changed)"
 3. テーブル存在確認: N クエリ（各約10ms、N = テーブル数）
 4. GTID 整合性: 1クエリ（約20ms）
 
-## 7. ベストプラクティス
+## 8. ベストプラクティス
 
 ### 設定管理
 
@@ -501,46 +612,53 @@ tail -100 /var/log/mygramdb/server.log | grep -E "(failover|UUID changed)"
 
 ### セキュリティ
 
-1. **SIGHUP アクセス**: 信頼できるユーザーのみがシグナル送信可能に
+1. **クライアントアクセス制御**: 信頼できるIPアドレスからのみSETコマンドを許可（`network.allow_cidrs`）
 2. **設定ファイルパーミッション**: `chmod 600 config.yaml`（機密情報を含む）
 3. **ログローテーション**: ディスク容量枯渇を防止
-4. **監査証跡**: すべての設定変更とフェイルオーバーをログ記録
+4. **監査証跡**: すべての変数変更とフェイルオーバーをログ記録
 
-## 8. 実装詳細
+## 9. 実装詳細
 
 ### ソースファイル
 
-**SIGHUP ハンドラ**:
-- `src/main.cpp:36-618` - シグナルハンドラと設定リロードロジック
+**ランタイム変数管理**:
+- `src/config/runtime_variable_manager.h/cpp` - 変数管理とスレッドセーフ更新
+- `src/server/handlers/variable_handler.h/cpp` - SET/SHOW VARIABLESコマンドハンドラ
+- `src/query/query_parser.h/cpp` - SET/SHOW構文パーサー
+
+**MySQL再接続**:
+- `src/app/mysql_reconnection_handler.h/cpp` - MySQL フェイルオーバーロジック
+- `src/mysql/binlog_reader.h/cpp` - GTID位置保存と再開
 
 **ConnectionValidator**:
 - `src/mysql/connection_validator.h` - 検証インターフェース
 - `src/mysql/connection_validator.cpp` - 検証実装
-
-**BinlogReader 統合**:
-- `src/mysql/binlog_reader.h:187-188,255` - UUID 追跡メンバー
-- `src/mysql/binlog_reader.cpp:196-201,315-322,386-393,452-459,749-799` - 検証呼び出し
 
 **テスト**:
 - `tests/mysql/connection_validator_test.cpp` - 包括的なテストスイート
 
 ### 設定スキーマ
 
-ホットリロードとフェイルオーバー検出に関連する設定フィールド：
+ランタイム変数とフェイルオーバー検出に関連する設定フィールド：
 
 ```yaml
 logging:
-  level: "info"  # SIGHUP でホットリロード可能
+  level: "info"  # SET logging.level で変更可能
 
 mysql:
-  host: "127.0.0.1"           # ホットリロード可能
-  port: 3306                   # ホットリロード可能
-  user: "replicator"           # ホットリロード可能
-  password: "password"         # ホットリロード可能
-  database: "myapp"            # ホットリロード可能
-  connect_timeout_ms: 10000    # ホットリロード可能
-  read_timeout_ms: 30000       # ホットリロード可能
-  write_timeout_ms: 30000      # ホットリロード可能
+  host: "127.0.0.1"           # SET mysql.host で変更可能（フェイルオーバー）
+  port: 3306                   # SET mysql.port で変更可能（フェイルオーバー）
+  user: "replicator"           # 不変（再起動が必要）
+  password: "password"         # 不変（再起動が必要）
+  database: "myapp"            # 不変（再起動が必要）
+  connect_timeout_ms: 10000    # 不変（再起動が必要）
+  read_timeout_ms: 30000       # 不変（再起動が必要）
+  write_timeout_ms: 30000      # 不変（再起動が必要）
+
+cache:
+  enabled: true                # SET cache.enabled で変更可能
+  min_query_cost_ms: 10.0     # SET cache.min_query_cost_ms で変更可能
+  ttl_seconds: 3600            # SET cache.ttl_seconds で変更可能
 ```
 
 ## 付録：クイックリファレンス
@@ -548,8 +666,14 @@ mysql:
 ### コマンド
 
 ```bash
-# 設定をリロード
-kill -SIGHUP $(pidof mygramdb)
+# すべての変数を表示
+mygramclient -c "SHOW VARIABLES;"
+
+# 変数を設定
+mygramclient -c "SET logging.level = 'debug';"
+
+# MySQLサーバーを切り替え（フェイルオーバー）
+mygramclient -c "SET mysql.host = 'new-host.example.com';"
 
 # プロセスステータスをチェック
 ps aux | grep mygramdb
@@ -568,9 +692,10 @@ curl http://localhost:8080/health/detail
 
 | イベント | 重要度 | 意味 |
 |---------|--------|------|
-| `Configuration reload requested` | INFO | SIGHUP を受信 |
-| `Configuration reload completed successfully` | INFO | 設定が適用された |
-| `Failed to reload configuration` | ERROR | 設定が無効、旧設定を使用 |
+| `variable_changed` | INFO | 変数が変更された |
+| `variable_set_failed` | ERROR | 変数設定が失敗（検証エラー） |
+| `mysql_reconnection_started` | INFO | MySQL再接続を開始 |
+| `mysql_reconnection_completed` | INFO | MySQL再接続が成功 |
 | `mysql_failover_detected` | WARNING | サーバー UUID が変更された |
 | `connection_validation_failed` | ERROR | 検証失敗、レプリケーション停止 |
 | `Connection validated successfully` | INFO | 検証合格 |

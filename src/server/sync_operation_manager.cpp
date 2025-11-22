@@ -13,10 +13,10 @@
 #include <sstream>
 #include <thread>
 
+#include "loader/initial_loader.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
 #include "server/response_formatter.h"
-#include "storage/snapshot_builder.h"
 #include "utils/memory_utils.h"
 #include "utils/structured_log.h"
 
@@ -168,11 +168,11 @@ std::string SyncOperationManager::GetSyncStatus() {
 void SyncOperationManager::RequestShutdown() {
   shutdown_requested_ = true;
 
-  // Cancel all active builders
-  std::lock_guard<std::mutex> lock(builders_mutex_);
-  for (auto& [table_name, builder] : active_builders_) {
+  // Cancel all active loaders
+  std::lock_guard<std::mutex> lock(loaders_mutex_);
+  for (auto& [table_name, loader] : active_loaders_) {
     spdlog::info("Cancelling SYNC for table: {}", table_name);
-    builder->Cancel();
+    loader->Cancel();
   }
 }
 
@@ -311,21 +311,21 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       return;
     }
 
-    // Build snapshot
-    storage::SnapshotBuilder builder(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
-                                     full_config_->build);
+    // Build initial data load
+    loader::InitialLoader loader(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
+                                 full_config_->build);
 
-    RegisterBuilder(table_name, &builder);
+    RegisterLoader(table_name, &loader);
 
-    auto result = builder.Build([&](const auto& progress) {
+    auto result = loader.Load([&](const auto& progress) {
       // Update progress atomically (these fields are atomic in SyncState)
       std::lock_guard<std::mutex> lock(sync_mutex_);
       sync_states_[table_name].total_rows = progress.total_rows;
       sync_states_[table_name].processed_rows = progress.processed_rows;
-      // Note: No need to call builder.Cancel() here as RequestShutdown() already handles it
+      // Note: No need to call loader.Cancel() here as RequestShutdown() already handles it
     });
 
-    UnregisterBuilder(table_name);
+    UnregisterLoader(table_name);
 
     // Handle cancellation
     if (shutdown_requested_) {
@@ -340,8 +340,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Handle result
     if (result) {
-      std::string gtid = builder.GetSnapshotGTID();
-      uint64_t processed = builder.GetProcessedRows();
+      std::string gtid = loader.GetStartGTID();
+      uint64_t processed = loader.GetProcessedRows();
 
       update_state([&gtid, processed](SyncState& state) {
         state.status = "COMPLETED";
@@ -428,14 +428,14 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   update_state([](SyncState& state) { state.is_running = false; });
 }
 
-void SyncOperationManager::RegisterBuilder(const std::string& table_name, storage::SnapshotBuilder* builder) {
-  std::lock_guard<std::mutex> lock(builders_mutex_);
-  active_builders_[table_name] = builder;
+void SyncOperationManager::RegisterLoader(const std::string& table_name, loader::InitialLoader* loader) {
+  std::lock_guard<std::mutex> lock(loaders_mutex_);
+  active_loaders_[table_name] = loader;
 }
 
-void SyncOperationManager::UnregisterBuilder(const std::string& table_name) {
-  std::lock_guard<std::mutex> lock(builders_mutex_);
-  active_builders_.erase(table_name);
+void SyncOperationManager::UnregisterLoader(const std::string& table_name) {
+  std::lock_guard<std::mutex> lock(loaders_mutex_);
+  active_loaders_.erase(table_name);
 }
 
 }  // namespace mygramdb::server

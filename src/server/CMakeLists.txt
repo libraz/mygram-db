@@ -22,6 +22,7 @@ add_library(mygramdb_server STATIC
   handlers/debug_handler.cpp
   handlers/cache_handler.cpp
   handlers/sync_handler.cpp
+  handlers/variable_handler.cpp
 )
 
 target_include_directories(mygramdb_server PUBLIC
@@ -37,5 +38,5 @@ target_link_libraries(mygramdb_server PUBLIC
 )
 
 if(USE_MYSQL AND MYSQL_FOUND)
-  target_link_libraries(mygramdb_server PUBLIC mygramdb_mysql)
+  target_link_libraries(mygramdb_server PUBLIC mygramdb_mysql mygramdb_loader)
 endif()

@@ -1,6 +1,6 @@
 /**
- * @file snapshot_builder.cpp
- * @brief Snapshot builder implementation
+ * @file initial_loader.cpp
+ * @brief Initial data loader implementation
  *
  * Note on clang-tidy suppressions:
  * This file extensively uses MySQL C API which requires pointer arithmetic for result set access.
@@ -11,7 +11,7 @@
  * - Pointer arithmetic warnings are suppressed for the entire file due to MySQL C API requirements
  */
 
-#include "storage/snapshot_builder.h"
+#include "loader/initial_loader.h"
 
 #ifdef USE_MYSQL
 
@@ -30,16 +30,16 @@
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
-namespace mygramdb::storage {
+namespace mygramdb::loader {
 
 namespace {
-// Default batch size for snapshot building
+// Default batch size for initial loading
 constexpr size_t kDefaultBatchSize = 1000;
 }  // namespace
 
-SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& index, DocumentStore& doc_store,
-                                 config::TableConfig table_config, config::MysqlConfig mysql_config,
-                                 config::BuildConfig build_config)
+InitialLoader::InitialLoader(mysql::Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
+                             config::TableConfig table_config, config::MysqlConfig mysql_config,
+                             config::BuildConfig build_config)
     : connection_(connection),
       index_(index),
       doc_store_(doc_store),
@@ -47,7 +47,7 @@ SnapshotBuilder::SnapshotBuilder(mysql::Connection& connection, index::Index& in
       mysql_config_(std::move(mysql_config)),
       build_config_(std::move(build_config)) {}
 
-mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const ProgressCallback& progress_callback) {
+mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const ProgressCallback& progress_callback) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -56,8 +56,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
   if (!connection_.IsConnected()) {
     std::string error_msg = "MySQL connection not established";
     mygram::utils::StructuredLog()
-        .Event("storage_error")
-        .Field("operation", "snapshot_build")
+        .Event("loader_error")
+        .Field("operation", "initial_load")
         .Field("error", error_msg)
         .Error();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
@@ -69,8 +69,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
         "GTID mode is not enabled on MySQL server. "
         "Please enable GTID mode (gtid_mode=ON) for replication support.";
     mygram::utils::StructuredLog()
-        .Event("storage_error")
-        .Field("operation", "snapshot_build")
+        .Event("loader_error")
+        .Field("operation", "initial_load")
         .Field("type", "gtid_mode_disabled")
         .Field("error", error_msg)
         .Error();
@@ -83,8 +83,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
                                         validation_error)) {
     std::string error_msg = "Primary key validation failed: " + validation_error;
     mygram::utils::StructuredLog()
-        .Event("storage_error")
-        .Field("operation", "snapshot_build")
+        .Event("loader_error")
+        .Field("operation", "initial_load")
         .Field("type", "primary_key_validation_failed")
         .Field("table", table_config_.name)
         .Field("primary_key", table_config_.primary_key)
@@ -94,35 +94,35 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
   }
 
   // Start transaction with consistent snapshot for GTID consistency
-  spdlog::info("Starting consistent snapshot transaction");
+  spdlog::info("Starting consistent snapshot transaction for initial load");
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
     std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
     mygram::utils::StructuredLog()
-        .Event("storage_error")
-        .Field("operation", "snapshot_build")
+        .Event("loader_error")
+        .Field("operation", "initial_load")
         .Field("type", "transaction_start_failed")
         .Field("error", error_msg)
         .Error();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Capture GTID at this point (represents snapshot state)
+  // Capture GTID at this point (represents load state)
   auto gtid_result_exp = connection_.Execute("SELECT @@global.gtid_executed");
   if (gtid_result_exp) {
     MYSQL_ROW row = mysql_fetch_row(gtid_result_exp->get());
     if (row != nullptr && row[0] != nullptr) {
-      snapshot_gtid_ = std::string(row[0]);
+      start_gtid_ = std::string(row[0]);
       // Remove all whitespace (newlines, spaces, tabs) from GTID string
       // MySQL may return GTID with newlines when it's long
-      snapshot_gtid_.erase(std::remove_if(snapshot_gtid_.begin(), snapshot_gtid_.end(),
-                                          [](unsigned char character) { return std::isspace(character); }),
-                           snapshot_gtid_.end());
+      start_gtid_.erase(std::remove_if(start_gtid_.begin(), start_gtid_.end(),
+                                       [](unsigned char character) { return std::isspace(character); }),
+                        start_gtid_.end());
     }
     // gtid_result_exp automatically freed by MySQLResult destructor
   }
 
   // GTID must not be empty for replication to work
-  if (snapshot_gtid_.empty()) {
+  if (start_gtid_.empty()) {
     std::string error_msg =
         "GTID is empty - cannot start replication from undefined position.\n"
         "This typically happens when GTID mode was recently enabled.\n"
@@ -132,8 +132,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
         "  3. Restart MygramDB\n"
         "Alternatively, disable replication by setting replication.enable=false in config.";
     mygram::utils::StructuredLog()
-        .Event("storage_error")
-        .Field("operation", "snapshot_build")
+        .Event("loader_error")
+        .Field("operation", "initial_load")
         .Field("type", "gtid_empty")
         .Field("error", error_msg)
         .Error();
@@ -141,11 +141,11 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  spdlog::info("Snapshot GTID captured: {}", snapshot_gtid_);
+  spdlog::info("Initial load starting from GTID: {}", start_gtid_);
 
   // Build SELECT query
   std::string query = BuildSelectQuery();
-  spdlog::info("Building snapshot with query: {}", query);
+  spdlog::info("Loading initial data with query: {}", query);
 
   auto start_time = std::chrono::steady_clock::now();
 
@@ -173,7 +173,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
   // Determine batch size (use default if not specified)
   size_t batch_size = build_config_.batch_size > 0 ? build_config_.batch_size : kDefaultBatchSize;
 
-  std::vector<DocumentStore::DocumentItem> doc_batch;
+  std::vector<storage::DocumentStore::DocumentItem> doc_batch;
   std::vector<index::Index::DocumentItem> index_batch;
   doc_batch.reserve(batch_size);
   index_batch.reserve(batch_size);
@@ -184,8 +184,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
     if (primary_key.empty()) {
       std::string error_msg = "Failed to extract primary key";
       mygram::utils::StructuredLog()
-          .Event("storage_error")
-          .Field("operation", "snapshot_build")
+          .Event("loader_error")
+          .Field("operation", "initial_load")
           .Field("type", "primary_key_extraction_failed")
           .Field("table", table_config_.name)
           .Field("error", error_msg)
@@ -219,7 +219,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
       if (!doc_ids_result) {
         return MakeUnexpected(doc_ids_result.error());
       }
-      std::vector<DocId> doc_ids = *doc_ids_result;
+      std::vector<storage::DocId> doc_ids = *doc_ids_result;
 
       // Update index_batch with assigned doc_ids
       for (size_t i = 0; i < doc_ids.size(); ++i) {
@@ -240,7 +240,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - start_time).count();
 
-        SnapshotProgress progress;
+        LoadProgress progress;
         progress.total_rows = total_rows;
         progress.processed_rows = processed_rows_;
         progress.elapsed_seconds = elapsed;
@@ -258,7 +258,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
     if (!doc_ids_result) {
       return MakeUnexpected(doc_ids_result.error());
     }
-    std::vector<DocId> doc_ids = *doc_ids_result;
+    std::vector<storage::DocId> doc_ids = *doc_ids_result;
 
     // Update index_batch with assigned doc_ids
     for (size_t i = 0; i < doc_ids.size(); ++i) {
@@ -276,28 +276,28 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::Build(const
   // Commit the transaction (releases the snapshot)
   if (!connection_.ExecuteUpdate("COMMIT")) {
     mygram::utils::StructuredLog()
-        .Event("storage_warning")
-        .Field("operation", "snapshot_build")
+        .Event("loader_warning")
+        .Field("operation", "initial_load")
         .Field("type", "commit_failed")
         .Field("error", connection_.GetLastError())
         .Warn();
   }
 
   if (cancelled_) {
-    std::string error_msg = "Build cancelled";
+    std::string error_msg = "Load cancelled";
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   auto end_time = std::chrono::steady_clock::now();
   double total_elapsed = std::chrono::duration<double>(end_time - start_time).count();
 
-  spdlog::info("Snapshot build completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_, total_elapsed,
+  spdlog::info("Initial load completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_, total_elapsed,
                total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
 
   return {};  // Success
 }
 
-std::string SnapshotBuilder::BuildSelectQuery() const {
+std::string InitialLoader::BuildSelectQuery() const {
   std::ostringstream query;
   query << "SELECT ";
 
@@ -381,8 +381,8 @@ std::string SnapshotBuilder::BuildSelectQuery() const {
   return query.str();
 }
 
-mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                                unsigned int num_fields) {
+mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                              unsigned int num_fields) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -413,7 +413,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::ProcessRow(
   if (!doc_id_result) {
     return MakeUnexpected(doc_id_result.error());
   }
-  DocId doc_id = *doc_id_result;
+  storage::DocId doc_id = *doc_id_result;
 
   // Add to index
   index_.AddDocument(doc_id, normalized_text);
@@ -421,14 +421,14 @@ mygram::utils::Expected<void, mygram::utils::Error> SnapshotBuilder::ProcessRow(
   return {};  // Success
 }
 
-bool SnapshotBuilder::IsTextColumn(enum_field_types type) {
+bool InitialLoader::IsTextColumn(enum_field_types type) {
   // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
   return type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING ||
          type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB || type == MYSQL_TYPE_LONG_BLOB ||
          type == MYSQL_TYPE_BLOB;
 }
 
-std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
+std::string InitialLoader::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
   if (!table_config_.text_source.column.empty()) {
     // Single column
     int idx = FindFieldIndex(table_config_.text_source.column, fields, num_fields);
@@ -436,7 +436,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, uns
       // Validate column type
       if (!IsTextColumn(fields[idx].type)) {
         mygram::utils::StructuredLog()
-            .Event("storage_error")
+            .Event("loader_error")
             .Field("operation", "extract_text")
             .Field("type", "invalid_column_type")
             .Field("column", table_config_.text_source.column)
@@ -458,7 +458,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, uns
         // Validate column type
         if (!IsTextColumn(fields[idx].type)) {
           mygram::utils::StructuredLog()
-              .Event("storage_error")
+              .Event("loader_error")
               .Field("operation", "extract_text_concat")
               .Field("type", "invalid_column_type")
               .Field("column", col)
@@ -481,7 +481,7 @@ std::string SnapshotBuilder::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, uns
   return "";
 }
 
-std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
+std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
   int idx = FindFieldIndex(table_config_.primary_key, fields, num_fields);
   if (idx >= 0 && row[idx] != nullptr) {
     return {row[idx]};
@@ -489,9 +489,9 @@ std::string SnapshotBuilder::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* field
   return "";
 }
 
-std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                             unsigned int num_fields) const {
-  std::unordered_map<std::string, FilterValue> filters;
+std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
+                                                                                    unsigned int num_fields) const {
+  std::unordered_map<std::string, storage::FilterValue> filters;
 
   for (const auto& filter_config : table_config_.filters) {
     int idx = FindFieldIndex(filter_config.name, fields, num_fields);
@@ -535,7 +535,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
           filters[filter_config.name] = *epoch_opt;
         } else {
           mygram::utils::StructuredLog()
-              .Event("storage_warning")
+              .Event("loader_warning")
               .Field("operation", "extract_filters")
               .Field("type", "datetime_conversion_failed")
               .Field("value", value_str)
@@ -549,7 +549,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
           filters[filter_config.name] = static_cast<uint64_t>(std::stoull(value_str));
         } catch (const std::exception& e) {
           mygram::utils::StructuredLog()
-              .Event("storage_warning")
+              .Event("loader_warning")
               .Field("operation", "extract_filters")
               .Field("type", "timestamp_conversion_failed")
               .Field("value", value_str)
@@ -562,7 +562,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
         auto processor_result = mysql_config_.CreateDateTimeProcessor();
         if (!processor_result) {
           mygram::utils::StructuredLog()
-              .Event("storage_warning")
+              .Event("loader_warning")
               .Field("operation", "extract_filters")
               .Field("type", "datetime_processor_creation_failed")
               .Field("field", filter_config.name)
@@ -571,10 +571,10 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
         } else {
           auto seconds_result = processor_result->TimeToSeconds(value_str);
           if (seconds_result) {
-            filters[filter_config.name] = TimeValue{*seconds_result};
+            filters[filter_config.name] = storage::TimeValue{*seconds_result};
           } else {
             mygram::utils::StructuredLog()
-                .Event("storage_warning")
+                .Event("loader_warning")
                 .Field("operation", "extract_filters")
                 .Field("type", "time_conversion_failed")
                 .Field("value", value_str)
@@ -585,7 +585,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
         }
       } else {
         mygram::utils::StructuredLog()
-            .Event("storage_warning")
+            .Event("loader_warning")
             .Field("operation", "extract_filters")
             .Field("type", "unknown_filter_type")
             .Field("filter_type", type)
@@ -594,7 +594,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
       }
     } catch (const std::exception& e) {
       mygram::utils::StructuredLog()
-          .Event("storage_warning")
+          .Event("loader_warning")
           .Field("operation", "extract_filters")
           .Field("type", "filter_parse_failed")
           .Field("filter_type", type)
@@ -608,7 +608,7 @@ std::unordered_map<std::string, FilterValue> SnapshotBuilder::ExtractFilters(MYS
   return filters;
 }
 
-int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields) {
+int InitialLoader::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields) {
   for (unsigned int i = 0; i < num_fields; ++i) {
     if (field_name == fields[i].name) {
       return static_cast<int>(i);
@@ -617,7 +617,7 @@ int SnapshotBuilder::FindFieldIndex(const std::string& field_name, MYSQL_FIELD* 
   return -1;
 }
 
-}  // namespace mygramdb::storage
+}  // namespace mygramdb::loader
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 

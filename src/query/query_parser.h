@@ -63,6 +63,10 @@ enum class QueryType : uint8_t {
   CACHE_ENABLE,   // CACHE ENABLE
   CACHE_DISABLE,  // CACHE DISABLE
 
+  // Variable commands (MySQL-compatible)
+  SET,             // SET variable = value [, variable2 = value2 ...]
+  SHOW_VARIABLES,  // SHOW VARIABLES [LIKE 'pattern'] [WHERE condition]
+
   UNKNOWN
 };
 
@@ -167,6 +171,10 @@ struct Query {
 
   // DUMP command options
   bool dump_with_stats = false;  // --with-stats flag for DUMP SAVE
+
+  // Variable commands (SET, SHOW VARIABLES)
+  std::vector<std::pair<std::string, std::string>> variable_assignments;  // For SET: [(name, value), ...]
+  std::string variable_like_pattern;                                      // For SHOW VARIABLES LIKE 'pattern'
 
   // Cache optimization: precomputed cache key (set by QueryParser)
   // This avoids recomputing normalization and MD5 hash on every cache lookup

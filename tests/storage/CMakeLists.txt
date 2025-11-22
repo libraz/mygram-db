@@ -88,8 +88,7 @@ add_executable(dump_security_test
 )
 
 target_link_libraries(dump_security_test
-  mygramdb_storage  # For dump functionality (explicit link needed for headers)
-  mygramdb_config   # For configuration
+  mygramdb_storage  # Includes mygramdb_config transitively
   GTest::gtest_main
 )
 
@@ -110,25 +109,11 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   target_link_libraries(dump_save_load_test
-    mygramdb_cache  # Includes mygramdb_query, mygramdb_storage, mygramdb_index transitively
-    mygramdb_config # Includes mygramdb_mysql transitively
+    mygramdb_cache   # Includes mygramdb_query, mygramdb_storage, mygramdb_index, mygramdb_config transitively
+    mygramdb_mysql   # Needed for mysql::Connection
+    mygramdb_loader  # Needed for InitialLoader
   )
 
   # This is a manual integration test - do not add to CTest
   # Run manually with: ./bin/dump_save_load_test
-
-  # SnapshotBuilder query generation logic tests
-  add_executable(snapshot_builder_query_test
-    snapshot_builder_query_test.cpp
-  )
-
-  target_link_libraries(snapshot_builder_query_test
-    mygramdb_config   # For TableConfig
-    GTest::gtest_main
-  )
-
-  gtest_discover_tests(snapshot_builder_query_test
-    DISCOVERY_MODE POST_BUILD
-    DISCOVERY_TIMEOUT 30
-  )
 endif()

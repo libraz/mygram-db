@@ -138,8 +138,8 @@ See [Protocol Reference](docs/en/protocol.md) for all commands.
 
 - **Fast**: 25-200x faster than MySQL FULLTEXT
 - **MySQL Replication**: Real-time GTID-based binlog streaming
-- **Configuration Hot Reload**: SIGHUP signal for zero-downtime config changes
-- **Failover Detection**: Automatic MySQL master failover detection and validation
+- **Runtime Variables**: MySQL-style SET/SHOW VARIABLES for zero-downtime config changes
+- **MySQL Failover**: Switch MySQL servers at runtime with GTID position preservation
 - **Multiple Tables**: Index multiple tables in one instance
 - **Dual Protocol**: TCP (memcached-style) and HTTP/REST API
 - **High Concurrency**: Thread pool supporting 10,000+ connections
@@ -185,7 +185,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - [HTTP API Reference](docs/en/http-api.md) - REST API documentation
 - [Performance Guide](docs/en/performance.md) - Benchmarks and optimization
 - [Replication Guide](docs/en/replication.md) - MySQL replication setup
-- [Operations Guide](docs/en/operations.md) - Configuration hot reload and failover detection
+- [Operations Guide](docs/en/operations.md) - Runtime variables and MySQL failover
 - [Installation Guide](docs/en/installation.md) - Build from source
 - [Development Guide](docs/en/development.md) - Contributing guidelines
 - [Client Library](docs/en/libmygramclient.md) - C/C++ client library

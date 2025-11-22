@@ -29,7 +29,7 @@ using mygram::utils::Expected;
  * 2. Load configuration
  * 3. Setup signal handlers
  * 4. Initialize components
- * 5. Run main loop (poll signals, handle config reload)
+ * 5. Run main loop (poll signals for shutdown)
  * 6. Graceful shutdown
  *
  * Design Pattern: Facade + Orchestrator
@@ -88,9 +88,9 @@ class Application {
    * 4. Daemonize (if --daemon)
    * 5. Verify dump directory
    * 6. Setup signal handlers
-   * 7. Initialize server components
+   * 7. Initialize server components (including RuntimeVariableManager)
    * 8. Start servers
-   * 9. Main loop (signal polling + config reload)
+   * 9. Main loop (signal polling for shutdown)
    * 10. Graceful shutdown
    */
   int Run();
@@ -112,9 +112,6 @@ class Application {
   static Expected<void, mygram::utils::Error> CheckRootPrivilege();
   Expected<void, mygram::utils::Error> VerifyDumpDirectory();
   Expected<void, mygram::utils::Error> DaemonizeIfRequested() const;
-
-  // Config reload handler
-  void HandleConfigReload();
 
   // Command-line arguments
   CommandLineArgs args_;

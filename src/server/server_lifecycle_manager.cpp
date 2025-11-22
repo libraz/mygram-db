@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "cache/cache_manager.h"
+#include "config/runtime_variable_manager.h"
 #include "server/handlers/admin_handler.h"
 #include "server/handlers/cache_handler.h"
 #include "server/handlers/debug_handler.h"
@@ -15,6 +16,7 @@
 #include "server/handlers/dump_handler.h"
 #include "server/handlers/replication_handler.h"
 #include "server/handlers/search_handler.h"
+#include "server/handlers/variable_handler.h"
 #ifdef USE_MYSQL
 #include "server/handlers/sync_handler.h"
 #include "server/sync_operation_manager.h"
@@ -55,6 +57,14 @@ ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
       binlog_reader_(binlog_reader)
 #endif
 {
+#ifdef USE_MYSQL
+  // Contract: sync_manager must be non-null when USE_MYSQL is defined
+  // This is enforced because HandlerContext requires valid references to
+  // syncing_tables and syncing_tables_mutex, which are owned by SyncOperationManager
+  if (sync_manager_ == nullptr) {
+    throw std::invalid_argument("ServerLifecycleManager: sync_manager must be non-null when USE_MYSQL is defined");
+  }
+#endif
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -96,9 +106,26 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     }
   }
 
-  // Step 4: Initialize HandlerContext (depends on catalog, cache)
+  // Step 3.5: Initialize RuntimeVariableManager (depends on config)
+  if (full_config_ != nullptr) {
+    auto variable_manager_result = config::RuntimeVariableManager::Create(*full_config_);
+    if (!variable_manager_result) {
+      return MakeUnexpected(variable_manager_result.error());
+    }
+    components.variable_manager = std::move(*variable_manager_result);
+
+    // Wire up CacheManager for runtime configuration updates
+    if (components.cache_manager) {
+      components.variable_manager->SetCacheManager(components.cache_manager.get());
+    }
+
+    spdlog::info("ServerLifecycleManager: RuntimeVariableManager initialized");
+  }
+
+  // Step 4: Initialize HandlerContext (depends on catalog, cache, variable_manager)
   {
-    auto handler_context_result = InitHandlerContext(components.table_catalog.get(), components.cache_manager.get());
+    auto handler_context_result = InitHandlerContext(components.table_catalog.get(), components.cache_manager.get(),
+                                                     components.variable_manager.get());
     if (!handler_context_result) {
       return MakeUnexpected(handler_context_result.error());
     }
@@ -121,6 +148,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     components.replication_handler = std::move(handlers_result->replication_handler);
     components.debug_handler = std::move(handlers_result->debug_handler);
     components.cache_handler = std::move(handlers_result->cache_handler);
+    components.variable_handler = std::move(handlers_result->variable_handler);
 #ifdef USE_MYSQL
     components.sync_handler = std::move(handlers_result->sync_handler);
 #endif
@@ -231,12 +259,15 @@ ServerLifecycleManager::InitCacheManager() {
 }
 
 mygram::utils::Expected<std::unique_ptr<HandlerContext>, mygram::utils::Error>
-ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::CacheManager* cache_manager) {
+ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::CacheManager* cache_manager,
+                                           config::RuntimeVariableManager* variable_manager) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   try {
+#ifdef USE_MYSQL
+    // sync_manager_ is guaranteed to be non-null (enforced in constructor)
     auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
         .table_catalog = table_catalog,
         .table_contexts = table_contexts_,
@@ -246,17 +277,27 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
-#ifdef USE_MYSQL
         .binlog_reader = binlog_reader_,
-        // Note: sync_manager_ should always be valid when USE_MYSQL is defined
-        // It's created in TcpServer::Start() before ServerLifecycleManager is instantiated
         .syncing_tables = sync_manager_->GetSyncingTablesRef(),
         .syncing_tables_mutex = sync_manager_->GetSyncingTablesMutex(),
-#else
-        .binlog_reader = binlog_reader_,
-#endif
         .cache_manager = cache_manager,
+        .variable_manager = variable_manager,
     });
+#else
+    auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
+        .table_catalog = table_catalog,
+        .table_contexts = table_contexts_,
+        .stats = stats_,
+        .full_config = full_config_,
+        .dump_dir = dump_dir_,
+        .loading = loading_,
+        .read_only = read_only_,
+        .optimization_in_progress = optimization_in_progress_,
+        .binlog_reader = binlog_reader_,
+        .cache_manager = cache_manager,
+        .variable_manager = variable_manager,
+    });
+#endif
     return handler_context;
   } catch (const std::exception& e) {
     auto error = MakeError(ErrorCode::kInternalError, "Failed to create handler context: " + std::string(e.what()));
@@ -285,9 +326,11 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     handlers.replication_handler = std::make_unique<ReplicationHandler>(handler_context);
     handlers.debug_handler = std::make_unique<DebugHandler>(handler_context);
     handlers.cache_handler = std::make_unique<CacheHandler>(handler_context);
+    handlers.variable_handler = std::make_unique<VariableHandler>(handler_context);
 #ifdef USE_MYSQL
     // Note: SyncHandler now takes SyncOperationManager* instead of TcpServer&
     // This eliminates circular dependency
+    // sync_manager_ is guaranteed to be non-null (enforced in constructor)
     handlers.sync_handler = std::make_unique<SyncHandler>(handler_context, sync_manager_);
 #endif
 
@@ -334,7 +377,10 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
     dispatcher->RegisterHandler(query::QueryType::CACHE_STATS, handlers.cache_handler.get());
     dispatcher->RegisterHandler(query::QueryType::CACHE_ENABLE, handlers.cache_handler.get());
     dispatcher->RegisterHandler(query::QueryType::CACHE_DISABLE, handlers.cache_handler.get());
+    dispatcher->RegisterHandler(query::QueryType::SET, handlers.variable_handler.get());
+    dispatcher->RegisterHandler(query::QueryType::SHOW_VARIABLES, handlers.variable_handler.get());
 #ifdef USE_MYSQL
+    // sync_handler is guaranteed to be non-null (sync_manager_ is enforced in constructor)
     dispatcher->RegisterHandler(query::QueryType::SYNC, handlers.sync_handler.get());
     dispatcher->RegisterHandler(query::QueryType::SYNC_STATUS, handlers.sync_handler.get());
 #endif

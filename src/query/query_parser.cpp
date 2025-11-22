@@ -79,8 +79,8 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, DUMP_*, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_* commands don't require a
-  // table
+  // INFO, SAVE, LOAD, DUMP_*, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_*, SET, SHOW_VARIABLES
+  // commands don't require a table
   if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD && type != QueryType::DUMP_SAVE &&
       type != QueryType::DUMP_LOAD && type != QueryType::DUMP_VERIFY && type != QueryType::DUMP_INFO &&
       type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
@@ -88,7 +88,7 @@ bool Query::IsValid() const {
       type != QueryType::CONFIG_SHOW && type != QueryType::CONFIG_VERIFY && type != QueryType::OPTIMIZE &&
       type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && type != QueryType::CACHE_CLEAR &&
       type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE && type != QueryType::CACHE_DISABLE &&
-      table.empty()) {
+      type != QueryType::SET && type != QueryType::SHOW_VARIABLES && table.empty()) {
     return false;
   }
 
@@ -387,6 +387,75 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     }
 
     return query;
+  }
+
+  // SET variable = value [, variable2 = value2 ...]
+  if (EqualsIgnoreCase(command, "SET")) {
+    Query query;
+    query.type = QueryType::SET;
+
+    // Parse variable assignments: variable = value [, variable2 = value2 ...]
+    size_t pos = 1;
+    while (pos < tokens.size()) {
+      // Expect: variable_name = value
+      if (pos + 2 >= tokens.size()) {
+        SetError("SET: Expected variable = value");
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+
+      std::string variable_name = tokens[pos];
+      std::string equals_sign = tokens[pos + 1];
+      std::string value = tokens[pos + 2];
+
+      if (equals_sign != "=") {
+        SetError("SET: Expected '=' after variable name");
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+
+      query.variable_assignments.emplace_back(variable_name, value);
+      pos += 3;
+
+      // Check for comma (more assignments)
+      if (pos < tokens.size()) {
+        if (tokens[pos] == ",") {
+          pos++;  // Skip comma
+        } else {
+          SetError("SET: Expected ',' or end of query");
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        }
+      }
+    }
+
+    if (query.variable_assignments.empty()) {
+      SetError("SET: No variable assignments found");
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    }
+
+    return query;
+  }
+
+  // SHOW VARIABLES [LIKE 'pattern']
+  if (EqualsIgnoreCase(command, "SHOW")) {
+    if (tokens.size() < 2) {
+      SetError("SHOW: Expected subcommand");
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    }
+
+    std::string subcommand = ToUpper(tokens[1]);
+    if (subcommand == "VARIABLES") {
+      Query query;
+      query.type = QueryType::SHOW_VARIABLES;
+
+      // Check for LIKE clause
+      if (tokens.size() >= 4 && ToUpper(tokens[2]) == "LIKE") {
+        query.variable_like_pattern = tokens[3];
+      }
+
+      return query;
+    }
+
+    SetError("SHOW: Unknown subcommand: " + subcommand);
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   SetError("Unknown command: " + std::string(command));

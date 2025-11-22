@@ -224,6 +224,14 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   }
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::StartFromGtid(const std::string& gtid) {
+  // Set the GTID position first
+  SetCurrentGTID(gtid);
+
+  // Then start the binlog reader (which will use the set GTID)
+  return Start();
+}
+
 void BinlogReader::Stop() {
   if (!running_) {
     return;

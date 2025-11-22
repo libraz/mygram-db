@@ -225,11 +225,6 @@ void Application::RunMainLoop() {
 
   while (!signal_manager_->IsShutdownRequested()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownCheckIntervalMs));
-
-    // Check for config reload
-    if (signal_manager_->CheckAndResetConfigReload()) {
-      HandleConfigReload();
-    }
   }
 
   spdlog::info("Shutdown requested, cleaning up...");
@@ -359,36 +354,6 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::DaemonizeIfRequ
   // Note: After daemonization, stdout/stderr are redirected to /dev/null
   // All output must go through spdlog to be visible (configure file logging if needed)
   return {};
-}
-
-void Application::HandleConfigReload() {
-  spdlog::info("Configuration reload requested (SIGHUP received)");
-
-  // Reload configuration
-  auto reload_result = config_manager_->Reload();
-  if (!reload_result) {
-    mygram::utils::StructuredLog()
-        .Event("application_error")
-        .Field("type", "config_reload_failed")
-        .Field("phase", "runtime")
-        .Field("error", reload_result.error().to_string())
-        .Error();
-    spdlog::warn("Continuing with current configuration");
-    return;
-  }
-
-  // Apply config changes to server orchestrator
-  auto apply_result = server_orchestrator_->ReloadConfig(config_manager_->GetConfig());
-  if (!apply_result) {
-    mygram::utils::StructuredLog()
-        .Event("application_error")
-        .Field("type", "config_apply_failed")
-        .Field("phase", "runtime")
-        .Field("error", apply_result.error().to_string())
-        .Error();
-  } else {
-    spdlog::info("Configuration reload completed successfully");
-  }
 }
 
 }  // namespace mygramdb::app

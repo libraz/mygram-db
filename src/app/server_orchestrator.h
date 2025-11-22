@@ -48,7 +48,7 @@ class SignalManager;
  * Design Pattern: Facade + Lifecycle Manager
  * - Owns all server components (table contexts, MySQL, servers)
  * - Manages initialization and shutdown order
- * - Provides hot reload support for reloadable settings
+ * - Provides runtime variable management through RuntimeVariableManager
  *
  * Dependency Order:
  * 1. Table contexts (no dependencies)
@@ -133,22 +133,6 @@ class ServerOrchestrator {
    */
   bool IsRunning() const;
 
-  /**
-   * @brief Handle configuration reload
-   * @param new_config New configuration
-   * @return Expected with void or error
-   *
-   * Hot-reloadable settings:
-   * - MySQL connection (reconnects if changed)
-   * - Binlog reader restart (if MySQL changed)
-   *
-   * Non-reloadable settings (require restart):
-   * - Tables configuration
-   * - API port/bind settings
-   * - Cache settings
-   */
-  Expected<void, mygram::utils::Error> ReloadConfig(const config::Config& new_config);
-
  private:
   ServerOrchestrator(Dependencies deps);
 
@@ -158,9 +142,6 @@ class ServerOrchestrator {
   Expected<void, mygram::utils::Error> BuildSnapshots();
   Expected<void, mygram::utils::Error> InitializeBinlogReader();
   Expected<void, mygram::utils::Error> InitializeServers();
-
-  // Config change handlers
-  Expected<void, mygram::utils::Error> HandleMySQLConfigChange(const config::Config& new_config);
 
   // Dependencies (non-owning)
   Dependencies deps_;

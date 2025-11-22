@@ -1,6 +1,6 @@
 /**
  * @file configuration_manager.h
- * @brief Configuration manager with hot reload support
+ * @brief Configuration manager for loading and validating configuration files
  */
 
 #ifndef MYGRAMDB_APP_CONFIGURATION_MANAGER_H_
@@ -20,19 +20,20 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 
 /**
- * @brief Configuration manager with hot reload support
+ * @brief Configuration manager
  *
  * Responsibilities:
  * - Load configuration from file (YAML/JSON)
  * - Validate against schema
- * - Support hot reload (SIGHUP)
  * - Apply logging configuration changes
+ * - Provide read-only access to configuration
  *
  * Design Pattern: Factory + Facade
  * - Create() validates config before returning instance
  * - Owns the Config object (single source of truth)
  * - Provides read-only access via GetConfig()
- * - Reload() atomically updates config on success
+ *
+ * Note: Runtime configuration changes are handled by RuntimeVariableManager
  */
 class ConfigurationManager {
  public:
@@ -65,19 +66,6 @@ class ConfigurationManager {
   const config::Config& GetConfig() const { return config_; }
 
   /**
-   * @brief Reload configuration from file
-   * @return Expected with void or error
-   *
-   * Side effects:
-   * - Updates config_ on success
-   * - Applies logging level changes (via ApplyLoggingConfig)
-   * - Logs warnings if reload fails (keeps old config)
-   *
-   * Thread Safety: NOT thread-safe (must be called from single thread)
-   */
-  Expected<void, mygram::utils::Error> Reload();
-
-  /**
    * @brief Test mode: Print configuration details and exit
    * @return Exit code (0 = success)
    *
@@ -101,7 +89,8 @@ class ConfigurationManager {
    *
    * This method should be called:
    * - After initial configuration load
-   * - After configuration reload (if logging settings changed)
+   *
+   * Note: Runtime logging level changes are handled by RuntimeVariableManager
    */
   Expected<void, mygram::utils::Error> ApplyLoggingConfig();
 

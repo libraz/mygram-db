@@ -12,6 +12,7 @@
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
+#include "config/runtime_variable_manager.h"
 #include "server/connection_acceptor.h"
 #include "server/handlers/command_handler.h"
 #include "server/request_dispatcher.h"
@@ -44,6 +45,7 @@ struct InitializedComponents {
   std::unique_ptr<ThreadPool> thread_pool;
   std::unique_ptr<TableCatalog> table_catalog;
   std::unique_ptr<cache::CacheManager> cache_manager;
+  std::unique_ptr<config::RuntimeVariableManager> variable_manager;
   std::unique_ptr<HandlerContext> handler_context;
 
   // Command handlers
@@ -54,6 +56,7 @@ struct InitializedComponents {
   std::unique_ptr<CommandHandler> replication_handler;
   std::unique_ptr<CommandHandler> debug_handler;
   std::unique_ptr<CommandHandler> cache_handler;
+  std::unique_ptr<CommandHandler> variable_handler;
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler;
 #endif
@@ -97,7 +100,10 @@ class ServerLifecycleManager {
    * @param read_only Reference to read-only flag (owned by TcpServer)
    * @param optimization_in_progress Reference to optimization flag (owned by TcpServer)
    * @param binlog_reader Optional BinlogReader for replication
-   * @param sync_manager Optional SyncOperationManager for SYNC operations (MySQL only)
+   * @param sync_manager SyncOperationManager for SYNC operations (MySQL only, MUST be non-null when USE_MYSQL is
+   * defined)
+   *
+   * @throws std::invalid_argument if sync_manager is nullptr when USE_MYSQL is defined
    */
   ServerLifecycleManager(const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
                          const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
@@ -160,7 +166,8 @@ class ServerLifecycleManager {
   mygram::utils::Expected<std::unique_ptr<TableCatalog>, mygram::utils::Error> InitTableCatalog();
   mygram::utils::Expected<std::unique_ptr<cache::CacheManager>, mygram::utils::Error> InitCacheManager();
   mygram::utils::Expected<std::unique_ptr<HandlerContext>, mygram::utils::Error> InitHandlerContext(
-      TableCatalog* table_catalog, cache::CacheManager* cache_manager);
+      TableCatalog* table_catalog, cache::CacheManager* cache_manager,
+      config::RuntimeVariableManager* variable_manager);
   mygram::utils::Expected<InitializedComponents, mygram::utils::Error> InitHandlers(HandlerContext& handler_context);
   mygram::utils::Expected<std::unique_ptr<RequestDispatcher>, mygram::utils::Error> InitDispatcher(
       HandlerContext& handler_context, const InitializedComponents& handlers);

@@ -180,6 +180,14 @@ void RateLimiter::Clear() {
   client_buckets_.clear();
 }
 
+void RateLimiter::UpdateParameters(size_t capacity, size_t refill_rate) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  capacity_ = capacity;
+  refill_rate_ = refill_rate;
+  // Existing client buckets keep their old parameters
+  // New clients will use the updated parameters
+}
+
 void RateLimiter::CleanupOldClients() {
   std::lock_guard<std::mutex> lock(mutex_);
 

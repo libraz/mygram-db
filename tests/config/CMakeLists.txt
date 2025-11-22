@@ -99,6 +99,24 @@ gtest_discover_tests(config_rate_limiting_test
     RESOURCE_LOCK config_rate_limiting_lock
 )
 
+# Runtime variable manager test
+add_executable(runtime_variable_manager_test
+  runtime_variable_manager_test.cpp
+)
+
+target_link_libraries(runtime_variable_manager_test PRIVATE
+  mygramdb_config
+  mygramdb_cache
+  GTest::gtest_main
+)
+
+gtest_discover_tests(runtime_variable_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    RESOURCE_LOCK runtime_variable_manager_lock
+)
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

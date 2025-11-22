@@ -20,7 +20,7 @@
    - [ネットワークセキュリティ](#ネットワークセキュリティ)
    - [ロギング](#ロギング)
    - [クエリキャッシュ](#クエリキャッシュ)
-4. [ホットリロード](#ホットリロード)
+4. [ランタイム変数](#ランタイム変数)
 5. [本番環境での推奨事項](#本番環境での推奨事項)
 6. [トラブルシューティング](#トラブルシューティング)
 
@@ -34,7 +34,7 @@ MygramDBは、サーバーの動作、MySQL接続設定、テーブルインデ�
 
 - **複数の形式**: YAML (`.yaml`, `.yml`) または JSON (`.json`)
 - **スキーマ検証**: 組み込みJSON Schemaによる自動検証
-- **ホットリロード**: SIGHUP シグナルによるライブ設定更新のサポート
+- **ランタイム変数**: MySQL形式のSET/SHOW VARIABLESコマンドによる再起動不要のライブ更新
 - **環境別設定**: 開発、ステージング、本番環境向けの簡単なカスタマイズ
 
 ### 設定ファイルの場所
@@ -704,88 +704,156 @@ cache:
 
 ---
 
-## ホットリロード
+## ランタイム変数
 
-### SIGHUPによるサポート
+MygramDBは、MySQL互換のSETおよびSHOW VARIABLESコマンドを使用して、再起動せずに**ライブ設定変更**をサポートします。
 
-MygramDBは、`SIGHUP`シグナルを送信することで、再起動せずに**ライブ設定リロード**をサポートします:
+### 基本的な使用方法
 
-```bash
-# プロセスIDを検索
-ps aux | grep mygramdb
+```sql
+-- すべてのランタイム変数を表示
+SHOW VARIABLES;
 
-# SIGHUPシグナルを送信
-kill -HUP <pid>
+-- 特定の変数パターンを表示
+SHOW VARIABLES LIKE 'mysql%';
+SHOW VARIABLES LIKE 'cache%';
 
-# またはsystemdを使用
-systemctl reload mygramdb
+-- 単一の変数を設定
+SET logging.level = 'debug';
+SET mysql.host = '192.168.1.100';
+
+-- 複数の変数を設定
+SET api.default_limit = 200, api.max_query_length = 256;
 ```
 
-### リロード可能な設定
+### 変数カテゴリ
 
-| セクション | 設定 | リロード動作 |
-|---------|---------|-----------------|
-| **Logging** | `level` | ✅ 即座に適用 |
-| **MySQL** | `host`、`port`、`user`、`password` | ✅ 新しいMySQLサーバーに再接続 |
-| **MySQL** | `ssl_*` | ✅ 新しいSSL設定で再接続 |
-| **Dump** | `interval_sec`、`retain` | ✅ スケジューラ設定を更新 |
-| **Cache** | すべての設定 | ⚠️ キャッシュクリア、新しい設定を適用 |
-| **API** | `default_limit`、`max_query_length` | ⚠️ 新しいクエリに適用 |
-| **API** | `rate_limiting.*` | ⚠️ レート制限リセット |
+#### 可変変数(ランタイム変更可能)
 
-### リロード不可能な設定(再起動が必要)
+これらの変数は`SET`コマンドを使用してランタイムで変更できます:
 
-| セクション | 設定 | 理由 |
-|---------|---------|--------|
-| **MySQL** | `database` | データベース接続は変更できない |
-| **MySQL** | `use_gtid`、`binlog_format`、`binlog_row_image` | レプリケーションモードは変更できない |
-| **Tables** | すべての設定 | テーブルスキーマとインデックス構造は変更できない |
-| **Build** | すべての設定 | 構築設定は起動時のみ |
-| **Replication** | `enable`、`server_id`、`start_from`、`queue_size` | レプリケーション設定は起動時のみ |
-| **Memory** | すべての設定 | メモリアロケータは変更できない |
-| **API** | `tcp.bind`、`tcp.port`、`http.bind`、`http.port` | ソケットは再バインドできない |
-| **Network** | `allow_cidrs` | ネットワークセキュリティポリシーは変更できない |
-| **Logging** | `json`、`file` | ログ出力は変更できない |
+| 変数 | 型 | 説明 | 例 |
+|----------|------|-------------|---------|
+| **ロギング** ||||
+| `logging.level` | string | ログレベル: debug, info, warn, error | `SET logging.level = 'debug'` |
+| `logging.format` | string | ログフォーマット: json, text | `SET logging.format = 'json'` |
+| **MySQLフェイルオーバー** ||||
+| `mysql.host` | string | MySQLサーバーホスト名またはIP | `SET mysql.host = '192.168.1.100'` |
+| `mysql.port` | integer | MySQLサーバーポート | `SET mysql.port = 3307` |
+| **キャッシュ** ||||
+| `cache.enabled` | boolean | クエリキャッシュの有効/無効 | `SET cache.enabled = true` |
+| `cache.min_query_cost_ms` | float | キャッシュする最小クエリコスト(ms) | `SET cache.min_query_cost_ms = 20.0` |
+| `cache.ttl_seconds` | integer | キャッシュエントリのTTL(0 = TTLなし) | `SET cache.ttl_seconds = 7200` |
+| **API** ||||
+| `api.default_limit` | integer | 指定されない場合のデフォルトLIMIT | `SET api.default_limit = 200` |
+| `api.max_query_length` | integer | 最大クエリ式長 | `SET api.max_query_length = 256` |
+| **レート制限** ||||
+| `rate_limiting.capacity` | integer | クライアントあたりの最大トークン数(バースト) | `SET rate_limiting.capacity = 200` |
+| `rate_limiting.refill_rate` | integer | クライアントあたり秒あたりのトークン数 | `SET rate_limiting.refill_rate = 20` |
 
-### リロードワークフロー
+#### 不変変数(再起動が必要)
 
-1. **設定ファイルを編集**:
-   ```bash
-   vim /etc/mygramdb/config.yaml
-   ```
+これらの変数はランタイムで変更できず、サーバーの再起動が必要です:
 
-2. **設定を検証**(オプション):
-   ```bash
-   mygramdb --config=/etc/mygramdb/config.yaml --validate
-   ```
+| カテゴリ | 変数 | 理由 |
+|----------|-----------|--------|
+| **MySQL** | `database`, `user`, `password`, `use_gtid`, `binlog_format`, `binlog_row_image`, `datetime_timezone` | コアレプリケーション設定 |
+| **Tables** | `tables[*].*` | テーブルスキーマとインデックス構造 |
+| **Build** | `build.*` | ビルド設定は起動時のみ |
+| **Replication** | `enable`, `server_id`, `start_from`, `queue_size` | レプリケーション初期化 |
+| **Memory** | `memory.*` | メモリアロケータ設定 |
+| **API** | `tcp.bind`, `tcp.port`, `http.bind`, `http.port`, `max_connections` | ネットワークソケットバインディング |
+| **Network** | `allow_cidrs` | ネットワークセキュリティポリシー |
+| **Logging** | `file` | ログ出力先 |
 
-3. **SIGHUPシグナルを送信**:
-   ```bash
-   kill -HUP $(cat /var/run/mygramdb.pid)
-   ```
+### MySQLフェイルオーバーの例
 
-4. **リロードを確認**:
-   ```bash
-   tail -f /var/log/mygramdb/mygramdb.log
-   ```
+MySQLプライマリが失敗した場合、MygramDBを再起動せずにレプリカに切り替えます:
 
-   期待される出力:
-   ```
-   Configuration reload requested (SIGHUP received)
-   Logging level changed: info -> debug
-   Configuration reload completed successfully
-   ```
+```sql
+-- 現在のMySQL接続を確認
+SHOW VARIABLES LIKE 'mysql%';
 
-### リロード失敗時の処理
+-- 新しいMySQLプライマリに切り替え(GTID位置は保持されます)
+SET mysql.host = '192.168.1.101', mysql.port = 3306;
 
-設定リロードが失敗した場合:
-- **現在の設定が継続**(ダウンタイムなし)
-- **詳細とともにエラーがログに記録**
-- **サーバーは古い設定で動作を継続**
-
+-- 再接続を確認
+SHOW VARIABLES LIKE 'mysql%';
 ```
-Failed to reload configuration: Invalid YAML syntax at line 42
-Continuing with current configuration
+
+**仕組み**:
+1. MygramDBが現在のGTID位置を保存
+2. binlogリーダーを停止
+3. 古い接続を閉じて新しい接続を開く
+4. 新しいMySQLサーバーを検証(GTIDモード、binlogフォーマット)
+5. 保存されたGTID位置からbinlogリーダーを再起動
+
+**要件**:
+- 新しいMySQLサーバーでGTIDモードが有効であること
+- 新しいサーバーが同じbinlogフォーマット(ROW)であること
+- GTIDセットに保存された位置が含まれていること
+
+### キャッシュ制御の例
+
+```sql
+-- メンテナンス中はキャッシュを無効化
+SET cache.enabled = false;
+
+-- メンテナンス後にキャッシュを再有効化
+SET cache.enabled = true;
+
+-- キャッシュ動作を調整
+SET cache.min_query_cost_ms = 50.0;  -- 遅いクエリのみキャッシュ
+SET cache.ttl_seconds = 3600;        -- 1時間のTTL
+```
+
+### 変数検証
+
+SETコマンドは適用前に値を検証します:
+
+```sql
+-- 無効な値の型(エラー)
+SET api.default_limit = 'invalid';
+ERROR: Invalid value for api.default_limit: must be integer
+
+-- 範囲外(エラー)
+SET api.default_limit = 99999;
+ERROR: Invalid value for api.default_limit: must be between 5 and 1000
+
+-- 未知の変数(エラー)
+SET unknown.variable = 'value';
+ERROR: Unknown variable: unknown.variable
+
+-- 不変変数(エラー)
+SET mysql.database = 'newdb';
+ERROR: Variable mysql.database is immutable (requires restart)
+```
+
+### 変数値の確認
+
+```sql
+-- すべての変数を表示
+SHOW VARIABLES;
+
+-- プレフィックスで変数を表示
+SHOW VARIABLES LIKE 'cache%';
+SHOW VARIABLES LIKE 'mysql%';
+SHOW VARIABLES LIKE 'api%';
+
+-- 特定のパターンを表示
+SHOW VARIABLES LIKE '%_limit';
+SHOW VARIABLES LIKE '%port%';
+```
+
+出力フォーマット(MySQL互換テーブル):
+```
++-------------------------+-----------------+
+| Variable_name           | Value           |
++-------------------------+-----------------+
+| cache.enabled           | true            |
+| cache.min_query_cost_ms | 10.0            |
+| cache.ttl_seconds       | 3600            |
++-------------------------+-----------------+
 ```
 
 ---
@@ -897,26 +965,26 @@ mysql> SHOW GRANTS FOR 'repl_user'@'%';
 - binlog形式をROWに設定
 - REPLICATION SLAVE、REPLICATION CLIENT権限を付与
 
-### ホットリロードが機能しない
+### ランタイム変数が機能しない
 
-**問題**: SIGHUPシグナルが設定リロードをトリガーしない
+**問題**: SETコマンドがエラーを返すか、変更が適用されない
 
 **診断**:
-```bash
-# プロセスが実行中か確認
-ps aux | grep mygramdb
+```sql
+-- 基本的なSETコマンドをテスト
+SET logging.level = 'debug';
 
-# SIGHUPを送信
-kill -HUP <pid>
+-- 変数値が変更されたことを確認
+SHOW VARIABLES LIKE 'logging%';
 
-# ログを確認
-tail -f /var/log/mygramdb/mygramdb.log
+-- サーバーログを確認
 ```
 
 **解決方法**:
-- 設定ファイルに構文エラーがないことを確認
-- ファイルパスが正しいことを確認
-- エラーの詳細についてログ出力を確認
+- 変数名が正しいことを確認(ドット以降は大文字小文字を区別)
+- 値の型が一致していることを確認(string、integer、float、boolean)
+- 変数が可変であることを確認(不変ではない)
+- 詳細なエラーメッセージについてサーバーログを確認
 
 ### キャッシュが機能しない
 
