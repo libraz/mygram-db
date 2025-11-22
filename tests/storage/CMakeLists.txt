@@ -101,6 +101,8 @@ gtest_discover_tests(dump_security_test
 )
 
 # Dump save/load integration test (MySQL only)
+# NOTE: This is a manual integration test that requires a running MySQL instance.
+# It is not automatically run by CTest because it depends on external MySQL setup.
 if(USE_MYSQL AND MYSQL_FOUND)
   # Dump save/load integration test
   add_executable(dump_save_load_test
@@ -110,15 +112,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
   target_link_libraries(dump_save_load_test
     mygramdb_cache  # Includes mygramdb_query, mygramdb_storage, mygramdb_index transitively
     mygramdb_config # Includes mygramdb_mysql transitively
-    GTest::gtest_main
   )
 
-  # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
-  gtest_discover_tests(dump_save_load_test
-    DISCOVERY_MODE POST_BUILD
-    DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK storage_io
-  )
+  # This is a manual integration test - do not add to CTest
+  # Run manually with: ./bin/dump_save_load_test
 
   # SnapshotBuilder query generation logic tests
   add_executable(snapshot_builder_query_test

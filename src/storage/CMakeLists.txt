@@ -24,5 +24,12 @@ target_link_libraries(mygramdb_storage PUBLIC
   ${ZLIB_LIBRARIES}
 )
 
+# Link config library when MySQL is available (needed for SnapshotBuilder)
+if(USE_MYSQL AND MYSQL_FOUND)
+  target_link_libraries(mygramdb_storage PUBLIC
+    mygramdb_config
+  )
+endif()
+
 # Don't link MySQL here to avoid circular dependency
 # Components that need both storage and mysql should link both explicitly
