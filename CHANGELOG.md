@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed excessive warning logs for multi-table databases
   - Changed log level from warning to debug for unknown table ID events
   - Affects write_rows, update_rows, and delete_rows binlog events
+  - Uses direct spdlog::debug() calls instead of structured logging for better performance
   - Reduces log noise in production environments with multiple tables where only specific tables are replicated
 
 ## [1.2.4] - 2025-11-21
