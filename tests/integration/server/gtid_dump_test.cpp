@@ -488,7 +488,8 @@ TEST_F(GtidSnapshotIntegrationTest, GtidWithWhitespaceHandling) {
   };
 
   for (size_t i = 0; i < test_cases.size(); ++i) {
-    const auto& [gtid_with_whitespace, expected_normalized] = test_cases[i];
+    const std::string& gtid_with_whitespace = test_cases[i].first;
+    const std::string& expected_normalized = test_cases[i].second;
 
     // Add a test document
     table_ctx_->index->AddDocument(static_cast<int>(i + 1), "test doc");
