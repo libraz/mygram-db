@@ -75,6 +75,7 @@ jobs:
               -DENABLE_ASAN=ON \
               -DUSE_ICU=ON \
               -DUSE_MYSQL=ON \
+              -DMYGRAMDB_PORTABLE_BUILD=ON \
               ..
 
     - name: Build
@@ -137,6 +138,7 @@ jobs:
               -DENABLE_TSAN=ON \
               -DUSE_ICU=ON \
               -DUSE_MYSQL=ON \
+              -DMYGRAMDB_PORTABLE_BUILD=ON \
               ..
 
     - name: Build

@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -19,8 +21,20 @@ namespace {
  * @brief Create a temporary YAML config file with logging settings
  */
 std::string CreateTempConfig(const std::string& logging_section) {
-  const char* temp_file = std::tmpnam(nullptr);
-  std::string temp_path = std::string(temp_file) + ".yaml";
+  // Use mkstemp for secure temporary file creation
+  char temp_template[] = "/tmp/mygramdb_test_XXXXXX.yaml";
+  // Create a mutable buffer for the template (mkstemp modifies it)
+  char temp_buffer[256];
+  std::snprintf(temp_buffer, sizeof(temp_buffer), "/tmp/mygramdb_test_XXXXXX");
+
+  int fd = mkstemp(temp_buffer);
+  if (fd == -1) {
+    throw std::runtime_error("Failed to create temporary file");
+  }
+  close(fd);  // Close the file descriptor, we'll use ofstream
+
+  std::string temp_path = std::string(temp_buffer) + ".yaml";
+  std::filesystem::rename(temp_buffer, temp_path);
 
   std::ofstream ofs(temp_path);
   ofs << "mysql:\n"

@@ -89,6 +89,7 @@ jobs:
               -DBUILD_TESTS=ON \
               -DUSE_ICU=ON \
               -DUSE_MYSQL=ON \
+              -DMYGRAMDB_PORTABLE_BUILD=ON \
               ..
 
     - name: Build
