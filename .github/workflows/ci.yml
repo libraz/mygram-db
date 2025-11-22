@@ -49,6 +49,7 @@ jobs:
     needs: changes
     # Always run on main branch pushes, skip on PRs only if no relevant changes
     if: github.event_name == 'push' || needs.changes.outputs.src == 'true' || needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: true  # Stop all jobs on first failure
 
@@ -183,12 +184,11 @@ jobs:
           build/CMakeFiles/*.log
           build/Testing/Temporary/
 
-  build-and-test-macos:
-
   # macOS build and test is disabled since the development environment is macOS
   # and local testing is sufficient. CI focuses on Linux compatibility.
   # Uncomment this job if cross-platform testing on macOS is needed.
   #
+  # build-and-test-macos:
   #   name: Build and Test (macOS)
   #   needs: [changes, linux-test-and-coverage]
   #   # Skip macOS tests on main push due to timeout instability
