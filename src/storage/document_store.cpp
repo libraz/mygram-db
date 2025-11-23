@@ -106,34 +106,22 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
     return iterator->second;
   }
 
-  // Check for DocID overflow: if next_doc_id_ reached UINT32_MAX, this is the last valid ID
-  // After using UINT32_MAX, next_doc_id_ will wrap to 0
-  if (next_doc_id_ == UINT32_MAX) {
-    // Assign the last valid DocID (UINT32_MAX)
-    DocId doc_id = next_doc_id_++;  // Will wrap to 0
-
-    // Store mappings for this last document
-    doc_id_to_pk_[doc_id] = primary_key_str;
-    pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
-
-    // Store filters
-    if (!filters.empty()) {
-      doc_filters_[doc_id] = filters;
-    }
-
-    spdlog::debug("Added document (LAST AVAILABLE): DocID={}, PK={}, filters={}", doc_id, primary_key, filters.size());
-
-    return doc_id;
-  }
-
-  // Post-increment defensive check: if we've wrapped to 0, DocID space is exhausted
+  // Check for DocID exhaustion: 0 is reserved or already wrapped
   if (next_doc_id_ == 0) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDocIdExhausted, "DocID space exhausted (4 billion limit reached)", ""));
   }
 
-  // Assign new DocID and increment
-  DocId doc_id = next_doc_id_++;
+  // Assign current DocID
+  DocId doc_id = next_doc_id_;
+
+  // Increment for next allocation, handling wraparound explicitly
+  if (next_doc_id_ == UINT32_MAX) {
+    // Last valid ID used, set to 0 to trigger error on next call
+    next_doc_id_ = 0;
+  } else {
+    next_doc_id_++;
+  }
 
   // Store mappings
   doc_id_to_pk_[doc_id] = primary_key_str;

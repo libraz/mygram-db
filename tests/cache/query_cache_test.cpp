@@ -829,4 +829,167 @@ TEST(QueryCacheTest, ConcurrentLookupEvictionABA) {
   EXPECT_GE(stats.total_queries, 1);
 }
 
+/**
+ * @brief Test TTL-based expiration (basic)
+ */
+TEST(QueryCacheTest, TTLBasicExpiration) {
+  // Create cache with 2-second TTL
+  QueryCache cache(1024 * 1024, 10.0, 2);  // 1MB, min_cost=10ms, ttl=2s
+
+  auto key = CacheKeyGenerator::Generate("test query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert entry
+  EXPECT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  // Immediate lookup should succeed
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+
+  // Lookup should fail (expired)
+  auto cached_after_ttl = cache.Lookup(key);
+  EXPECT_FALSE(cached_after_ttl.has_value());
+
+  // Statistics should show cache miss
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.cache_misses, 1);  // The expired lookup
+}
+
+/**
+ * @brief Test TTL disabled (0 = no expiration)
+ */
+TEST(QueryCacheTest, TTLDisabled) {
+  // Create cache with TTL=0 (disabled)
+  QueryCache cache(1024 * 1024, 10.0, 0);
+
+  auto key = CacheKeyGenerator::Generate("test query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert entry
+  EXPECT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  // Wait for a few seconds
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  // Lookup should still succeed (no expiration)
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+}
+
+/**
+ * @brief Test TTL runtime update with SetTtl
+ */
+TEST(QueryCacheTest, TTLRuntimeUpdate) {
+  // Create cache with no TTL
+  QueryCache cache(1024 * 1024, 10.0, 0);
+
+  auto key = CacheKeyGenerator::Generate("test query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert entry
+  EXPECT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  // Immediate lookup should succeed
+  auto cached1 = cache.Lookup(key);
+  ASSERT_TRUE(cached1.has_value());
+
+  // Enable TTL with very short duration (1 second)
+  cache.SetTtl(1);
+
+  // Wait for new TTL to expire
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  // Lookup should now fail (expired with new TTL)
+  auto cached2 = cache.Lookup(key);
+  EXPECT_FALSE(cached2.has_value());
+
+  // Verify we can read TTL setting
+  EXPECT_EQ(cache.GetTtl(), 1);
+}
+
+/**
+ * @brief Test LookupWithMetadata respects TTL
+ */
+TEST(QueryCacheTest, TTLWithMetadataLookup) {
+  QueryCache cache(1024 * 1024, 10.0, 1);  // 1 second TTL
+
+  auto key = CacheKeyGenerator::Generate("test query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert entry
+  EXPECT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  // Immediate lookup with metadata should succeed
+  QueryCache::LookupMetadata lookup_meta;
+  auto cached1 = cache.LookupWithMetadata(key, lookup_meta);
+  ASSERT_TRUE(cached1.has_value());
+  EXPECT_EQ(result, cached1.value());
+  EXPECT_DOUBLE_EQ(lookup_meta.query_cost_ms, 15.0);
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  // Lookup with metadata should also fail (expired)
+  QueryCache::LookupMetadata lookup_meta2;
+  auto cached2 = cache.LookupWithMetadata(key, lookup_meta2);
+  EXPECT_FALSE(cached2.has_value());
+}
+
+/**
+ * @brief Test multiple entries with different ages and TTL
+ */
+TEST(QueryCacheTest, TTLMultipleEntriesExpiration) {
+  QueryCache cache(1024 * 1024, 10.0, 2);  // 2 second TTL
+
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  std::vector<DocId> result1 = {1, 2};
+  std::vector<DocId> result2 = {3, 4};
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"que"};
+
+  // Insert first entry
+  EXPECT_TRUE(cache.Insert(key1, result1, meta, 15.0));
+
+  // Wait 1 second
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  // Insert second entry (younger)
+  EXPECT_TRUE(cache.Insert(key2, result2, meta, 15.0));
+
+  // Wait another 1.2 seconds (total: first=2.2s, second=1.2s)
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+  // First entry should be expired (age > 2s)
+  auto cached1 = cache.Lookup(key1);
+  EXPECT_FALSE(cached1.has_value());
+
+  // Second entry should still be valid (age < 2s)
+  auto cached2 = cache.Lookup(key2);
+  EXPECT_TRUE(cached2.has_value());  // Should still be valid
+}
+
 }  // namespace mygramdb::cache

@@ -14,8 +14,9 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config,
                            const std::unordered_map<std::string, server::TableContext*>& table_contexts)
     : enabled_(cache_config.enabled), ttl_seconds_(cache_config.ttl_seconds) {
   if (enabled_) {
-    // Create query cache
-    query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms);
+    // Create query cache with TTL support
+    query_cache_ =
+        std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms, ttl_seconds_);
 
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
@@ -226,8 +227,10 @@ void CacheManager::SetMinQueryCost(double min_query_cost_ms) {
 
 void CacheManager::SetTtl(int ttl_seconds) {
   ttl_seconds_ = ttl_seconds;
-  // Note: TTL-based expiration is not yet implemented in QueryCache
-  // This just stores the value for future use
+  // Apply TTL to query cache if it exists
+  if (query_cache_) {
+    query_cache_->SetTtl(ttl_seconds);
+  }
 }
 
 }  // namespace mygramdb::cache

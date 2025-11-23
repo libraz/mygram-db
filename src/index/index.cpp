@@ -188,6 +188,7 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     // High selectivity (close to 1.0) means terms are highly correlated (e.g., CJK bigrams)
     // Low selectivity (close to 0.0) means terms are independent
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // Suppressing magic-numbers warning: query optimization thresholds are defined as named constants below
     double selectivity = (max_size > 0) ? static_cast<double>(min_size) / static_cast<double>(max_size) : 0.0;
 
     // Step 3: Query planning - choose execution strategy

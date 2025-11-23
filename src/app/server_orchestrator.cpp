@@ -400,7 +400,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     auto* variable_manager = tcp_server_->GetVariableManager();
     auto* rate_limiter = tcp_server_->GetRateLimiter();
     if (variable_manager != nullptr && rate_limiter != nullptr) {
-      variable_manager->SetRateLimiterCallback([rate_limiter](size_t capacity, size_t refill_rate) {
+      variable_manager->SetRateLimiterCallback([rate_limiter](bool enabled, size_t capacity, size_t refill_rate) {
+        // Note: enabled parameter is currently not used by RateLimiter::UpdateParameters
+        // Future enhancement: Add enable/disable functionality to RateLimiter
+        (void)enabled;  // Suppress unused parameter warning
         rate_limiter->UpdateParameters(capacity, refill_rate);
       });
       spdlog::info("Rate limiter callback registered");

@@ -138,16 +138,16 @@ class CacheManager {
 
   /**
    * @brief Set TTL for cache entries
-   * @param ttl_seconds Time-to-live in seconds
+   * @param ttl_seconds Time-to-live in seconds (0 = no expiration)
    *
-   * Note: TTL-based expiration is not yet implemented.
-   * This updates the configuration for future use.
+   * Changes apply immediately. Cache entries will be checked for expiration
+   * on lookup. Expired entries are treated as cache misses.
    */
   void SetTtl(int ttl_seconds);
 
  private:
   bool enabled_;
-  int ttl_seconds_;  // TTL configuration (not yet used for expiration)
+  int ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

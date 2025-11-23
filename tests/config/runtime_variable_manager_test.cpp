@@ -544,12 +544,14 @@ TEST(RuntimeVariableManagerTest, SetRateLimitingCapacity) {
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
   bool callback_called = false;
+  bool callback_enabled = false;
   size_t callback_capacity = 0;
   size_t callback_refill_rate = 0;
 
   // Set rate limiter callback
-  manager->SetRateLimiterCallback([&](size_t capacity, size_t refill_rate) {
+  manager->SetRateLimiterCallback([&](bool enabled, size_t capacity, size_t refill_rate) {
     callback_called = true;
+    callback_enabled = enabled;
     callback_capacity = capacity;
     callback_refill_rate = refill_rate;
   });
@@ -575,12 +577,14 @@ TEST(RuntimeVariableManagerTest, SetRateLimitingRefillRate) {
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
   bool callback_called = false;
+  bool callback_enabled = false;
   size_t callback_capacity = 0;
   size_t callback_refill_rate = 0;
 
   // Set rate limiter callback
-  manager->SetRateLimiterCallback([&](size_t capacity, size_t refill_rate) {
+  manager->SetRateLimiterCallback([&](bool enabled, size_t capacity, size_t refill_rate) {
     callback_called = true;
+    callback_enabled = enabled;
     callback_capacity = capacity;
     callback_refill_rate = refill_rate;
   });
@@ -935,7 +939,8 @@ TEST(RuntimeVariableManagerTest, SetRateLimitingPartialFailure) {
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
   bool callback_called = false;
-  manager->SetRateLimiterCallback([&](size_t /*capacity*/, size_t /*refill_rate*/) { callback_called = true; });
+  manager->SetRateLimiterCallback(
+      [&](bool /*enabled*/, size_t /*capacity*/, size_t /*refill_rate*/) { callback_called = true; });
 
   // Valid capacity change
   callback_called = false;
@@ -1052,7 +1057,7 @@ TEST(RuntimeVariableManagerTest, SetRateLimitingLargeValues) {
   bool callback_called = false;
   size_t callback_capacity = 0;
 
-  manager->SetRateLimiterCallback([&](size_t capacity, size_t /*refill_rate*/) {
+  manager->SetRateLimiterCallback([&](bool /*enabled*/, size_t capacity, size_t /*refill_rate*/) {
     callback_called = true;
     callback_capacity = capacity;
   });

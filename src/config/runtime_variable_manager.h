@@ -152,9 +152,9 @@ class RuntimeVariableManager {
    * @brief Set rate limiter configuration callback
    * @param callback Function to call when rate limiting parameters change
    *
-   * The callback receives capacity and refill_rate values.
+   * The callback receives enabled, capacity, and refill_rate values.
    */
-  void SetRateLimiterCallback(std::function<void(size_t capacity, size_t refill_rate)> callback);
+  void SetRateLimiterCallback(std::function<void(bool enabled, size_t capacity, size_t refill_rate)> callback);
 
  private:
   RuntimeVariableManager() = default;
@@ -172,7 +172,7 @@ class RuntimeVariableManager {
   std::function<mygram::utils::Expected<void, mygram::utils::Error>(const std::string& host, int port)>
       mysql_reconnect_callback_;
   std::function<mygram::utils::Expected<void, mygram::utils::Error>(bool enabled)> cache_toggle_callback_;
-  std::function<void(size_t capacity, size_t refill_rate)> rate_limiter_callback_;
+  std::function<void(bool enabled, size_t capacity, size_t refill_rate)> rate_limiter_callback_;
   cache::CacheManager* cache_manager_ = nullptr;  // Non-owning pointer for cache configuration updates
 
   /**

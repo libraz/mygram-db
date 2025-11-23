@@ -10,8 +10,8 @@
 
 namespace mygramdb::cache {
 
-QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms)
-    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms) {}
+QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds)
+    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms), ttl_seconds_(ttl_seconds) {}
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Start timing
@@ -52,6 +52,28 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     }
 
     return std::nullopt;
+  }
+
+  // Check TTL expiration (if TTL is enabled)
+  if (ttl_seconds_ > 0) {
+    const auto& entry = iter->second.first;
+    auto now = std::chrono::steady_clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
+    if (age >= ttl_seconds_) {
+      // Entry expired
+      stats_.cache_misses++;
+      stats_.cache_misses_not_found++;  // Treat expired as not found
+
+      // Record miss latency
+      auto end_time = std::chrono::high_resolution_clock::now();
+      double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      {
+        std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+        stats_.total_cache_miss_time_ms += miss_time_ms;
+      }
+
+      return std::nullopt;
+    }
   }
 
   // Cache hit
@@ -224,6 +246,28 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     }
 
     return std::nullopt;
+  }
+
+  // Check TTL expiration (if TTL is enabled)
+  if (ttl_seconds_ > 0) {
+    const auto& entry = iter->second.first;
+    auto now = std::chrono::steady_clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
+    if (age >= ttl_seconds_) {
+      // Entry expired
+      stats_.cache_misses++;
+      stats_.cache_misses_not_found++;  // Treat expired as not found
+
+      // Record miss latency
+      auto end_time = std::chrono::high_resolution_clock::now();
+      double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      {
+        std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+        stats_.total_cache_miss_time_ms += miss_time_ms;
+      }
+
+      return std::nullopt;
+    }
   }
 
   // Cache hit

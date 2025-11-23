@@ -313,7 +313,7 @@ void RuntimeVariableManager::SetCacheManager(cache::CacheManager* cache_manager)
   cache_manager_ = cache_manager;
 }
 
-void RuntimeVariableManager::SetRateLimiterCallback(std::function<void(size_t, size_t)> callback) {
+void RuntimeVariableManager::SetRateLimiterCallback(std::function<void(bool, size_t, size_t)> callback) {
   rate_limiter_callback_ = std::move(callback);
 }
 
@@ -430,7 +430,10 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingEnable(bool value
   // Update base config
   base_config_.api.rate_limiting.enable = value;
 
-  // TODO: Add callback for rate limiter enable/disable
+  // Notify rate limiter of enable/disable change
+  if (rate_limiter_callback_) {
+    rate_limiter_callback_(value, base_config_.api.rate_limiting.capacity, base_config_.api.rate_limiting.refill_rate);
+  }
 
   return {};
 }
@@ -445,7 +448,8 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingCapacity(int valu
 
   // Apply to rate limiter if callback is set
   if (rate_limiter_callback_) {
-    rate_limiter_callback_(static_cast<size_t>(value), base_config_.api.rate_limiting.refill_rate);
+    rate_limiter_callback_(base_config_.api.rate_limiting.enable, static_cast<size_t>(value),
+                           base_config_.api.rate_limiting.refill_rate);
   }
 
   return {};
@@ -461,7 +465,8 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingRefillRate(int va
 
   // Apply to rate limiter if callback is set
   if (rate_limiter_callback_) {
-    rate_limiter_callback_(base_config_.api.rate_limiting.capacity, static_cast<size_t>(value));
+    rate_limiter_callback_(base_config_.api.rate_limiting.enable, base_config_.api.rate_limiting.capacity,
+                           static_cast<size_t>(value));
   }
 
   return {};

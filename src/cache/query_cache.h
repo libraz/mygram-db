@@ -124,8 +124,9 @@ class QueryCache {
    * @brief Constructor
    * @param max_memory_bytes Maximum memory usage in bytes
    * @param min_query_cost_ms Minimum query cost to cache (ms)
+   * @param ttl_seconds Time-to-live for cache entries in seconds (0 = no expiration)
    */
-  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms);
+  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0);
 
   /**
    * @brief Destructor
@@ -256,6 +257,19 @@ class QueryCache {
    */
   [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_; }
 
+  /**
+   * @brief Set TTL for cache entries
+   * @param ttl_seconds Time-to-live in seconds (0 = no expiration)
+   *
+   * Changes apply immediately to TTL expiration checks.
+   */
+  void SetTtl(int ttl_seconds) { ttl_seconds_ = ttl_seconds; }
+
+  /**
+   * @brief Get current TTL setting
+   */
+  [[nodiscard]] int GetTtl() const { return ttl_seconds_; }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
@@ -266,6 +280,7 @@ class QueryCache {
   // Configuration
   size_t max_memory_bytes_;
   double min_query_cost_ms_;
+  int ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;
