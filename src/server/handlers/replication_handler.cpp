@@ -49,6 +49,16 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
             "SYNC will automatically start replication when complete.");
       }
 
+      // Check if DUMP LOAD is in progress (block REPLICATION START)
+      if (ctx_.loading.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot start replication while DUMP LOAD is in progress. "
+            "Please wait for load to complete.");
+      }
+
+      // Note: DUMP SAVE (read_only flag) is allowed during REPLICATION START
+      // as they are both read operations and can run concurrently
+
       if (ctx_.binlog_reader != nullptr) {
         auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
         if (!reader->IsRunning()) {

@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "config/runtime_variable_manager.h"
+#include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -41,6 +42,20 @@ std::string VariableHandler::HandleSet(const Query& query) {
   if (ctx_.variable_manager == nullptr) {
     return "-ERR Runtime variable manager not initialized\r\n";
   }
+
+#ifdef USE_MYSQL
+  // Check if trying to change MySQL connection settings during SYNC
+  for (const auto& [variable_name, value] : query.variable_assignments) {
+    if (variable_name == "mysql.host" || variable_name == "mysql.port") {
+      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
+        std::ostringstream oss;
+        oss << "-ERR Cannot change '" << variable_name << "' while SYNC is in progress. "
+            << "Please wait for SYNC to complete.\r\n";
+        return oss.str();
+      }
+    }
+  }
+#endif
 
   // Apply each variable assignment
   for (const auto& [variable_name, value] : query.variable_assignments) {

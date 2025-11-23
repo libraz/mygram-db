@@ -193,6 +193,60 @@ TEST_F(ReplicationHandlerTest, InvalidQueryTypeReturnsError) {
   EXPECT_NE(response.find("Invalid query type"), std::string::npos);
 }
 
+/**
+ * @brief Test that REPLICATION START is blocked during DUMP LOAD
+ *
+ * DUMP LOAD clears all data and reloads from dump file.
+ * Starting replication during this process would cause data corruption
+ * as binlog events could be applied to incomplete data.
+ */
+TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpLoad) {
+  query::Query query;
+  query.type = query::QueryType::REPLICATION_START;
+
+  // Simulate DUMP LOAD in progress
+  loading_ = true;
+
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
+
+  std::string response = handler.Handle(query, conn_ctx);
+
+  // Should be blocked
+  EXPECT_NE(response.find("ERROR"), std::string::npos);
+  EXPECT_NE(response.find("DUMP LOAD is in progress"), std::string::npos);
+  EXPECT_NE(response.find("Cannot start replication"), std::string::npos);
+
+  // Clean up
+  loading_ = false;
+}
+
+/**
+ * @brief Test that REPLICATION START is allowed during DUMP SAVE
+ *
+ * DUMP SAVE is a read operation that creates a snapshot.
+ * REPLICATION START begins reading binlog events.
+ * These are both read operations and can run concurrently safely.
+ */
+TEST_F(ReplicationHandlerTest, ReplicationStartAllowedDuringDumpSave) {
+  query::Query query;
+  query.type = query::QueryType::REPLICATION_START;
+
+  // Simulate DUMP SAVE in progress
+  read_only_ = true;
+
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
+
+  std::string response = handler.Handle(query, conn_ctx);
+
+  // Should not be blocked by DUMP SAVE (may fail for other reasons like no binlog_reader)
+  EXPECT_EQ(response.find("Cannot start replication while DUMP SAVE"), std::string::npos);
+
+  // Clean up
+  read_only_ = false;
+}
+
 }  // namespace mygramdb::server
 
 #endif  // USE_MYSQL

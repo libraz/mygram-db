@@ -71,24 +71,45 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
 
 std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
-  // Warn if any table is currently syncing
+  // Check if GTID is set (required for consistent dump)
+  std::string current_gtid;
+  if (ctx_.binlog_reader != nullptr) {
+    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
+    current_gtid = reader->GetCurrentGTID();
+    if (current_gtid.empty()) {
+      return ResponseFormatter::FormatError(
+          "Cannot save dump without GTID position. "
+          "Please run SYNC command first to establish initial position.");
+    }
+  }
+
+  // Block if any table is currently syncing
   if (ctx_.sync_manager != nullptr) {
     std::vector<std::string> syncing_tables;
     if (ctx_.sync_manager->GetSyncingTablesIfAny(syncing_tables)) {
       std::ostringstream oss;
-      oss << "Warning: DUMP SAVE executed while SYNC is in progress for tables:";
+      oss << "Cannot save dump while SYNC is in progress for tables:";
       for (const auto& table : syncing_tables) {
         oss << " " << table;
       }
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("operation", "dump_save")
-          .Field("reason", "sync_in_progress")
-          .Field("details", oss.str())
-          .Warn();
+      return ResponseFormatter::FormatError(oss.str());
     }
   }
 #endif
+
+  // Check if DUMP LOAD is in progress (block DUMP SAVE)
+  if (ctx_.loading.load()) {
+    return ResponseFormatter::FormatError(
+        "Cannot save dump while DUMP LOAD is in progress. "
+        "Please wait for load to complete.");
+  }
+
+  // Check if another DUMP SAVE is in progress (block concurrent saves)
+  if (ctx_.read_only.load()) {
+    return ResponseFormatter::FormatError(
+        "Cannot save dump while another DUMP SAVE is in progress. "
+        "Please wait for current save to complete.");
+  }
 
   // Determine filepath
   std::string filepath;
@@ -181,6 +202,27 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     }
   }
 #endif
+
+  // Check if OPTIMIZE is in progress (block DUMP LOAD)
+  if (ctx_.optimization_in_progress.load()) {
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while OPTIMIZE is in progress. "
+        "Please wait for optimization to complete.");
+  }
+
+  // Check if DUMP SAVE is in progress (block DUMP LOAD)
+  if (ctx_.read_only.load()) {
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while DUMP SAVE is in progress. "
+        "Please wait for save to complete.");
+  }
+
+  // Check if another DUMP LOAD is in progress (block concurrent loads)
+  if (ctx_.loading.load()) {
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while another DUMP LOAD is in progress. "
+        "Please wait for current load to complete.");
+  }
 
   std::string filepath;
   if (!query.filepath.empty()) {

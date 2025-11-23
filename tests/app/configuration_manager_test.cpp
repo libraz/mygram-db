@@ -6,6 +6,7 @@
 #include "app/configuration_manager.h"
 
 #include <gtest/gtest.h>
+#include <spdlog/sinks/stdout_sinks.h>
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 
@@ -21,6 +22,44 @@ using namespace mygramdb::app;
 using namespace mygramdb::config;
 
 namespace {
+
+/**
+ * @brief Test fixture that properly manages spdlog state
+ *
+ * This fixture ensures each test starts with clean spdlog state:
+ * - Drops all existing loggers
+ * - Resets to stdout logging
+ * - Restores default log level
+ */
+class ConfigurationManagerTestFixture : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // Drop all existing loggers
+    spdlog::drop_all();
+
+    // Create fresh stdout logger as default
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+    auto logger = std::make_shared<spdlog::logger>("mygramdb_test", console_sink);
+    spdlog::set_default_logger(logger);
+
+    // Reset to info level
+    spdlog::set_level(spdlog::level::info);
+
+    // Reset structured log format
+    mygram::utils::StructuredLog::SetFormat(mygram::utils::LogFormat::TEXT);
+  }
+
+  void TearDown() override {
+    // Clean up loggers after each test
+    spdlog::drop_all();
+
+    // Restore default console logger
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+    auto logger = std::make_shared<spdlog::logger>("default", console_sink);
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::info);
+  }
+};
 
 /**
  * @brief Create a temporary YAML config file with custom logging settings
@@ -86,7 +125,7 @@ std::string ReadFile(const std::string& path) {
 /**
  * @brief Test that ApplyLoggingConfig correctly sets log level for stdout
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigStdoutLevel) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigStdoutLevel) {
   // Create config with debug level, stdout output
   std::string config_path = CreateTempConfig("debug", "json", "");
 
@@ -109,7 +148,7 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigStdoutLevel) {
 /**
  * @brief Test that ApplyLoggingConfig correctly sets log level for file output
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigFileLevel) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigFileLevel) {
   std::string log_file = "/tmp/test_config_mgr_" + std::to_string(getpid()) + ".log";
 
   // Clean up any existing log file
@@ -154,16 +193,12 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigFileLevel) {
   // Cleanup
   std::filesystem::remove(config_path);
   std::filesystem::remove(log_file);
-
-  // Reset logger to default stdout for other tests
-  spdlog::set_default_logger(spdlog::default_logger());
-  spdlog::set_level(spdlog::level::info);
 }
 
 /**
  * @brief Test that ApplyLoggingConfig correctly applies all log levels
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigAllLevels) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigAllLevels) {
   const std::vector<std::pair<std::string, spdlog::level::level_enum>> levels = {{"debug", spdlog::level::debug},
                                                                                  {"info", spdlog::level::info},
                                                                                  {"warn", spdlog::level::warn},
@@ -189,7 +224,7 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigAllLevels) {
 /**
  * @brief Test that ApplyLoggingConfig creates log directory if it doesn't exist
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigCreatesDirectory) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigCreatesDirectory) {
   std::string log_dir = "/tmp/test_config_mgr_dir_" + std::to_string(getpid());
   std::string log_file = log_dir + "/test.log";
 
@@ -204,9 +239,6 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigCreatesDirectory) {
   ASSERT_TRUE(config_mgr_result);
 
   auto config_mgr = std::move(*config_mgr_result);
-
-  // Drop existing "mygramdb" logger if it exists
-  spdlog::drop("mygramdb");
 
   auto result = config_mgr->ApplyLoggingConfig();
   ASSERT_TRUE(result) << "ApplyLoggingConfig failed: " << result.error().to_string();
@@ -225,18 +257,12 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigCreatesDirectory) {
   // Cleanup
   std::filesystem::remove(config_path);
   std::filesystem::remove_all(log_dir);
-
-  // Note: Intentionally not resetting logger to avoid segfaults
 }
 
 /**
  * @brief Test that ApplyLoggingConfig correctly sets format (JSON vs TEXT)
- * DISABLED: Causes segfault due to spdlog logger reuse issues
  */
-TEST(ConfigurationManagerTest, DISABLED_ApplyLoggingConfigFormat) {
-  // Drop any existing logger
-  spdlog::drop("mygramdb");
-
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigFormat) {
   // Test JSON format
   {
     std::string config_path = CreateTempConfig("info", "json", "");
@@ -273,7 +299,7 @@ TEST(ConfigurationManagerTest, DISABLED_ApplyLoggingConfigFormat) {
 /**
  * @brief Test that file logger receives correct log level (regression test for bug)
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigFileLoggerReceivesLevel) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigFileLoggerReceivesLevel) {
   std::string log_file = "/tmp/test_file_logger_level_" + std::to_string(getpid()) + ".log";
 
   // Clean up any existing log file
@@ -288,9 +314,6 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigFileLoggerReceivesLevel) {
   ASSERT_TRUE(config_mgr_result);
 
   auto config_mgr = std::move(*config_mgr_result);
-
-  // Drop existing "mygramdb" logger if it exists
-  spdlog::drop("mygramdb");
 
   // Apply logging config
   auto result = config_mgr->ApplyLoggingConfig();
@@ -315,14 +338,12 @@ TEST(ConfigurationManagerTest, ApplyLoggingConfigFileLoggerReceivesLevel) {
   // Cleanup
   std::filesystem::remove(config_path);
   std::filesystem::remove(log_file);
-
-  // Note: Intentionally not resetting logger to avoid segfaults
 }
 
 /**
  * @brief Test that ApplyLoggingConfig handles invalid log file path gracefully
  */
-TEST(ConfigurationManagerTest, ApplyLoggingConfigInvalidPath) {
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigInvalidPath) {
   // Use an invalid path (root directory, typically not writable)
   std::string invalid_path = "/invalid_root_path_123456/test.log";
 

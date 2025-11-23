@@ -470,3 +470,39 @@ gtest_discover_tests(replication_handler_test
   PROPERTIES RESOURCE_LOCK mysql_connection
 )
 
+# DebugHandler tests (DEBUG and OPTIMIZE commands)
+
+add_executable(debug_handler_test
+  debug_handler_test.cpp
+)
+
+target_link_libraries(debug_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid server state conflicts
+gtest_discover_tests(debug_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# VariableHandler tests (SET/SHOW VARIABLES commands)
+
+add_executable(variable_handler_test
+  variable_handler_test.cpp
+)
+
+target_link_libraries(variable_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid server state conflicts
+gtest_discover_tests(variable_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+

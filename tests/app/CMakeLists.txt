@@ -10,4 +10,4 @@ target_link_libraries(configuration_manager_test
     GTest::gtest_main
 )
 
-gtest_discover_tests(configuration_manager_test)
+gtest_discover_tests(configuration_manager_test DISCOVERY_TIMEOUT 5)

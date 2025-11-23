@@ -534,36 +534,43 @@ TEST_F(DumpHandlerTest, LoadingFlagResetOnException) {
 
 TEST_F(DumpHandlerTest, ConcurrentFlagsNotAffected) {
   // This test verifies that read_only and loading flags work correctly
-  // when set by different operations
+  // when set by different operations and that concurrent operations are blocked
 
-  // Set loading flag externally (simulating another operation)
-  loading_ = true;
-
-  // Try to save dump (should work independently)
+  // First create a dump file for testing
   query::Query save_query;
   save_query.type = query::QueryType::DUMP_SAVE;
   save_query.filepath = test_filepath_;
-  std::string save_response = handler_->Handle(save_query, conn_ctx_);
-  EXPECT_TRUE(save_response.find("OK SAVED") == 0);
+  std::string initial_save = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(initial_save.find("OK SAVED") == 0) << "Initial save should succeed";
 
-  // read_only should be reset, but loading should remain true
-  EXPECT_FALSE(read_only_);
-  EXPECT_TRUE(loading_) << "loading flag should not be affected by save operation";
+  // Set loading flag externally (simulating DUMP LOAD in progress)
+  loading_ = true;
+
+  // Try to save dump (should be blocked now due to concurrent operation protection)
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(save_response.find("ERROR") == 0) << "Save should be blocked during load";
+  EXPECT_TRUE(save_response.find("DUMP LOAD is in progress") != std::string::npos);
+
+  // loading flag should remain true (unaffected by blocked save attempt)
+  EXPECT_TRUE(loading_) << "loading flag should not be affected by blocked save operation";
 
   // Reset for next test
   loading_ = false;
   read_only_ = true;
 
-  // Load dump (should work independently)
+  // Try to load dump (should be blocked due to read_only flag from another DUMP SAVE)
   query::Query load_query;
   load_query.type = query::QueryType::DUMP_LOAD;
   load_query.filepath = test_filepath_;
   std::string load_response = handler_->Handle(load_query, conn_ctx_);
-  EXPECT_TRUE(load_response.find("OK LOADED") == 0);
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Load should be blocked during save";
+  EXPECT_TRUE(load_response.find("DUMP SAVE is in progress") != std::string::npos);
 
-  // loading should be reset, but read_only should remain true
-  EXPECT_FALSE(loading_);
-  EXPECT_TRUE(read_only_) << "read_only flag should not be affected by load operation";
+  // read_only flag should remain true (unaffected by blocked load attempt)
+  EXPECT_TRUE(read_only_) << "read_only flag should not be affected by blocked load operation";
+
+  // Clean up
+  read_only_ = false;
 }
 
 #ifdef USE_MYSQL
@@ -700,6 +707,156 @@ TEST_F(DumpHandlerTest, PathTraversalPreventionVerify) {
   response = handler_->Handle(query, conn_ctx_);
   // May succeed if interpreted as literal filename, but should not traverse
   // The important thing is it doesn't access /etc/passwd
+}
+
+/**
+ * @brief Test DUMP LOAD is blocked during OPTIMIZE
+ */
+TEST_F(DumpHandlerTest, DumpLoadBlockedDuringOptimize) {
+  // First create a dump file to load
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Failed to create test dump file";
+
+  // Simulate OPTIMIZE in progress
+  optimization_in_progress_ = true;
+
+  // Try to load dump
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+
+  // Should be blocked
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("OPTIMIZE") != std::string::npos) << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("Cannot load dump") != std::string::npos) << "Response: " << load_response;
+}
+
+/**
+ * @brief Test DUMP SAVE is allowed during OPTIMIZE (for auto-save)
+ */
+TEST_F(DumpHandlerTest, DumpSaveAllowedDuringOptimize) {
+  // Simulate OPTIMIZE in progress
+  optimization_in_progress_ = true;
+
+  // Try to save dump
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+
+  // Should be allowed (for auto-save support)
+  EXPECT_TRUE(save_response.find("OK SAVED") == 0 || save_response.find("ERROR") == 0) << "Response: " << save_response;
+
+  // Should not contain OPTIMIZE blocking message
+  EXPECT_TRUE(save_response.find("Cannot save dump while OPTIMIZE") == std::string::npos)
+      << "Response: " << save_response;
+}
+
+// ============================================================================
+// Concurrent Dump Operation Tests
+// ============================================================================
+
+TEST_F(DumpHandlerTest, DumpSaveBlockedDuringDumpLoad) {
+  // First create a dump file to load
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Failed to create test dump file";
+
+  // Simulate DUMP LOAD in progress
+  loading_ = true;
+
+  // Try to save another dump
+  query::Query save_query2;
+  save_query2.type = query::QueryType::DUMP_SAVE;
+  save_query2.filepath = test_filepath_ + ".new";
+  std::string save_response2 = handler_->Handle(save_query2, conn_ctx_);
+
+  // Should be blocked
+  EXPECT_TRUE(save_response2.find("ERROR") == 0) << "Response: " << save_response2;
+  EXPECT_TRUE(save_response2.find("DUMP LOAD is in progress") != std::string::npos) << "Response: " << save_response2;
+  EXPECT_TRUE(save_response2.find("Cannot save dump") != std::string::npos) << "Response: " << save_response2;
+
+  // Clean up
+  loading_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpSaveBlockedDuringDumpSave) {
+  // Simulate DUMP SAVE in progress
+  read_only_ = true;
+
+  // Try to save a dump
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+
+  // Should be blocked
+  EXPECT_TRUE(save_response.find("ERROR") == 0) << "Response: " << save_response;
+  EXPECT_TRUE(save_response.find("another DUMP SAVE is in progress") != std::string::npos)
+      << "Response: " << save_response;
+  EXPECT_TRUE(save_response.find("Cannot save dump") != std::string::npos) << "Response: " << save_response;
+
+  // Clean up
+  read_only_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpLoadBlockedDuringDumpSave) {
+  // First create a dump file to load
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Failed to create test dump file";
+
+  // Simulate DUMP SAVE in progress
+  read_only_ = true;
+
+  // Try to load dump
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+
+  // Should be blocked
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("DUMP SAVE is in progress") != std::string::npos) << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("Cannot load dump") != std::string::npos) << "Response: " << load_response;
+
+  // Clean up
+  read_only_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpLoadBlockedDuringDumpLoad) {
+  // First create a dump file to load
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Failed to create test dump file";
+
+  // Simulate DUMP LOAD in progress
+  loading_ = true;
+
+  // Try to load another dump
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+
+  // Should be blocked
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("another DUMP LOAD is in progress") != std::string::npos)
+      << "Response: " << load_response;
+  EXPECT_TRUE(load_response.find("Cannot load dump") != std::string::npos) << "Response: " << load_response;
+
+  // Clean up
+  loading_ = false;
 }
 
 }  // namespace mygramdb::server

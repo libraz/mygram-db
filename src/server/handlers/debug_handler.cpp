@@ -9,6 +9,7 @@
 
 #include <sstream>
 
+#include "server/sync_operation_manager.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -30,6 +31,25 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
     }
 
     case query::QueryType::OPTIMIZE: {
+#ifdef USE_MYSQL
+      // Check if any table is currently syncing
+      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
+        return ResponseFormatter::FormatError(
+            "Cannot optimize while SYNC is in progress. "
+            "Please wait for SYNC to complete.");
+      }
+#endif
+
+      // Check if DUMP LOAD is in progress
+      if (ctx_.loading.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot optimize while DUMP LOAD is in progress. "
+            "Please wait for load to complete.");
+      }
+
+      // Note: DUMP SAVE (read_only flag) is allowed during OPTIMIZE
+      // to support auto-save functionality that runs in background
+
       // Check if another OPTIMIZE is already running globally
       bool expected = false;
       if (!ctx_.optimization_in_progress.compare_exchange_strong(expected, true)) {
