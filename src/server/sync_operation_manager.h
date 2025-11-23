@@ -99,6 +99,13 @@ class SyncOperationManager {
   std::string StartSync(const std::string& table_name);
 
   /**
+   * @brief Stop SYNC operation for a table
+   * @param table_name Table to stop (empty means stop all)
+   * @return Response string (OK or ERROR)
+   */
+  std::string StopSync(const std::string& table_name);
+
+  /**
    * @brief Get SYNC status for all tables
    * @return Response string with sync status
    */
@@ -122,21 +129,17 @@ class SyncOperationManager {
   bool IsAnySyncing() const;
 
   /**
-   * @brief Get syncing table names
+   * @brief Get syncing table names (thread-safe)
+   * @return Copy of syncing tables set
    */
   std::unordered_set<std::string> GetSyncingTables() const;
 
   /**
-   * @brief Get reference to syncing tables set (for HandlerContext)
-   * @return Reference to the internal syncing_tables_ set
+   * @brief Check if any tables are syncing and get their names (thread-safe)
+   * @param out_tables Output parameter for syncing table names (only filled if return is true)
+   * @return true if any tables are syncing, false otherwise
    */
-  std::unordered_set<std::string>& GetSyncingTablesRef() { return syncing_tables_; }
-
-  /**
-   * @brief Get reference to syncing tables mutex (for HandlerContext)
-   * @return Reference to the internal syncing_tables_mutex_
-   */
-  std::mutex& GetSyncingTablesMutex() { return syncing_tables_mutex_; }
+  bool GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const;
 
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;

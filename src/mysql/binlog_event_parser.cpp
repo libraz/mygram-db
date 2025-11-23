@@ -209,12 +209,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "table_not_in_context")
-              .Field("event_type", "write_rows")
-              .Field("table_name", table_meta->table_name)
-              .Warn();
+          spdlog::debug("Table not in replication context (write_rows): table_name={}", table_meta->table_name);
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -292,12 +287,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "table_not_in_context")
-              .Field("event_type", "update_rows")
-              .Field("table_name", table_meta->table_name)
-              .Warn();
+          spdlog::debug("Table not in replication context (update_rows): table_name={}", table_meta->table_name);
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -379,12 +369,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "table_not_in_context")
-              .Field("event_type", "delete_rows")
-              .Field("table_name", table_meta->table_name)
-              .Warn();
+          spdlog::debug("Table not in replication context (delete_rows): table_name={}", table_meta->table_name);
           return std::nullopt;
         }
         current_config = &table_iter->second->config;

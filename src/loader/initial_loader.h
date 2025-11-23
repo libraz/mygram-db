@@ -85,6 +85,12 @@ class InitialLoader {
    */
   void Cancel() { cancelled_ = true; }
 
+  /**
+   * @brief Check if load was cancelled
+   * @return true if cancelled, false otherwise
+   */
+  bool IsCancelled() const { return cancelled_; }
+
  private:
   mysql::Connection& connection_;
   index::Index& index_;

@@ -72,6 +72,16 @@ bool EqualsIgnoreCase(std::string_view lhs, std::string_view rhs) {
   });
 }
 
+/**
+ * @brief Check if token is a query clause keyword
+ * @param token Token to check (should be uppercase)
+ * @return true if token is a clause keyword (AND, OR, NOT, FILTER, SORT, LIMIT, OFFSET)
+ */
+bool IsClauseKeyword(const std::string& token) {
+  return token == "AND" || token == "OR" || token == "NOT" || token == "FILTER" || token == "SORT" ||
+         token == "LIMIT" || token == "OFFSET";
+}
+
 }  // namespace
 
 bool Query::IsValid() const {
@@ -79,16 +89,42 @@ bool Query::IsValid() const {
     return false;
   }
 
-  // INFO, SAVE, LOAD, DUMP_*, REPLICATION_*, SYNC_STATUS, CONFIG_*, OPTIMIZE, DEBUG_*, CACHE_*, SET, SHOW_VARIABLES
-  // commands don't require a table
-  if (type != QueryType::INFO && type != QueryType::SAVE && type != QueryType::LOAD && type != QueryType::DUMP_SAVE &&
-      type != QueryType::DUMP_LOAD && type != QueryType::DUMP_VERIFY && type != QueryType::DUMP_INFO &&
-      type != QueryType::REPLICATION_STATUS && type != QueryType::REPLICATION_STOP &&
-      type != QueryType::REPLICATION_START && type != QueryType::SYNC_STATUS && type != QueryType::CONFIG_HELP &&
-      type != QueryType::CONFIG_SHOW && type != QueryType::CONFIG_VERIFY && type != QueryType::OPTIMIZE &&
-      type != QueryType::DEBUG_ON && type != QueryType::DEBUG_OFF && type != QueryType::CACHE_CLEAR &&
-      type != QueryType::CACHE_STATS && type != QueryType::CACHE_ENABLE && type != QueryType::CACHE_DISABLE &&
-      type != QueryType::SET && type != QueryType::SHOW_VARIABLES && table.empty()) {
+  // Check if this query type requires a table name
+  auto requires_table = [this]() -> bool {
+    switch (type) {
+      // Commands that do NOT require a table
+      case QueryType::INFO:
+      case QueryType::SAVE:
+      case QueryType::LOAD:
+      case QueryType::DUMP_SAVE:
+      case QueryType::DUMP_LOAD:
+      case QueryType::DUMP_VERIFY:
+      case QueryType::DUMP_INFO:
+      case QueryType::REPLICATION_STATUS:
+      case QueryType::REPLICATION_STOP:
+      case QueryType::REPLICATION_START:
+      case QueryType::SYNC_STATUS:
+      case QueryType::SYNC_STOP:
+      case QueryType::CONFIG_HELP:
+      case QueryType::CONFIG_SHOW:
+      case QueryType::CONFIG_VERIFY:
+      case QueryType::OPTIMIZE:
+      case QueryType::DEBUG_ON:
+      case QueryType::DEBUG_OFF:
+      case QueryType::CACHE_CLEAR:
+      case QueryType::CACHE_STATS:
+      case QueryType::CACHE_ENABLE:
+      case QueryType::CACHE_DISABLE:
+      case QueryType::SET:
+      case QueryType::SHOW_VARIABLES:
+        return false;
+      // All other commands require a table
+      default:
+        return true;
+    }
+  };
+
+  if (requires_table() && table.empty()) {
     return false;
   }
 
@@ -304,7 +340,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     return query;
   }
   if (command == "SYNC") {
-    // SYNC [table] | SYNC STATUS
+    // SYNC [table] | SYNC STATUS | SYNC STOP [table]
     Query query;
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -313,6 +349,15 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       if (second_token == "STATUS") {
         query.type = QueryType::SYNC_STATUS;
         query.table = "";  // SYNC STATUS doesn't need a table
+      } else if (second_token == "STOP") {
+        query.type = QueryType::SYNC_STOP;
+        // SYNC STOP [table] - optional table name
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+        if (tokens.size() > 2) {    // 2: SYNC STOP <table>
+          query.table = tokens[2];  // Keep original case for table name
+        } else {
+          query.table = "";  // Empty means stop all
+        }
       } else {
         // SYNC <table>
         query.type = QueryType::SYNC;
@@ -320,7 +365,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       }
     } else {
       // SYNC without arguments (sync all tables or error)
-      SetError("SYNC requires a table name or STATUS subcommand");
+      SetError("SYNC requires a table name or STATUS/STOP subcommand");
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
@@ -561,9 +606,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)
-    if (paren_depth == 0 &&
-        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
-         upper_token == "SORT" || upper_token == "LIMIT" || upper_token == "OFFSET")) {
+    if (paren_depth == 0 && IsClauseKeyword(upper_token)) {
       break;  // Stop consuming search text
     }
 
@@ -785,9 +828,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
 
     // Check if this is a keyword (only when not inside parentheses)
     // Include LIMIT/OFFSET so they stop token consumption and get rejected below
-    if (paren_depth == 0 &&
-        (upper_token == "AND" || upper_token == "OR" || upper_token == "NOT" || upper_token == "FILTER" ||
-         upper_token == "LIMIT" || upper_token == "OFFSET" || upper_token == "SORT")) {
+    if (paren_depth == 0 && IsClauseKeyword(upper_token)) {
       break;  // Stop consuming search text
     }
 
@@ -1179,10 +1220,15 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   // (not a known keyword), it's likely a multi-column sort attempt
   if (pos < tokens.size()) {
     std::string peek_token = ToUpper(tokens[pos]);
-    // Check if next token is not a known keyword
-    if (peek_token != "LIMIT" && peek_token != "OFFSET" && peek_token != "FILTER" && peek_token != "AND" &&
-        peek_token != "NOT") {
-      // Next token might be a second column name
+
+    // Lambda to check if token is a known keyword
+    auto is_known_keyword = [&peek_token]() -> bool {
+      return peek_token == "LIMIT" || peek_token == "OFFSET" || peek_token == "FILTER" || peek_token == "AND" ||
+             peek_token == "NOT";
+    };
+
+    // If next token is not a known keyword, it might be a second column name
+    if (!is_known_keyword()) {
       SetError(
           "Multiple column sorting is not supported. Hint: Sort by a single column only. Use application-level "
           "sorting for complex requirements.");

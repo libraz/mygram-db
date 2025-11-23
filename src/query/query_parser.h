@@ -46,6 +46,7 @@ enum class QueryType : uint8_t {
   // Snapshot synchronization commands
   SYNC,         // SYNC [table]
   SYNC_STATUS,  // SYNC STATUS
+  SYNC_STOP,    // SYNC STOP [table]
 
   // Config commands
   CONFIG_HELP,    // CONFIG HELP [path]

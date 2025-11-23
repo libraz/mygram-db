@@ -36,6 +36,7 @@ namespace mygramdb::server {
 
 // Forward declarations
 class TableCatalog;
+class SyncOperationManager;
 
 // Default constants
 constexpr uint16_t kDefaultPort = 11016;       // memcached default port
@@ -105,10 +106,7 @@ struct HandlerContext {
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader;
-  std::unordered_set<std::string>&
-      syncing_tables;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
-  std::mutex&
-      syncing_tables_mutex;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members) - External state reference
+  SyncOperationManager* sync_manager;  // Manages sync operations and state
 #else
   void* binlog_reader;
 #endif

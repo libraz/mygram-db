@@ -589,6 +589,10 @@ void BinlogReader::ReaderThreadFunc() {
   }
 
   spdlog::info("Binlog reader thread stopped");
+
+  // Clear running flag when thread exits (for non-recoverable errors or stop requests)
+  // This ensures IsRunning() accurately reflects the thread state
+  running_ = false;
 }
 
 void BinlogReader::WorkerThreadFunc() {

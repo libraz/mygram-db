@@ -70,8 +70,7 @@ class RequestDispatcherTest : public ::testing::Test {
         .optimization_in_progress = optimization_in_progress_,
 #ifdef USE_MYSQL
         .binlog_reader = nullptr,
-        .syncing_tables = syncing_tables_,
-        .syncing_tables_mutex = syncing_tables_mutex_,
+        .sync_manager = nullptr,
 #else
         .binlog_reader = nullptr,
 #endif
@@ -102,10 +101,6 @@ class RequestDispatcherTest : public ::testing::Test {
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
-#ifdef USE_MYSQL
-  std::unordered_set<std::string> syncing_tables_;
-  std::mutex syncing_tables_mutex_;
-#endif
 
   std::unique_ptr<HandlerContext> ctx_;
   std::unique_ptr<RequestDispatcher> dispatcher_;

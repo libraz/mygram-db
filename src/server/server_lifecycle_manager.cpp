@@ -278,8 +278,7 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
         .binlog_reader = binlog_reader_,
-        .syncing_tables = sync_manager_->GetSyncingTablesRef(),
-        .syncing_tables_mutex = sync_manager_->GetSyncingTablesMutex(),
+        .sync_manager = sync_manager_,
         .cache_manager = cache_manager,
         .variable_manager = variable_manager,
     });

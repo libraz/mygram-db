@@ -15,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "server/sync_operation_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/structured_log.h"
 
@@ -71,12 +72,12 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
 std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
   // Warn if any table is currently syncing
-  {
-    std::lock_guard<std::mutex> lock(ctx_.syncing_tables_mutex);
-    if (!ctx_.syncing_tables.empty()) {
+  if (ctx_.sync_manager != nullptr) {
+    std::vector<std::string> syncing_tables;
+    if (ctx_.sync_manager->GetSyncingTablesIfAny(syncing_tables)) {
       std::ostringstream oss;
       oss << "Warning: DUMP SAVE executed while SYNC is in progress for tables:";
-      for (const auto& table : ctx_.syncing_tables) {
+      for (const auto& table : syncing_tables) {
         oss << " " << table;
       }
       mygram::utils::StructuredLog()
@@ -168,12 +169,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 #ifdef USE_MYSQL
   // Check if any table is currently syncing (block DUMP LOAD)
-  {
-    std::lock_guard<std::mutex> lock(ctx_.syncing_tables_mutex);
-    if (!ctx_.syncing_tables.empty()) {
+  if (ctx_.sync_manager != nullptr) {
+    std::vector<std::string> syncing_tables;
+    if (ctx_.sync_manager->GetSyncingTablesIfAny(syncing_tables)) {
       std::ostringstream oss;
       oss << "Cannot load dump while SYNC is in progress for tables:";
-      for (const auto& table : ctx_.syncing_tables) {
+      for (const auto& table : syncing_tables) {
         oss << " " << table;
       }
       return ResponseFormatter::FormatError(oss.str());

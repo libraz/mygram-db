@@ -21,6 +21,7 @@ add_subdirectory(cache)
 add_subdirectory(mysql)
 add_subdirectory(server)
 add_subdirectory(client)
+add_subdirectory(app)
 
 # Integration tests
 add_subdirectory(integration)

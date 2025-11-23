@@ -452,3 +452,21 @@ else()
   )
 endif()
 
+# ReplicationHandler tests (regression tests for replication bugs)
+
+add_executable(replication_handler_test
+  replication_handler_test.cpp
+)
+
+target_link_libraries(replication_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
+gtest_discover_tests(replication_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK mysql_connection
+)
+

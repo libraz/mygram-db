@@ -364,9 +364,14 @@ std::string InitialLoader::BuildSelectQuery() const {
       } else {
         query << filter.op << " ";
 
+        // Lambda to check if type requires quoting
+        auto requires_quoting = [&filter]() -> bool {
+          return filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
+                 filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
+        };
+
         // Quote string values
-        if (filter.type == "string" || filter.type == "varchar" || filter.type == "text" || filter.type == "datetime" ||
-            filter.type == "date" || filter.type == "timestamp") {
+        if (requires_quoting()) {
           query << "'" << filter.value << "'";
         } else {
           query << filter.value;
@@ -423,9 +428,18 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
 
 bool InitialLoader::IsTextColumn(enum_field_types type) {
   // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
-  return type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING ||
-         type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB || type == MYSQL_TYPE_LONG_BLOB ||
-         type == MYSQL_TYPE_BLOB;
+  switch (type) {
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_BLOB:
+      return true;
+    default:
+      return false;
+  }
 }
 
 std::string InitialLoader::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {

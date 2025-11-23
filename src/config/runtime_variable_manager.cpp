@@ -320,8 +320,12 @@ void RuntimeVariableManager::SetRateLimiterCallback(std::function<void(size_t, s
 // ========== Apply functions ==========
 
 Expected<void, Error> RuntimeVariableManager::ApplyLoggingLevel(const std::string& value) {
-  // Validate level
-  if (value != "debug" && value != "info" && value != "warn" && value != "error") {
+  // Validate and apply logging level
+  auto is_valid_level = [&value]() -> bool {
+    return value == "debug" || value == "info" || value == "warn" || value == "error";
+  };
+
+  if (!is_valid_level()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kInvalidArgument, "Invalid logging level (must be debug/info/warn/error): " + value));
   }
@@ -347,10 +351,12 @@ Expected<void, Error> RuntimeVariableManager::ApplyLoggingFormat(const std::stri
         MakeError(ErrorCode::kInvalidArgument, "Invalid logging format (must be json/text): " + value));
   }
 
-  // Note: Format change requires logger reinitialization
-  // For now, we just validate and store the value
-  // The actual format change would be handled by Application/ServerOrchestrator
-  // TODO: Add callback for format change
+  // Apply format change to StructuredLog
+  // Note: This changes the global format for all subsequent StructuredLog calls.
+  // The change is thread-safe (uses atomic operations) but only affects new log messages.
+  // spdlog's native format is not affected - this only controls StructuredLog output format.
+  mygram::utils::LogFormat format = (value == "json") ? mygram::utils::LogFormat::JSON : mygram::utils::LogFormat::TEXT;
+  mygram::utils::StructuredLog::SetFormat(format);
 
   return {};
 }
@@ -597,10 +603,20 @@ std::string RuntimeVariableManager::GetVariableInternal(const std::string& varia
 }
 
 Expected<bool, Error> RuntimeVariableManager::ParseBool(const std::string& value) {
-  if (value == "true" || value == "1" || value == "yes" || value == "on") {
+  // Lambda to check if value represents true
+  auto is_true_value = [&value]() -> bool {
+    return value == "true" || value == "1" || value == "yes" || value == "on";
+  };
+
+  // Lambda to check if value represents false
+  auto is_false_value = [&value]() -> bool {
+    return value == "false" || value == "0" || value == "no" || value == "off";
+  };
+
+  if (is_true_value()) {
     return true;
   }
-  if (value == "false" || value == "0" || value == "no" || value == "off") {
+  if (is_false_value()) {
     return false;
   }
   return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid boolean value: " + value));

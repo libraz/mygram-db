@@ -189,7 +189,9 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   }
 
   // Validate: Other operators should have a value
-  if (config.op != "IS NULL" && config.op != "IS NOT NULL" && config.value.empty()) {
+  auto is_null_operator = [&config]() -> bool { return config.op == "IS NULL" || config.op == "IS NOT NULL"; };
+
+  if (!is_null_operator() && config.value.empty()) {
     std::stringstream err_msg;
     err_msg << "Required filter error: Operator '" << config.op << "' requires a value\n";
     err_msg << "  Please provide a 'value' field for this operator.\n";
@@ -411,7 +413,13 @@ Config ParseConfigFromJson(const json& root) {
     // Validate start_from
     if (config.replication.enable) {
       const auto& start = config.replication.start_from;
-      if (start != "snapshot" && start != "latest" && start.find("gtid=") != 0) {
+
+      // Lambda to check if start_from value is valid
+      auto is_valid_start_from = [&start]() -> bool {
+        return start == "snapshot" || start == "latest" || start.find("gtid=") == 0;
+      };
+
+      if (!is_valid_start_from()) {
         std::stringstream err_msg;
         err_msg << "Replication configuration error: Invalid start_from value: '" << start << "'\n";
         err_msg << "  Valid options:\n";

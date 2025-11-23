@@ -10,6 +10,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -49,13 +50,15 @@ class StructuredLog {
 
   /**
    * @brief Set global log format (JSON or TEXT)
+   * Thread-safe: Uses atomic store with relaxed memory order
    */
-  static void SetFormat(LogFormat format) { format_ = format; }
+  static void SetFormat(LogFormat format) { format_.store(format, std::memory_order_relaxed); }
 
   /**
    * @brief Get current log format
+   * Thread-safe: Uses atomic load with relaxed memory order
    */
-  static LogFormat GetFormat() { return format_; }
+  static LogFormat GetFormat() { return format_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Parse format string to LogFormat enum
@@ -182,15 +185,16 @@ class StructuredLog {
  private:
   std::string event_;
   std::string message_;
-  std::vector<std::string> fields_;                   // JSON format fields
-  std::vector<std::string> fields_text_;              // Text format fields
-  static inline LogFormat format_ = LogFormat::JSON;  // Default to JSON
+  std::vector<std::string> fields_;                               // JSON format fields
+  std::vector<std::string> fields_text_;                          // Text format fields
+  static inline std::atomic<LogFormat> format_{LogFormat::JSON};  // Default to JSON (thread-safe)
 
   /**
    * @brief Build log string in selected format
+   * Thread-safe: Reads format atomically
    */
   std::string Build() const {
-    if (format_ == LogFormat::TEXT) {
+    if (format_.load(std::memory_order_relaxed) == LogFormat::TEXT) {
       return BuildText();
     }
     return BuildJSON();

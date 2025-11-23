@@ -22,6 +22,9 @@ std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& co
   if (query.type == query::QueryType::SYNC_STATUS) {
     return HandleSyncStatus(query);
   }
+  if (query.type == query::QueryType::SYNC_STOP) {
+    return HandleSyncStop(query);
+  }
   return ResponseFormatter::FormatError("Unknown SYNC command");
 }
 
@@ -37,6 +40,13 @@ std::string SyncHandler::HandleSyncStatus(const query::Query& query) {
     return "status=IDLE message=\"SYNC manager not initialized\"";
   }
   return sync_manager_->GetSyncStatus();
+}
+
+std::string SyncHandler::HandleSyncStop(const query::Query& query) {
+  if (sync_manager_ == nullptr) {
+    return ResponseFormatter::FormatError("SYNC manager not initialized");
+  }
+  return sync_manager_->StopSync(query.table);
 }
 
 }  // namespace mygramdb::server

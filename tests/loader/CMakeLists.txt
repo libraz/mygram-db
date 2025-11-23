@@ -6,5 +6,5 @@ if(USE_MYSQL AND MYSQL_FOUND)
   target_link_libraries(
     initial_loader_query_test PRIVATE GTest::gtest GTest::gtest_main mygramdb_config
   )
-  gtest_discover_tests(initial_loader_query_test)
+  gtest_discover_tests(initial_loader_query_test DISCOVERY_TIMEOUT 30)
 endif()

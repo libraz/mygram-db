@@ -50,7 +50,29 @@ int ConfigurationManager::PrintConfigTest() const {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyLoggingConfig() {
-  // Apply logging level
+  // Configure log output (file or stdout) BEFORE setting level
+  if (!config_.logging.file.empty()) {
+    try {
+      // Ensure log directory exists
+      std::filesystem::path log_path(config_.logging.file);
+      std::filesystem::path log_dir = log_path.parent_path();
+      if (!log_dir.empty() && !std::filesystem::exists(log_dir)) {
+        std::filesystem::create_directories(log_dir);
+      }
+
+      // Create file logger
+      auto file_logger = spdlog::basic_logger_mt("mygramdb", config_.logging.file);
+      spdlog::set_default_logger(file_logger);
+    } catch (const spdlog::spdlog_ex& ex) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kIOError, "Log file initialization failed: " + std::string(ex.what())));
+    } catch (const std::exception& ex) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kIOError, "Failed to create log directory: " + std::string(ex.what())));
+    }
+  }
+
+  // Apply logging level (must be AFTER setting default logger)
   if (config_.logging.level == "debug") {
     spdlog::set_level(spdlog::level::debug);
   } else if (config_.logging.level == "info") {
@@ -64,27 +86,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
   // Apply structured log format (JSON or TEXT)
   mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config_.logging.format));
 
-  // Configure log output (file or stdout)
+  // Log confirmation message (after logger is configured)
   if (!config_.logging.file.empty()) {
-    try {
-      // Ensure log directory exists
-      std::filesystem::path log_path(config_.logging.file);
-      std::filesystem::path log_dir = log_path.parent_path();
-      if (!log_dir.empty() && !std::filesystem::exists(log_dir)) {
-        std::filesystem::create_directories(log_dir);
-      }
-
-      // Create file logger
-      auto file_logger = spdlog::basic_logger_mt("mygramdb", config_.logging.file);
-      spdlog::set_default_logger(file_logger);
-      spdlog::info("Logging to file: {}", config_.logging.file);
-    } catch (const spdlog::spdlog_ex& ex) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kIOError, "Log file initialization failed: " + std::string(ex.what())));
-    } catch (const std::exception& ex) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kIOError, "Failed to create log directory: " + std::string(ex.what())));
-    }
+    spdlog::info("Logging to file: {}", config_.logging.file);
   }
 
   return {};

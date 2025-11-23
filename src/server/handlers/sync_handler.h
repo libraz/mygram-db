@@ -54,6 +54,11 @@ class SyncHandler : public CommandHandler {
    */
   std::string HandleSyncStatus(const query::Query& query);
 
+  /**
+   * @brief Handle SYNC STOP command (cancel ongoing SYNC)
+   */
+  std::string HandleSyncStop(const query::Query& query);
+
   SyncOperationManager* sync_manager_;  // Non-owning pointer
 };
 

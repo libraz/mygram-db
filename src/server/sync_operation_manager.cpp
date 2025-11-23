@@ -165,6 +165,90 @@ std::string SyncOperationManager::GetSyncStatus() {
   return result;
 }
 
+std::string SyncOperationManager::StopSync(const std::string& table_name) {
+  // Empty table_name means stop all
+  if (table_name.empty()) {
+    std::vector<std::string> tables_to_stop;
+
+    // Collect active sync tables
+    {
+      std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+      tables_to_stop.assign(syncing_tables_.begin(), syncing_tables_.end());
+    }
+
+    if (tables_to_stop.empty()) {
+      return ResponseFormatter::FormatError("No active SYNC operations to stop");
+    }
+
+    // Cancel all active loaders
+    {
+      std::lock_guard<std::mutex> lock(loaders_mutex_);
+      for (const auto& tbl : tables_to_stop) {
+        auto iter = active_loaders_.find(tbl);
+        if (iter != active_loaders_.end()) {
+          mygram::utils::StructuredLog()
+              .Event("sync_stop")
+              .Field("table", tbl)
+              .Field("source", "user_request")
+              .Field("scope", "all")
+              .Info();
+          iter->second->Cancel();
+        }
+      }
+    }
+
+    // Wait for threads to finish
+    {
+      std::lock_guard<std::mutex> lock(sync_mutex_);
+      for (const auto& tbl : tables_to_stop) {
+        auto thread_iter = sync_threads_.find(tbl);
+        if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
+          thread_iter->second.join();
+          sync_threads_.erase(thread_iter);
+        }
+      }
+    }
+
+    return "OK SYNC STOPPED count=" + std::to_string(tables_to_stop.size());
+  }
+
+  // Stop specific table
+  {
+    std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+    if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
+      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+    }
+  }
+
+  // Cancel the loader
+  {
+    std::lock_guard<std::mutex> lock(loaders_mutex_);
+    auto iter = active_loaders_.find(table_name);
+    if (iter != active_loaders_.end()) {
+      mygram::utils::StructuredLog()
+          .Event("sync_stop")
+          .Field("table", table_name)
+          .Field("source", "user_request")
+          .Info();
+      iter->second->Cancel();
+    } else {
+      return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
+    }
+  }
+
+  // Wait for thread to finish
+  {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    auto thread_iter = sync_threads_.find(table_name);
+    if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
+      thread_iter->second.join();
+      sync_threads_.erase(thread_iter);
+    }
+  }
+
+  return "OK SYNC STOPPED table=" + table_name;
+}
+
 void SyncOperationManager::RequestShutdown() {
   shutdown_requested_ = true;
 
@@ -211,6 +295,15 @@ bool SyncOperationManager::IsAnySyncing() const {
 std::unordered_set<std::string> SyncOperationManager::GetSyncingTables() const {
   std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
   return syncing_tables_;
+}
+
+bool SyncOperationManager::GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const {
+  std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+  if (syncing_tables_.empty()) {
+    return false;
+  }
+  out_tables.assign(syncing_tables_.begin(), syncing_tables_.end());
+  return true;
 }
 
 void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
@@ -327,19 +420,45 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     UnregisterLoader(table_name);
 
-    // Handle cancellation
-    if (shutdown_requested_) {
-      update_state([](SyncState& state) {
+    // Handle cancellation (both shutdown and user-requested SYNC STOP)
+    // Check if loader was cancelled OR shutdown was requested
+    bool was_cancelled = loader.IsCancelled() || shutdown_requested_;
+
+    if (was_cancelled) {
+      // Clean up partial data on cancellation to maintain consistency
+      uint64_t partial_rows = loader.GetProcessedRows();
+      std::string cancel_reason = shutdown_requested_ ? "shutdown" : "user_stop_request";
+
+      mygram::utils::StructuredLog()
+          .Event("sync_cleanup")
+          .Field("table", table_name)
+          .Field("reason", cancel_reason)
+          .Field("partial_rows_discarded", partial_rows)
+          .Field("message", "Partial data discarded due to cancellation")
+          .Warn();
+
+      ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
+      ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+      std::string cancel_msg = shutdown_requested_ ? "Server shutdown requested" : "Cancelled by user (SYNC STOP)";
+      update_state([&cancel_msg](SyncState& state) {
         state.status = "CANCELLED";
-        state.error_message = "Server shutdown requested";
+        state.error_message = cancel_msg;
         state.is_running = false;
       });
-      spdlog::info("SYNC cancelled for {} due to shutdown", table_name);
+
+      mygram::utils::StructuredLog()
+          .Event("sync_cancelled")
+          .Field("table", table_name)
+          .Field("reason", cancel_reason)
+          .Field("partial_rows", partial_rows)
+          .Info();
       return;
     }
 
     // Handle result
     if (result) {
+      // SYNC succeeded
       std::string gtid = loader.GetStartGTID();
       uint64_t processed = loader.GetProcessedRows();
 
@@ -357,35 +476,57 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       mysql::BinlogReader* reader = binlog_reader_;
       if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
         // reader is guaranteed non-null here due to the check above
+        // If replication is already running, stop it first to update GTID
+        // This handles cases where:
+        // 1. Replication failed with non-recoverable error but running_ flag wasn't cleared
+        // 2. GTID needs to be updated to the snapshot position
         if (reader->IsRunning()) {
-          update_state([](SyncState& state) { state.replication_status = "ALREADY_RUNNING"; });
-          spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication already running.", table_name, processed,
-                       gtid);
+          mygram::utils::StructuredLog()
+              .Event("replication_restart")
+              .Field("operation", "sync")
+              .Field("table", table_name)
+              .Field("reason", "update_gtid_after_sync")
+              .Info();
+          reader->Stop();
+        }
+
+        // Always set GTID and start replication after SYNC
+        reader->SetCurrentGTID(gtid);
+        auto start_result = reader->Start();
+        if (start_result) {
+          update_state([](SyncState& state) { state.replication_status = "STARTED"; });
+          mygram::utils::StructuredLog()
+              .Event("sync_completed")
+              .Field("table", table_name)
+              .Field("rows", processed)
+              .Field("gtid", gtid)
+              .Field("replication_status", "started")
+              .Info();
         } else {
-          reader->SetCurrentGTID(gtid);
-          auto start_result = reader->Start();
-          if (start_result) {
-            update_state([](SyncState& state) { state.replication_status = "STARTED"; });
-            spdlog::info("SYNC completed for {} (rows={}, gtid={}). Replication started.", table_name, processed, gtid);
-          } else {
-            std::string error_msg = "Snapshot OK but replication failed: " + start_result.error().message();
-            update_state([&error_msg](SyncState& state) {
-              state.replication_status = "FAILED";
-              state.error_message = error_msg;
-            });
-            mygram::utils::StructuredLog()
-                .Event("server_error")
-                .Field("operation", "sync_replication")
-                .Field("table", table_name)
-                .Field("error", start_result.error().message())
-                .Error();
-          }
+          std::string error_msg = "Snapshot OK but replication failed: " + start_result.error().message();
+          update_state([&error_msg](SyncState& state) {
+            state.replication_status = "FAILED";
+            state.error_message = error_msg;
+          });
+          mygram::utils::StructuredLog()
+              .Event("server_error")
+              .Field("operation", "sync_replication")
+              .Field("table", table_name)
+              .Field("error", start_result.error().message())
+              .Error();
         }
       } else {
         update_state([](SyncState& state) { state.replication_status = "DISABLED"; });
-        spdlog::info("SYNC completed for {} (rows={}, replication disabled)", table_name, processed);
+        mygram::utils::StructuredLog()
+            .Event("sync_completed")
+            .Field("table", table_name)
+            .Field("rows", processed)
+            .Field("replication_status", "disabled")
+            .Info();
       }
     } else {
+      // SYNC failed - must clean up partial data to maintain consistency
+      // The partial data violates time-consistency (snapshot integrity)
       std::string error_msg = result.error().message();
 
       // Check if error might be session timeout related
@@ -398,6 +539,21 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         error_msg += " (check if session_timeout_sec=" + std::to_string(session_timeout) +
                      " is sufficient for snapshot duration)";
       }
+
+      // Clean up partial data by recreating Index and DocumentStore
+      // This ensures no inconsistent partial state remains
+      uint64_t partial_rows = loader.GetProcessedRows();
+
+      mygram::utils::StructuredLog()
+          .Event("sync_cleanup")
+          .Field("table", table_name)
+          .Field("reason", "sync_failed")
+          .Field("partial_rows_discarded", partial_rows)
+          .Field("message", "Partial data discarded to maintain consistency")
+          .Warn();
+
+      ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
+      ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
@@ -413,6 +569,25 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
   } catch (const std::exception& e) {
     std::string error_msg = e.what();
+
+    // Clean up partial data on exception to maintain consistency
+    // Need to re-acquire table context (may have changed during exception)
+    auto table_iter = table_contexts_.find(table_name);
+    if (table_iter != table_contexts_.end()) {
+      auto* ctx = table_iter->second;
+      if (ctx != nullptr && ctx->index && ctx->doc_store) {
+        mygram::utils::StructuredLog()
+            .Event("sync_cleanup")
+            .Field("table", table_name)
+            .Field("reason", "exception")
+            .Field("message", "Partial data discarded due to exception")
+            .Warn();
+
+        ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
+        ctx->doc_store = std::make_unique<storage::DocumentStore>();
+      }
+    }
+
     update_state([&error_msg](SyncState& state) {
       state.status = "FAILED";
       state.error_message = error_msg;
