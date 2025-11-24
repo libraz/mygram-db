@@ -153,23 +153,15 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
     const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone) {
-  if ((buffer == nullptr) || length < 20) {
-    // Minimum event size is 20 bytes (1 byte OK packet + 19 bytes binlog header)
+  if ((buffer == nullptr) || length < 19) {
+    // Minimum event size is 19 bytes (binlog header)
     return std::nullopt;
   }
 
-  // MySQL C API prepends an OK packet byte (0x00) before the actual binlog event
-  // Skip the OK byte to get to the actual binlog event data
-  buffer++;
-  length--;
-
+  // binlog_reader already skipped OK byte, buffer points to event data.
   // Binlog event header format (19 bytes):
-  // timestamp (4 bytes)
-  // event_type (1 byte)
-  // server_id (4 bytes)
-  // event_size (4 bytes)
-  // log_pos (4 bytes)
-  // flags (2 bytes)
+  //   [timestamp(4)][event_type(1)][server_id(4)][event_size(4)][log_pos(4)][flags(2)]
+  // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
 
   auto event_type = static_cast<MySQLBinlogEventType>(buffer[4]);
 
@@ -511,16 +503,23 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
 std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 8) {
     // Minimum TABLE_MAP event size (6 bytes table_id + 2 bytes flags)
+    spdlog::error("ParseTableMapEvent: buffer null or length {} < 8", length);
     return std::nullopt;
   }
 
   TableMetadata metadata;
 
-  // Skip header (19 bytes) to get to post-header
+  // binlog_reader already skipped OK byte, so buffer points to event data.
+  // Standard binlog event header: LOG_EVENT_HEADER_LEN = 19 bytes
+  //   [timestamp(4)][type(1)][server_id(4)][event_size(4)][log_pos(4)][flags(2)]
+  // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h)
   const unsigned char* ptr = buffer + 19;
   unsigned long remaining = length - 19;
 
+  spdlog::debug("ParseTableMapEvent: length={}, remaining after header={}", length, remaining);
+
   if (remaining < 8) {
+    spdlog::error("ParseTableMapEvent: remaining {} < 8 after header skip", remaining);
     return std::nullopt;
   }
 
@@ -532,11 +531,14 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   ptr += 6;
   remaining -= 6;
 
+  spdlog::debug("ParseTableMapEvent: table_id={}, remaining={}", metadata.table_id, remaining);
+
   // Skip flags (2 bytes)
   ptr += 2;
   remaining -= 2;
 
   if (remaining < 1) {
+    spdlog::error("ParseTableMapEvent: remaining {} < 1 before db_len", remaining);
     return std::nullopt;
   }
 
@@ -544,7 +546,10 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   uint8_t db_len = *ptr++;
   remaining--;
 
+  spdlog::debug("ParseTableMapEvent: db_len={}, remaining={}", db_len, remaining);
+
   if (remaining < static_cast<size_t>(db_len) + 1) {  // +1 for null terminator
+    spdlog::error("ParseTableMapEvent: remaining {} < db_len {} + 1", remaining, db_len);
     return std::nullopt;
   }
 
@@ -552,7 +557,10 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   ptr += db_len + 1;  // +1 for null terminator
   remaining -= (db_len + 1);
 
+  spdlog::debug("ParseTableMapEvent: database_name={}, remaining={}", metadata.database_name, remaining);
+
   if (remaining < 1) {
+    spdlog::error("ParseTableMapEvent: remaining {} < 1 before table_len", remaining);
     return std::nullopt;
   }
 
@@ -560,13 +568,18 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   uint8_t table_len = *ptr++;
   remaining--;
 
+  spdlog::debug("ParseTableMapEvent: table_len={}, remaining={}", table_len, remaining);
+
   if (remaining < static_cast<size_t>(table_len) + 1) {
+    spdlog::error("ParseTableMapEvent: remaining {} < table_len {} + 1", remaining, table_len);
     return std::nullopt;
   }
 
   metadata.table_name = std::string(reinterpret_cast<const char*>(ptr), table_len);
   ptr += table_len + 1;
   remaining -= (table_len + 1);
+
+  spdlog::debug("ParseTableMapEvent: table_name={}, remaining={}", metadata.table_name, remaining);
 
   if (remaining < 1) {
     return std::nullopt;

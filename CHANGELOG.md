@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2025-11-25
+
+🚨 **CRITICAL UPGRADE - All v1.3.0 and v1.3.1 users with MySQL replication must upgrade immediately**
+
+### Fixed
+
+- **Critical: Binlog event parsing offset error** - Remove duplicate OK byte skip in BinlogEventParser (already handled by BinlogReader)
+- **Critical: Binlog checksum boundary error** - Exclude 4-byte checksum from event parsing boundary to prevent buffer overrun
+- **Critical: Extra row info length calculation** - Fix MySQL 8.0 ROWS_EVENT_V2 extra_row_info_len interpretation (includes packed integer itself)
+- **High: Binlog purged error detection** - Detect errno 1236 (binlog position purged) and stop with actionable error message
+
+### Added
+
+- Enhanced debugging logs for TABLE_MAP_EVENT parsing with field-by-field validation
+- Structured logging for BinlogReader lifecycle events (connection, stream, GTID)
+- Structured logging for SyncOperationManager operations
+
+### Changed
+
+- Improved binlog fetch diagnostics (log first fetch result, no-data occurrences)
+- Reduced log verbosity for production (debug level for routine replication events)
+
+**Detailed Release Notes**: [docs/releases/v1.3.2.md](docs/releases/v1.3.2.md)
+
 ## [1.3.1] - 2025-11-24
 
 🚨 **CRITICAL UPGRADE - All v1.3.0 users must upgrade immediately**

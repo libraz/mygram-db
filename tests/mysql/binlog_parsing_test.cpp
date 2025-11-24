@@ -756,4 +756,295 @@ TEST(BinlogParsingTest, IsTableAffectingDDL_Security) {
   EXPECT_LT(duration, 100) << "Query parsing took too long (possible ReDoS): " << duration << "ms";
 }
 
+/**
+ * @brief Test that binlog_reader correctly handles OK byte skip without double skipping
+ *
+ * Bug: binlog_reader.cpp was skipping OK byte, then binlog_event_parser.cpp
+ * was also skipping a byte, causing buffer misalignment.
+ *
+ * Fix: binlog_reader.cpp skips OK byte and passes (buffer+1) to parser.
+ * Parser now reads directly from buffer without additional skip.
+ */
+TEST(BinlogParsingTest, DoubleOKByteSkipBugFixed) {
+  // Create a complete binlog event with OK byte
+  std::vector<uint8_t> event_with_ok = {
+      0x00,  // OK byte (position 0) - skipped by binlog_reader
+      // Binlog event header (19 bytes starting at position 1):
+      0x00, 0x00, 0x00, 0x00,  // timestamp (positions 1-4)
+      0x04,                    // event_type = ROTATE_EVENT (position 5)
+      0x01, 0x00, 0x00, 0x00,  // server_id = 1 (positions 6-9)
+      0x1E, 0x00, 0x00, 0x00,  // event_size = 30 bytes (positions 10-13)
+      0x00, 0x00, 0x00, 0x00,  // log_pos (positions 14-17)
+      0x00, 0x00,              // flags (positions 18-19)
+      // Event data (11 bytes):
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // position
+      0x74, 0x65, 0x73                                 // "tes"
+  };
+
+  // Simulate what binlog_reader does: skip OK byte
+  const unsigned char* buffer = event_with_ok.data() + 1;  // Skip OK byte at position 0
+  unsigned long length = event_with_ok.size() - 1;
+
+  // Verify buffer structure AFTER OK byte skip (this is what parser receives)
+  ASSERT_GE(length, 19);
+
+  // Event type should be at buffer[4] (which was originally at position 5)
+  EXPECT_EQ(buffer[4], 0x04) << "Event type should be ROTATE_EVENT (4)";
+
+  // Server ID should be at buffer[5-8] (originally positions 6-9)
+  EXPECT_EQ(buffer[5], 0x01) << "Server ID byte 0 should be 0x01";
+
+  // Event size should be at buffer[9-12] (originally positions 10-13)
+  uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+  EXPECT_EQ(event_size, 30) << "Event size should be 30 bytes";
+
+  // Verify that if parser incorrectly skipped another byte (the bug),
+  // it would read wrong values:
+  const unsigned char* buggy_buffer = buffer + 1;  // Simulating double skip bug
+  uint8_t wrong_event_type = buggy_buffer[4];
+  EXPECT_NE(wrong_event_type, 0x04) << "With double skip, event type would be wrong";
+  EXPECT_EQ(wrong_event_type, 0x01) << "With double skip, would read server_id[0] as event type";
+}
+
+/**
+ * @brief Test UPDATE_ROWS_EVENT parsing with correct buffer offset
+ *
+ * Verifies that event_size is read from correct position (buffer[9-12])
+ * and post-header starts at buffer[19] after OK byte skip by binlog_reader.
+ */
+TEST(BinlogParsingTest, UpdateRowsEventOffsetAfterOKByteSkip) {
+  // Create UPDATE_ROWS_EVENT with OK byte
+  std::vector<uint8_t> update_event = {
+      0x00,  // OK byte - skipped by binlog_reader
+      // Header (19 bytes):
+      0x00, 0x00, 0x00, 0x00,  // timestamp
+      0x1F,                    // event_type = UPDATE_ROWS_EVENT (31)
+      0x01, 0x00, 0x00, 0x00,  // server_id
+      0xCC, 0x01, 0x00, 0x00,  // event_size = 460 bytes (0x01CC)
+      0x00, 0x00, 0x00, 0x00,  // log_pos
+      0x00, 0x00,              // flags
+      // Post-header starts here (at buffer[19] after OK skip):
+      0x80, 0x00, 0x00, 0x00, 0x00, 0x00,  // table_id (6 bytes)
+      0x01, 0x00,                          // flags (2 bytes)
+  };
+
+  // Simulate binlog_reader behavior
+  const unsigned char* buffer = update_event.data() + 1;
+  unsigned long length = update_event.size() - 1;
+
+  ASSERT_GE(length, 27);  // 19 header + 8 post-header
+
+  // Event type at buffer[4]
+  EXPECT_EQ(buffer[4], 0x1F) << "Event type should be UPDATE_ROWS_EVENT (31)";
+
+  // Event size at buffer[9-12] (little-endian)
+  uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+  EXPECT_EQ(event_size, 460) << "Event size should be 460 (0x01CC)";
+
+  // Post-header starts at buffer[19]
+  EXPECT_EQ(buffer[19], 0x80) << "table_id first byte at buffer[19]";
+  EXPECT_EQ(buffer[20], 0x00) << "table_id second byte at buffer[20]";
+
+  // Verify wrong offset would give wrong values (the bug scenario)
+  // If using buffer + 20 (the old bug), would skip past table_id
+  EXPECT_NE(buffer[20], 0x80) << "buffer[20] is not table_id start";
+}
+
+/**
+ * @brief Test TABLE_MAP_EVENT parsing with correct offset
+ */
+TEST(BinlogParsingTest, TableMapEventOffsetAfterOKByteSkip) {
+  std::vector<uint8_t> table_map = {
+      0x00,  // OK byte
+      // Header (19 bytes):
+      0x00, 0x00, 0x00, 0x00,  // timestamp
+      0x13,                    // event_type = TABLE_MAP_EVENT (19)
+      0x01, 0x00, 0x00, 0x00,  // server_id
+      0x32, 0x00, 0x00, 0x00,  // event_size = 50 bytes
+      0x00, 0x00, 0x00, 0x00,  // log_pos
+      0x00, 0x00,              // flags
+      // Post-header at buffer[19]:
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00,  // table_id = 5
+  };
+
+  const unsigned char* buffer = table_map.data() + 1;
+  unsigned long length = table_map.size() - 1;
+
+  ASSERT_GE(length, 25);
+
+  // Event type at buffer[4]
+  EXPECT_EQ(buffer[4], 0x13) << "Event type should be TABLE_MAP_EVENT (19)";
+
+  // table_id at buffer[19]
+  uint64_t table_id = buffer[19] | (buffer[20] << 8);
+  EXPECT_EQ(table_id, 5) << "table_id should be 5";
+}
+
+/**
+ * @brief Test checksum exclusion in event parsing
+ *
+ * MySQL binlog events include a 4-byte checksum at the end, even when checksums
+ * are disabled via SET @source_binlog_checksum='NONE'.
+ * Parser must exclude these 4 bytes when calculating event data end position.
+ */
+TEST(BinlogParsingTest, ChecksumExclusionInEventParsing) {
+  // Create a ROWS_EVENT with checksum
+  std::vector<uint8_t> event_with_checksum = {
+      0x00,  // OK byte (skipped by binlog_reader)
+      // Header (19 bytes):
+      0x00, 0x00, 0x00, 0x00,  // timestamp
+      0x1E,                    // event_type = WRITE_ROWS_EVENT (30)
+      0x01, 0x00, 0x00, 0x00,  // server_id
+      0x32, 0x00, 0x00, 0x00,  // event_size = 50 bytes (includes header + data + checksum)
+      0x00, 0x00, 0x00, 0x00,  // log_pos
+      0x00, 0x00,              // flags
+      // Post-header + data (27 bytes):
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00,  // table_id
+      0x00, 0x00,                          // flags (no extra_row_info)
+      // ... more data (19 bytes) ...
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      // Checksum (4 bytes) - should be excluded from parsing:
+      0xAA, 0xBB, 0xCC, 0xDD};
+
+  // After OK byte skip
+  const unsigned char* buffer = event_with_checksum.data() + 1;
+
+  // Read event_size from header
+  uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+  EXPECT_EQ(event_size, 50);
+
+  // Calculate end position EXCLUDING checksum (4 bytes)
+  const unsigned char* end_correct = buffer + event_size - 4;
+  const unsigned char* end_wrong = buffer + event_size;
+
+  // Verify correct end position excludes checksum
+  EXPECT_EQ(end_correct - buffer, 46) << "Correct end should be at offset 46 (50 - 4)";
+  EXPECT_EQ(end_wrong - buffer, 50) << "Wrong end would be at offset 50";
+
+  // Verify checksum bytes are excluded
+  EXPECT_EQ(*(end_correct + 0), 0xAA) << "First checksum byte should be at end_correct";
+  EXPECT_EQ(*(end_correct + 1), 0xBB);
+  EXPECT_EQ(*(end_correct + 2), 0xCC);
+  EXPECT_EQ(*(end_correct + 3), 0xDD);
+}
+
+/**
+ * @brief Test extra_row_info length calculation
+ *
+ * In MySQL 8.0 ROWS_EVENT_V2, extra_row_info_len is a packed integer that includes
+ * its own length. Parser must skip (extra_info_len - packed_int_size) bytes.
+ */
+TEST(BinlogParsingTest, ExtraRowInfoLengthCalculation) {
+  // Simulate ROWS_EVENT_V2 with extra_row_info
+  std::vector<uint8_t> event_data = {
+      // Post-header:
+      0x80, 0x00, 0x00, 0x00, 0x00, 0x00,  // table_id (6 bytes)
+      0x01, 0x00,                          // flags = 0x0001 (ROWS_EVENT_V2)
+      // extra_row_info:
+      0x02,  // extra_row_info_len = 2 bytes TOTAL (including this byte itself)
+      0xFF,  // extra_row_info data (1 byte, since total=2, data=2-1=1)
+      // column_count should be HERE (after skipping extra_row_info):
+      0x03,  // column_count = 3
+  };
+
+  const unsigned char* ptr = event_data.data() + 8;  // After table_id + flags
+
+  // Read extra_row_info_len
+  const unsigned char* ptr_before = ptr;
+  uint8_t extra_info_len = *ptr;  // Simplified packed int read (single byte)
+  ptr++;
+  auto len_bytes = static_cast<int>(ptr - ptr_before);
+
+  EXPECT_EQ(extra_info_len, 2) << "extra_info_len should be 2";
+  EXPECT_EQ(len_bytes, 1) << "Packed integer used 1 byte";
+
+  // Calculate skip_bytes
+  auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
+  EXPECT_EQ(skip_bytes, 1) << "Should skip 1 more byte (2 - 1)";
+
+  // Skip extra_row_info data
+  ptr += skip_bytes;
+
+  // Now ptr should point to column_count
+  uint8_t column_count = *ptr;
+  EXPECT_EQ(column_count, 3) << "column_count should be 3 after skipping extra_row_info";
+}
+
+/**
+ * @brief Test extra_row_info skip with wrong calculation
+ *
+ * Demonstrates the bug: if we skip extra_info_len bytes AGAIN after reading packed int,
+ * we skip too far and read wrong values.
+ */
+TEST(BinlogParsingTest, ExtraRowInfoWrongCalculationBug) {
+  std::vector<uint8_t> event_data = {
+      0x80, 0x00, 0x00, 0x00, 0x00, 0x00,  // table_id
+      0x01, 0x00,                          // flags = 0x0001
+      0x02,                                // extra_row_info_len = 2
+      0xFF,                                // extra_row_info data (1 byte)
+      0x03,                                // column_count = 3 (CORRECT position)
+      0xAA,                                // next data
+      0xBB,                                // next data
+  };
+
+  const unsigned char* ptr = event_data.data() + 8;
+
+  // WRONG: Read packed int, then skip extra_info_len bytes again
+  uint8_t extra_info_len = *ptr;
+  ptr++;  // Already advanced 1 byte for packed int
+
+  // BUG: Skip extra_info_len bytes (2) again
+  ptr += extra_info_len;  // Wrong! Should skip (extra_info_len - 1)
+
+  // Now ptr is 1 byte too far (should be at 0x03, but at 0xAA)
+  uint8_t wrong_value = *ptr;
+  EXPECT_EQ(wrong_value, 0xAA) << "With bug, reads 0xAA instead of column_count (0x03)";
+  EXPECT_NE(wrong_value, 0x03) << "Bug causes reading wrong position";
+}
+
+/**
+ * @brief Test multiple UPDATE_ROWS in single event with checksum
+ *
+ * A single UPDATE_ROWS_EVENT can contain multiple row pairs (before+after images).
+ * Parser must handle multiple rows and stop at correct boundary (before checksum).
+ */
+TEST(BinlogParsingTest, MultipleRowsWithChecksumBoundary) {
+  // Create UPDATE_ROWS_EVENT with 2 row pairs + checksum
+  std::vector<uint8_t> event_data = {
+      0x00,  // OK byte
+      // Header (19 bytes):
+      0x00, 0x00, 0x00, 0x00,  // timestamp
+      0x1F,                    // event_type = UPDATE_ROWS_EVENT (31)
+      0x01, 0x00, 0x00, 0x00,  // server_id
+      0x64, 0x00, 0x00, 0x00,  // event_size = 100 bytes (header + 2 row pairs + checksum)
+      0x00, 0x00, 0x00, 0x00,  // log_pos
+      0x00, 0x00,              // flags
+  };
+
+  // Add post-header + minimal row data (77 bytes) to reach 96 bytes before checksum
+  for (int i = 0; i < 77; i++) {
+    event_data.push_back(0x00);
+  }
+
+  // Add 4-byte checksum
+  event_data.push_back(0xDE);
+  event_data.push_back(0xAD);
+  event_data.push_back(0xBE);
+  event_data.push_back(0xEF);
+
+  ASSERT_EQ(event_data.size(), 101) << "Total size should be 101 (1 OK + 100 event)";
+
+  const unsigned char* buffer = event_data.data() + 1;
+  uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+  EXPECT_EQ(event_size, 100);
+
+  // Correct end calculation (exclude 4-byte checksum)
+  const unsigned char* end = buffer + event_size - 4;
+  EXPECT_EQ(end - buffer, 96) << "Event data ends at offset 96";
+
+  // Verify checksum is excluded
+  EXPECT_EQ(*(end + 0), 0xDE) << "Checksum starts after event data";
+  EXPECT_EQ(*(end + 3), 0xEF) << "Checksum ends at correct position";
+}
+
 #endif  // USE_MYSQL

@@ -349,8 +349,19 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
   }
 
   try {
-    const unsigned char* ptr = buffer + 19;  // Skip common header
-    const unsigned char* end = buffer + length;
+    // binlog_reader already skipped OK byte, buffer points to event data
+    // Event size is at bytes [9-12] of event data (little-endian)
+    // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
+    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+
+    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN = 19)
+
+    // IMPORTANT: Event size includes header + data + 4-byte CRC32 checksum at the end.
+    // Even when checksums are disabled via SET @source_binlog_checksum='NONE', MySQL still
+    // includes 4 bytes at the end of each event for checksum space.
+    // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: BINLOG_CHECKSUM_LEN = 4)
+    // We must exclude these 4 bytes when calculating the end of parseable data.
+    const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
 
     // Parse post-header
     if (ptr + 8 > end) {
@@ -370,6 +381,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     ptr += 2;
 
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       if (ptr >= end) {
         mygram::utils::StructuredLog()
@@ -379,8 +391,25 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
             .Error();
         return std::nullopt;
       }
+      const unsigned char* ptr_before = ptr;
       uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
-      ptr += extra_info_len;  // Skip the extra row info data
+      auto len_bytes = static_cast<int>(ptr - ptr_before);
+
+      // IMPORTANT: extra_info_len is the TOTAL length INCLUDING the packed integer itself.
+      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
+      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
+      // So we skip (extra_info_len - len_bytes) more bytes.
+      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
+      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
+      if (skip_bytes < 0 || ptr + skip_bytes > end) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "invalid_extra_row_info")
+            .Field("event_type", "write_rows")
+            .Error();
+        return std::nullopt;
+      }
+      ptr += skip_bytes;
     }
 
     // Parse body
@@ -538,14 +567,17 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
   }
 
   try {
-    // Read event_size from binlog header (bytes 9-12, little-endian)
+    // binlog_reader already skipped OK byte, buffer points to event data.
+    // Event size is at bytes [9-12] of event data (little-endian)
+    // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
     uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
 
-    const unsigned char* ptr = buffer + 19;          // Skip common header
-    const unsigned char* end = buffer + event_size;  // Use event_size from header, not length param
+    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
+    // Event size includes header + data + 4-byte checksum (even when checksums are disabled)
+    // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: BINLOG_CHECKSUM_LEN = 4)
+    const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
 
-    spdlog::debug("UPDATE_ROWS buffer: length_param={}, event_size_from_header={}, using event_size", length,
-                  event_size);
+    spdlog::debug("UPDATE_ROWS buffer: length_param={}, event_size_from_header={}", length, event_size);
 
     // Parse post-header (same as WRITE_ROWS)
     if (ptr + 8 > end) {
@@ -561,7 +593,10 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     uint16_t flags = binlog_util::uint2korr(ptr);
     ptr += 2;  // flags
 
+    spdlog::debug("UPDATE_ROWS flags: 0x{:04x}, ptr offset after flags: {}", flags, ptr - buffer);
+
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
     // The flags field indicates if extra info exists
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       // Read extra_row_info_length (packed integer)
@@ -589,8 +624,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
       spdlog::debug("Extra_row_info_len: {} bytes, packed_int used {} bytes", extra_info_len, len_bytes);
 
-      // In MySQL 8.0, extra_row_info_len is the TOTAL length including the length field itself
-      // So we need to skip (extra_info_len - len_bytes) more bytes
+      // IMPORTANT: extra_row_info_len is the TOTAL length INCLUDING the packed integer itself.
+      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
+      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
+      // So we skip (extra_info_len - len_bytes) more bytes.
+      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
       auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
       if (skip_bytes < 0) {
         mygram::utils::StructuredLog()
@@ -931,8 +969,13 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
   }
 
   try {
-    const unsigned char* ptr = buffer + 19;  // Skip common header
-    const unsigned char* end = buffer + length;
+    // binlog_reader already skipped OK byte, buffer points to event data
+    // Event size is at bytes [9-12] of event data (little-endian)
+    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+
+    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
+    // Event size includes header + data + 4-byte checksum (even when checksums are disabled)
+    const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
 
     // Parse post-header
     if (ptr + 8 > end) {
@@ -949,6 +992,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     ptr += 2;  // flags
 
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
     if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
       if (ptr >= end) {
         mygram::utils::StructuredLog()
@@ -958,8 +1002,25 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
             .Error();
         return std::nullopt;
       }
+      const unsigned char* ptr_before = ptr;
       uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
-      ptr += extra_info_len;  // Skip the extra row info data
+      auto len_bytes = static_cast<int>(ptr - ptr_before);
+
+      // IMPORTANT: extra_info_len is the TOTAL length INCLUDING the packed integer itself.
+      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
+      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
+      // So we skip (extra_info_len - len_bytes) more bytes.
+      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
+      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
+      if (skip_bytes < 0 || ptr + skip_bytes > end) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "invalid_extra_row_info")
+            .Field("event_type", "delete_rows")
+            .Error();
+        return std::nullopt;
+      }
+      ptr += skip_bytes;
     }
 
     // Parse body

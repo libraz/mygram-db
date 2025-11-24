@@ -474,6 +474,17 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       // SAFETY: Capture binlog_reader_ to local variable to prevent TOCTOU issues
       // (Time-Of-Check-Time-Of-Use) if binlog_reader_ were to be modified by another thread.
       mysql::BinlogReader* reader = binlog_reader_;
+
+      // Log replication configuration for debugging
+      mygram::utils::StructuredLog()
+          .Event("sync_replication_check")
+          .Field("table", table_name)
+          .Field("replication_enable", full_config_->replication.enable)
+          .Field("reader_exists", reader != nullptr)
+          .Field("gtid_empty", gtid.empty())
+          .Field("gtid", gtid)
+          .Info();
+
       if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
         // reader is guaranteed non-null here due to the check above
         // If replication is already running, stop it first to update GTID
@@ -491,7 +502,18 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         }
 
         // Always set GTID and start replication after SYNC
+        mygram::utils::StructuredLog().Event("sync_setting_gtid").Field("table", table_name).Field("gtid", gtid).Info();
+
         reader->SetCurrentGTID(gtid);
+
+        // Log before attempting to start replication
+        mygram::utils::StructuredLog()
+            .Event("sync_starting_replication")
+            .Field("table", table_name)
+            .Field("gtid", gtid)
+            .Field("reader_running", reader->IsRunning())
+            .Info();
+
         auto start_result = reader->Start();
         if (start_result) {
           update_state([](SyncState& state) { state.replication_status = "STARTED"; });

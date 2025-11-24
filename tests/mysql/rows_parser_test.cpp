@@ -25,6 +25,7 @@ class RowsParserTest : public ::testing::Test {
     std::vector<unsigned char> buffer;
 
     // Common header (19 bytes) - simplified
+    // We'll fill in event_size later at bytes [9-12]
     for (int i = 0; i < 19; i++) {
       buffer.push_back(0);
     }
@@ -135,6 +136,20 @@ class RowsParserTest : public ::testing::Test {
         }
       }
     }
+
+    // Add 4-byte checksum placeholder (required even when checksums disabled)
+    // Parser expects: event_size = header + data + 4-byte checksum
+    buffer.push_back(0);
+    buffer.push_back(0);
+    buffer.push_back(0);
+    buffer.push_back(0);
+
+    // Now fill in event_size at bytes [9-12] (total buffer size)
+    uint32_t event_size = buffer.size();
+    buffer[9] = event_size & 0xFF;
+    buffer[10] = (event_size >> 8) & 0xFF;
+    buffer[11] = (event_size >> 16) & 0xFF;
+    buffer[12] = (event_size >> 24) & 0xFF;
 
     return buffer;
   }
