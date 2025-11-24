@@ -38,6 +38,7 @@ class ReplicationHandlerTest : public ::testing::Test {
         loading_(false),
         read_only_(false),
         optimization_in_progress_(false),
+        replication_paused_for_dump_(false),
         handler_ctx_{.table_catalog = nullptr,
                      .table_contexts = table_contexts_,
                      .stats = stats_,
@@ -46,6 +47,8 @@ class ReplicationHandlerTest : public ::testing::Test {
                      .loading = loading_,
                      .read_only = read_only_,
                      .optimization_in_progress = optimization_in_progress_,
+                     .replication_paused_for_dump = replication_paused_for_dump_,
+                     .mysql_reconnecting = mysql_reconnecting_,
                      .binlog_reader = nullptr,
                      .sync_manager = nullptr,
                      .cache_manager = nullptr,
@@ -64,6 +67,8 @@ class ReplicationHandlerTest : public ::testing::Test {
   std::atomic<bool> loading_;
   std::atomic<bool> read_only_;
   std::atomic<bool> optimization_in_progress_;
+  std::atomic<bool> replication_paused_for_dump_;
+  std::atomic<bool> mysql_reconnecting_{false};
   HandlerContext handler_ctx_;
 };
 
@@ -222,13 +227,12 @@ TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpLoad) {
 }
 
 /**
- * @brief Test that REPLICATION START is allowed during DUMP SAVE
+ * @brief Test that REPLICATION START is blocked during DUMP SAVE
  *
- * DUMP SAVE is a read operation that creates a snapshot.
- * REPLICATION START begins reading binlog events.
- * These are both read operations and can run concurrently safely.
+ * DUMP SAVE now automatically pauses replication before starting.
+ * Manual REPLICATION START should be blocked during DUMP SAVE.
  */
-TEST_F(ReplicationHandlerTest, ReplicationStartAllowedDuringDumpSave) {
+TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpSave) {
   query::Query query;
   query.type = query::QueryType::REPLICATION_START;
 
@@ -240,11 +244,40 @@ TEST_F(ReplicationHandlerTest, ReplicationStartAllowedDuringDumpSave) {
 
   std::string response = handler.Handle(query, conn_ctx);
 
-  // Should not be blocked by DUMP SAVE (may fail for other reasons like no binlog_reader)
-  EXPECT_EQ(response.find("Cannot start replication while DUMP SAVE"), std::string::npos);
+  // Should be blocked by DUMP SAVE
+  EXPECT_NE(response.find("ERROR"), std::string::npos);
+  EXPECT_NE(response.find("DUMP SAVE is in progress"), std::string::npos);
+  EXPECT_NE(response.find("Cannot start replication"), std::string::npos);
 
   // Clean up
   read_only_ = false;
+}
+
+/**
+ * @brief Test that REPLICATION START is blocked when replication_paused_for_dump is set
+ *
+ * When replication is automatically paused for DUMP operations,
+ * manual REPLICATION START should be blocked until the operation completes.
+ */
+TEST_F(ReplicationHandlerTest, ReplicationStartBlockedWhenPausedForDump) {
+  query::Query query;
+  query.type = query::QueryType::REPLICATION_START;
+
+  // Simulate replication paused for DUMP operation
+  replication_paused_for_dump_ = true;
+
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
+
+  std::string response = handler.Handle(query, conn_ctx);
+
+  // Should be blocked
+  EXPECT_NE(response.find("ERROR"), std::string::npos);
+  EXPECT_NE(response.find("DUMP SAVE/LOAD is in progress"), std::string::npos);
+  EXPECT_NE(response.find("automatically restart"), std::string::npos);
+
+  // Clean up
+  replication_paused_for_dump_ = false;
 }
 
 }  // namespace mygramdb::server

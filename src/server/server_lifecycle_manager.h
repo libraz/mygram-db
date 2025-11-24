@@ -99,6 +99,8 @@ class ServerLifecycleManager {
    * @param loading Reference to loading flag (owned by TcpServer)
    * @param read_only Reference to read-only flag (owned by TcpServer)
    * @param optimization_in_progress Reference to optimization flag (owned by TcpServer)
+   * @param replication_paused_for_dump Reference to replication pause flag (owned by TcpServer)
+   * @param mysql_reconnecting Reference to MySQL reconnection flag (owned by TcpServer)
    * @param binlog_reader Optional BinlogReader for replication
    * @param sync_manager SyncOperationManager for SYNC operations (MySQL only, MUST be non-null when USE_MYSQL is
    * defined)
@@ -108,7 +110,8 @@ class ServerLifecycleManager {
   ServerLifecycleManager(const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
                          const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
                          std::atomic<bool>& loading, std::atomic<bool>& read_only,
-                         std::atomic<bool>& optimization_in_progress,
+                         std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
+                         std::atomic<bool>& mysql_reconnecting,
 #ifdef USE_MYSQL
                          mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
 #else
@@ -153,6 +156,8 @@ class ServerLifecycleManager {
   std::atomic<bool>& loading_;
   std::atomic<bool>& read_only_;
   std::atomic<bool>& optimization_in_progress_;
+  std::atomic<bool>& replication_paused_for_dump_;
+  std::atomic<bool>& mysql_reconnecting_;
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;

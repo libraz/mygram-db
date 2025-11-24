@@ -42,6 +42,20 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 
     case query::QueryType::REPLICATION_START: {
 #ifdef USE_MYSQL
+      // Check if MySQL reconnection is in progress (block manual restart)
+      if (ctx_.mysql_reconnecting.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot start replication while MySQL reconnection is in progress. "
+            "Replication will automatically restart after reconnection completes.");
+      }
+
+      // Check if replication is paused for DUMP operation (block manual restart)
+      if (ctx_.replication_paused_for_dump.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot start replication while DUMP SAVE/LOAD is in progress. "
+            "Replication will automatically restart after DUMP completes.");
+      }
+
       // Check if any table is currently syncing
       if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
         return ResponseFormatter::FormatError(
@@ -56,8 +70,12 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
             "Please wait for load to complete.");
       }
 
-      // Note: DUMP SAVE (read_only flag) is allowed during REPLICATION START
-      // as they are both read operations and can run concurrently
+      // Check if DUMP SAVE is in progress (block REPLICATION START)
+      if (ctx_.read_only.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot start replication while DUMP SAVE is in progress. "
+            "Please wait for save to complete.");
+      }
 
       if (ctx_.binlog_reader != nullptr) {
         auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);

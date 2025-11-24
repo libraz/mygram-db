@@ -103,6 +103,8 @@ struct HandlerContext {
   std::atomic<bool>& loading;
   std::atomic<bool>& read_only;
   std::atomic<bool>& optimization_in_progress;
+  std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
+  std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader;

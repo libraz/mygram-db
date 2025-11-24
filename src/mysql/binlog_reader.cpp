@@ -571,7 +571,7 @@ void BinlogReader::ReaderThreadFunc() {
                        event_opt->primary_key);
         }
 
-        PushEvent(event_opt.value());
+        PushEvent(std::make_unique<BinlogEvent>(std::move(event_opt.value())));
       } else {
         spdlog::debug("Event skipped (not a data event or parse failed)");
       }
@@ -599,29 +599,29 @@ void BinlogReader::WorkerThreadFunc() {
   spdlog::info("Binlog worker thread started");
 
   while (!should_stop_) {
-    BinlogEvent event;
-    if (!PopEvent(event)) {
+    auto event = PopEvent();
+    if (!event) {
       continue;
     }
 
-    if (!ProcessEvent(event)) {
+    if (!ProcessEvent(*event)) {
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "event_processing_failed")
-          .Field("table", event.table_name)
-          .Field("primary_key", event.primary_key)
-          .Field("gtid", event.gtid)
+          .Field("table", event->table_name)
+          .Field("primary_key", event->primary_key)
+          .Field("gtid", event->gtid)
           .Error();
     }
 
     processed_events_++;
-    UpdateCurrentGTID(event.gtid);
+    UpdateCurrentGTID(event->gtid);
   }
 
   spdlog::info("Binlog worker thread stopped");
 }
 
-void BinlogReader::PushEvent(const BinlogEvent& event) {
+void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {
   std::unique_lock<std::mutex> lock(queue_mutex_);
 
   // Wait if queue is full
@@ -631,27 +631,27 @@ void BinlogReader::PushEvent(const BinlogEvent& event) {
     return;
   }
 
-  event_queue_.push(event);
+  event_queue_.push(std::move(event));
   queue_cv_.notify_one();
 }
 
-bool BinlogReader::PopEvent(BinlogEvent& event) {
+std::unique_ptr<BinlogEvent> BinlogReader::PopEvent() {
   std::unique_lock<std::mutex> lock(queue_mutex_);
 
   // Wait if queue is empty
   queue_cv_.wait(lock, [this] { return should_stop_ || !event_queue_.empty(); });
 
   if (should_stop_ && event_queue_.empty()) {
-    return false;
+    return nullptr;
   }
 
-  event = event_queue_.front();
+  auto event = std::move(event_queue_.front());
   event_queue_.pop();
 
   // Notify reader thread that queue has space
   queue_full_cv_.notify_one();
 
-  return true;
+  return event;
 }
 
 bool BinlogReader::ProcessEvent(const BinlogEvent& event) {

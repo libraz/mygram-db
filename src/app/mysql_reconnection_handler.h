@@ -52,8 +52,10 @@ class MysqlReconnectionHandler {
    * @brief Create reconnection handler
    * @param mysql_connection Current MySQL connection
    * @param binlog_reader Current BinlogReader
+   * @param reconnecting_flag Optional flag to set during reconnection (to block manual REPLICATION START)
    */
-  MysqlReconnectionHandler(mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader);
+  MysqlReconnectionHandler(mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader,
+                           std::atomic<bool>* reconnecting_flag = nullptr);
 #else
   MysqlReconnectionHandler(void* mysql_connection, void* binlog_reader);
 #endif
@@ -90,6 +92,7 @@ class MysqlReconnectionHandler {
 #ifdef USE_MYSQL
   mysql::Connection* mysql_connection_;
   mysql::BinlogReader* binlog_reader_;
+  std::atomic<bool>* reconnecting_flag_;  // Flag to set during reconnection (non-owning)
 #else
   void* mysql_connection_;
   void* binlog_reader_;

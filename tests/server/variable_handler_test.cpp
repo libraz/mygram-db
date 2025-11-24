@@ -56,6 +56,8 @@ class VariableHandlerTest : public ::testing::Test {
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+        .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
         .binlog_reader = nullptr,
         .sync_manager = nullptr,
@@ -82,6 +84,8 @@ class VariableHandlerTest : public ::testing::Test {
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};
+  std::atomic<bool> mysql_reconnecting_{false};
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<VariableHandler> handler_;

@@ -382,8 +382,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     auto* variable_manager = tcp_server_->GetVariableManager();
     if (variable_manager != nullptr) {
       // Create reconnection handler (use shared_ptr so it can be captured in std::function)
-      auto reconnection_handler =
-          std::make_shared<MysqlReconnectionHandler>(mysql_connection_.get(), binlog_reader_.get());
+      // Pass the mysql_reconnecting flag to block manual REPLICATION START during reconnection
+      auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
+          mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag());
 
       // Set callback that captures the reconnection handler
       variable_manager->SetMysqlReconnectCallback([handler = reconnection_handler](const std::string& host, int port) {

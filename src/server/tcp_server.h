@@ -145,6 +145,11 @@ class TcpServer {
   std::atomic<bool>* GetLoadingFlag() { return &loading_; }
 
   /**
+   * @brief Get MySQL reconnecting flag pointer (for MysqlReconnectionHandler)
+   */
+  std::atomic<bool>* GetMysqlReconnectingFlag() { return &mysql_reconnecting_; }
+
+  /**
    * @brief Get cache manager pointer (for HttpServer)
    */
   cache::CacheManager* GetCacheManager() { return cache_manager_.get(); }
@@ -189,6 +194,8 @@ class TcpServer {
   std::atomic<bool> read_only_{false};
   std::atomic<bool> loading_{false};
   std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};  // Replication paused for DUMP SAVE/LOAD
+  std::atomic<bool> mysql_reconnecting_{false};           // MySQL reconnection in progress
 
   // Services (composition) - NEW
   std::unique_ptr<TableCatalog> table_catalog_;

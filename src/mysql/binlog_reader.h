@@ -178,8 +178,8 @@ class BinlogReader {
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
 
-  // Event queue
-  std::queue<BinlogEvent> event_queue_;
+  // Event queue (using unique_ptr to avoid copying large BinlogEvent objects)
+  std::queue<std::unique_ptr<BinlogEvent>> event_queue_;
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   std::condition_variable queue_full_cv_;
@@ -229,13 +229,15 @@ class BinlogReader {
 
   /**
    * @brief Push event to queue (blocking if full)
+   * @param event Event to push (ownership transferred)
    */
-  void PushEvent(const BinlogEvent& event);
+  void PushEvent(std::unique_ptr<BinlogEvent> event);
 
   /**
    * @brief Pop event from queue (blocking if empty)
+   * @return Unique pointer to event, or nullptr if should_stop_ is true
    */
-  bool PopEvent(BinlogEvent& event);
+  std::unique_ptr<BinlogEvent> PopEvent();
 
   /**
    * @brief Process single event (delegates to BinlogEventProcessor)

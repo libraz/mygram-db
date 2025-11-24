@@ -63,6 +63,7 @@ class ServerLifecycleManagerTest : public ::testing::Test {
   std::unique_ptr<ServerLifecycleManager> CreateManager() {
     return std::make_unique<ServerLifecycleManager>(server_config_, table_contexts_, dump_dir_, &full_config_, stats_,
                                                     loading_, read_only_, optimization_in_progress_,
+                                                    replication_paused_for_dump_, mysql_reconnecting_,
 #ifdef USE_MYSQL
                                                     nullptr,  // binlog_reader
                                                     sync_manager_.get()
@@ -84,6 +85,8 @@ class ServerLifecycleManagerTest : public ::testing::Test {
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};
+  std::atomic<bool> mysql_reconnecting_{false};
 
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
@@ -219,6 +222,8 @@ TEST_F(ServerLifecycleManagerTest, Initialize_HandlerContextHasCorrectDependenci
   EXPECT_EQ(&handler_context->loading, &loading_);
   EXPECT_EQ(&handler_context->read_only, &read_only_);
   EXPECT_EQ(&handler_context->optimization_in_progress, &optimization_in_progress_);
+  EXPECT_EQ(&handler_context->replication_paused_for_dump, &replication_paused_for_dump_);
+  EXPECT_EQ(&handler_context->mysql_reconnecting, &mysql_reconnecting_);
 
   // Cleanup
   result->acceptor->Stop();
@@ -318,6 +323,7 @@ TEST_F(ServerLifecycleManagerTest, Constructor_NullFullConfig_SkipsOptionalCompo
   auto manager = std::make_unique<ServerLifecycleManager>(server_config_, table_contexts_, dump_dir_,
                                                           nullptr,  // full_config = nullptr
                                                           stats_, loading_, read_only_, optimization_in_progress_,
+                                                          replication_paused_for_dump_, mysql_reconnecting_,
 #ifdef USE_MYSQL
                                                           nullptr, sync_manager_.get()
 #else

@@ -56,6 +56,8 @@ class SyncHandlerTest : public ::testing::Test {
   std::atomic<bool> loading_{false};
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};
+  std::atomic<bool> mysql_reconnecting_{false};
   std::unordered_set<std::string> syncing_tables_;
   std::mutex syncing_tables_mutex_;
 };

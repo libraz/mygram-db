@@ -138,13 +138,13 @@ TEST_F(BinlogReaderFixture, RejectsDoubleStart) {
  * @brief Exercise queue push/pop helpers without worker threads
  */
 TEST_F(BinlogReaderFixture, PushAndPopEvents) {
-  BinlogEvent first = MakeEvent(BinlogEventType::INSERT, "1", 1);
-  reader_->PushEvent(first);
+  auto first = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "1", 1));
+  reader_->PushEvent(std::move(first));
   EXPECT_EQ(reader_->GetQueueSize(), 1);
 
-  BinlogEvent popped;
-  ASSERT_TRUE(reader_->PopEvent(popped));
-  EXPECT_EQ(popped.primary_key, "1");
+  auto popped = reader_->PopEvent();
+  ASSERT_NE(popped, nullptr);
+  EXPECT_EQ(popped->primary_key, "1");
   EXPECT_EQ(reader_->GetQueueSize(), 0);
 }
 
@@ -153,26 +153,27 @@ TEST_F(BinlogReaderFixture, PushAndPopEvents) {
  */
 TEST_F(BinlogReaderFixture, PushBlocksWhenQueueFull) {
   reader_->config_.queue_size = 1;
-  BinlogEvent first = MakeEvent(BinlogEventType::INSERT, "1", 1);
-  reader_->PushEvent(first);
+  auto first = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "1", 1));
+  reader_->PushEvent(std::move(first));
 
   std::atomic<bool> second_pushed{false};
   std::thread producer([&] {
-    BinlogEvent second = MakeEvent(BinlogEventType::INSERT, "2", 1);
-    reader_->PushEvent(second);
+    auto second = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1));
+    reader_->PushEvent(std::move(second));
     second_pushed.store(true);
   });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   EXPECT_FALSE(second_pushed.load());
 
-  BinlogEvent popped;
-  ASSERT_TRUE(reader_->PopEvent(popped));
+  auto popped = reader_->PopEvent();
+  ASSERT_NE(popped, nullptr);
   producer.join();
   EXPECT_TRUE(second_pushed.load());
 
   // Drain queue for subsequent tests
-  ASSERT_TRUE(reader_->PopEvent(popped));
+  popped = reader_->PopEvent();
+  ASSERT_NE(popped, nullptr);
   EXPECT_EQ(reader_->GetQueueSize(), 0);
 }
 
@@ -182,30 +183,30 @@ TEST_F(BinlogReaderFixture, PushBlocksWhenQueueFull) {
 TEST_F(BinlogReaderFixture, PopBlocksUntilEventArrives) {
   std::atomic<bool> pop_completed{false};
   std::thread consumer([&] {
-    BinlogEvent event;
-    bool ok = reader_->PopEvent(event);
-    pop_completed.store(ok);
-    EXPECT_EQ(event.primary_key, "7");
+    auto event = reader_->PopEvent();
+    pop_completed.store(event != nullptr);
+    if (event) {
+      EXPECT_EQ(event->primary_key, "7");
+    }
   });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   EXPECT_FALSE(pop_completed.load());
 
-  reader_->PushEvent(MakeEvent(BinlogEventType::INSERT, "7", 1));
+  reader_->PushEvent(std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "7", 1)));
   consumer.join();
   EXPECT_TRUE(pop_completed.load());
   EXPECT_EQ(reader_->GetQueueSize(), 0);
 }
 
 /**
- * @brief Confirm PopEvent unblocks and returns false when reader is stopped
+ * @brief Confirm PopEvent unblocks and returns nullptr when reader is stopped
  */
 TEST_F(BinlogReaderFixture, PopReturnsFalseWhenStopping) {
   std::atomic<bool> pop_result{true};
   std::thread consumer([&] {
-    BinlogEvent event;
-    bool ok = reader_->PopEvent(event);
-    pop_result.store(ok);
+    auto event = reader_->PopEvent();
+    pop_result.store(event == nullptr);
   });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -213,7 +214,7 @@ TEST_F(BinlogReaderFixture, PopReturnsFalseWhenStopping) {
   reader_->queue_cv_.notify_all();
 
   consumer.join();
-  EXPECT_FALSE(pop_result.load());
+  EXPECT_TRUE(pop_result.load());  // Should be nullptr (true) when stopping
   reader_->should_stop_ = false;
 }
 

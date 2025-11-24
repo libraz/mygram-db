@@ -30,18 +30,17 @@ namespace {
 constexpr size_t kThreadPoolQueueSize = 1000;
 }  // namespace
 
-ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
-                                               std::unordered_map<std::string, TableContext*>& table_contexts,
-                                               const std::string& dump_dir, const config::Config* full_config,
-                                               ServerStats& stats, std::atomic<bool>& loading,
-                                               std::atomic<bool>& read_only,
-                                               std::atomic<bool>& optimization_in_progress,
+ServerLifecycleManager::ServerLifecycleManager(
+    const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
+    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats, std::atomic<bool>& loading,
+    std::atomic<bool>& read_only, std::atomic<bool>& optimization_in_progress,
+    std::atomic<bool>& replication_paused_for_dump, std::atomic<bool>& mysql_reconnecting,
 #ifdef USE_MYSQL
-                                               mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
+    mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
 #else
-                                               void* binlog_reader
+    void* binlog_reader
 #endif
-                                               )
+    )
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -50,6 +49,8 @@ ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
       loading_(loading),
       read_only_(read_only),
       optimization_in_progress_(optimization_in_progress),
+      replication_paused_for_dump_(replication_paused_for_dump),
+      mysql_reconnecting_(mysql_reconnecting),
 #ifdef USE_MYSQL
       binlog_reader_(binlog_reader),
       sync_manager_(sync_manager)
@@ -277,6 +278,8 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+        .mysql_reconnecting = mysql_reconnecting_,
         .binlog_reader = binlog_reader_,
         .sync_manager = sync_manager_,
         .cache_manager = cache_manager,
@@ -292,6 +295,8 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .loading = loading_,
         .read_only = read_only_,
         .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+        .mysql_reconnecting = mysql_reconnecting_,
         .binlog_reader = binlog_reader_,
         .cache_manager = cache_manager,
         .variable_manager = variable_manager,

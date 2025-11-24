@@ -169,7 +169,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Initialize all server components via ServerLifecycleManager
   // This centralizes component creation and dependency ordering
   ServerLifecycleManager lifecycle_manager(config_, table_contexts_, dump_dir_, full_config_, stats_, loading_,
-                                           read_only_, optimization_in_progress_,
+                                           read_only_, optimization_in_progress_, replication_paused_for_dump_,
+                                           mysql_reconnecting_,
 #ifdef USE_MYSQL
                                            binlog_reader_, sync_manager_.get()
 #else

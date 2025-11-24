@@ -26,10 +26,16 @@ using mygram::utils::MakeUnexpected;
 #ifdef USE_MYSQL
 
 MysqlReconnectionHandler::MysqlReconnectionHandler(mysql::Connection* mysql_connection,
-                                                   mysql::BinlogReader* binlog_reader)
-    : mysql_connection_(mysql_connection), binlog_reader_(binlog_reader) {}
+                                                   mysql::BinlogReader* binlog_reader,
+                                                   std::atomic<bool>* reconnecting_flag)
+    : mysql_connection_(mysql_connection), binlog_reader_(binlog_reader), reconnecting_flag_(reconnecting_flag) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
+  // Set reconnecting flag to block manual REPLICATION START
+  if (reconnecting_flag_ != nullptr) {
+    reconnecting_flag_->store(true);
+  }
+
   mygram::utils::StructuredLog()
       .Event("mysql_reconnection_start")
       .Field("new_host", new_host)
@@ -66,6 +72,10 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   *mysql_connection_ = mysql::Connection(config);
   auto connect_result = mysql_connection_->Connect("reconnection");
   if (!connect_result) {
+    // Clear reconnecting flag on error
+    if (reconnecting_flag_ != nullptr) {
+      reconnecting_flag_->store(false);
+    }
     mygram::utils::StructuredLog()
         .Event("mysql_reconnection_connect_failed")
         .Field("host", new_host)
@@ -78,6 +88,10 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   // Step 4: Validate new connection
   auto validate_result = ValidateConnection(mysql_connection_);
   if (!validate_result) {
+    // Clear reconnecting flag on error
+    if (reconnecting_flag_ != nullptr) {
+      reconnecting_flag_->store(false);
+    }
     mygram::utils::StructuredLog()
         .Event("mysql_reconnection_validation_failed")
         .Field("host", new_host)
@@ -100,6 +114,10 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       spdlog::info("Restarting BinlogReader from GTID: {}", current_gtid);
       auto start_result = binlog_reader_->StartFromGtid(current_gtid);
       if (!start_result) {
+        // Clear reconnecting flag on error
+        if (reconnecting_flag_ != nullptr) {
+          reconnecting_flag_->store(false);
+        }
         mygram::utils::StructuredLog()
             .Event("mysql_reconnection_binlog_restart_failed")
             .Field("error", start_result.error().message())
@@ -120,6 +138,11 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       .Field("new_host", new_host)
       .Field("new_port", static_cast<int64_t>(new_port))
       .Info();
+
+  // Clear reconnecting flag
+  if (reconnecting_flag_ != nullptr) {
+    reconnecting_flag_->store(false);
+  }
 
   spdlog::info("MySQL reconnection completed successfully");
   return {};
