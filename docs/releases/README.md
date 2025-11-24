@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.3.0](v1.3.0.md) - Latest release (2025-11-22) - Temporal Data Types & Timezone Support ⚠️ BREAKING CHANGES
+- [v1.3.1](v1.3.1.md) - Latest release (2025-11-24) - Critical Bug Fixes 🚨 URGENT UPGRADE
+- [v1.3.0](v1.3.0.md) - 2025-11-22 - Temporal Data Types & Timezone Support ⚠️ BREAKING CHANGES
 - [v1.2.5](v1.2.5.md) - 2025-11-22 - Log Noise Reduction
 - [v1.2.4](v1.2.4.md) - 2025-11-21 - Critical Bug Fix
 - [v1.2.3](v1.2.3.md) - 2025-11-20

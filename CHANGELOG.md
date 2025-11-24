@@ -6,414 +6,176 @@ All notable changes to MygramDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+**Note**: For detailed release information, see [docs/releases/](docs/releases/).
+
 ## [Unreleased]
+
+## [1.3.1] - 2025-11-24
+
+🚨 **CRITICAL UPGRADE - All v1.3.0 users must upgrade immediately**
+
+### Fixed
+
+- **Critical: Replication corruption after SYNC** - Auto-restart replication with updated GTID
+- **Critical: GTID validation** - Block REPLICATION START before initial SYNC
+- **Critical: Logging configuration crash** - Fix initialization order
+- **Critical: Missing mutual exclusion** - Prevent concurrent operation data corruption (DUMP/OPTIMIZE/SYNC)
+- **Critical: Replication race conditions** - Add state flags to prevent manual interference during auto-management
+- **High: TTL expiration not implemented** - Implement cache TTL expiration to prevent memory leak
+- **Medium: Rate limiter callback** - Fix runtime toggle for rate limiting
+- **Medium: BinlogReader performance** - Use unique_ptr to eliminate expensive copying
+- **Low: DocID overflow logic** - Simplify complex overflow handling
+- **Low: Code quality** - clang-tidy compliance, thread-safe StructuredLog
+
+### Added
+
+- New documentation: `docs/en/replication_management.md`, `docs/ja/replication_management.md`
+
+### Testing
+
+- 52+ new test cases, 1,228+ lines of test code
+- Comprehensive coverage for all critical bugs
+
+**Detailed Release Notes**: [docs/releases/v1.3.1.md](docs/releases/v1.3.1.md)
 
 ## [1.3.0] - 2025-11-22
 
 ### ⚠️ BREAKING CHANGES
 
-- **Dump file format incompatibility for DATETIME/DATE/TIME columns**
-  - DATETIME, DATE, and TIME filter values changed from string storage to epoch seconds (uint64_t)
-  - **Impact**: Dump files from v1.2.x containing these column types cannot be loaded by v1.3.0
-  - **Action required**: Delete old dump files and rebuild snapshot from MySQL after upgrading
-  - **Reason**: Performance improvement and proper timezone support
-  - **Safe scenarios**: Tables with only `string`, `int`, `float` filter columns (no rebuild needed)
-  - **Affected scenarios**: Tables with `datetime`, `date`, or `time` filter columns (snapshot rebuild required)
-  - **Migration**: Remove old dump file before starting v1.3.0, allow snapshot to rebuild from MySQL
-  - **Rollback**: Dump files from v1.3.0 cannot be loaded by v1.2.5 (MySQL rebuild required)
-
-- **SIGHUP hot reload removed - replaced with MySQL-style SET/SHOW VARIABLES**
-  - Configuration hot reload via SIGHUP signal is no longer supported
-  - **New approach**: Use `SET variable_name = value` command via TCP protocol (MySQL-compatible)
-  - **Impact**: Scripts or automation using `kill -HUP <pid>` will no longer trigger config reload
-  - **Action required**: Update operational procedures to use `SET` commands instead
-  - **Benefits**: Fine-grained control, immediate feedback, thread-safe, no file parsing overhead
-  - **Migration**: See docs/en/operations.md and docs/ja/operations.md for new workflow
+- **Dump file format incompatibility** - DATETIME/DATE/TIME now stored as epoch seconds (rebuild required)
+- **SIGHUP hot reload removed** - Use MySQL-style `SET`/`SHOW VARIABLES` commands instead
 
 ### Added
 
-- **MySQL-style SET/SHOW VARIABLES commands for runtime configuration**
-  - New `RuntimeVariableManager` for thread-safe configuration changes at runtime (632 lines)
-  - `SHOW VARIABLES` - Display all runtime variables with mutability status
-  - `SHOW VARIABLES LIKE 'pattern%'` - Filter variables by pattern (MySQL-compatible)
-  - `SET variable_name = value` - Change mutable variables without restart
-  - `SET var1 = val1, var2 = val2` - Change multiple variables atomically
-  - **11 mutable variables**: logging.level, logging.format, api.default_limit, api.max_limit, api.max_query_length, api.rate_limiting.enable, api.rate_limiting.capacity, api.rate_limiting.refill_per_sec, cache.enabled, cache.min_query_cost_ms, cache.ttl_seconds
-  - **Type-safe validation**: Range checking, type conversion, invalid value detection
-  - **Zero-downtime MySQL failover**: `SET mysql.host`, `mysql.port`, `mysql.user`, `mysql.password` with automatic reconnection and GTID preservation
-  - Implementation: `src/config/runtime_variable_manager.h/cpp` (632 lines), `src/server/handlers/variable_handler.h/cpp` (211 lines)
-  - MySQL failover: `src/app/mysql_reconnection_handler.h/cpp` (161 lines with RAII guards)
-  - Tests: 46 unit tests in `tests/config/runtime_variable_manager_test.cpp` (1088 lines)
-  - Integration tests: 10 tests in `tests/integration/mysql/failover_test.cpp` (377 lines)
-  - Variable handler tests: 15 tests in `tests/integration/server/variable_handler_test.cpp` (429 lines, currently skipped)
-
-- **MySQL TIME type support**
-  - Full support for MySQL TIME columns in filters and sorting
-  - Range: -838:59:59 to 838:59:59 (stored as signed seconds from midnight)
-  - New `TimeValue` structure for type-safe TIME handling
-  - Filter operators: `=`, `!=`, `<`, `<=`, `>`, `>=`
-  - Proper sorting with ASC/DESC directives
-  - Use cases: duration tracking, time-of-day scheduling, elapsed time calculations
-  - Implementation: `src/storage/document_store.h`, `src/mysql/rows_parser.cpp`, `src/query/result_sorter.cpp`
-  - Tests: 266 test cases in `tests/utils/datetime_converter_test.cpp`
-
-- **Timezone-aware DATETIME/DATE processing**
-  - New configuration option: `mysql.datetime_timezone` (format: `[+-]HH:MM`)
-  - Default: UTC (+00:00)
-  - DATETIME and DATE columns now interpret values in configured timezone
-  - TIMESTAMP columns always stored as UTC (MySQL spec)
-  - Supports all standard UTC offsets from -12:00 to +14:00
-  - ⚠️ Requires server restart when changed (not hot-reloadable)
-  - Implementation: `src/utils/datetime_converter.h/cpp` (664 lines of timezone logic)
-  - Configuration: `src/config/config.h/cpp`
-  - Integration: `src/mysql/binlog_filter_evaluator.cpp`, `src/storage/snapshot_builder.cpp`
-
-- **Bug fix: Primary key column name sorting**
-  - **Critical**: Fixed `SORT id ASC` and `SORT id DESC` to work as documented
-  - **Issue**: Documentation has always stated full syntax should work, but it was non-functional
-  - Only shorthand syntax (`SORT ASC/DESC`) worked before v1.3.0
-  - **Root cause**: `result_sorter.cpp` only checked empty column names for primary key path
-  - **Fix**: Detect when sort column matches primary key column name (`src/query/result_sorter.cpp:79-103`)
-  - **Impact**: High - fixes documentation vs. implementation mismatch
-  - Backward compatible - shorthand syntax still works
-  - Improved NULL value handling: ASC (NULL first), DESC (NULL last) - MySQL semantics
-  - Tests: 314 comprehensive test cases in `tests/query/result_sorter_asc_desc_test.cpp`
-
-- **Query parameter support in snapshot API**
-  - Filter and sort during snapshot creation
-  - HTTP endpoints: `GET /table/snapshot?filter=col:val&sort=col&order=desc`
-  - Use cases: export subsets, sorted dumps, category-specific backups
-  - Tests: 252 test cases in `tests/storage/snapshot_builder_query_test.cpp`
-
-### Changed
-
-- **Removed SIGHUP signal handler and hot reload code**
-  - Deleted `src/app/config_reloader.h/cpp` (replaced by RuntimeVariableManager)
-  - Removed SIGHUP signal handling from Application and SignalManager
-  - Removed `ConfigurationManager::ReloadConfig()` method (35 lines deleted)
-  - Configuration file is now loaded once at startup only
-  - Runtime changes handled exclusively through SET commands
-
-- **Renamed SnapshotBuilder to InitialLoader**
-  - Module moved from `src/storage/` to new `src/loader/` directory
-  - Class renamed: `SnapshotBuilder` → `InitialLoader`
-  - Focused responsibility: Initial data loading from MySQL only
-  - No longer part of storage layer (clear separation of concerns)
-  - Files: `src/loader/initial_loader.h/cpp` (was `src/storage/snapshot_builder.h/cpp`)
-  - Tests: `tests/loader/initial_loader_query_test.cpp` (was `tests/storage/snapshot_builder_query_test.cpp`)
-  - CMake: New `src/loader/CMakeLists.txt` module
-
-- **Enhanced CacheManager and QueryCache APIs**
-  - Added `SetEnabled()` method for runtime cache on/off switching
-  - Added `SetMinQueryCostMs()` for dynamic query cost threshold
-  - Added `SetTtlSeconds()` for dynamic TTL adjustment
-  - Methods integrated with RuntimeVariableManager change callbacks
-
-- **Extended TcpServer and ServerLifecycleManager**
-  - Added `GetRuntimeVariableManager()` accessor for variable handler integration
-  - Added `GetMySQLReconnectionHandler()` accessor for failover handler integration
-  - ServerOrchestrator passes RuntimeVariableManager to all server components
-
-- Updated configuration examples to include `datetime_timezone`
-  - `examples/config.yaml`, `examples/config.json`: Added with detailed comments
-  - `examples/config-minimal.yaml`, `examples/config-minimal.json`: Added with usage note
-- Documentation updates for TIME type and timezone support
-  - `docs/en/configuration.md`, `docs/ja/configuration.md`: TIME type, timezone configuration
-  - Removed SIGHUP hot reload references, added SET/SHOW VARIABLES documentation
+- MySQL-style `SET`/`SHOW VARIABLES` for runtime configuration with 11 mutable variables
+- Zero-downtime MySQL failover with GTID preservation
+- MySQL TIME type support (-838:59:59 to 838:59:59)
+- Timezone-aware DATETIME/DATE processing (`mysql.datetime_timezone` config)
+- Query parameter support in snapshot API (filter/sort during snapshot)
 
 ### Fixed
 
-- **Critical: Primary key column name sorting** (`SORT id ASC/DESC`)
-  - Fixed documented but non-functional syntax: `SORT <primary_key_column> ASC/DESC`
-  - Documentation (docs/en/query_syntax.md:310-314) has always specified this should work
-  - Only shorthand syntax (`SORT ASC/DESC`) was functional before v1.3.0
-  - Root cause: `result_sorter.cpp` only checked empty column names for primary key path
-  - Impact: High - fixes long-standing doc/implementation mismatch
-  - Files: `src/query/result_sorter.cpp:79-103`, `src/server/handlers/search_handler.cpp`
-  - Tests: 314 test cases in `tests/query/result_sorter_asc_desc_test.cpp`
+- **Critical: Primary key column name sorting** - `SORT id ASC/DESC` now works as documented
 
-- Sort key generation for filter columns
-  - When column name matches both primary key and filter column, filter value takes precedence
-  - Minimal impact - affects only tables with primary key column also configured as filter
+### Changed
 
-### Documentation
-
-- Comprehensive TIME type documentation in configuration guides
-- Timezone configuration reference (format, supported offsets, hot reload restrictions)
-- Enhanced sorting examples (primary key column name, ASC/DESC, NULL handling)
-- Migration guide for timezone configuration
-- Security considerations for non-UTC timezones
+- Renamed `SnapshotBuilder` → `InitialLoader` (moved to `src/loader/`)
+- Enhanced CacheManager/QueryCache APIs for runtime configuration
 
 ### Testing
 
-- **New test files**: 3 files added (runtime_variable_manager_test.cpp, failover_test.cpp, variable_handler_test.cpp)
-- **Total new test cases**: 71 (46 + 10 + 15, with variable_handler tests currently skipped)
-- **Total new code**: 1,894 lines of test code
+- 71 new test cases (1,894 lines): RuntimeVariableManager (46), MySQL failover (10), Variable handler (15)
 
-**Test Coverage by Feature:**
-
-1. **RuntimeVariableManager** (`tests/config/runtime_variable_manager_test.cpp`)
-   - 46 test cases, 1,088 lines
-   - All 11 mutable variables tested (logging.level, logging.format, api.*, cache.*)
-   - Range validation (min/max boundaries for numeric variables)
-   - Type conversion (string/int/double/bool validation)
-   - Error handling (invalid values, out-of-range, unknown variables)
-   - Concurrent access (thread safety validation with std::shared_mutex)
-   - Change callbacks (MySQL reconnection integration)
-   - Idempotent operations (multiple SETs with same value)
-   - Edge cases (boundary values, floating-point precision, simultaneous changes)
-
-2. **MySQL Failover** (`tests/integration/mysql/failover_test.cpp`)
-   - 10 integration test cases, 377 lines
-   - Zero-downtime MySQL reconnection scenarios
-   - GTID position preservation during failover
-   - Connection validation (GTID mode, binlog format, table existence)
-   - Error handling (connection refused, invalid server, GTID mismatch)
-   - RuntimeVariableManager integration with MySQL reconnection
-   - Idempotent reconnection (same host/port multiple times)
-   - BinlogReader lifecycle management during failover
-
-3. **Variable Handler** (`tests/integration/server/variable_handler_test.cpp`)
-   - 15 integration test cases, 429 lines (currently skipped)
-   - SET/SHOW VARIABLES TCP command testing
-   - Pattern matching validation (SHOW VARIABLES LIKE 'pattern%')
-   - Multi-variable SET (atomic changes)
-   - Error response validation (unknown variable, immutable variable, invalid value)
-   - MySQL-compatible response formatting (table output)
-   - Concurrent SET command handling
-   - Note: Tests skipped due to TcpServer integration complexity (requires full server setup)
-
-**Previous v1.3.0 Features (already tested in earlier iterations):**
-
-- DateTime converter: 13 tests (timezone parsing, TIME/DATETIME/DATE conversion, edge cases)
-- Result sorter ASC/DESC: 4 tests (primary key column name sorting, NULL handling, reverse order)
-- Snapshot builder query: Tests integrated into InitialLoader (filtered loading, sorting)
-
-**Total Test Suite Statistics:**
-
-- **Total tests**: 1,366 tests across entire codebase
-- **New tests in v1.3.0**: 71 tests (46 + 10 + 15)
-- **Test coverage**: All new features have comprehensive unit and integration tests
-- **Thread safety**: Concurrent access tests for RuntimeVariableManager
-- **Error scenarios**: Comprehensive error handling validation
+**Detailed Release Notes**: [docs/releases/v1.3.0.md](docs/releases/v1.3.0.md)
 
 ## [1.2.5] - 2025-11-22
 
 ### Fixed
 
-- Fixed excessive warning logs for multi-table databases
-  - Changed log level from warning to debug for unknown table ID events
-  - Affects write_rows, update_rows, and delete_rows binlog events
-  - Uses direct spdlog::debug() calls instead of structured logging for better performance
-  - Reduces log noise in production environments with multiple tables where only specific tables are replicated
+- Excessive warning logs for multi-table databases (changed to debug level)
+
+**Detailed Release Notes**: [docs/releases/v1.2.5.md](docs/releases/v1.2.5.md)
 
 ## [1.2.4] - 2025-11-21
 
 ### Fixed
 
-- **Critical: Fixed GTID parsing crash during replication startup (MySQL 8.4 compatibility)**
-  - MySQL 8.4 returns GTID strings with embedded newlines for readability (e.g., `uuid1:1-100,\nuuid2:1-200`)
-  - Long GTID strings from multiple replication sources would cause `std::invalid_argument` crash
-  - Now properly removes whitespace from GTID strings, following MySQL's official parser behavior
-  - Affects systems replicating from multiple MySQL sources (6+ UUIDs)
-- Fixed RPM package upgrade failures
-  - Added error suppression to `%systemd_preun` macro
-  - Eliminates "fg: no job control" errors during package updates
-  - Ensures smooth upgrades without manual intervention
+- **Critical: GTID parsing crash** - MySQL 8.4 compatibility (handle newlines in GTID strings)
+- RPM package upgrade failures (suppress systemd errors)
 
-### Added
-
-- Comprehensive GTID whitespace handling tests
-  - 5 test cases covering various whitespace patterns (newlines, spaces, tabs)
-  - Real-world 6-UUID production scenario validation
-  - Documented MySQL 8.4 GTID formatting behavior
+**Detailed Release Notes**: [docs/releases/v1.2.4.md](docs/releases/v1.2.4.md)
 
 ## [1.2.3] - 2025-11-20
 
 ### Added
 
-- Configurable MySQL session timeout to prevent disconnection during long operations
-  - New configuration option: `replication.session_timeout_sec` (default: 28800 seconds / 8 hours)
-  - Automatically sets `wait_timeout` and `interactive_timeout` on MySQL connection
-  - Prevents timeout issues during large table synchronization or slow binlog processing
-- C API for parsing web-style search expressions
-  - New public API: `mygram_parse_search_expr()` for parsing search queries
-  - Enables integration with other C/C++ applications
-  - Supports all existing query syntax (SEARCH, FILTER, SORT, LIMIT)
+- Configurable MySQL session timeout (`replication.session_timeout_sec`)
+- C API for parsing web-style search expressions (`mygram_parse_search_expr()`)
+
+**Detailed Release Notes**: [docs/releases/v1.2.3.md](docs/releases/v1.2.3.md)
 
 ## [1.2.2] - 2025-11-20
 
 ### Fixed
 
-- Fixed Docker entrypoint script POSIX compatibility issue
-  - Replaced bashism (`<<<` here-string and array syntax) with POSIX-compliant code
-  - Script now works correctly in Docker containers where `/bin/sh` is linked to `dash`
-  - Fixes "Syntax error: redirection unexpected" error when using `NETWORK_ALLOW_CIDRS`
+- Docker entrypoint POSIX compatibility (replaced bashism with POSIX code)
+
+**Detailed Release Notes**: [docs/releases/v1.2.2.md](docs/releases/v1.2.2.md)
 
 ## [1.2.1] - 2025-11-19
 
 ### Added
 
-- Added `NETWORK_ALLOW_CIDRS` environment variable support to Docker entrypoint
-  - Enables easy network ACL configuration in Docker environments
-  - Supports comma-separated CIDR list (e.g., `10.0.0.0/8,172.16.0.0/12`)
-  - Default value: `0.0.0.0/0` (allow all) for development convenience
-- Added RPM testing environment in `support/testing/`
-  - Docker-based environment for testing RPM packages
-  - Includes Rocky Linux 9 and MySQL 8.4 setup
+- `NETWORK_ALLOW_CIDRS` environment variable for Docker
+- RPM testing environment in `support/testing/`
 
 ### Fixed
 
-- Fixed MySQL 8.4 compatibility in docker-compose.yml
-  - Replaced deprecated `--default-authentication-plugin` with `--mysql-native-password=ON`
-- Fixed connection refused errors when using Docker without custom config
-  - Network ACL is now properly configured via environment variables
+- MySQL 8.4 compatibility in docker-compose.yml
+- Connection refused errors in Docker without custom config
 
-### Changed
-
-- Updated `.gitignore` to use `/Testing/` instead of `Testing/` to avoid excluding support/testing directory
-- Aligned example configuration files (YAML/JSON) with consistent defaults
-  - Changed `allow_cidrs` from `127.0.0.1/32` to `0.0.0.0/0` for easier initial setup
-  - Fixed JSON configs: added `ssl_enable`, corrected `dump.interval_sec`, `api.http.enable`, `logging.file`
-
-### Documentation
-
-- Added network ACL configuration examples to Docker deployment guide
-- Added security warnings for production environments in README
-- Updated configuration reference with Docker environment variable examples
-- Added comprehensive documentation for network security settings
+**Detailed Release Notes**: [docs/releases/v1.2.1.md](docs/releases/v1.2.1.md)
 
 ## [1.2.0] - 2025-11-19
 
 ### ⚠️ BREAKING CHANGES
 
-**Network ACL now deny-by-default** - Servers will reject all connections unless explicitly allowed.
-
-**Required action before upgrade:**
-
-```yaml
-# Add to config.yaml to allow connections
-network:
-  allow_cidrs:
-    - "127.0.0.1/32"      # localhost only (secure default)
-    # - "10.0.0.0/8"      # or your network range
-    # - "0.0.0.0/0"       # or allow all (NOT RECOMMENDED)
-```
-
-**Why this change?** Fail-closed security is industry best practice. Previous versions accepted all connections by default, which posed a security risk.
+- **Network ACL now deny-by-default** - Must configure `network.allow_cidrs`
 
 ### Added
 
-- MySQL failover detection with server UUID tracking and validation
-- Rate limiting with token bucket algorithm (configurable per-client IP)
-- Connection limits to prevent file descriptor exhaustion
-- Differential test execution for faster CI feedback (50-90% time reduction)
-- Multi-architecture RPM builds (x86_64 and aarch64)
-- Health endpoint metrics: current GTID, processed events, queue size
+- MySQL failover detection with server UUID tracking
+- Rate limiting with token bucket algorithm
+- Connection limits
+- Differential test execution (50-90% CI time reduction)
+- Multi-architecture RPM builds (x86_64, aarch64)
 - HTTP COUNT endpoint (`POST /{table}/count`)
-- Type-safe error handling with `Expected<T, Error>` pattern
-- Structured logging system with JSON/text format support
-- Linux CI testing infrastructure with Docker
+- Type-safe error handling (`Expected<T, Error>`)
+- Structured logging (JSON/text)
 
 ### Changed
 
-- LOG_JSON environment variable replaced with LOG_FORMAT (json/text) - backward compatible
-- Extracted application layer from monolithic main.cpp (656→24 lines)
-- Refactored binlog processing into modular parser/processor/evaluator
-- Optimized string handling with C++17 `std::string_view` (zero-copy)
-- Precomputed cache keys in QueryParser to reduce lock contention
-- Extended Schwartzian transform to all filter columns (96% lock reduction)
-- Reorganized test suite into focused, granular test files
-
-### Fixed
-
-- Compiler warnings in result_sorter and query_cache_test
-- Security vulnerability: replaced deprecated tmpnam() with mkstemp()
-- DocID overflow check to use full UINT32_MAX range
-- SyncState thread safety with atomic total_rows
-- PostingList thread safety with shared_mutex protection
-- Resource leaks in ConnectionAcceptor and TcpServer (RAII guards)
-- ThreadPool active_workers race condition
-- macOS CI test timing issues with platform-specific thresholds
+- `LOG_JSON` → `LOG_FORMAT` (backward compatible)
+- Extracted application layer from main.cpp (656→24 lines)
+- Optimized string handling with `std::string_view`
 
 ### Security
 
-- Network ACL now deny-by-default (requires explicit allow_cidrs)
-- Rate limiting to prevent abuse (disabled by default)
-- Connection limits to prevent resource exhaustion
-- FD leak fixes with RAII guards
+- Network ACL deny-by-default
+- Rate limiting
+- Connection limits
 
-### Documentation
-
-- Added bilingual operations guide (EN/JA) for failover scenarios (updated in v1.3.0 for SET/SHOW VARIABLES)
-- Added Linux testing guide for Docker-based CI workflow
-- Added architecture documentation for system design overview
-- Added RPM build guide for multi-architecture packaging
-- Updated configuration guide with security best practices
-
-### Performance
-
-- std::string_view migration eliminates unnecessary string copies
-- Precomputed cache keys avoid redundant normalization
-- Extended Schwartzian transform reduces lock contention by 96%
-
-**Detailed Release Notes**: See [docs/releases/v1.2.0.md](docs/releases/v1.2.0.md)
+**Detailed Release Notes**: [docs/releases/v1.2.0.md](docs/releases/v1.2.0.md)
 
 ## [1.1.0] - 2025-11-17
 
 ### ⚠️ BREAKING CHANGES
 
-1. **Query Syntax**: `ORDER BY` → `SORT` (e.g., `SEARCH "text" SORT -id LIMIT 100`)
-2. **Dump Commands**: `SAVE/LOAD` → `DUMP SAVE/LOAD` (new format with CRC32 verification)
-3. **Configuration**: `replication.state_file` removed (auto-managed)
-4. **LIMIT Enhancement**: Added MySQL-compatible `LIMIT offset,count` syntax
-
-See [docs/releases/v1.1.0.md](docs/releases/v1.1.0.md) for migration guide.
+- Query syntax: `ORDER BY` → `SORT`
+- Dump commands: `SAVE/LOAD` → `DUMP SAVE/LOAD`
+- LIMIT syntax: Added `LIMIT offset,count`
 
 ### Added
 
-- Query result caching with n-gram based invalidation
-- Network access control with CIDR-based IP filtering
-- Prometheus metrics endpoint (`/metrics`)
+- Query result caching with n-gram invalidation
+- Network ACL with CIDR filtering
+- Prometheus metrics endpoint
 - MySQL SSL/TLS support
-- SYNC command for manual table synchronization
-- Automatic dump saves with configurable intervals
-- Runtime configuration help system (`--help-config`)
-- RPM packaging and GitHub Actions release workflow
-- Input validation and DoS protection
-- Primary key validation for table sync
+- SYNC command for manual synchronization
+- Automatic dump saves
+- RPM packaging
 
-### Changed
-
-- Query syntax: `ORDER BY` replaced with `SORT` keyword
-- Dump system: `SAVE/LOAD` replaced with `DUMP SAVE/LOAD/VERIFY/INFO`
-- LIMIT syntax: Added `LIMIT offset,count` support (MySQL-compatible)
-- Server architecture: Extracted components (ConnectionAcceptor, handlers)
-- Storage: Unified dump management with versioned format
-
-### Fixed
-
-- Critical concurrency bugs in cache and MySQL handling
-- Test parallelism issues causing hangs
-- Memory safety issues in thread handling
-- Server shutdown synchronization
-
-### Security
-
-- Network ACL with allow_cidrs configuration (default: allow all)
-- MySQL SSL/TLS encryption support
-- Query length validation
-- Bounds checking in dump/document loaders
-
-**Detailed Release Notes**: See [docs/releases/v1.1.0.md](docs/releases/v1.1.0.md)
+**Detailed Release Notes**: [docs/releases/v1.1.0.md](docs/releases/v1.1.0.md)
 
 ## [1.0.0] - 2025-11-13
 
-Initial release of MygramDB with core search engine functionality and MySQL replication support.
+Initial release with core search engine functionality and MySQL replication support.
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/libraz/mygram-db/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/libraz/mygram-db/compare/v1.2.5...v1.3.0
 [1.2.5]: https://github.com/libraz/mygram-db/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/libraz/mygram-db/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/libraz/mygram-db/compare/v1.2.2...v1.2.3
