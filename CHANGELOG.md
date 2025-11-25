@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2025-11-25
+
+### Added
+
+- **Zero-downtime log rotation** - SIGUSR1 signal handler for seamless log file rotation (similar to nginx)
+- 60+ new unit tests across multiple modules (CommandLineParser, BinlogFilterEvaluator, GTIDEncoder, TableCatalog, SnapshotScheduler, TableMetadataCache, CacheKey, ErrorCodeToString)
+
+### Fixed
+
+- **Medium: Permission errors for non-monitored tables** - Skip FetchColumnNames for tables not in monitoring configuration, preventing SELECT permission errors
+
+### Testing
+
+- New test files: command_line_parser_test, signal_manager_test, configuration_manager_test, binlog_filter_evaluator_test, gtid_encoder_test, binlog_reader_multitable_test, table_metadata_test, table_catalog_test, snapshot_scheduler_test, cache_key_test, error_test
+- Test configuration improvements: RUN_SERIAL for slow tests, RESOURCE_LOCK for shared resources
+
+**Detailed Release Notes**: [docs/releases/v1.3.4.md](docs/releases/v1.3.4.md)
+
 ## [1.3.3] - 2025-11-25
 
 ### Fixed
@@ -214,7 +232,10 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.4...HEAD
+[1.3.4]: https://github.com/libraz/mygram-db/compare/v1.3.3...v1.3.4
+[1.3.3]: https://github.com/libraz/mygram-db/compare/v1.3.2...v1.3.3
+[1.3.2]: https://github.com/libraz/mygram-db/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/libraz/mygram-db/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/libraz/mygram-db/compare/v1.2.5...v1.3.0
 [1.2.5]: https://github.com/libraz/mygram-db/compare/v1.2.4...v1.2.5
