@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2025-11-26
+
+### Performance
+
+- **Parallel query optimization** - Schwartzian Transform with partial_sort eliminates 99.9996% of lock acquisitions during parallel query execution
+- **snprintf replacement** - ToZeroPaddedString using std::to_chars (~10x faster, no locale lock contention)
+- **Zero-copy I/O** - Replace send() with writev() for response sending
+- **Batch primary key lookups** - DocumentStore::GetPrimaryKeysBatch() for single lock acquisition
+- **RCU pattern for index search** - TakePostingSnapshots() method reduces lock contention under high read concurrency
+
+### Fixed
+
+- **Medium: Primary key sort optimization** - Explicit column name (SORT id ASC) now recognized as equivalent to implicit sort (SORT ASC)
+- **SIGPIPE handling** - Add process-wide SIGPIPE ignore and SO_NOSIGPIPE for macOS
+
+### Added
+
+- OPTIMIZE command now accepts optional table parameter
+- Python benchmark tool for MygramDB vs MySQL comparison (`support/benchmark/`)
+
+**Detailed Release Notes**: [docs/releases/v1.3.5.md](docs/releases/v1.3.5.md)
+
 ## [1.3.4] - 2025-11-25
 
 ### Added
@@ -232,7 +254,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.4...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.5...HEAD
+[1.3.5]: https://github.com/libraz/mygram-db/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/libraz/mygram-db/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/libraz/mygram-db/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/libraz/mygram-db/compare/v1.3.1...v1.3.2

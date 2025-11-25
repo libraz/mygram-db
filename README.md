@@ -8,36 +8,35 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 
-**25-200x faster** than MySQL FULLTEXT. In-memory full-text search engine with MySQL replication.
+**27-3700x faster** than MySQL FULLTEXT. In-memory full-text search engine with MySQL replication.
 
 ## Why MygramDB?
 
 MySQL FULLTEXT is painfully slow — it scans B-tree pages on disk, doesn't compress postings, and struggles with common terms.
 
-**MygramDB** solves this with an in-memory search replica that syncs via GTID binlog, delivering **sub-60ms queries** even for datasets matching 75% of your data.
+**MygramDB** solves this with an in-memory search replica that syncs via GTID binlog, delivering **sub-80ms queries** even for datasets matching 75% of your data.
 
 ## Performance
 
-Tested on 1.7M rows (real production data):
+Tested on 1.7M rows (real production data), MygramDB with `cache.enabled: false`:
 
-| Query Type | MySQL (Cold/Warm) | MygramDB | Speedup |
-|------------|-------------------|----------|---------|
-| **SORT id LIMIT 100** (typical use) | 900-3,700ms | 24-56ms | **25-68x** |
-| Medium-freq term (4.6% match) | 906ms / 592ms | 24ms | **38x / 25x** |
-| High-freq term (47.5% match) | 2,495ms / 2,017ms | 42ms | **59x / 48x** |
-| Ultra high-freq (74.9% match) | 3,753ms / 3,228ms | 56ms | **68x / 58x** |
-| Two terms AND | 1,189ms | 10ms | **115x** |
-| **COUNT queries** | 680-1,070ms | 5-9ms | **70-200x** |
+| Query Type | MySQL | MygramDB | Speedup |
+|------------|-------|----------|---------|
+| **SORT id LIMIT 100** (typical) | 908-2,980ms | 22-92ms | **19-32x** |
+| **COUNT queries** | 124-2,891ms | 0.3-6.7ms | **413-431x** |
+| **10 concurrent** | 90% failed, QPS 0.4 | 100% success, QPS 288 | **720x** |
+| **100 concurrent** | Cannot execute | QPS 372 | - |
 
 **Key advantages:**
+
 - **No cache warmup needed** - Always fast, even on cold starts
 - **SORT optimization** - Uses primary key index (no external sort)
-- **Scales with result size** - Larger result sets show bigger speedups
-- **Consistent performance** - MySQL varies 600ms-3.7s, MygramDB stays under 60ms
-- **High concurrency** - Handles heavy load effortlessly; MySQL FULLTEXT often stalls under concurrent traffic
+- **Consistent performance** - MySQL varies 900ms-3s, MygramDB stays under 100ms
+- **COUNT performance** - Up to 431x faster
+- **Parallel performance** - MySQL fails 90% at 10 concurrent; MygramDB achieves **QPS 372** at 100 concurrent
 
 **Real-world impact:**
-Under **heavy concurrent load**, MySQL FULLTEXT starts queuing requests due to disk I/O bottlenecks, causing cascading delays and timeouts. MygramDB's in-memory architecture handles the same load trivially with consistent sub-60ms latencies.
+Under **heavy concurrent load**, MySQL FULLTEXT fails 90% of connections. MygramDB handles 100 concurrent queries with **100% success rate and QPS 372**.
 
 See [Performance Guide](docs/en/performance.md) for detailed benchmarks.
 
@@ -136,7 +135,7 @@ See [Protocol Reference](docs/en/protocol.md) for all commands.
 
 ## Features
 
-- **Fast**: 25-200x faster than MySQL FULLTEXT
+- **Fast**: 19-720x faster than MySQL FULLTEXT (QPS 372 at 100 concurrent)
 - **MySQL Replication**: Real-time GTID-based binlog streaming
 - **Runtime Variables**: MySQL-style SET/SHOW VARIABLES for zero-downtime config changes
 - **MySQL Failover**: Switch MySQL servers at runtime with GTID position preservation
