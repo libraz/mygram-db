@@ -506,3 +506,37 @@ gtest_discover_tests(variable_handler_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# TableCatalog tests
+
+add_executable(table_catalog_test
+  table_catalog_test.cpp
+)
+
+target_link_libraries(table_catalog_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(table_catalog_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# SnapshotScheduler tests
+
+add_executable(snapshot_scheduler_test
+  snapshot_scheduler_test.cpp
+)
+
+target_link_libraries(snapshot_scheduler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(snapshot_scheduler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
+)
+

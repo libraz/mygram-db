@@ -7,11 +7,11 @@
 
 #include "server/handlers/sync_handler.h"
 
-#include <cstdlib>
-
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+
+#include <cstdlib>
 
 #include "query/query_parser.h"
 #include "server/tcp_server.h"

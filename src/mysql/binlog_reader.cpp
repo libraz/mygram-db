@@ -625,16 +625,32 @@ void BinlogReader::ReaderThreadFunc() {
           } else {
             spdlog::debug("TABLE_MAP_EVENT parsed successfully: {}.{} (table_id={})", metadata_opt->database_name,
                           metadata_opt->table_name, metadata_opt->table_id);
-            if (!FetchColumnNames(metadata_opt.value())) {
-              mygram::utils::StructuredLog()
-                  .Event("binlog_warning")
-                  .Field("type", "column_fetch_failed")
-                  .Field("database", metadata_opt->database_name)
-                  .Field("table", metadata_opt->table_name)
-                  .Field("gtid", GetCurrentGTID())
-                  .Message("Failed to fetch column names, using col_N placeholders")
-                  .Warn();
+
+            // Check if this table is monitored before fetching column names
+            // This avoids permission errors for tables we don't have SELECT access to
+            bool is_monitored_table = false;
+            if (multi_table_mode_) {
+              is_monitored_table = table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
+            } else {
+              is_monitored_table = (metadata_opt->table_name == table_config_.name);
             }
+
+            if (is_monitored_table) {
+              if (!FetchColumnNames(metadata_opt.value())) {
+                mygram::utils::StructuredLog()
+                    .Event("binlog_warning")
+                    .Field("type", "column_fetch_failed")
+                    .Field("database", metadata_opt->database_name)
+                    .Field("table", metadata_opt->table_name)
+                    .Field("gtid", GetCurrentGTID())
+                    .Message("Failed to fetch column names, using col_N placeholders")
+                    .Warn();
+              }
+            } else {
+              spdlog::debug("Skipping column fetch for non-monitored table: {}.{}", metadata_opt->database_name,
+                            metadata_opt->table_name);
+            }
+
             table_metadata_cache_.Add(metadata_opt->table_id, metadata_opt.value());
             spdlog::debug("Cached TABLE_MAP: {}.{} (table_id={})", metadata_opt->database_name,
                           metadata_opt->table_name, metadata_opt->table_id);

@@ -86,13 +86,15 @@ target_link_libraries(index_gettopn_test
   GTest::gtest_main
 )
 
-# Note: Some tests (e.g., MergeJoinSelectivityThreshold) process 20,000+ documents
-# and can take over 100 seconds in CI environments
+# Note: Some tests (e.g., MergeJoinSelectivityThreshold, BatchBlockSearchInsufficientResults)
+# process 20,000+ documents and can take over 100 seconds in CI environments
+# RUN_SERIAL prevents parallel execution conflicts and timeout issues
 gtest_discover_tests(index_gettopn_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
     LABELS "SLOW"
+    RUN_SERIAL TRUE
     TIMEOUT 180
 )
 
@@ -106,9 +108,12 @@ target_link_libraries(posting_list_test
   GTest::gtest_main
 )
 
+# Note: ContainsPerformanceBenchmark can fail under parallel execution due to resource contention
 gtest_discover_tests(posting_list_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    RESOURCE_LOCK posting_list_lock
 )
 
 # PostingList thread safety tests
