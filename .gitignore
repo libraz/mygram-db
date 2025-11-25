@@ -83,3 +83,10 @@ coverage/
 *.info
 
 # RPM test files
+
+# Python (support/benchmark)
+__pycache__/
+*.py[oc]
+*.egg-info
+.venv/
+.python-version

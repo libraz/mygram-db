@@ -98,6 +98,25 @@ Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {
                                  "Failed to register SIGUSR1 handler: " + std::string(std::strerror(errno))));
   }
 
+  // Ignore SIGPIPE to prevent crashes when writing to closed connections
+  // writev() doesn't support MSG_NOSIGNAL, so we must ignore SIGPIPE process-wide
+  // macOS also uses SO_NOSIGPIPE per-socket, but this provides a fallback
+  struct sigaction sigpipe_action {};
+  std::memset(&sigpipe_action, 0, sizeof(sigpipe_action));
+  sigpipe_action.sa_handler = SIG_IGN;
+  sigemptyset(&sigpipe_action.sa_mask);
+  sigpipe_action.sa_flags = 0;
+
+  if (sigaction(SIGPIPE, &sigpipe_action, &original_sigpipe_) != 0) {
+    // Restore all handlers before returning error
+    sigaction(SIGINT, &original_sigint_, nullptr);
+    sigaction(SIGTERM, &original_sigterm_, nullptr);
+    sigaction(SIGUSR1, &original_sigusr1_, nullptr);
+    return MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+                                 "Failed to register SIGPIPE handler: " + std::string(std::strerror(errno))));
+  }
+
   return {};
 }
 
@@ -106,6 +125,7 @@ void SignalManager::RestoreHandlers() {
   sigaction(SIGINT, &original_sigint_, nullptr);
   sigaction(SIGTERM, &original_sigterm_, nullptr);
   sigaction(SIGUSR1, &original_sigusr1_, nullptr);
+  sigaction(SIGPIPE, &original_sigpipe_, nullptr);
 }
 
 }  // namespace mygramdb::app

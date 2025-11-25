@@ -118,6 +118,7 @@ class SignalManager {
   struct sigaction original_sigint_ {};
   struct sigaction original_sigterm_ {};
   struct sigaction original_sigusr1_ {};
+  struct sigaction original_sigpipe_ {};
 };
 
 }  // namespace mygramdb::app

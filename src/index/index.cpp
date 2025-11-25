@@ -142,21 +142,29 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
 }
 
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_t limit, bool reverse) const {
-  // Acquire shared lock for read-only access (allows concurrent readers)
-  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
+  // This reduces lock contention under high concurrency
 
   if (terms.empty()) {
     return {};
   }
 
+  // Take snapshot of all posting lists (short lock)
+  auto snapshots = TakePostingSnapshots(terms);
+
+  // Check if any term is missing
+  for (const auto& snapshot : snapshots) {
+    if (snapshot == nullptr) {
+      return {};  // No documents if any term is missing
+    }
+  }
+
+  // From here, no lock is held - search operates on immutable snapshots
+
   // Optimization: Single term with limit and reverse
   // This is common for "ORDER BY primary_key DESC LIMIT N" queries
   if (terms.size() == 1 && limit > 0 && reverse) {
-    const auto* posting = GetPostingList(terms[0]);
-    if (posting == nullptr) {
-      return {};
-    }
-    return posting->GetTopN(limit, true);
+    return snapshots[0]->GetTopN(limit, true);
   }
 
   // NEW Optimization: Multi-term with limit and reverse (for multi-ngram queries)
@@ -166,12 +174,8 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     std::vector<std::pair<size_t, const PostingList*>> term_info;
     term_info.reserve(terms.size());
 
-    for (const auto& term : terms) {
-      const auto* posting = GetPostingList(term);
-      if (posting == nullptr) {
-        return {};  // No documents if any term is missing
-      }
-      term_info.emplace_back(posting->Size(), posting);
+    for (const auto& snapshot : snapshots) {
+      term_info.emplace_back(snapshot->Size(), snapshot.get());
     }
 
     // Find min and max sizes for selectivity estimation
@@ -324,22 +328,14 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
   }
 
   // Standard path: Get all documents from all terms and intersect
-  const auto* first_posting = GetPostingList(terms[0]);
-  if (first_posting == nullptr) {
-    return {};
-  }
+  // Note: snapshots are already validated above (no nullptr)
 
   // Start with first term's documents
-  auto result = first_posting->GetAll();
+  auto result = snapshots[0]->GetAll();
 
   // Intersect with each subsequent term
-  for (size_t i = 1; i < terms.size(); ++i) {
-    const auto* posting = GetPostingList(terms[i]);
-    if (posting == nullptr) {
-      return {};  // No documents if any term is missing
-    }
-
-    auto term_docs = posting->GetAll();
+  for (size_t i = 1; i < snapshots.size(); ++i) {
+    auto term_docs = snapshots[i]->GetAll();
     std::vector<DocId> intersection;
     std::set_intersection(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
                           std::back_inserter(intersection));
@@ -375,9 +371,28 @@ std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms
 }
 
 std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {
-  // Acquire shared lock for read-only access (allows concurrent readers)
-  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-  return SearchOrInternal(terms);
+  // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
+  if (terms.empty()) {
+    return {};
+  }
+
+  // Take snapshot of all posting lists (short lock)
+  auto snapshots = TakePostingSnapshots(terms);
+
+  // From here, no lock is held - search operates on immutable snapshots
+  std::vector<DocId> result;
+
+  for (const auto& snapshot : snapshots) {
+    if (snapshot != nullptr) {
+      auto term_docs = snapshot->GetAll();
+      std::vector<DocId> union_result;
+      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
+                     std::back_inserter(union_result));
+      result = std::move(union_result);
+    }
+  }
+
+  return result;
 }
 
 std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const std::vector<std::string>& terms) const {
@@ -385,11 +400,22 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
     return all_docs;
   }
 
-  // Acquire shared lock for read-only access (allows concurrent readers)
-  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
+  auto snapshots = TakePostingSnapshots(terms);
 
+  // From here, no lock is held - search operates on immutable snapshots
   // Get union of all documents containing any of the NOT terms
-  std::vector<DocId> excluded_docs = SearchOrInternal(terms);
+  std::vector<DocId> excluded_docs;
+
+  for (const auto& snapshot : snapshots) {
+    if (snapshot != nullptr) {
+      auto term_docs = snapshot->GetAll();
+      std::vector<DocId> union_result;
+      std::set_union(excluded_docs.begin(), excluded_docs.end(), term_docs.begin(), term_docs.end(),
+                     std::back_inserter(union_result));
+      excluded_docs = std::move(union_result);
+    }
+  }
 
   // Return set difference: all_docs - excluded_docs
   std::vector<DocId> result;
@@ -400,10 +426,9 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
 }
 
 uint64_t Index::Count(std::string_view term) const {
-  // Acquire shared lock for read-only access (allows concurrent readers)
-  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-  const auto* posting = GetPostingList(term);
-  return (posting != nullptr) ? posting->Size() : 0;
+  // RCU pattern: Take snapshot under short lock, then access without lock
+  auto snapshot = TakePostingSnapshot(term);
+  return (snapshot != nullptr) ? snapshot->Size() : 0;
 }
 
 size_t Index::MemoryUsage() const {
@@ -745,6 +770,34 @@ const PostingList* Index::GetPostingList(std::string_view term) const {
   //   - Switch to std::map + std::less<> (zero-copy but O(log N) lookup)
   auto iterator = term_postings_.find(std::string(term));
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
+}
+
+std::vector<std::shared_ptr<PostingList>> Index::TakePostingSnapshots(const std::vector<std::string>& terms) const {
+  // RCU pattern: Take short lock to copy shared_ptrs, then release
+  // This allows search to proceed without holding any lock
+  std::vector<std::shared_ptr<PostingList>> snapshots;
+  snapshots.reserve(terms.size());
+
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    for (const auto& term : terms) {
+      auto iter = term_postings_.find(term);
+      if (iter != term_postings_.end()) {
+        snapshots.push_back(iter->second);  // Copy shared_ptr (ref count increment)
+      } else {
+        snapshots.push_back(nullptr);  // Term not found
+      }
+    }
+  }  // Lock released here
+
+  return snapshots;
+}
+
+std::shared_ptr<PostingList> Index::TakePostingSnapshot(std::string_view term) const {
+  // RCU pattern: Take short lock to copy shared_ptr, then release
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  auto iter = term_postings_.find(std::string(term));
+  return (iter != term_postings_.end()) ? iter->second : nullptr;
 }
 
 bool Index::SaveToFile(const std::string& filepath) const {

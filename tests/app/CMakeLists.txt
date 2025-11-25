@@ -10,7 +10,10 @@ target_link_libraries(configuration_manager_test
     GTest::gtest_main
 )
 
-gtest_discover_tests(configuration_manager_test DISCOVERY_TIMEOUT 5)
+gtest_discover_tests(configuration_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
 
 # CommandLineParser tests
 add_executable(command_line_parser_test command_line_parser_test.cpp)

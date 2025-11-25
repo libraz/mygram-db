@@ -7,8 +7,10 @@
 
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 
@@ -83,23 +85,38 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
 }
 
 bool ConnectionIOHandler::ProcessBuffer(std::string& accumulated, int client_fd, ConnectionContext& ctx) {
+  // Optimized: Use indices instead of substr() to avoid string copies
+  size_t start = 0;
   size_t pos = 0;
 
-  while ((pos = accumulated.find("\r\n")) != std::string::npos) {
-    std::string request = accumulated.substr(0, pos);
-    accumulated = accumulated.substr(pos + 2);
-
-    if (request.empty()) {
+  while ((pos = accumulated.find("\r\n", start)) != std::string::npos) {
+    // Create string_view for zero-copy parsing (convert to string only when needed)
+    size_t len = pos - start;
+    if (len == 0) {
+      start = pos + 2;
       continue;
     }
+
+    // Extract request - single allocation here is unavoidable as processor needs string
+    std::string request = accumulated.substr(start, len);
+    start = pos + 2;
 
     // Process request
     std::string response = processor_(request, ctx);
 
     // Send response
     if (!SendResponse(client_fd, response)) {
+      // Cleanup: remove processed portion before returning
+      if (start > 0) {
+        accumulated.erase(0, start);
+      }
       return false;
     }
+  }
+
+  // Remove all processed data in single operation (instead of per-request copies)
+  if (start > 0) {
+    accumulated.erase(0, start);
   }
 
   return true;
@@ -108,17 +125,21 @@ bool ConnectionIOHandler::ProcessBuffer(std::string& accumulated, int client_fd,
 // Kept as member function for consistency and potential future extensions
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& response) {
-  std::string full_response = response + "\r\n";
-  size_t total_sent = 0;
-  size_t to_send = full_response.length();
+  // Zero-copy send using writev (scatter-gather I/O)
+  // Avoids creating a copy of response just to append "\r\n"
+  static constexpr std::array<char, 3> kCRLF = {'\r', '\n', '\0'};
 
-  // Handle partial sends
-  while (total_sent < to_send) {
-    // Use MSG_NOSIGNAL to prevent SIGPIPE when client closes connection unexpectedly
-    // Pointer arithmetic needed for partial send resumption with POSIX send()
-    ssize_t sent =
-        send(client_fd, full_response.c_str() + total_sent,  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-             to_send - total_sent, MSG_NOSIGNAL);
+  // const_cast required: iovec::iov_base is void*, but writev only reads data
+  std::array<struct iovec, 2> iov = {
+      {{const_cast<char*>(response.data()), response.size()},  // NOLINT(cppcoreguidelines-pro-type-const-cast)
+       {const_cast<char*>(kCRLF.data()), 2}}};                 // NOLINT(cppcoreguidelines-pro-type-const-cast)
+
+  size_t total_to_send = response.size() + 2;
+  size_t total_sent = 0;
+  size_t current_iov = 0;
+
+  while (total_sent < total_to_send && current_iov < 2) {
+    ssize_t sent = writev(client_fd, &iov.at(current_iov), static_cast<int>(2 - current_iov));
 
     if (sent < 0) {
       if (errno == EINTR) {
@@ -126,17 +147,32 @@ bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& respons
       }
       // EPIPE is expected when client closes connection
       if (errno != EPIPE) {
-        spdlog::debug("send error on fd {}: {}", client_fd, strerror(errno));
+        spdlog::debug("writev error on fd {}: {}", client_fd, strerror(errno));
       }
       return false;
     }
 
     if (sent == 0) {
-      spdlog::debug("send returned 0 on fd {}", client_fd);
+      spdlog::debug("writev returned 0 on fd {}", client_fd);
       return false;
     }
 
     total_sent += sent;
+
+    // Adjust iov for partial writes
+    size_t remaining = sent;
+    while (remaining > 0 && current_iov < 2) {
+      if (remaining >= iov.at(current_iov).iov_len) {
+        remaining -= iov.at(current_iov).iov_len;
+        iov.at(current_iov).iov_len = 0;
+        current_iov++;
+      } else {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+        iov.at(current_iov).iov_base = static_cast<char*>(iov.at(current_iov).iov_base) + remaining;
+        iov.at(current_iov).iov_len -= remaining;
+        remaining = 0;
+      }
+    }
   }
 
   return true;

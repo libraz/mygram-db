@@ -11,6 +11,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+// macOS-specific: Define SO_NOSIGPIPE if not already defined (include order issues)
+#if defined(__APPLE__) && !defined(SO_NOSIGPIPE)
+// Macro required: system constant for setsockopt, cannot use constexpr
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define SO_NOSIGPIPE 0x1022
+#endif
+
 #include <cstring>
 
 #include "server/server_types.h"
@@ -276,6 +283,20 @@ void ConnectionAcceptor::AcceptLoop() {
           .Field("error", strerror(errno))
           .Warn();
     }
+
+#ifdef __APPLE__
+    // On macOS, set SO_NOSIGPIPE to prevent SIGPIPE when writing to closed connections
+    // Linux uses MSG_NOSIGNAL flag instead, but writev() doesn't support flags
+    int nosigpipe = 1;
+    if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe)) < 0) {
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "setsockopt_failed")
+          .Field("option", "SO_NOSIGPIPE")
+          .Field("error", strerror(errno))
+          .Warn();
+    }
+#endif
 
     // Track connection
     {

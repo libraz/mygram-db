@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <csignal>
 #include <thread>
 
 #include "server/server_types.h"
@@ -19,6 +20,9 @@ namespace mygramdb::server {
 class ConnectionIOHandlerTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    // Ignore SIGPIPE to prevent crash when writev writes to closed socket
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Create socket pair for testing
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets_) != 0) {
       FAIL() << "Failed to create socket pair";

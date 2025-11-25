@@ -260,6 +260,28 @@ class Index {
    * @brief Internal search methods (no locking, assumes caller holds lock)
    */
   [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
+
+  /**
+   * @brief RCU snapshot helpers for lock-free search
+   *
+   * These methods take a short lock to copy shared_ptrs, then release the lock.
+   * The actual search operations can then proceed without holding any lock.
+   */
+
+  /**
+   * @brief Take snapshot of posting lists for given terms (RCU pattern)
+   * @param terms Search terms
+   * @return Vector of shared_ptr to posting lists (empty ptr if term not found)
+   */
+  [[nodiscard]] std::vector<std::shared_ptr<PostingList>> TakePostingSnapshots(
+      const std::vector<std::string>& terms) const;
+
+  /**
+   * @brief Take snapshot of a single posting list (RCU pattern)
+   * @param term Search term
+   * @return shared_ptr to posting list (nullptr if term not found)
+   */
+  [[nodiscard]] std::shared_ptr<PostingList> TakePostingSnapshot(std::string_view term) const;
 };
 
 }  // namespace mygramdb::index

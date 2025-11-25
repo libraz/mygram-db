@@ -145,6 +145,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     return ResponseFormatter::FormatSearchResponse({}, 0, current_doc_store);
   }
 
+  // Get primary key column name from table config (needed for optimization check and sorting)
+  std::string primary_key_column = "id";  // default
+  auto table_it = ctx_.table_contexts.find(query.table);
+  if (table_it != ctx_.table_contexts.end()) {
+    primary_key_column = table_it->second->config.primary_key;
+  }
+
   // Determine ORDER BY clause (default: primary key DESC)
   query::OrderByClause order_by;
   bool order_by_implicit = false;
@@ -157,9 +164,12 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     order_by_implicit = true;
   }
 
+  // Check if ordering by primary key (either empty column or explicit primary key column name)
+  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+
   // Record applied ORDER BY for debug
   if (conn_ctx.debug_mode) {
-    std::string order_str = order_by.column.empty() ? "id" : order_by.column;
+    std::string order_str = order_by.column.empty() ? primary_key_column : order_by.column;
     order_str += (order_by.order == query::SortOrder::ASC) ? " ASC" : " DESC";
     if (order_by_implicit) {
       order_str += " (default)";
@@ -176,7 +186,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   constexpr uint32_t kMaxOffsetForOptimization = 10000;
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
-                      query.offset <= kMaxOffsetForOptimization && order_by.IsPrimaryKey();
+                      query.offset <= kMaxOffsetForOptimization && is_primary_key_order;
 
   // Calculate total results count
   size_t total_results = 0;
@@ -264,13 +274,6 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   // Sort and paginate results
   if (!can_optimize) {
     total_results = results.size();
-  }
-
-  // Get primary key column name from table config
-  std::string primary_key_column = "id";  // default
-  auto table_it = ctx_.table_contexts.find(query.table);
-  if (table_it != ctx_.table_contexts.end()) {
-    primary_key_column = table_it->second->config.primary_key;
   }
 
   auto sorted_result = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query, primary_key_column);

@@ -372,10 +372,14 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     return query;
   }
   if (command == "OPTIMIZE") {
-    // OPTIMIZE - optimize index posting lists
+    // OPTIMIZE [table] - optimize index posting lists
     Query query;
     query.type = QueryType::OPTIMIZE;
-    query.table = "";  // OPTIMIZE doesn't need a table
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    if (tokens.size() > 1) {  // 1: OPTIMIZE + table
+      query.table = tokens[1];
+    }
+    // If no table specified, query.table remains empty (handler will use default or error)
     return query;
   }
   if (EqualsIgnoreCase(command, "DEBUG")) {

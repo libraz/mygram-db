@@ -37,8 +37,8 @@ constexpr double kPartialSortThreshold = 0.5;
 
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
                                      const OrderByClause& order_by, const std::string& primary_key_column) {
-  // If ordering by primary key (empty column name)
-  if (order_by.IsPrimaryKey()) {
+  // If ordering by primary key (empty column name or explicit primary key column name)
+  if (order_by.IsPrimaryKey() || order_by.column == primary_key_column) {
     // Get primary key as sort key
     auto pk_opt = doc_store.GetPrimaryKey(doc_id);
     if (pk_opt.has_value()) {
@@ -210,7 +210,8 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
 bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   // Optimization: for primary key ordering, try numeric comparison first
   // This avoids string allocation for numeric primary keys
-  if (order_by_.IsPrimaryKey()) {
+  // Check both empty column (shorthand) and explicit primary key column name
+  if (order_by_.IsPrimaryKey() || order_by_.column == primary_key_column_) {
     auto pk_lhs = doc_store_.GetPrimaryKey(lhs);
     auto pk_rhs = doc_store_.GetPrimaryKey(rhs);
 
@@ -274,12 +275,13 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   }
 
   // Column validation: lightweight check (only first few documents)
-  // - Primary key (empty column name): always valid
+  // - Primary key (empty column name or explicit primary key column name): always valid
   // - Filter column: check existence in a sample of documents
   // - Performance: O(min(N, sample_size)) instead of O(N)
   // - Thread safety: uses read lock, but column may be added/removed between check and sort
   //   (This is acceptable - non-existent columns are treated as NULL)
-  if (!order_by.IsPrimaryKey() && !results.empty()) {
+  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  if (!is_primary_key_order && !results.empty()) {
     // Sample-based validation: check first 100 documents (or all if fewer)
     // This is a heuristic - if column doesn't exist in first 100, likely doesn't exist
     constexpr size_t kSampleSize = 100;

@@ -23,23 +23,48 @@
 
 namespace mygramdb::server {
 
+namespace {
+// Response buffer pre-allocation constants
+// Base size: "OK RESULTS " (11) + max result count digits (10) + margin
+constexpr size_t kResponseBaseBufferSize = 32;
+// Average primary key size estimate (including space delimiter)
+constexpr size_t kEstimatedPrimaryKeySize = 12;
+}  // namespace
+
 std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
                                                     storage::DocumentStore* doc_store,
                                                     const query::DebugInfo* debug_info) {
-  std::ostringstream oss;
-  oss << "OK RESULTS " << total_results;
+  // Optimized: Use batch API to retrieve all primary keys in single lock acquisition
+  // This avoids N individual lock acquisitions for N results
 
-  // Results are already sorted and paginated by ResultSorter::SortAndPaginate
-  // Just format them directly (no offset/limit needed)
+  // Convert index::DocId to storage::DocId for batch lookup
+  std::vector<storage::DocId> doc_ids;
+  doc_ids.reserve(results.size());
   for (const auto& doc_id : results) {
-    auto pk_opt = doc_store->GetPrimaryKey(static_cast<storage::DocId>(doc_id));
-    if (pk_opt) {
-      oss << " " << pk_opt.value();
+    doc_ids.push_back(static_cast<storage::DocId>(doc_id));
+  }
+
+  // Single lock acquisition for all primary keys
+  auto primary_keys = doc_store->GetPrimaryKeysBatch(doc_ids);
+
+  // Pre-allocate response buffer for better performance
+  std::string response;
+  response.reserve(kResponseBaseBufferSize + results.size() * kEstimatedPrimaryKeySize);
+
+  response += "OK RESULTS ";
+  response += std::to_string(total_results);
+
+  // Append primary keys (already in correct order)
+  for (const auto& primary_key : primary_keys) {
+    if (!primary_key.empty()) {
+      response += ' ';
+      response += primary_key;
     }
   }
 
-  // Add debug information if provided
+  // Add debug information if provided (debug path uses ostringstream for convenience)
   if (debug_info != nullptr) {
+    std::ostringstream oss;
     oss << "\r\n\r\n# DEBUG\r\n";
     oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
     oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
@@ -106,9 +131,10 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
     if (!debug_info->cache_info.cache_key.empty()) {
       oss << "cache_key: " << debug_info->cache_info.cache_key << "\r\n";
     }
+    response += oss.str();
   }
 
-  return oss.str();
+  return response;
 }
 
 std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {

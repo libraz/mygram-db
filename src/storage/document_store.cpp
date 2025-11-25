@@ -273,6 +273,25 @@ std::optional<std::string> DocumentStore::GetPrimaryKey(DocId doc_id) const {
   return iterator->second;
 }
 
+std::vector<std::string> DocumentStore::GetPrimaryKeysBatch(const std::vector<DocId>& doc_ids) const {
+  // Single lock acquisition for all lookups - much more efficient than N individual calls
+  std::shared_lock lock(mutex_);
+
+  std::vector<std::string> results;
+  results.reserve(doc_ids.size());
+
+  for (const auto& doc_id : doc_ids) {
+    auto iterator = doc_id_to_pk_.find(doc_id);
+    if (iterator != doc_id_to_pk_.end()) {
+      results.push_back(iterator->second);
+    } else {
+      results.emplace_back();  // Empty string for missing doc
+    }
+  }
+
+  return results;
+}
+
 std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
   auto doc_it = doc_filters_.find(doc_id);
