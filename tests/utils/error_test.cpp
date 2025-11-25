@@ -228,3 +228,104 @@ TEST(ErrorTest, ErrorPropagation) {
   EXPECT_EQ(error2.message(), "Failed to read block");
   EXPECT_EQ(error2.context(), "snapshot.dat:1024");
 }
+
+// ========== Comprehensive ErrorCodeToString coverage ==========
+
+TEST(ErrorCodeTest, AllGeneralErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kOutOfRange), "Out of range");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNotImplemented), "Not implemented");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kInternalError), "Internal error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIOError), "I/O error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kPermissionDenied), "Permission denied");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNotFound), "Not found");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kAlreadyExists), "Already exists");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kTimeout), "Timeout");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCancelled), "Cancelled");
+}
+
+TEST(ErrorCodeTest, AllConfigErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigMissingRequired), "Missing required configuration");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigInvalidValue), "Invalid configuration value");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigSchemaError), "JSON schema error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigYamlError), "YAML parsing error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigJsonError), "JSON parsing error");
+}
+
+TEST(ErrorCodeTest, AllMySQLErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLDisconnected), "MySQL disconnected");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLAuthFailed), "MySQL authentication failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLTimeout), "MySQL timeout");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLGTIDNotEnabled), "GTID mode not enabled");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLBinlogError), "Binlog error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLTableNotFound), "Table not found");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLColumnNotFound), "Column not found");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLDuplicateColumn), "Duplicate column");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kMySQLInvalidSchema), "Invalid schema");
+}
+
+TEST(ErrorCodeTest, AllQueryErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryUnexpectedToken), "Unexpected token");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryInvalidOperator), "Invalid operator");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryInvalidFilter), "Invalid filter");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryInvalidSort), "Invalid sort");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryInvalidLimit), "Invalid limit");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryInvalidOffset), "Invalid offset");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryExpressionParseError), "Expression parse error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kQueryASTBuildError), "AST build error");
+}
+
+TEST(ErrorCodeTest, AllIndexErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIndexDeserializationFailed), "Index deserialization failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIndexDocumentNotFound), "Document not found");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIndexInvalidDocID), "Invalid document ID");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIndexFull), "Index full");
+}
+
+TEST(ErrorCodeTest, AllStorageErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageWriteError), "Storage write error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageCorrupted), "Storage corrupted");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageCompressionFailed), "Compression failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDecompressionFailed), "Decompression failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageInvalidFormat), "Invalid format");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageSnapshotBuildFailed), "Snapshot build failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDocIdExhausted), "DocID exhausted");
+}
+
+TEST(ErrorCodeTest, AllNetworkErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkListenFailed), "Listen failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkAcceptFailed), "Accept failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkConnectionClosed), "Connection closed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkSendFailed), "Send failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReceiveFailed), "Receive failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkInvalidRequest), "Invalid request");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkServerNotStarted), "Server not started");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkAlreadyRunning), "Server already running");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkSocketCreationFailed), "Socket creation failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkInvalidBindAddress), "Invalid bind address");
+}
+
+TEST(ErrorCodeTest, AllClientErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientSendFailed), "Send failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientReceiveFailed), "Receive failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientAlreadyConnected), "Already connected");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientCommandFailed), "Command failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientConnectionClosed), "Connection closed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientInvalidArgument), "Invalid argument");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientServerError), "Server error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientProtocolError), "Protocol error");
+}
+
+TEST(ErrorCodeTest, AllCacheErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheDecompressionFailed), "Cache decompression failed");
+}
+
+TEST(ErrorCodeTest, UnknownErrorCode) {
+  // Test default case for unknown error codes
+  EXPECT_STREQ(ErrorCodeToString(static_cast<ErrorCode>(9999)), "Unknown error code");
+}
+
+TEST(ErrorCodeTest, StorageDumpErrorCodes) {
+  // These error codes fall through to default case (not explicitly handled in switch)
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpReadError), "Unknown error code");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpWriteError), "Unknown error code");
+}

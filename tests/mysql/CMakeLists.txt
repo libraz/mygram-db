@@ -1,6 +1,36 @@
 # MySQL connection tests
 
+# GTID encoder tests (no MySQL dependency)
+add_executable(gtid_encoder_test
+  gtid_encoder_test.cpp
+)
+
+target_link_libraries(gtid_encoder_test
+  mygramdb_mysql
+  GTest::gtest_main
+)
+
+gtest_discover_tests(gtid_encoder_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 if(USE_MYSQL AND MYSQL_FOUND)
+  # Table metadata cache tests (no MySQL connection required)
+  add_executable(table_metadata_test
+    table_metadata_test.cpp
+  )
+
+  target_link_libraries(table_metadata_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(table_metadata_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   add_executable(mysql_connection_test
     connection_test.cpp
   )
@@ -145,6 +175,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
   target_link_libraries(binlog_filter_validation_test
     mygramdb_server
     GTest::gtest_main
+  )
+
+  # Binlog filter evaluator tests
+  add_executable(binlog_filter_evaluator_test
+    binlog_filter_evaluator_test.cpp
+  )
+
+  target_link_libraries(binlog_filter_evaluator_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(binlog_filter_evaluator_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
   )
 
   # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
