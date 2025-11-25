@@ -61,11 +61,14 @@ target_link_libraries(stress_test
   GTest::gtest_main
 )
 
-# Note: Stress tests may take a long time
+# Note: Stress tests involve large-scale concurrent operations
+# and can take 20-110 seconds in CI environments
 gtest_discover_tests(stress_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES TIMEOUT 300  # 5 minutes timeout
+  PROPERTIES
+    LABELS "SLOW"
+    TIMEOUT 300  # 5 minutes timeout
 )
 
 # Variable Handler Integration Tests

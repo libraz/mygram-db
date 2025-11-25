@@ -451,8 +451,24 @@ if(ENABLE_COVERAGE)
       set(CTEST_PARALLEL_ARGS --parallel ${N})
     endif()
 
-    # Add target to generate HTML coverage report
+    # Add target to generate HTML coverage report (excludes SLOW tests for faster CI)
     add_custom_target(coverage
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
+      COMMAND ${LCOV_PATH} --directory . --zerocounters
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS} --label-exclude SLOW
+      COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
+      COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
+        '${CMAKE_SOURCE_DIR}/src/*'
+        --output-file ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info --ignore-errors inconsistent,format,mismatch,negative,unused,source --rc derive_function_end_line=0
+      COMMAND ${GENHTML_PATH} ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info
+        --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
+      COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMENT "Generating code coverage report (excluding SLOW tests)"
+    )
+
+    # Add target to generate coverage report with ALL tests (including SLOW)
+    add_custom_target(coverage-full
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
       COMMAND ${LCOV_PATH} --directory . --zerocounters
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS}
@@ -464,7 +480,7 @@ if(ENABLE_COVERAGE)
         --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
       COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-      COMMENT "Generating code coverage report"
+      COMMENT "Generating code coverage report (including ALL tests)"
     )
 
     # Add target to clean coverage data

@@ -93,22 +93,40 @@ build: configure
 	$(MAKE) -C $(BUILD_DIR) -j$$(nproc)
 	@echo "Build complete!"
 
-# Run tests with configurable options
+# Run tests with configurable options (excludes SLOW tests by default)
 test: build
 	@echo "Running tests (jobs=$(TEST_JOBS), verbose=$(TEST_VERBOSE), debug=$(TEST_DEBUG))..."
+	@echo "Note: Excluding SLOW tests. Use 'make test-all' to run all tests."
 	@if [ "$(TEST_JOBS)" = "1" ]; then \
 		echo "Running tests sequentially..."; \
 	fi
 	@cd $(BUILD_DIR) && \
-		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS)"; \
+		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS) --label-exclude SLOW"; \
 		if [ "$(TEST_VERBOSE)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --verbose"; fi; \
 		if [ "$(TEST_DEBUG)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --debug"; fi; \
 		ctest $$CTEST_FLAGS
 	@echo "Tests complete!"
 
+# Run ALL tests including SLOW tests
+test-all: build
+	@echo "Running ALL tests including SLOW tests (jobs=$(TEST_JOBS))..."
+	@cd $(BUILD_DIR) && \
+		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS)"; \
+		if [ "$(TEST_VERBOSE)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --verbose"; fi; \
+		if [ "$(TEST_DEBUG)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --debug"; fi; \
+		ctest $$CTEST_FLAGS
+	@echo "All tests complete!"
+
+# Run only SLOW tests
+test-slow: build
+	@echo "Running only SLOW tests (jobs=$(TEST_JOBS))..."
+	@cd $(BUILD_DIR) && \
+		ctest --output-on-failure --parallel $(TEST_JOBS) --label-regex SLOW
+	@echo "SLOW tests complete!"
+
 # Convenience aliases for common test scenarios
 test-full:
-	@$(MAKE) test TEST_JOBS=$$(nproc)
+	@$(MAKE) test-all TEST_JOBS=$$(nproc)
 
 test-sequential:
 	@$(MAKE) test TEST_JOBS=1

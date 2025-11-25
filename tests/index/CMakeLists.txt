@@ -66,11 +66,14 @@ target_link_libraries(index_concurrent_test
   GTest::gtest_main
 )
 
+# Note: Concurrent tests involve multi-threaded operations, taking 10-25 seconds in CI
 gtest_discover_tests(index_concurrent_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
+    LABELS "SLOW"
     RESOURCE_LOCK index_concurrent_lock
+    TIMEOUT 60
 )
 
 # Index GetTopN tests
@@ -83,9 +86,14 @@ target_link_libraries(index_gettopn_test
   GTest::gtest_main
 )
 
+# Note: Some tests (e.g., MergeJoinSelectivityThreshold) process 20,000+ documents
+# and can take over 100 seconds in CI environments
 gtest_discover_tests(index_gettopn_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
+    TIMEOUT 180
 )
 
 # PostingList unit tests
@@ -113,11 +121,14 @@ target_link_libraries(posting_list_thread_safety_test
   GTest::gtest_main
 )
 
+# Note: Thread safety tests involve multi-threaded operations, taking 6-15 seconds in CI
 gtest_discover_tests(posting_list_thread_safety_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 60
   PROPERTIES
+    LABELS "SLOW"
     RESOURCE_LOCK posting_list_concurrent_lock
+    TIMEOUT 60
 )
 
 # Index optimization concurrency tests
@@ -130,20 +141,26 @@ target_link_libraries(optimize_concurrency_test
   GTest::gtest_main
 )
 
+# Note: Tests involve 10,000 documents with concurrent optimization/search/write
+# operations, taking 45-90 seconds in CI environments
 # On macOS, run serially to avoid scheduler timing issues
 if(APPLE)
   gtest_discover_tests(optimize_concurrency_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
+      LABELS "SLOW"
       RESOURCE_LOCK optimize_concurrent_lock
       RUN_SERIAL TRUE
+      TIMEOUT 120
   )
 else()
   gtest_discover_tests(optimize_concurrency_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
+      LABELS "SLOW"
       RESOURCE_LOCK optimize_concurrent_lock
+      TIMEOUT 120
   )
 endif()

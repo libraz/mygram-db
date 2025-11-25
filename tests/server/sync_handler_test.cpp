@@ -7,6 +7,8 @@
 
 #include "server/handlers/sync_handler.h"
 
+#include <cstdlib>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
@@ -290,8 +292,18 @@ TEST(SyncOperationManagerTest, RapidCreateDestroyNoThreadLeak) {
  * @brief Test concurrent StartSync calls with thread safety
  * Regression test for: sync_threads_ and sync_states_ race condition
  * Ensures both are protected by the same mutex (sync_mutex_)
+ *
+ * NOTE: This test requires a running MySQL server because StartSync
+ * actually attempts to connect. Skip if MySQL is not available.
  */
 TEST(SyncOperationManagerTest, ConcurrentStartSyncThreadSafe) {
+  // Skip if MySQL integration tests are disabled
+  const char* env = std::getenv("ENABLE_MYSQL_INTEGRATION_TESTS");
+  if (env == nullptr || std::string(env) != "1") {
+    GTEST_SKIP() << "MySQL integration tests are disabled. "
+                 << "Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
   // Create minimal setup
   config::TableConfig table_config;
   table_config.name = "test_table";
