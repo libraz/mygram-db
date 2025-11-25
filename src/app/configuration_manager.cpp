@@ -94,4 +94,33 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
   return {};
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ReopenLogFile() const {
+  // No-op if logging to stdout
+  if (config_.logging.file.empty()) {
+    return {};
+  }
+
+  try {
+    // Get current log level before dropping logger
+    auto current_level = spdlog::get_level();
+
+    // Drop existing logger
+    spdlog::drop("mygramdb");
+
+    // Create new file logger (this opens a new file descriptor)
+    auto file_logger = spdlog::basic_logger_mt("mygramdb", config_.logging.file);
+    spdlog::set_default_logger(file_logger);
+
+    // Restore log level
+    spdlog::set_level(current_level);
+
+    spdlog::info("Log file reopened for rotation");
+  } catch (const spdlog::spdlog_ex& ex) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kIOError,
+                                                                  "Log file reopen failed: " + std::string(ex.what())));
+  }
+
+  return {};
+}
+
 }  // namespace mygramdb::app

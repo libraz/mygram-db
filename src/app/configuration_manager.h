@@ -95,6 +95,19 @@ class ConfigurationManager {
   Expected<void, mygram::utils::Error> ApplyLoggingConfig();
 
   /**
+   * @brief Reopen log file for log rotation
+   * @return Expected with void or error
+   *
+   * Used for log rotation with SIGUSR1:
+   * 1. mv app.log app.log.1
+   * 2. kill -USR1 $(pidof mygramdb)
+   * 3. This method reopens the log file
+   *
+   * If logging to stdout (no file configured), this is a no-op.
+   */
+  Expected<void, mygram::utils::Error> ReopenLogFile() const;
+
+  /**
    * @brief Get config file path
    */
   const std::string& GetConfigFilePath() const { return config_file_; }

@@ -623,7 +623,7 @@ ERROR: Failed to reconnect to MySQL server
 
 1. **Client Access Control**: Use `network.allow_cidrs` to restrict client access
 2. **Config File Permissions**: `chmod 600 config.yaml` (sensitive credentials)
-3. **Log Rotation**: Prevent disk space exhaustion
+3. **Log Rotation**: Use SIGUSR1 signal for zero-downtime log rotation (see Section 10)
 4. **Audit Trail**: Log all variable changes and failovers
 
 ## 9. Implementation Details
@@ -727,4 +727,125 @@ curl http://localhost:8080/health/detail
 | Server UUID changed | `failover_detected` | Verify failover |
 | Connection lost | `connection_failed` | Check network |
 
-**Last Updated**: 2025-11-17
+## 10. Log Rotation with SIGUSR1
+
+MygramDB supports zero-downtime log rotation using the SIGUSR1 signal, similar to nginx. This allows seamless log file rotation without restarting the server.
+
+### How It Works
+
+1. **Rename the current log file** (by logrotate or manually)
+2. **Send SIGUSR1 signal** to the MygramDB process
+3. **MygramDB reopens the log file** with the original path, creating a new file
+
+The process continues logging to the new file immediately, while the old file (now renamed) can be compressed or archived.
+
+### Manual Rotation
+
+```bash
+# 1. Rename the current log file
+mv /var/log/mygramdb/app.log /var/log/mygramdb/app.log.1
+
+# 2. Send SIGUSR1 to reopen log file
+kill -USR1 $(pidof mygramdb)
+# or
+kill -USR1 $(cat /var/run/mygramdb.pid)
+
+# 3. MygramDB creates new app.log and continues logging
+```
+
+### logrotate Configuration
+
+Create `/etc/logrotate.d/mygramdb`:
+
+```conf
+/var/log/mygramdb/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 mygramdb mygramdb
+    sharedscripts
+    postrotate
+        kill -USR1 $(cat /var/run/mygramdb.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}
+```
+
+**Configuration Options**:
+- `daily`: Rotate logs daily
+- `rotate 7`: Keep 7 days of logs
+- `compress`: Compress rotated logs with gzip
+- `delaycompress`: Don't compress the most recently rotated file (useful for debugging)
+- `missingok`: Don't error if log file doesn't exist
+- `notifempty`: Don't rotate empty files
+- `create 0640 mygramdb mygramdb`: Create new file with specified permissions and ownership
+- `sharedscripts`: Run postrotate only once for all matched files
+- `postrotate`: Command to run after rotation (send SIGUSR1)
+
+### Verification
+
+After sending SIGUSR1, check the logs:
+
+```bash
+# Verify new log file was created
+ls -la /var/log/mygramdb/
+
+# Check new log file contains reopen confirmation
+grep "Log file reopened" /var/log/mygramdb/app.log
+```
+
+**Expected log entry after rotation**:
+```
+[2025-11-25 12:34:56.789] [mygramdb] [info] Log file reopened for rotation
+```
+
+### systemd Integration
+
+If using systemd, add a reload target for log rotation:
+
+```ini
+# /etc/systemd/system/mygramdb.service
+[Service]
+ExecReload=/bin/kill -USR1 $MAINPID
+```
+
+Then use `systemctl reload mygramdb` for log rotation:
+
+```bash
+# Rotate logs using systemd
+systemctl reload mygramdb
+```
+
+### Important Notes
+
+1. **File logging required**: SIGUSR1 only affects file logging. If logging to stdout, the signal is acknowledged but no action is taken.
+
+2. **Log level preserved**: After reopening, the log level remains unchanged.
+
+3. **Signal safety**: SIGUSR1 only sets a flag; the actual file reopen happens in the main loop within 100ms.
+
+4. **Error handling**: If reopening fails, an error is written to stderr (not the log file, since it may be broken).
+
+### Troubleshooting
+
+**Log file not created after SIGUSR1**:
+- Check file permissions on the log directory
+- Verify the process received the signal: `grep "Log file reopened" /var/log/mygramdb/app.log`
+- Check stderr for errors
+
+**Old log file still being written to**:
+- Ensure the mv command completed before sending SIGUSR1
+- Check process PID is correct
+- Verify signal was sent to the correct process
+
+### Source Files
+
+- `src/app/signal_manager.h` - SIGUSR1 signal handling
+- `src/app/signal_manager.cpp` - Signal registration and flag management
+- `src/app/configuration_manager.h` - ReopenLogFile() interface
+- `src/app/configuration_manager.cpp` - spdlog file reopen implementation
+- `src/app/application.cpp` - Main loop signal checking
+
+**Last Updated**: 2025-11-25

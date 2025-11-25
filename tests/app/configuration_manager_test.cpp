@@ -362,3 +362,129 @@ TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigInvalidPath) {
   // Cleanup
   std::filesystem::remove(config_path);
 }
+
+/**
+ * @brief Test that ReopenLogFile successfully reopens log file for rotation
+ */
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFileRotation) {
+  std::string log_dir = "/tmp/test_log_rotation_" + std::to_string(getpid());
+  std::string log_file = log_dir + "/app.log";
+  std::string rotated_file = log_dir + "/app.log.1";
+
+  // Ensure clean state
+  if (std::filesystem::exists(log_dir)) {
+    std::filesystem::remove_all(log_dir);
+  }
+  std::filesystem::create_directories(log_dir);
+
+  std::string config_path = CreateTempConfig("info", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result);
+
+  auto config_mgr = std::move(*config_mgr_result);
+
+  // Apply logging config first
+  auto apply_result = config_mgr->ApplyLoggingConfig();
+  ASSERT_TRUE(apply_result) << "ApplyLoggingConfig failed: " << apply_result.error().to_string();
+
+  // Write message before rotation
+  spdlog::info("Before rotation message");
+  spdlog::default_logger()->flush();
+
+  // Simulate log rotation: rename current log file
+  ASSERT_TRUE(std::filesystem::exists(log_file)) << "Log file should exist before rotation";
+  std::filesystem::rename(log_file, rotated_file);
+
+  // Call ReopenLogFile
+  auto reopen_result = config_mgr->ReopenLogFile();
+  ASSERT_TRUE(reopen_result) << "ReopenLogFile failed: " << reopen_result.error().to_string();
+
+  // Write message after rotation
+  spdlog::info("After rotation message");
+  spdlog::default_logger()->flush();
+
+  // Verify both files exist
+  EXPECT_TRUE(std::filesystem::exists(log_file)) << "New log file should be created after reopen";
+  EXPECT_TRUE(std::filesystem::exists(rotated_file)) << "Rotated log file should still exist";
+
+  // Verify content of old (rotated) log
+  std::string old_content = ReadFile(rotated_file);
+  EXPECT_NE(old_content.find("Before rotation message"), std::string::npos)
+      << "Old log should contain message before rotation";
+  EXPECT_EQ(old_content.find("After rotation message"), std::string::npos)
+      << "Old log should NOT contain message after rotation";
+
+  // Verify content of new log
+  std::string new_content = ReadFile(log_file);
+  EXPECT_NE(new_content.find("After rotation message"), std::string::npos)
+      << "New log should contain message after rotation";
+  EXPECT_NE(new_content.find("Log file reopened"), std::string::npos)
+      << "New log should contain reopen confirmation message";
+
+  // Cleanup
+  std::filesystem::remove(config_path);
+  std::filesystem::remove_all(log_dir);
+}
+
+/**
+ * @brief Test that ReopenLogFile is no-op when logging to stdout
+ */
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFileStdoutNoOp) {
+  // Create config without log file (stdout logging)
+  std::string config_path = CreateTempConfig("info", "text", "");
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result);
+
+  auto config_mgr = std::move(*config_mgr_result);
+
+  // Apply logging config
+  auto apply_result = config_mgr->ApplyLoggingConfig();
+  ASSERT_TRUE(apply_result);
+
+  // ReopenLogFile should succeed (no-op for stdout)
+  auto reopen_result = config_mgr->ReopenLogFile();
+  EXPECT_TRUE(reopen_result) << "ReopenLogFile should succeed for stdout logging";
+
+  // Cleanup
+  std::filesystem::remove(config_path);
+}
+
+/**
+ * @brief Test that ReopenLogFile preserves log level
+ */
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFilePreservesLevel) {
+  std::string log_dir = "/tmp/test_log_level_" + std::to_string(getpid());
+  std::string log_file = log_dir + "/app.log";
+
+  // Ensure clean state
+  if (std::filesystem::exists(log_dir)) {
+    std::filesystem::remove_all(log_dir);
+  }
+  std::filesystem::create_directories(log_dir);
+
+  // Create config with debug level
+  std::string config_path = CreateTempConfig("debug", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result);
+
+  auto config_mgr = std::move(*config_mgr_result);
+
+  // Apply logging config
+  auto apply_result = config_mgr->ApplyLoggingConfig();
+  ASSERT_TRUE(apply_result);
+  EXPECT_EQ(spdlog::get_level(), spdlog::level::debug);
+
+  // Reopen log file
+  auto reopen_result = config_mgr->ReopenLogFile();
+  ASSERT_TRUE(reopen_result);
+
+  // Log level should be preserved
+  EXPECT_EQ(spdlog::get_level(), spdlog::level::debug) << "Log level should be preserved after reopen";
+
+  // Cleanup
+  std::filesystem::remove(config_path);
+  std::filesystem::remove_all(log_dir);
+}

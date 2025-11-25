@@ -32,6 +32,8 @@ using mygram::utils::Expected;
 struct SignalFlags {
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
   volatile std::sig_atomic_t shutdown_requested = 0;
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+  volatile std::sig_atomic_t log_reopen_requested = 0;
 };
 
 /**
@@ -84,6 +86,16 @@ class SignalManager {
    */
   static bool IsShutdownRequested();
 
+  /**
+   * @brief Check if log reopen was requested (SIGUSR1)
+   * @return True if log reopen signal was received
+   *
+   * This method reads and clears the log_reopen_requested flag.
+   * Typical usage: poll in main loop, then reopen log files.
+   * Used for log rotation: mv log log.1 && kill -USR1 pid
+   */
+  static bool ConsumeLogReopenRequest();
+
   // Static signal flags (shared with signal handler)
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
   static SignalFlags signal_flags_;
@@ -105,6 +117,7 @@ class SignalManager {
   // Original signal handlers (for restoration in destructor)
   struct sigaction original_sigint_ {};
   struct sigaction original_sigterm_ {};
+  struct sigaction original_sigusr1_ {};
 };
 
 }  // namespace mygramdb::app

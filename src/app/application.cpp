@@ -224,6 +224,15 @@ void Application::RunMainLoop() {
   spdlog::info("Entering main loop...");
 
   while (!signal_manager_->IsShutdownRequested()) {
+    // Check for log rotation signal (SIGUSR1)
+    if (signal_manager_->ConsumeLogReopenRequest()) {
+      auto reopen_result = config_manager_->ReopenLogFile();
+      if (!reopen_result) {
+        // Log to stderr as file logging may be broken
+        std::cerr << "Failed to reopen log file: " << reopen_result.error().to_string() << '\n';
+      }
+    }
+
     std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownCheckIntervalMs));
   }
 

@@ -614,7 +614,7 @@ ERROR: Invalid value for api.default_limit: must be between 5 and 1000
 
 1. **クライアントアクセス制御**: 信頼できるIPアドレスからのみSETコマンドを許可（`network.allow_cidrs`）
 2. **設定ファイルパーミッション**: `chmod 600 config.yaml`（機密情報を含む）
-3. **ログローテーション**: ディスク容量枯渇を防止
+3. **ログローテーション**: SIGUSR1シグナルによるゼロダウンタイムログローテーション（セクション10参照）
 4. **監査証跡**: すべての変数変更とフェイルオーバーをログ記録
 
 ## 9. 実装詳細
@@ -709,4 +709,125 @@ curl http://localhost:8080/health/detail
 | サーバー UUID 変更 | `failover_detected` | フェイルオーバーを確認 |
 | 接続断 | `connection_failed` | ネットワークをチェック |
 
-**最終更新**: 2025-11-17
+## 10. SIGUSR1によるログローテーション
+
+MygramDBは、nginxと同様にSIGUSR1シグナルを使用したゼロダウンタイムのログローテーションをサポートしています。サーバーを再起動せずにシームレスにログファイルをローテーションできます。
+
+### 動作の仕組み
+
+1. **現在のログファイルをリネーム**（logrotateまたは手動で）
+2. **SIGUSR1シグナルを送信**（MygramDBプロセスに）
+3. **MygramDBがログファイルを再オープン**（元のパスで新規ファイルを作成）
+
+プロセスは即座に新しいファイルへのログ出力を開始し、古いファイル（リネーム済み）は圧縮やアーカイブが可能になります。
+
+### 手動ローテーション
+
+```bash
+# 1. 現在のログファイルをリネーム
+mv /var/log/mygramdb/app.log /var/log/mygramdb/app.log.1
+
+# 2. SIGUSR1を送信してログファイルを再オープン
+kill -USR1 $(pidof mygramdb)
+# または
+kill -USR1 $(cat /var/run/mygramdb.pid)
+
+# 3. MygramDBが新しいapp.logを作成してログ出力を継続
+```
+
+### logrotate設定
+
+`/etc/logrotate.d/mygramdb` を作成:
+
+```conf
+/var/log/mygramdb/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 mygramdb mygramdb
+    sharedscripts
+    postrotate
+        kill -USR1 $(cat /var/run/mygramdb.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}
+```
+
+**設定オプション**:
+- `daily`: 毎日ローテーション
+- `rotate 7`: 7日分のログを保持
+- `compress`: ローテーションしたログをgzipで圧縮
+- `delaycompress`: 直近のローテーションファイルは圧縮しない（デバッグに便利）
+- `missingok`: ログファイルが存在しなくてもエラーにしない
+- `notifempty`: 空のファイルはローテーションしない
+- `create 0640 mygramdb mygramdb`: 指定したパーミッションと所有者で新規ファイルを作成
+- `sharedscripts`: マッチした全ファイルに対してpostrotateを1回だけ実行
+- `postrotate`: ローテーション後に実行するコマンド（SIGUSR1を送信）
+
+### 確認方法
+
+SIGUSR1送信後、ログを確認:
+
+```bash
+# 新しいログファイルが作成されたことを確認
+ls -la /var/log/mygramdb/
+
+# 新しいログファイルに再オープン確認メッセージが含まれることを確認
+grep "Log file reopened" /var/log/mygramdb/app.log
+```
+
+**ローテーション後の期待されるログエントリ**:
+```
+[2025-11-25 12:34:56.789] [mygramdb] [info] Log file reopened for rotation
+```
+
+### systemd連携
+
+systemdを使用している場合、ログローテーション用のreloadターゲットを追加:
+
+```ini
+# /etc/systemd/system/mygramdb.service
+[Service]
+ExecReload=/bin/kill -USR1 $MAINPID
+```
+
+`systemctl reload mygramdb` でログローテーションを実行:
+
+```bash
+# systemdを使用してログをローテーション
+systemctl reload mygramdb
+```
+
+### 重要な注意事項
+
+1. **ファイルロギングが必要**: SIGUSR1はファイルロギングにのみ影響します。stdout出力の場合、シグナルは受信されますがアクションは実行されません。
+
+2. **ログレベルは保持**: 再オープン後もログレベルは変更されません。
+
+3. **シグナル安全性**: SIGUSR1はフラグを設定するだけで、実際のファイル再オープンはメインループで100ms以内に実行されます。
+
+4. **エラーハンドリング**: 再オープンに失敗した場合、エラーはstderr（ログファイルではなく）に出力されます。
+
+### トラブルシューティング
+
+**SIGUSR1後にログファイルが作成されない**:
+- ログディレクトリのファイルパーミッションを確認
+- プロセスがシグナルを受信したことを確認: `grep "Log file reopened" /var/log/mygramdb/app.log`
+- stderrでエラーを確認
+
+**古いログファイルにまだ書き込まれている**:
+- mvコマンドがSIGUSR1送信前に完了していることを確認
+- プロセスPIDが正しいことを確認
+- 正しいプロセスにシグナルが送信されたことを確認
+
+### ソースファイル
+
+- `src/app/signal_manager.h` - SIGUSR1シグナル処理
+- `src/app/signal_manager.cpp` - シグナル登録とフラグ管理
+- `src/app/configuration_manager.h` - ReopenLogFile()インターフェース
+- `src/app/configuration_manager.cpp` - spdlogファイル再オープン実装
+- `src/app/application.cpp` - メインループでのシグナルチェック
+
+**最終更新**: 2025-11-25
