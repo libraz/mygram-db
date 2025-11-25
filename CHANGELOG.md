@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2025-11-25
+
+### Fixed
+
+- **Critical: DATETIME2 parsing produces invalid dates** - Fix MySQL DATETIME2 binlog format parsing by adding missing `DATETIMEF_INT_OFS` offset subtraction and correcting year/month calculation (`ym/13`, `ym%13` instead of bitwise extraction)
+- **Critical: server_id not passed to MySQL replication** - Fix hardcoded `server_id=1001` in binlog reader, now uses config value; prevents replication conflicts when multiple instances connect to same MySQL server
+- **Medium: TIME2 type not implemented** - Implement MySQL TIME2 binlog format with `TIMEF_INT_OFS` offset and fractional seconds support
+- **Low: TIMESTAMP2 big-endian handling** - Fix TIMESTAMP2 byte order (big-endian) and separate fractional seconds handling from legacy TIMESTAMP
+
+### Added
+
+- 15 new unit tests for datetime/time parsing (`DateTimeParsingTest` suite)
+- Unit test for server_id=0 validation (`StartFailsWithZeroServerId`)
+- Source code references to MySQL 8.4.7 (`mysys/my_time.cc`) in parsing implementation
+
+**Detailed Release Notes**: [docs/releases/v1.3.3.md](docs/releases/v1.3.3.md)
+
 ## [1.3.2] - 2025-11-25
 
 🚨 **CRITICAL UPGRADE - All v1.3.0 and v1.3.1 users with MySQL replication must upgrade immediately**

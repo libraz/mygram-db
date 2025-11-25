@@ -321,6 +321,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   mysql::BinlogReader::Config binlog_config;
   binlog_config.start_gtid = start_gtid;
   binlog_config.queue_size = deps_.config.replication.queue_size;
+  binlog_config.server_id = deps_.config.replication.server_id;
 
   binlog_reader_ =
       std::make_unique<mysql::BinlogReader>(*mysql_connection_, table_contexts_ptrs, deps_.config.mysql, binlog_config);

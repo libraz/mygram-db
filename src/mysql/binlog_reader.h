@@ -71,6 +71,7 @@ class BinlogReader {
     std::string start_gtid;         // Starting GTID
     size_t queue_size = 10000;      // Maximum queue size
     int reconnect_delay_ms = 1000;  // Reconnect delay in milliseconds
+    uint32_t server_id = 0;         // MySQL server ID for replication (must be unique)
   };
   // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 

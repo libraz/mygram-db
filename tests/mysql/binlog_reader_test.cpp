@@ -63,6 +63,7 @@ class BinlogReaderFixture : public ::testing::Test {
     reader_config_.start_gtid = "uuid:1";
     reader_config_.queue_size = 2;
     reader_config_.reconnect_delay_ms = 10;
+    reader_config_.server_id = 12345;  // Test server ID
 
     index_.Clear();
     doc_store_.Clear();
@@ -510,6 +511,7 @@ TEST(BinlogReaderTest, Construction) {
   BinlogReader::Config reader_config;
   reader_config.start_gtid = "uuid:1";
   reader_config.queue_size = 1000;
+  reader_config.server_id = 12345;  // Test server ID
 
   BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
 
@@ -534,6 +536,7 @@ TEST(BinlogReaderTest, InitialState) {
 
   BinlogReader::Config reader_config;
   reader_config.start_gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:100";
+  reader_config.server_id = 12345;  // Test server ID
 
   BinlogReader reader(conn, idx, doc_store, table_config, reader_config);
 
@@ -552,15 +555,18 @@ TEST(BinlogReaderTest, Config) {
   // Default values
   EXPECT_EQ(config.queue_size, 10000);
   EXPECT_EQ(config.reconnect_delay_ms, 1000);
+  EXPECT_EQ(config.server_id, 0);  // Default server_id is 0 (invalid for replication)
 
   // Custom values
   config.start_gtid = "test:123";
   config.queue_size = 5000;
   config.reconnect_delay_ms = 500;
+  config.server_id = 12345;
 
   EXPECT_EQ(config.start_gtid, "test:123");
   EXPECT_EQ(config.queue_size, 5000);
   EXPECT_EQ(config.reconnect_delay_ms, 500);
+  EXPECT_EQ(config.server_id, 12345);
 }
 
 /**

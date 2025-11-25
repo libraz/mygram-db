@@ -119,6 +119,13 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, should_stop_);
 
+  // Validate server_id (must be non-zero for replication)
+  if (config_.server_id == 0) {
+    last_error_ = "server_id must be set to a non-zero value for binlog replication";
+    mygram::utils::LogBinlogError("invalid_server_id", current_gtid_, last_error_);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+  }
+
   // Check MySQL connection
   if (!connection_.IsConnected()) {
     last_error_ = "MySQL connection not established";
@@ -217,7 +224,11 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     // Start reader thread
     reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
 
-    mygram::utils::StructuredLog().Event("binlog_reader_started").Field("gtid", current_gtid_).Info();
+    mygram::utils::StructuredLog()
+        .Event("binlog_reader_started")
+        .Field("gtid", current_gtid_)
+        .Field("server_id", static_cast<int64_t>(config_.server_id))
+        .Info();
     guard.success = true;  // Mark start as successful - StartupGuard won't clean up
     return {};
   } catch (const std::exception& e) {
@@ -354,9 +365,9 @@ void BinlogReader::ReaderThreadFunc() {
     MYSQL_RPL rpl{};
     rpl.file_name_length = 0;  // 0 means start from current position
     rpl.file_name = nullptr;
-    rpl.start_position = 4;      // Skip magic number at start of binlog
-    rpl.server_id = 1001;        // Use non-zero server ID for replica
-    rpl.flags = MYSQL_RPL_GTID;  // Use GTID mode (allow heartbeat events)
+    rpl.start_position = 4;             // Skip magic number at start of binlog
+    rpl.server_id = config_.server_id;  // Use configured server ID for replica
+    rpl.flags = MYSQL_RPL_GTID;         // Use GTID mode (allow heartbeat events)
 
     // Use current GTID for replication (updated after each event)
     std::string current_gtid = GetCurrentGTID();

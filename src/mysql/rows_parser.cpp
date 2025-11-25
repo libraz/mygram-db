@@ -5,6 +5,7 @@
  * Implementation based on MySQL 8.4.7 source code:
  * - libs/mysql/binlog/event/rows_event.h (event format documentation)
  * - libs/mysql/binlog/event/binary_log_funcs.cpp (field size calculation)
+ * - mysys/my_time.cc (DATETIME2 format: my_datetime_packed_from_binary, TIME_from_longlong_datetime_packed)
  *
  * Binary format for WRITE_ROWS event:
  * 1. Common event header (19 bytes) - already skipped by caller
@@ -27,6 +28,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -251,10 +253,59 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       return oss.str();
     }
 
-    case 7:     // MYSQL_TYPE_TIMESTAMP (4 bytes)
-    case 17: {  // MYSQL_TYPE_TIMESTAMP2
-      // Unix timestamp (seconds since 1970-01-01)
+    case 7: {  // MYSQL_TYPE_TIMESTAMP (4 bytes)
+      // Unix timestamp (seconds since 1970-01-01), no fractional seconds
       uint32_t timestamp = binlog_util::uint4korr(data);
+      return std::to_string(timestamp);
+    }
+
+    case 17: {  // MYSQL_TYPE_TIMESTAMP2 (4+ bytes)
+      // MySQL TIMESTAMP2 format (see mysql-source/mysys/my_time.cc):
+      // - 4 bytes for seconds (big-endian)
+      // - Additional bytes for fractional seconds based on precision (metadata)
+      //
+      // Note: TIMESTAMP2 stores seconds in big-endian unlike TIMESTAMP
+
+      // Read 4 bytes in big-endian
+      uint32_t timestamp = (static_cast<uint32_t>(data[0]) << 24) | (static_cast<uint32_t>(data[1]) << 16) |
+                           (static_cast<uint32_t>(data[2]) << 8) | static_cast<uint32_t>(data[3]);
+
+      // Process fractional seconds if present
+      if (metadata > 0) {
+        int frac_bytes = (metadata + 1) / 2;
+        int32_t frac = 0;
+        for (int i = 0; i < frac_bytes; i++) {
+          frac = (frac << 8) | data[4 + i];
+        }
+
+        // Convert to microseconds based on precision
+        uint32_t usec = 0;
+        switch (metadata) {
+          case 1:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
+            break;
+          case 2:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
+            break;
+          case 3:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
+            break;
+          case 4:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
+            break;
+          case 5:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
+            break;
+          case 6:
+            usec = static_cast<uint32_t>(std::abs(frac));
+            break;
+        }
+
+        std::ostringstream oss;
+        oss << timestamp << '.' << std::setfill('0') << std::setw(6) << usec;
+        return oss.str();
+      }
+
       return std::to_string(timestamp);
     }
 
@@ -265,27 +316,54 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
     }
 
     case 18: {  // MYSQL_TYPE_DATETIME2 (5+ bytes, new format)
-      // Format: 5 bytes for datetime + fractional seconds bytes
-      // Bit layout is complex, packed in big-endian
+      // MySQL DATETIME2 format (see mysql-source/mysys/my_time.cc):
+      // - 5 bytes base datetime stored as unsigned with DATETIMEF_INT_OFS offset
+      // - Additional bytes for fractional seconds based on precision (metadata)
+      //
+      // The 5 bytes are read as big-endian unsigned, then subtract DATETIMEF_INT_OFS
+      // to get the signed packed datetime value.
+      //
+      // Packed format (40-bit signed integer):
+      //   ymdhms = (year * 13 + month) << 22 | day << 17 | hour << 12 | minute << 6 | second
 
-      // Read 5 bytes in big-endian
+      // Read 5 bytes in big-endian (unsigned)
       uint64_t packed = 0;
       for (int i = 0; i < 5; i++) {
         packed = (packed << 8) | data[i];
       }
 
-      // Extract datetime parts
-      // Format: YYYYMMDDhhmmss packed in 40 bits
-      uint64_t ymd = (packed >> 17) & 0x3FFFF;  // 18 bits for date
-      uint64_t hms = packed & 0x1FFFF;          // 17 bits for time
+      // Subtract the offset to get signed packed value
+      // DATETIMEF_INT_OFS = 0x8000000000LL (for binary key compatibility)
+      constexpr int64_t kDatetimeIntOfs = 0x8000000000LL;
+      int64_t intpart = static_cast<int64_t>(packed) - kDatetimeIntOfs;
 
-      unsigned int year = ymd >> 9;
-      unsigned int month = (ymd >> 5) & 0x0F;
+      // Handle negative values (dates before year 0) - just use absolute value
+      if (intpart < 0) {
+        intpart = -intpart;
+      }
+
+      // Extract datetime parts per MySQL format:
+      // ymd = intpart >> 17
+      // ym = ymd >> 5
+      // day = ymd % 32 (i.e., ymd & 0x1F)
+      // month = ym % 13
+      // year = ym / 13
+      // hms = intpart % (1 << 17) (i.e., intpart & 0x1FFFF)
+      // second = hms % 64 (i.e., hms & 0x3F)
+      // minute = (hms >> 6) % 64 (i.e., (hms >> 6) & 0x3F)
+      // hour = hms >> 12
+
+      int64_t ymd = intpart >> 17;
+      int64_t hms = intpart & 0x1FFFF;
+      int64_t year_month = ymd >> 5;
+
       unsigned int day = ymd & 0x1F;
+      unsigned int month = year_month % 13;
+      auto year = static_cast<unsigned int>(year_month / 13);
 
-      unsigned int hour = (hms >> 12) & 0x1F;
-      unsigned int minute = (hms >> 6) & 0x3F;
       unsigned int second = hms & 0x3F;
+      unsigned int minute = (hms >> 6) & 0x3F;
+      auto hour = static_cast<unsigned int>(hms >> 12);
 
       std::ostringstream oss;
       oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
@@ -294,31 +372,123 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       // Process fractional seconds if present
       if (metadata > 0) {
         int frac_bytes = (metadata + 1) / 2;
-        uint32_t frac = 0;
+        int32_t frac = 0;
         for (int i = 0; i < frac_bytes; i++) {
           frac = (frac << 8) | data[5 + i];
         }
+
+        // Handle signed fractional values (for precision 1-2, it's a signed byte)
+        // For precision 3-4, it's signed 2 bytes; for 5-6, signed 3 bytes
+        // The fractional part can be negative for dates before epoch
 
         // Convert to microseconds based on precision
         uint32_t usec = 0;
         switch (metadata) {
           case 1:
-            usec = frac * 100000;
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
             break;
           case 2:
-            usec = frac * 10000;
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
             break;
           case 3:
-            usec = frac * 1000;
+            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
             break;
           case 4:
-            usec = frac * 100;
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
             break;
           case 5:
-            usec = frac * 10;
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
             break;
           case 6:
-            usec = frac;
+            usec = static_cast<uint32_t>(std::abs(frac));
+            break;
+        }
+
+        oss << '.' << std::setw(6) << usec;
+      }
+
+      return oss.str();
+    }
+
+    case 11: {  // MYSQL_TYPE_TIME (3 bytes, old format)
+      // Old TIME format: 3 bytes, stored as HHMMSS
+      uint32_t val = binlog_util::uint3korr(data);
+      unsigned int second = val % 100;
+      unsigned int minute = (val / 100) % 100;
+      unsigned int hour = val / 10000;
+
+      std::ostringstream oss;
+      oss << std::setfill('0') << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2)
+          << second;
+      return oss.str();
+    }
+
+    case 19: {  // MYSQL_TYPE_TIME2 (3+ bytes, new format)
+      // MySQL TIME2 format (see mysql-source/mysys/my_time.cc):
+      // - 3 bytes base time stored as unsigned with TIMEF_INT_OFS offset
+      // - Additional bytes for fractional seconds based on precision (metadata)
+      //
+      // Packed format (24-bit signed integer after offset subtraction):
+      //   hms = hour << 12 | minute << 6 | second
+
+      // Read 3 bytes in big-endian (unsigned)
+      uint32_t packed = (static_cast<uint32_t>(data[0]) << 16) | (static_cast<uint32_t>(data[1]) << 8) |
+                        static_cast<uint32_t>(data[2]);
+
+      // Subtract the offset to get signed packed value
+      // TIMEF_INT_OFS = 0x800000LL (for binary key compatibility)
+      constexpr int32_t kTimefIntOfs = 0x800000;
+      int32_t intpart = static_cast<int32_t>(packed) - kTimefIntOfs;
+
+      // Handle negative time values
+      bool negative = intpart < 0;
+      if (negative) {
+        intpart = -intpart;
+      }
+
+      // Extract time parts per MySQL format:
+      // hour = hms >> 12 (10 bits)
+      // minute = (hms >> 6) & 0x3F (6 bits)
+      // second = hms & 0x3F (6 bits)
+      unsigned int hour = (intpart >> 12) & 0x3FF;
+      unsigned int minute = (intpart >> 6) & 0x3F;
+      unsigned int second = intpart & 0x3F;
+
+      std::ostringstream oss;
+      if (negative) {
+        oss << '-';
+      }
+      oss << std::setfill('0') << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2)
+          << second;
+
+      // Process fractional seconds if present
+      if (metadata > 0) {
+        int frac_bytes = (metadata + 1) / 2;
+        int32_t frac = 0;
+        for (int i = 0; i < frac_bytes; i++) {
+          frac = (frac << 8) | data[3 + i];
+        }
+
+        // Handle signed fractional values
+        uint32_t usec = 0;
+        switch (metadata) {
+          case 1:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
+            break;
+          case 2:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
+            break;
+          case 3:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
+            break;
+          case 4:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
+            break;
+          case 5:
+            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
+            break;
+          case 6:
+            usec = static_cast<uint32_t>(std::abs(frac));
             break;
         }
 

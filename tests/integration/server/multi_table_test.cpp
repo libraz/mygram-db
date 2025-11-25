@@ -525,6 +525,7 @@ TEST(BinlogReaderMultiTableTest, EventRoutingToDifferentTables) {
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "test-uuid:1";
   reader_config.queue_size = 100;
+  reader_config.server_id = 12345;  // Test server ID
 
   mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
   mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
@@ -565,6 +566,7 @@ TEST(BinlogReaderMultiTableTest, UnknownTableEventIgnored) {
 
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "test-uuid:1";
+  reader_config.server_id = 12345;  // Test server ID
 
   mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
   mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
@@ -631,6 +633,7 @@ TEST(BinlogReaderMultiTableTest, MultipleEventTypesAcrossTables) {
 
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "test-uuid:1";
+  reader_config.server_id = 12345;  // Test server ID
 
   mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
   mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
@@ -686,6 +689,7 @@ TEST(BinlogReaderMultiTableTest, MultiTableModeConfiguration) {
   // Test with reader configuration
   mygramdb::mysql::BinlogReader::Config reader_config;
   reader_config.start_gtid = "server-uuid:100";
+  reader_config.server_id = 12345;  // Test server ID
 
   mygramdb::config::MysqlConfig mysql_config;  // Use default (UTC timezone)
   mygramdb::mysql::BinlogReader reader(conn, table_contexts, mysql_config, reader_config);

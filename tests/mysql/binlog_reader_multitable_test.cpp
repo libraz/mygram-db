@@ -63,6 +63,7 @@ class BinlogReaderFixture : public ::testing::Test {
     reader_config_.start_gtid = "uuid:1";
     reader_config_.queue_size = 2;
     reader_config_.reconnect_delay_ms = 10;
+    reader_config_.server_id = 12345;  // Test server ID
 
     index_.Clear();
     doc_store_.Clear();
