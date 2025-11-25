@@ -65,6 +65,17 @@ class ResultSorter {
   static constexpr size_t kSchwartzianTransformThreshold = 100;
 
   /**
+   * @brief Maximum result size for Schwartzian Transform
+   *
+   * To prevent memory explosion, limit Schwartzian Transform to this size.
+   * Beyond this, fall back to traditional sorting.
+   *
+   * Memory estimate: ~100 bytes per entry (DocId + string + overhead)
+   * 5M entries ≈ 500MB temporary memory
+   */
+  static constexpr size_t kSchwartzianTransformMaxSize = 5'000'000;
+
+  /**
    * @brief Entry for Schwartzian Transform (pre-computed sort key)
    */
   struct SortEntry {
@@ -109,6 +120,27 @@ class ResultSorter {
                                                          const storage::DocumentStore& doc_store,
                                                          const OrderByClause& order_by,
                                                          const std::string& primary_key_column = "id");
+
+  /**
+   * @brief Sort using Schwartzian Transform with partial_sort
+   *
+   * Combines Schwartzian Transform with partial_sort for optimal performance:
+   * - Pre-computes sort keys once (O(N) lookups with single lock)
+   * - Uses partial_sort (O(N log K) comparisons, no lock contention)
+   *
+   * This eliminates lock contention during parallel query execution.
+   *
+   * @param results Document IDs to sort (modified in-place)
+   * @param doc_store Document store for retrieving sort keys
+   * @param order_by ORDER BY clause
+   * @param primary_key_column Primary key column name
+   * @param top_k Number of elements to partially sort
+   * @return Top K sorted document IDs
+   */
+  static std::vector<DocId> SortWithSchwartzianTransformPartial(const std::vector<DocId>& results,
+                                                                const storage::DocumentStore& doc_store,
+                                                                const OrderByClause& order_by,
+                                                                const std::string& primary_key_column, size_t top_k);
 
   /**
    * @brief Compare function for sorting

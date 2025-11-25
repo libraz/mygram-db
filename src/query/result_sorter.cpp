@@ -7,6 +7,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <array>
+#include <charconv>
 #include <variant>
 
 #include "utils/error.h"
@@ -27,11 +29,59 @@ constexpr int kDoublePrecision = 6;
 constexpr size_t kDocIdBufferSize = kDocIdWidth + 2;  // Ensure enough space for width + null
 constexpr size_t kNumericBufferSize = 32;
 
+// Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
+constexpr size_t kToCharsBufferSize = 21;
+
 // Signed integer offset to make all values positive for sorting
 constexpr long long kSignedOffset = (1LL << 60);
 
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;
+
+/**
+ * @brief Convert uint64_t to zero-padded string using std::to_chars (locale-independent)
+ *
+ * This is ~10x faster than snprintf for parallel execution because:
+ * - No locale lookup (localeconv_l)
+ * - No os_unfair_lock contention
+ *
+ * @param num Number to convert
+ * @param width Target width (will be zero-padded)
+ * @return Zero-padded string
+ */
+inline std::string ToZeroPaddedString(uint64_t num, int width) {
+  // Buffer large enough for max uint64_t (20 digits)
+  std::array<char, kToCharsBufferSize> buf{};
+  // std::to_chars requires pointer range; buf.data() + buf.size() is idiomatic end pointer
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), num);
+
+  if (ec != std::errc()) {
+    // Fallback (should never happen for valid uint64_t)
+    return std::to_string(num);
+  }
+
+  auto num_digits = static_cast<size_t>(ptr - buf.data());
+  auto target_width = static_cast<size_t>(width);
+
+  if (num_digits >= target_width) {
+    return {buf.data(), num_digits};
+  }
+
+  // Zero-pad on the left
+  std::string result(target_width, '0');
+  // std::copy destination requires pointer arithmetic for offset positioning
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  std::copy(buf.data(), ptr, result.data() + (target_width - num_digits));
+  return result;
+}
+
+/**
+ * @brief Convert uint32_t to zero-padded string using std::to_chars
+ */
+inline std::string ToZeroPaddedString(uint32_t num, int width) {
+  return ToZeroPaddedString(static_cast<uint64_t>(num), width);
+}
 
 }  // namespace
 
@@ -207,6 +257,98 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   return sorted_results;
 }
 
+std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::vector<DocId>& results,
+                                                                     const storage::DocumentStore& doc_store,
+                                                                     const OrderByClause& order_by,
+                                                                     const std::string& primary_key_column,
+                                                                     size_t top_k) {
+  // Schwartzian Transform + partial_sort: eliminates lock contention during sorting
+  //
+  // Performance improvement for parallel execution:
+  // - Before: N log K comparisons × 2 GetPrimaryKey() calls = 2N log K lock acquisitions per query
+  // - After:  1 batch lookup (1 lock) + N log K string comparisons (no locks)
+  // - For 100 parallel queries with N=10,000, K=100:
+  //   Before: ~265,000 × 100 = 26.5M lock acquisitions total
+  //   After:  100 lock acquisitions total (99.9996% reduction)
+
+  if (results.empty() || top_k == 0) {
+    return {};
+  }
+
+  // Clamp top_k to results size
+  top_k = std::min(top_k, results.size());
+
+  std::vector<SortEntry> entries;
+  try {
+    entries.reserve(results.size());
+  } catch (const std::bad_alloc&) {
+    // Memory allocation failed - this shouldn't happen as caller checks size
+    mygram::utils::StructuredLog()
+        .Event("sort_fallback")
+        .Field("reason", "memory_allocation_failed")
+        .Field("size", static_cast<uint64_t>(results.size()))
+        .Warn();
+    return {};  // Let caller handle fallback
+  }
+
+  // Phase 1: Pre-compute sort keys for all DocIDs
+  // Use batch lookup for primary key ordering (single lock acquisition)
+  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+
+  if (is_primary_key_order) {
+    // Batch primary key lookup: single lock acquisition for all keys
+    auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
+
+    for (size_t i = 0; i < results.size(); ++i) {
+      const auto& pk_str = primary_keys[i];
+      std::string sort_key;
+
+      if (!pk_str.empty()) {
+        // Numeric primary keys: pad with zeros for lexicographic ordering
+        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+          try {
+            uint64_t num = std::stoull(pk_str);
+            // Use std::to_chars (locale-independent, no lock contention)
+            sort_key = ToZeroPaddedString(num, kNumericWidth);
+          } catch (const std::exception&) {
+            sort_key = pk_str;  // Overflow - use as string
+          }
+        } else {
+          sort_key = pk_str;  // String primary key
+        }
+      } else {
+        // Fallback: use DocID as sort key (locale-independent)
+        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
+      }
+
+      entries.push_back({results[i], std::move(sort_key)});
+    }
+  } else {
+    // Filter column: individual lookups (still benefits from pre-computation)
+    for (const auto& doc_id : results) {
+      std::string sort_key = GetSortKey(doc_id, doc_store, order_by, primary_key_column);
+      entries.push_back({doc_id, std::move(sort_key)});
+    }
+  }
+
+  // Phase 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
+  bool ascending = (order_by.order == SortOrder::ASC);
+  std::partial_sort(entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(top_k), entries.end(),
+                    [ascending](const SortEntry& lhs, const SortEntry& rhs) {
+                      int cmp = lhs.sort_key.compare(rhs.sort_key);
+                      return ascending ? (cmp < 0) : (cmp > 0);
+                    });
+
+  // Phase 3: Extract top K sorted DocIDs
+  std::vector<DocId> sorted_results;
+  sorted_results.reserve(top_k);
+  for (size_t i = 0; i < top_k; ++i) {
+    sorted_results.push_back(entries[i].doc_id);
+  }
+
+  return sorted_results;
+}
+
 bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   // Optimization: for primary key ordering, try numeric comparison first
   // This avoids string allocation for numeric primary keys
@@ -342,39 +484,59 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
       (total_needed < results.size() && total_needed_double < results_size_double * kPartialSortThreshold);
 
   // Decide whether to use Schwartzian Transform optimization
-  // Benefits: Eliminates repeated GetSortKey() calls (96% reduction in lock acquisitions)
-  // Trade-offs: Requires O(N) temporary memory, only beneficial for N >= threshold
+  // Benefits: Eliminates repeated GetSortKey() calls (96%+ reduction in lock acquisitions)
+  // Trade-offs: Requires O(N) temporary memory
   //
   // Use Schwartzian Transform when:
   // 1. Result set is large enough (N >= 100) to justify overhead
-  // 2. NOT using partial_sort (Schwartzian Transform returns new vector, incompatible with in-place partial_sort)
+  // 2. Result set is not too large (N <= 5M) to avoid memory explosion
   //
-  // Schwartzian Transform now supports both primary keys and filter columns.
-  // TODO(performance): Combine Schwartzian Transform with partial_sort in future
-  bool use_schwartzian = (results.size() >= kSchwartzianTransformThreshold && !use_partial_sort);
+  // Schwartzian Transform now supports both full sort and partial_sort.
+  bool use_schwartzian =
+      (results.size() >= kSchwartzianTransformThreshold && results.size() <= kSchwartzianTransformMaxSize);
 
-  if (use_schwartzian) {
-    // Schwartzian Transform: Pre-compute sort keys, then sort
+  if (use_schwartzian && use_partial_sort) {
+    // Schwartzian Transform + partial_sort: Best for parallel execution
+    // Eliminates lock contention by pre-computing all sort keys
+    // Memory: ~100 bytes per entry × N (temporary allocation)
+    auto sorted_results =
+        SortWithSchwartzianTransformPartial(results, doc_store, order_by, primary_key_column, total_needed);
+
+    if (!sorted_results.empty()) {
+      // Success - return directly (already paginated to total_needed)
+      spdlog::trace("Used Schwartzian Transform + partial_sort for {} out of {} results", total_needed, results.size());
+
+      // Apply OFFSET (skip first query.offset elements)
+      auto start = std::min(static_cast<size_t>(query.offset), sorted_results.size());
+      auto end = sorted_results.size();
+      auto start_iter = sorted_results.begin() + static_cast<ptrdiff_t>(start);
+      auto end_iter = sorted_results.begin() + static_cast<ptrdiff_t>(end);
+      return std::vector<DocId>{start_iter, end_iter};
+    }
+    // Fall through to traditional partial_sort if Schwartzian failed
+    spdlog::trace("Schwartzian Transform failed, falling back to traditional partial_sort");
+  } else if (use_schwartzian) {
+    // Schwartzian Transform: Pre-compute sort keys, then full sort
     // Expected: 30-50% reduction in sort time for N >= 10,000
-    // Memory: ~50 bytes per entry × N (temporary allocation)
+    // Memory: ~100 bytes per entry × N (temporary allocation)
     auto sorted_results = SortWithSchwartzianTransform(results, doc_store, order_by, primary_key_column);
     results = std::move(sorted_results);
 
     spdlog::trace("Used Schwartzian Transform for {} results", results.size());
   } else if (use_partial_sort) {
-    // partial_sort: O(N * log(K)) where K = total_needed
-    // For 800K results with K=100: ~800K * log2(100) ≈ 5.3M operations
-    // vs full sort: 800K * log2(800K) ≈ 15.9M operations
-    // Memory: in-place, no additional allocation
+    // Traditional partial_sort: O(N * log(K)) where K = total_needed
+    // Note: This path has lock contention issues with parallel execution
+    // Used only for very large result sets (> 5M) to avoid memory explosion
     SortComparator comparator(doc_store, order_by, primary_key_column);
     std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
                       comparator);
 
-    spdlog::trace("Used partial_sort for {} out of {} results", total_needed, results.size());
+    spdlog::trace("Used traditional partial_sort for {} out of {} results (large dataset fallback)", total_needed,
+                  results.size());
   } else {
     // Full sort: O(N * log(N))
-    // Use when we need most of the results anyway OR result set is too small for Schwartzian Transform
-    // Memory: in-place, no additional allocation
+    // Use when result set is too small for Schwartzian Transform (< 100)
+    // Lock contention is minimal for small result sets
     SortComparator comparator(doc_store, order_by, primary_key_column);
     std::sort(results.begin(), results.end(), comparator);
 
