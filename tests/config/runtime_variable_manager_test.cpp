@@ -454,6 +454,11 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
   auto result3 = manager->SetVariable("mysql.database", "new_db");
   EXPECT_FALSE(result3);
 
+  // Try to set logging.file (immutable)
+  auto result4 = manager->SetVariable("logging.file", "/var/log/mygramdb/mygramdb.log");
+  EXPECT_FALSE(result4);
+  EXPECT_EQ(static_cast<int>(result4.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+
   // Original values should remain unchanged
   auto user_result = manager->GetVariable("mysql.user");
   ASSERT_TRUE(user_result);

@@ -188,7 +188,14 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   thread_pool_ = std::move(components.thread_pool);
   table_catalog_ = std::move(components.table_catalog);
   cache_manager_ = std::move(components.cache_manager);
+  variable_manager_ = std::move(components.variable_manager);
   handler_context_ = std::move(components.handler_context);
+
+  // Update HandlerContext pointer to point to TcpServer-owned variable_manager
+  // (The original pointer in HandlerContext pointed to the components.variable_manager
+  // which would become invalid after this scope)
+  handler_context_->variable_manager = variable_manager_.get();
+
   search_handler_ = std::move(components.search_handler);
   document_handler_ = std::move(components.document_handler);
   dump_handler_ = std::move(components.dump_handler);
@@ -196,6 +203,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   replication_handler_ = std::move(components.replication_handler);
   debug_handler_ = std::move(components.debug_handler);
   cache_handler_ = std::move(components.cache_handler);
+  variable_handler_ = std::move(components.variable_handler);
 #ifdef USE_MYSQL
   sync_handler_ = std::move(components.sync_handler);
 #endif

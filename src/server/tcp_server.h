@@ -157,9 +157,7 @@ class TcpServer {
   /**
    * @brief Get runtime variable manager pointer (for ServerOrchestrator to set callbacks)
    */
-  config::RuntimeVariableManager* GetVariableManager() {
-    return handler_context_ ? handler_context_->variable_manager : nullptr;
-  }
+  config::RuntimeVariableManager* GetVariableManager() { return variable_manager_.get(); }
 
   /**
    * @brief Get rate limiter pointer (for ServerOrchestrator to set callbacks)
@@ -204,6 +202,7 @@ class TcpServer {
   std::unique_ptr<RequestDispatcher> dispatcher_;
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
+  std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
   std::unique_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
@@ -231,6 +230,7 @@ class TcpServer {
   std::unique_ptr<CommandHandler> replication_handler_;
   std::unique_ptr<CommandHandler> debug_handler_;
   std::unique_ptr<CommandHandler> cache_handler_;
+  std::unique_ptr<CommandHandler> variable_handler_;
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler_;
 #endif
