@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.6] - 2025-11-26
+
+### Performance
+
+- **Cache key optimization** - Exclude LIMIT/OFFSET from cache keys to improve hit rate; single cache entry now serves all pagination variants of the same query
+
+### Refactoring
+
+- **Log verbosity reduction** - Demote startup/shutdown messages to debug level for cleaner production logs; adopt structured logging for config loading
+
+**Detailed Release Notes**: [docs/releases/v1.3.6.md](docs/releases/v1.3.6.md)
+
 ## [1.3.5] - 2025-11-26
 
 ### Performance
@@ -254,7 +266,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.5...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.6...HEAD
+[1.3.6]: https://github.com/libraz/mygram-db/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/libraz/mygram-db/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/libraz/mygram-db/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/libraz/mygram-db/compare/v1.3.2...v1.3.3
