@@ -106,7 +106,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   if (!tcp_start) {
     return mygram::utils::MakeUnexpected(tcp_start.error());
   }
-  spdlog::info("TCP server started on {}:{}", deps_.config.api.tcp.bind, deps_.config.api.tcp.port);
 
   // Start HTTP server (if enabled)
   if (http_server_) {
@@ -125,24 +124,23 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
 }
 
 void ServerOrchestrator::Stop() {
-  spdlog::info("Stopping server components...");
+  spdlog::debug("Stopping server components...");
 
   // Stop HTTP server first (depends on TCP server's cache manager)
   if (http_server_ && http_server_->IsRunning()) {
-    spdlog::info("Stopping HTTP server");
+    spdlog::debug("Stopping HTTP server");
     http_server_->Stop();
   }
 
   // Stop TCP server
   if (tcp_server_) {
-    spdlog::info("Stopping TCP server");
     tcp_server_->Stop();
   }
 
 #ifdef USE_MYSQL
   // Stop BinlogReader
   if (binlog_reader_ && binlog_reader_->IsRunning()) {
-    spdlog::info("Stopping binlog reader");
+    spdlog::debug("Stopping binlog reader");
     binlog_reader_->Stop();
   }
 
@@ -154,7 +152,7 @@ void ServerOrchestrator::Stop() {
 
   // Table contexts will be automatically destroyed
   started_ = false;
-  spdlog::info("All server components stopped");
+  spdlog::debug("All server components stopped");
 }
 
 bool ServerOrchestrator::IsRunning() const {
@@ -162,10 +160,10 @@ bool ServerOrchestrator::IsRunning() const {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeTables() {
-  spdlog::info("Initializing {} table(s)...", deps_.config.tables.size());
+  spdlog::debug("Initializing {} table(s)...", deps_.config.tables.size());
 
   for (const auto& table_config : deps_.config.tables) {
-    spdlog::info("Initializing table: {}", table_config.name);
+    spdlog::debug("Initializing table: {}", table_config.name);
 
     auto ctx = std::make_unique<server::TableContext>();
     ctx->name = table_config.name;
@@ -176,16 +174,16 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
     table_contexts_[table_config.name] = std::move(ctx);
-    spdlog::info("Table initialized successfully: {}", table_config.name);
+    spdlog::debug("Table initialized successfully: {}", table_config.name);
   }
 
-  spdlog::info("All {} table(s) initialized", table_contexts_.size());
+  spdlog::debug("All {} table(s) initialized", table_contexts_.size());
   return {};
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeMySQL() {
 #ifdef USE_MYSQL
-  spdlog::info("Initializing MySQL connection...");
+  spdlog::debug("Initializing MySQL connection...");
 
   mysql::Connection::Config mysql_config;
   mysql_config.host = deps_.config.mysql.host;
@@ -211,7 +209,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
                                  "Failed to connect to MySQL: " + mysql_connection_->GetLastError()));
   }
 
-  spdlog::info("MySQL connection established");
+  spdlog::debug("MySQL connection established");
 #endif
   return {};
 }
@@ -219,8 +217,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSnapshots() {
 #ifdef USE_MYSQL
   if (!deps_.config.replication.auto_initial_snapshot) {
-    spdlog::info("Skipping automatic snapshot build (auto_initial_snapshot=false)");
-    spdlog::info("Use SYNC command to manually trigger snapshot synchronization");
+    spdlog::debug("Skipping automatic snapshot build (auto_initial_snapshot=false)");
+    spdlog::debug("Use SYNC command to manually trigger snapshot synchronization");
     return {};
   }
 
@@ -293,14 +291,14 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     if (start_gtid.empty()) {
       spdlog::warn("Snapshot GTID not available, replication may miss changes");
     } else {
-      spdlog::info("Replication will start from snapshot GTID: {}", start_gtid);
+      spdlog::debug("Replication will start from snapshot GTID: {}", start_gtid);
     }
   } else if (start_from == "latest") {
     // Get current GTID from MySQL
     auto latest_gtid = mysql_connection_->GetLatestGTID();
     if (latest_gtid) {
       start_gtid = latest_gtid.value();
-      spdlog::info("Replication will start from latest GTID: {}", start_gtid);
+      spdlog::debug("Replication will start from latest GTID: {}", start_gtid);
     } else {
       spdlog::warn("Failed to get latest GTID, starting from empty");
       start_gtid = "";
@@ -308,7 +306,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   } else if (start_from.find("gtid=") == 0) {
     // Extract GTID from "gtid=<UUID:txn>" format
     start_gtid = start_from.substr(kGtidPrefixLength);
-    spdlog::info("Replication will start from specified GTID: {}", start_gtid);
+    spdlog::debug("Replication will start from specified GTID: {}", start_gtid);
   }
 
   // Prepare table_contexts map for BinlogReader
@@ -330,9 +328,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   snapshot_gtid_ = start_gtid;
 
   if (start_gtid.empty()) {
-    spdlog::info("Binlog replication initialized but not started (waiting for GTID)");
+    spdlog::debug("Binlog replication initialized but not started (waiting for GTID)");
   } else {
-    spdlog::info("Binlog replication initialized (will start on Start() call)");
+    spdlog::debug("Binlog replication initialized (will start on Start() call)");
   }
 #endif
   return {};
@@ -375,7 +373,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
       std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, nullptr);
 #endif
 
-  spdlog::info("TCP server initialized");
+  spdlog::debug("TCP server initialized");
 
 #ifdef USE_MYSQL
   // Setup MySQL reconnection callback for RuntimeVariableManager

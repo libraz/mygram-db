@@ -167,7 +167,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
 
-  spdlog::info("ConnectionAcceptor listening on {}:{}", config_.host, actual_port_);
+  spdlog::debug("ConnectionAcceptor listening on {}:{}", config_.host, actual_port_);
   return {};
 }
 
@@ -176,7 +176,7 @@ void ConnectionAcceptor::Stop() {
     return;
   }
 
-  spdlog::info("Stopping ConnectionAcceptor...");
+  spdlog::debug("Stopping ConnectionAcceptor...");
   should_stop_ = true;
   running_ = false;
 
@@ -203,7 +203,7 @@ void ConnectionAcceptor::Stop() {
     active_fds_.clear();
   }
 
-  spdlog::info("ConnectionAcceptor stopped");
+  spdlog::debug("ConnectionAcceptor stopped");
 }
 
 void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
@@ -211,7 +211,7 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
 }
 
 void ConnectionAcceptor::AcceptLoop() {
-  spdlog::info("Accept loop started");
+  spdlog::debug("Accept loop started");
 
   while (!should_stop_) {
     struct sockaddr_in client_addr = {};
@@ -336,7 +336,7 @@ void ConnectionAcceptor::AcceptLoop() {
     }
   }
 
-  spdlog::info("Accept loop exited");
+  spdlog::debug("Accept loop exited");
 }
 
 bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {

@@ -82,7 +82,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(thread_pool_result.error());
     }
     components.thread_pool = std::move(*thread_pool_result);
-    spdlog::info("ServerLifecycleManager: ThreadPool initialized");
+    spdlog::debug("ServerLifecycleManager: ThreadPool initialized");
   }
 
   // Step 2: Initialize TableCatalog (no dependencies)
@@ -92,7 +92,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(table_catalog_result.error());
     }
     components.table_catalog = std::move(*table_catalog_result);
-    spdlog::info("ServerLifecycleManager: TableCatalog initialized");
+    spdlog::debug("ServerLifecycleManager: TableCatalog initialized");
   }
 
   // Step 3: Initialize CacheManager (depends on config)
@@ -103,7 +103,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     }
     components.cache_manager = std::move(*cache_manager_result);
     if (components.cache_manager) {
-      spdlog::info("ServerLifecycleManager: CacheManager initialized");
+      spdlog::debug("ServerLifecycleManager: CacheManager initialized");
     }
   }
 
@@ -120,7 +120,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       components.variable_manager->SetCacheManager(components.cache_manager.get());
     }
 
-    spdlog::info("ServerLifecycleManager: RuntimeVariableManager initialized");
+    spdlog::debug("ServerLifecycleManager: RuntimeVariableManager initialized");
   }
 
   // Step 4: Initialize HandlerContext (depends on catalog, cache, variable_manager)
@@ -131,7 +131,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(handler_context_result.error());
     }
     components.handler_context = std::move(*handler_context_result);
-    spdlog::info("ServerLifecycleManager: HandlerContext initialized");
+    spdlog::debug("ServerLifecycleManager: HandlerContext initialized");
   }
 
   // Step 5: Initialize Handlers (depend on HandlerContext)
@@ -153,7 +153,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 #ifdef USE_MYSQL
     components.sync_handler = std::move(handlers_result->sync_handler);
 #endif
-    spdlog::info("ServerLifecycleManager: Command handlers initialized");
+    spdlog::debug("ServerLifecycleManager: Command handlers initialized");
   }
 
   // Step 6: Initialize Dispatcher (depends on handlers)
@@ -163,7 +163,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(dispatcher_result.error());
     }
     components.dispatcher = std::move(*dispatcher_result);
-    spdlog::info("ServerLifecycleManager: RequestDispatcher initialized");
+    spdlog::debug("ServerLifecycleManager: RequestDispatcher initialized");
   }
 
   // Step 7: Initialize Acceptor (depends on thread pool)
@@ -173,7 +173,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(acceptor_result.error());
     }
     components.acceptor = std::move(*acceptor_result);
-    spdlog::info("ServerLifecycleManager: ConnectionAcceptor initialized");
+    spdlog::debug("ServerLifecycleManager: ConnectionAcceptor initialized");
   }
 
   // Step 8: Initialize Scheduler (depends on catalog)
@@ -184,11 +184,11 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     }
     components.scheduler = std::move(*scheduler_result);
     if (components.scheduler) {
-      spdlog::info("ServerLifecycleManager: SnapshotScheduler initialized");
+      spdlog::debug("ServerLifecycleManager: SnapshotScheduler initialized");
     }
   }
 
-  spdlog::info("ServerLifecycleManager: All components initialized successfully");
+  spdlog::debug("ServerLifecycleManager: All components initialized successfully");
   return components;
 }
 

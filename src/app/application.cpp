@@ -221,7 +221,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::Start() {
 }
 
 void Application::RunMainLoop() {
-  spdlog::info("Entering main loop...");
+  spdlog::debug("Entering main loop...");
 
   while (!signal_manager_->IsShutdownRequested()) {
     // Check for log rotation signal (SIGUSR1)
@@ -236,7 +236,7 @@ void Application::RunMainLoop() {
     std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownCheckIntervalMs));
   }
 
-  spdlog::info("Shutdown requested, cleaning up...");
+  spdlog::debug("Shutdown requested, cleaning up...");
 }
 
 void Application::Stop() {
@@ -340,7 +340,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
     test_stream.close();
     std::filesystem::remove(test_file);
 
-    spdlog::info("Dump directory verified: {} (canonical: {})", dump_dir, canonical_dump.string());
+    spdlog::debug("Dump directory verified: {} (canonical: {})", dump_dir, canonical_dump.string());
   } catch (const std::exception& e) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kIOError, "Failed to verify dump directory: " + std::string(e.what())));

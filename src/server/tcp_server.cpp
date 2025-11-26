@@ -211,7 +211,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 }
 
 void TcpServer::Stop() {
-  spdlog::info("Stopping TCP server...");
+  spdlog::debug("Stopping TCP server...");
 
   // Signal shutdown to all connection handlers
   shutdown_requested_ = true;
@@ -239,7 +239,7 @@ void TcpServer::Stop() {
     thread_pool_->Shutdown();
   }
 
-  spdlog::info("TCP server stopped. Handled {} total requests", stats_.GetTotalRequests());
+  spdlog::debug("TCP server stopped. Handled {} total requests", stats_.GetTotalRequests());
 }
 
 void TcpServer::HandleConnection(int client_fd) {

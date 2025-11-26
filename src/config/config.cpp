@@ -19,6 +19,7 @@
 #include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::config {
 
@@ -816,10 +817,13 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
     // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(config_json);
 
-    spdlog::info("Configuration loaded successfully from {}", path);
-    spdlog::info("  Tables: {}", config.tables.size());
-    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user, std::string(config.mysql.password.length(), '*'),
-                 config.mysql.host, config.mysql.port);
+    mygram::utils::StructuredLog()
+        .Event("config_loaded")
+        .Field("path", path)
+        .Field("tables", static_cast<uint64_t>(config.tables.size()))
+        .Field("mysql_host", config.mysql.host)
+        .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
+        .Info();
 
     return config;
   } catch (const std::exception& e) {
@@ -841,10 +845,13 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
     // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(json_root);
 
-    spdlog::info("Configuration loaded successfully from {}", path);
-    spdlog::info("  Tables: {}", config.tables.size());
-    spdlog::info("  MySQL: {}:{}@{}:{}", config.mysql.user, std::string(config.mysql.password.length(), '*'),
-                 config.mysql.host, config.mysql.port);
+    mygram::utils::StructuredLog()
+        .Event("config_loaded")
+        .Field("path", path)
+        .Field("tables", static_cast<uint64_t>(config.tables.size()))
+        .Field("mysql_host", config.mysql.host)
+        .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
+        .Info();
 
     return config;
   } catch (const YAML::Exception& e) {

@@ -164,7 +164,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
   std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";
-  spdlog::info("{}Connected to MySQL {}:{}{}{}", context_prefix, config_.host, config_.port, db_info, ssl_info);
+  spdlog::debug("{}Connected to MySQL {}:{}{}{}", context_prefix, config_.host, config_.port, db_info, ssl_info);
   return {};
 }
 

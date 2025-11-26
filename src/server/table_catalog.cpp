@@ -10,7 +10,7 @@
 namespace mygramdb::server {
 
 TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables) : tables_(std::move(tables)) {
-  spdlog::info("TableCatalog initialized with {} tables", tables_.size());
+  spdlog::debug("TableCatalog initialized with {} tables", tables_.size());
 }
 
 TableContext* TableCatalog::GetTable(const std::string& name) {

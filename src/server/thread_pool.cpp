@@ -23,8 +23,8 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(
     }
   }
 
-  spdlog::info("Creating thread pool with {} workers, queue size: {}", num_threads,
-               queue_size == 0 ? "unbounded" : std::to_string(queue_size));
+  spdlog::debug("Creating thread pool with {} workers, queue size: {}", num_threads,
+                queue_size == 0 ? "unbounded" : std::to_string(queue_size));
 
   // Start worker threads
   workers_.reserve(num_threads);
@@ -144,7 +144,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
       }
 
       if (elapsed < std::chrono::milliseconds(timeout_ms)) {
-        spdlog::info("Thread pool shut down gracefully (all tasks completed)");
+        spdlog::debug("Thread pool shut down gracefully (all tasks completed)");
       }
     } else {
       // No timeout - wait for all workers
@@ -153,7 +153,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
           worker.join();
         }
       }
-      spdlog::info("Thread pool shut down gracefully (all tasks completed)");
+      spdlog::debug("Thread pool shut down gracefully (all tasks completed)");
     }
   } else {
     // Non-graceful or no pending tasks - just join workers
@@ -163,9 +163,9 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
       }
     }
     if (!graceful) {
-      spdlog::info("Thread pool shut down immediately (non-graceful)");
+      spdlog::debug("Thread pool shut down immediately (non-graceful)");
     } else {
-      spdlog::info("Thread pool shut down (no pending tasks)");
+      spdlog::debug("Thread pool shut down (no pending tasks)");
     }
   }
 }
