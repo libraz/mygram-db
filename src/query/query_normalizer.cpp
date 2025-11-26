@@ -56,12 +56,10 @@ std::string QueryNormalizer::Normalize(const query::Query& query) {
   // Add SORT clause (with default if not specified)
   oss << " " << NormalizeSortClause(query.order_by, query.table);
 
-  // Add LIMIT - use actual limit value (which may have been set by RequestDispatcher
-  // from api.default_limit if not explicitly specified by the user)
-  oss << " LIMIT " << query.limit;
-
-  // Add OFFSET (always include for consistency)
-  oss << " OFFSET " << query.offset;
+  // Note: LIMIT and OFFSET are intentionally excluded from cache key.
+  // The cache stores full results (before pagination), and LIMIT/OFFSET
+  // are applied when retrieving from cache. This allows a single cache
+  // entry to serve all pagination requests for the same query.
 
   return oss.str();
 }

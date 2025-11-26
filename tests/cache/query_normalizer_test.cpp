@@ -151,60 +151,80 @@ TEST(QueryNormalizerTest, FilterOrdering) {
 }
 
 /**
- * @brief Test default limit uses actual value (different values)
+ * @brief Test LIMIT is excluded from cache key
+ *
+ * LIMIT and OFFSET are excluded from cache keys because the cache stores
+ * full results (before pagination). Different LIMIT values should produce
+ * the same cache key, and pagination is applied when retrieving from cache.
  */
-TEST(QueryNormalizerTest, DefaultLimitDifferent) {
+TEST(QueryNormalizerTest, LimitExcludedFromCacheKey) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
   query1.search_text = "test";
   query1.limit = 100;
-  query1.limit_explicit = false;  // Default (set by api.default_limit)
+  query1.limit_explicit = false;
 
   query::Query query2;
   query2.type = query::QueryType::SEARCH;
   query2.table = "posts";
   query2.search_text = "test";
   query2.limit = 50;
-  query2.limit_explicit = false;  // Default (different api.default_limit)
+  query2.limit_explicit = false;
 
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // Even with default limits, different actual limit values should produce different cache keys
-  // This prevents cache hits from returning incorrect number of results
-  EXPECT_NE(normalized1, normalized2);
-}
-
-/**
- * @brief Test default limit uses actual value (same values)
- */
-TEST(QueryNormalizerTest, DefaultLimitSame) {
-  query::Query query1;
-  query1.type = query::QueryType::SEARCH;
-  query1.table = "posts";
-  query1.search_text = "test";
-  query1.limit = 50;
-  query1.limit_explicit = false;  // Default (set by api.default_limit)
-
-  query::Query query2;
-  query2.type = query::QueryType::SEARCH;
-  query2.table = "posts";
-  query2.search_text = "test";
-  query2.limit = 50;
-  query2.limit_explicit = false;  // Default (same api.default_limit)
-
-  std::string normalized1 = QueryNormalizer::Normalize(query1);
-  std::string normalized2 = QueryNormalizer::Normalize(query2);
-
-  // Same limit value should produce same cache key regardless of limit_explicit flag
+  // Different LIMIT values should produce the SAME cache key
+  // (LIMIT is excluded from normalization)
   EXPECT_EQ(normalized1, normalized2);
 }
 
 /**
- * @brief Test explicit limit preservation
+ * @brief Test OFFSET is excluded from cache key
+ *
+ * OFFSET is excluded from cache keys for the same reason as LIMIT.
+ * Different pages of the same query should share the same cache entry.
  */
-TEST(QueryNormalizerTest, ExplicitLimit) {
+TEST(QueryNormalizerTest, OffsetExcludedFromCacheKey) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  query1.search_text = "test";
+  query1.limit = 20;
+  query1.offset = 0;  // Page 1
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "test";
+  query2.limit = 20;
+  query2.offset = 20;  // Page 2
+
+  query::Query query3;
+  query3.type = query::QueryType::SEARCH;
+  query3.table = "posts";
+  query3.search_text = "test";
+  query3.limit = 20;
+  query3.offset = 100;  // Page 6
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+  std::string normalized3 = QueryNormalizer::Normalize(query3);
+
+  // Different OFFSET values should produce the SAME cache key
+  // (OFFSET is excluded from normalization)
+  EXPECT_EQ(normalized1, normalized2);
+  EXPECT_EQ(normalized2, normalized3);
+}
+
+/**
+ * @brief Test explicit limit is also excluded from cache key
+ *
+ * Even explicit LIMIT values are excluded from cache keys.
+ * The cache stores full results, and LIMIT is applied on retrieval.
+ */
+TEST(QueryNormalizerTest, ExplicitLimitAlsoExcluded) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -222,8 +242,8 @@ TEST(QueryNormalizerTest, ExplicitLimit) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // Explicit limits should be preserved and differ
-  EXPECT_NE(normalized1, normalized2);
+  // Even explicit LIMIT values should produce the SAME cache key
+  EXPECT_EQ(normalized1, normalized2);
 }
 
 /**

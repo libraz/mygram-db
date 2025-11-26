@@ -245,6 +245,11 @@ TEST_F(CacheOffsetLimitIntegrationTest, MultiplePaginationCombinations) {
 
 /**
  * @brief Test cache statistics are correctly updated
+ *
+ * Verifies that different LIMIT/OFFSET combinations share the same cache entry.
+ * This tests the core optimization: cache stores full results, and pagination
+ * is applied on retrieval, so all pagination variants of the same query hit
+ * a single cache entry.
  */
 TEST_F(CacheOffsetLimitIntegrationTest, CacheStatisticsTracking) {
   int sock = CreateClientSocket();
@@ -259,16 +264,27 @@ TEST_F(CacheOffsetLimitIntegrationTest, CacheStatisticsTracking) {
       << "Should have 1 cache miss. Response: " << stats_response1;
   EXPECT_TRUE(stats_response1.find("cache_hits: 0") != std::string::npos)
       << "Should have 0 cache hits. Response: " << stats_response1;
+  EXPECT_TRUE(stats_response1.find("current_entries: 1") != std::string::npos)
+      << "Should have 1 cache entry. Response: " << stats_response1;
 
-  // Second query with different OFFSET/LIMIT (should be cache hit or miss depending on implementation)
-  SendCommand(sock, "SEARCH test test OFFSET 10 LIMIT 5");
-
-  // Third query with same parameters as second (should definitely be cache hit if caching OFFSET/LIMIT separately)
+  // Second query with different OFFSET/LIMIT - should be cache HIT
+  // because LIMIT/OFFSET are excluded from cache key
   SendCommand(sock, "SEARCH test test OFFSET 10 LIMIT 5");
 
   auto stats_response2 = SendCommand(sock, "CACHE STATS");
-  // At minimum, we should have increased total queries
-  EXPECT_TRUE(stats_response2.find("total_queries:") != std::string::npos);
+  EXPECT_TRUE(stats_response2.find("cache_hits: 1") != std::string::npos)
+      << "Different OFFSET/LIMIT should hit cache. Response: " << stats_response2;
+  EXPECT_TRUE(stats_response2.find("current_entries: 1") != std::string::npos)
+      << "Should still have only 1 cache entry (not 2). Response: " << stats_response2;
+
+  // Third query with yet another OFFSET/LIMIT - should also be cache HIT
+  SendCommand(sock, "SEARCH test test OFFSET 50 LIMIT 20");
+
+  auto stats_response3 = SendCommand(sock, "CACHE STATS");
+  EXPECT_TRUE(stats_response3.find("cache_hits: 2") != std::string::npos)
+      << "Third query should also hit cache. Response: " << stats_response3;
+  EXPECT_TRUE(stats_response3.find("current_entries: 1") != std::string::npos)
+      << "Should still have only 1 cache entry (not 3). Response: " << stats_response3;
 
   close(sock);
 }

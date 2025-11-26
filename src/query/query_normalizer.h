@@ -20,11 +20,16 @@ namespace mygramdb::cache {
  *
  * Normalization rules:
  * 1. Whitespace: Normalize to single spaces
- * 2. Keywords: Convert to uppercase (SEARCH, FILTER, SORT, LIMIT, etc.)
+ * 2. Keywords: Convert to uppercase (SEARCH, FILTER, SORT, etc.)
  * 3. Search text: Keep as-is (case-sensitive)
  * 4. Clause order: Canonicalize to fixed order
  * 5. Filter order: Sort alphabetically by column name
- * 6. Default values: Include explicit defaults (SORT id DESC, LIMIT 100, OFFSET 0)
+ * 6. Default values: Include explicit defaults (SORT id DESC)
+ *
+ * Note: LIMIT and OFFSET are intentionally excluded from the normalized form.
+ * The cache stores full results (before pagination), and LIMIT/OFFSET are
+ * applied when retrieving from cache. This allows a single cache entry to
+ * serve all pagination requests for the same query.
  */
 class QueryNormalizer {
  public:
