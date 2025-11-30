@@ -20,6 +20,7 @@
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
+class IBinlogReader;
 class BinlogReader;
 }  // namespace mygramdb::mysql
 #endif
@@ -100,14 +101,14 @@ struct HandlerContext {
   ServerStats& stats;
   const config::Config* full_config;
   std::string dump_dir;
-  std::atomic<bool>& loading;
-  std::atomic<bool>& read_only;
+  std::atomic<bool>& dump_load_in_progress;        // True when DUMP LOAD operation is in progress
+  std::atomic<bool>& dump_save_in_progress;        // True when DUMP SAVE operation is in progress
   std::atomic<bool>& optimization_in_progress;
   std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
   std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
 #ifdef USE_MYSQL
-  mysql::BinlogReader* binlog_reader;
+  mysql::IBinlogReader* binlog_reader;
   SyncOperationManager* sync_manager;  // Manages sync operations and state
 #else
   void* binlog_reader;

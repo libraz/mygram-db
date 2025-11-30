@@ -443,7 +443,7 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts_, config_.get(), nullptr, tcp_server.GetCacheManager(),
-                         tcp_server.GetLoadingFlag());
+                         tcp_server.GetDumpLoadInProgressFlag());
   ASSERT_TRUE(http_server.Start());
 
   httplib::Client client("http://127.0.0.1:18084");

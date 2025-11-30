@@ -17,6 +17,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_reader_interface.h"
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
 #include "mysql/rows_parser.h"
@@ -60,7 +61,7 @@ struct BinlogEvent {
  *
  * Reads binlog events from MySQL and queues them for processing
  */
-class BinlogReader {
+class BinlogReader : public IBinlogReader {
  public:
   /**
    * @brief Configuration for binlog reader
@@ -106,7 +107,7 @@ class BinlogReader {
    * @brief Start reading binlog events
    * @return Expected<void, Error> - success or start error
    */
-  mygram::utils::Expected<void, mygram::utils::Error> Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override;
 
   /**
    * @brief Start reading binlog events from specific GTID
@@ -121,38 +122,38 @@ class BinlogReader {
   /**
    * @brief Stop reading binlog events
    */
-  void Stop();
+  void Stop() override;
 
   /**
    * @brief Check if reader is running
    */
-  bool IsRunning() const { return running_; }
+  bool IsRunning() const override { return running_.load() && !should_stop_.load(); }
 
   /**
    * @brief Get current GTID
    */
-  std::string GetCurrentGTID() const;
+  std::string GetCurrentGTID() const override;
 
   /**
    * @brief Set current GTID (used when loading from snapshot)
    * @param gtid GTID to set
    */
-  void SetCurrentGTID(const std::string& gtid);
+  void SetCurrentGTID(const std::string& gtid) override;
 
   /**
    * @brief Get queue size
    */
-  size_t GetQueueSize() const;
+  size_t GetQueueSize() const override;
 
   /**
    * @brief Get total events processed
    */
-  uint64_t GetProcessedEvents() const { return processed_events_; }
+  uint64_t GetProcessedEvents() const override { return processed_events_; }
 
   /**
    * @brief Get last error message
    */
-  const std::string& GetLastError() const { return last_error_; }
+  const std::string& GetLastError() const override { return last_error_; }
 
   /**
    * @brief Set server statistics tracker

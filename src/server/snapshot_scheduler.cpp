@@ -24,19 +24,43 @@
 
 namespace mygramdb::server {
 
+namespace {
+/**
+ * @brief RAII guard for atomic boolean flags
+ *
+ * Automatically sets flag to true on construction and resets to false on destruction.
+ * Exception-safe: ensures flag is always reset even if exceptions are thrown.
+ */
+class FlagGuard {
+ public:
+  explicit FlagGuard(std::atomic<bool>& flag) : flag_(flag) { flag_ = true; }
+  ~FlagGuard() { flag_ = false; }
+
+  // Non-copyable and non-movable
+  FlagGuard(const FlagGuard&) = delete;
+  FlagGuard& operator=(const FlagGuard&) = delete;
+  FlagGuard(FlagGuard&&) = delete;
+  FlagGuard& operator=(FlagGuard&&) = delete;
+
+ private:
+  std::atomic<bool>& flag_;
+};
+}  // namespace
+
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
 #ifdef USE_MYSQL
-                                     mysql::BinlogReader* binlog_reader
+                                     mysql::BinlogReader* binlog_reader,
 #else
-                                     void* binlog_reader
+                                     void* binlog_reader,
 #endif
-                                     )
+                                     std::atomic<bool>& dump_save_in_progress)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
-      binlog_reader_(binlog_reader) {
+      binlog_reader_(binlog_reader),
+      dump_save_in_progress_(dump_save_in_progress) {
   if (catalog_ == nullptr) {
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -116,6 +140,16 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
+    // Check if manual DUMP SAVE is in progress (mutual exclusion)
+    if (dump_save_in_progress_.load()) {
+      spdlog::info("Auto-snapshot skipped: manual DUMP SAVE is in progress");
+      return;
+    }
+
+    // Set dump_save_in_progress flag (RAII guard ensures it's cleared even on exceptions)
+    // This prevents manual DUMP SAVE from running during auto-dump
+    FlagGuard dump_save_guard(dump_save_in_progress_);
+
     // Generate timestamp-based filename
     auto timestamp = std::time(nullptr);
     std::tm tm_buf{};

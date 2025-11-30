@@ -50,15 +50,16 @@ class SnapshotScheduler {
    * @param full_config Full configuration (for snapshot metadata)
    * @param dump_dir Directory for snapshot files
    * @param binlog_reader Optional binlog reader for GTID tracking
+   * @param dump_save_in_progress Reference to DUMP SAVE flag for mutual exclusion with manual DUMP SAVE
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
                     std::string dump_dir,
 #ifdef USE_MYSQL
-                    mysql::BinlogReader* binlog_reader
+                    mysql::BinlogReader* binlog_reader,
 #else
-                    void* binlog_reader
+                    void* binlog_reader,
 #endif
-  );
+                    std::atomic<bool>& dump_save_in_progress);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -117,6 +118,9 @@ class SnapshotScheduler {
 #else
   void* binlog_reader_;
 #endif
+
+  // Reference to dump_save_in_progress flag (shared with DumpHandler for mutual exclusion)
+  std::atomic<bool>& dump_save_in_progress_;
 };
 
 }  // namespace mygramdb::server

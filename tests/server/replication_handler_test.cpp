@@ -35,8 +35,8 @@ class ReplicationHandlerTest : public ::testing::Test {
   ReplicationHandlerTest()
       : table_contexts_(),
         stats_(),
-        loading_(false),
-        read_only_(false),
+        dump_load_in_progress_(false),
+        dump_save_in_progress_(false),
         optimization_in_progress_(false),
         replication_paused_for_dump_(false),
         handler_ctx_{.table_catalog = nullptr,
@@ -44,8 +44,8 @@ class ReplicationHandlerTest : public ::testing::Test {
                      .stats = stats_,
                      .full_config = nullptr,
                      .dump_dir = "",
-                     .loading = loading_,
-                     .read_only = read_only_,
+                     .dump_load_in_progress = dump_load_in_progress_,
+                     .dump_save_in_progress = dump_save_in_progress_,
                      .optimization_in_progress = optimization_in_progress_,
                      .replication_paused_for_dump = replication_paused_for_dump_,
                      .mysql_reconnecting = mysql_reconnecting_,
@@ -64,8 +64,8 @@ class ReplicationHandlerTest : public ::testing::Test {
 
   std::unordered_map<std::string, TableContext*> table_contexts_;
   ServerStats stats_;
-  std::atomic<bool> loading_;
-  std::atomic<bool> read_only_;
+  std::atomic<bool> dump_load_in_progress_;
+  std::atomic<bool> dump_save_in_progress_;
   std::atomic<bool> optimization_in_progress_;
   std::atomic<bool> replication_paused_for_dump_;
   std::atomic<bool> mysql_reconnecting_{false};
@@ -210,7 +210,7 @@ TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpLoad) {
   query.type = query::QueryType::REPLICATION_START;
 
   // Simulate DUMP LOAD in progress
-  loading_ = true;
+  dump_load_in_progress_ = true;
 
   ReplicationHandler handler(handler_ctx_);
   ConnectionContext conn_ctx;
@@ -223,7 +223,7 @@ TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpLoad) {
   EXPECT_NE(response.find("Cannot start replication"), std::string::npos);
 
   // Clean up
-  loading_ = false;
+  dump_load_in_progress_ = false;
 }
 
 /**
@@ -237,7 +237,7 @@ TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpSave) {
   query.type = query::QueryType::REPLICATION_START;
 
   // Simulate DUMP SAVE in progress
-  read_only_ = true;
+  dump_save_in_progress_ = true;
 
   ReplicationHandler handler(handler_ctx_);
   ConnectionContext conn_ctx;
@@ -250,7 +250,7 @@ TEST_F(ReplicationHandlerTest, ReplicationStartBlockedDuringDumpSave) {
   EXPECT_NE(response.find("Cannot start replication"), std::string::npos);
 
   // Clean up
-  read_only_ = false;
+  dump_save_in_progress_ = false;
 }
 
 /**

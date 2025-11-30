@@ -422,10 +422,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 #ifdef USE_MYSQL
     http_server_ = std::make_unique<server::HttpServer>(http_config, table_contexts_ptrs, &deps_.config,
                                                         binlog_reader_.get(), tcp_server_->GetCacheManager(),
-                                                        tcp_server_->GetLoadingFlag(), tcp_server_->GetMutableStats());
+                                                        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats());
 #else
     http_server_ = std::make_unique<server::HttpServer>(http_config, table_contexts_ptrs, &deps_.config, nullptr,
-                                                        tcp_server_->GetCacheManager(), tcp_server_->GetLoadingFlag(),
+                                                        tcp_server_->GetCacheManager(), tcp_server_->GetDumpLoadInProgressFlag(),
                                                         tcp_server_->GetMutableStats());
 #endif
 

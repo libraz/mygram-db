@@ -137,6 +137,69 @@ TEST_F(BinlogReaderFixture, RejectsDoubleStart) {
 }
 
 /**
+ * @brief Verify IsRunning returns false when should_stop_ is true
+ *
+ * This tests the fix for the REPLICATION STATUS bug where status would show
+ * "running" even when Stop() was requested but threads hadn't finished yet.
+ */
+TEST_F(BinlogReaderFixture, IsRunningReturnsFalseWhenShouldStopIsTrue) {
+  // Initially not running
+  EXPECT_FALSE(reader_->IsRunning());
+
+  // Simulate running state
+  reader_->running_ = true;
+  EXPECT_TRUE(reader_->IsRunning());
+
+  // Set should_stop_ flag (simulating Stop() was called)
+  reader_->should_stop_ = true;
+
+  // IsRunning should now return false (stopping state)
+  EXPECT_FALSE(reader_->IsRunning());
+
+  // Cleanup
+  reader_->running_ = false;
+  reader_->should_stop_ = false;
+}
+
+/**
+ * @brief Verify Start fails when reader is in stopping state
+ *
+ * When Stop() is called but threads haven't finished joining yet,
+ * Start() should return an appropriate error instead of "already running".
+ */
+TEST_F(BinlogReaderFixture, StartFailsWhenStopping) {
+  // Simulate stopping state: running is true but should_stop is also true
+  reader_->running_ = true;
+  reader_->should_stop_ = true;
+
+  // Start should fail with "stopping" error
+  EXPECT_FALSE(reader_->Start());
+  EXPECT_NE(reader_->GetLastError().find("stopping"), std::string::npos);
+
+  // Cleanup
+  reader_->running_ = false;
+  reader_->should_stop_ = false;
+}
+
+/**
+ * @brief Verify Stop resets should_stop_ flag after completion
+ *
+ * After Stop() completes, should_stop_ should be reset to false
+ * so that subsequent Start() calls work correctly.
+ */
+TEST_F(BinlogReaderFixture, StopResetsShouldStopFlag) {
+  // Simulate running state (without actual threads)
+  reader_->running_ = true;
+
+  // Stop should set should_stop_ temporarily and then reset it
+  reader_->Stop();
+
+  // After Stop completes, both flags should be false
+  EXPECT_FALSE(reader_->running_.load());
+  EXPECT_FALSE(reader_->should_stop_.load());
+}
+
+/**
  * @brief Exercise queue push/pop helpers without worker threads
  */
 TEST_F(BinlogReaderFixture, PushAndPopEvents) {

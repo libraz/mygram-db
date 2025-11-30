@@ -472,13 +472,39 @@ REPLICATION STATUS
 
 ### Response
 
+Multi-line key-value format:
+
 ```
-OK REPLICATION status=<running|stopped> gtid=<current_gtid>
+status: <running|stopped|not_configured>
+current_gtid: <current_gtid>
+processed_events: <count>
+queue_size: <size>
+END
 ```
 
-Example:
+- **status**: Current replication state
+  - `running`: Actively replicating from MySQL
+  - `stopped`: Replication manually stopped
+  - `not_configured`: MySQL replication not configured
+- **current_gtid**: Last processed GTID position
+- **processed_events**: Total binlog events processed
+- **queue_size**: Pending events in queue (only shown when running)
+
+Example (running):
 ```
-OK REPLICATION status=running gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+status: running
+current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+processed_events: 5000
+queue_size: 0
+END
+```
+
+Example (stopped):
+```
+status: stopped
+current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+processed_events: 5000
+END
 ```
 
 ---

@@ -53,8 +53,8 @@ class VariableHandlerTest : public ::testing::Test {
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = "/tmp",
-        .loading = loading_,
-        .read_only = read_only_,
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
@@ -73,16 +73,16 @@ class VariableHandlerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    loading_ = false;
-    read_only_ = false;
+    dump_load_in_progress_ = false;
+    dump_save_in_progress_ = false;
     optimization_in_progress_ = false;
   }
 
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
-  std::atomic<bool> loading_{false};
-  std::atomic<bool> read_only_{false};
+  std::atomic<bool> dump_load_in_progress_{false};
+  std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};

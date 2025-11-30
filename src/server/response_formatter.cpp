@@ -18,7 +18,7 @@
 #include "version.h"
 
 #ifdef USE_MYSQL
-#include "mysql/binlog_reader.h"
+#include "mysql/binlog_reader_interface.h"
 #endif
 
 namespace mygramdb::server {
@@ -217,7 +217,7 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
 std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                                   const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-                                                  mysql::BinlogReader* binlog_reader,
+                                                  mysql::IBinlogReader* binlog_reader,
 #else
                                                   void* binlog_reader,
 #endif
@@ -421,7 +421,7 @@ std::string ResponseFormatter::FormatLoadResponse(const std::string& filepath) {
 
 std::string ResponseFormatter::FormatReplicationStatusResponse(
 #ifdef USE_MYSQL
-    mysql::BinlogReader* binlog_reader
+    mysql::IBinlogReader* binlog_reader
 #else
     void* binlog_reader
 #endif
@@ -525,7 +525,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
     const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-    mysql::BinlogReader* binlog_reader
+    mysql::IBinlogReader* binlog_reader
 #else
     void* binlog_reader
 #endif

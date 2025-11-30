@@ -96,8 +96,8 @@ class ServerLifecycleManager {
    * @param dump_dir Dump directory path
    * @param full_config Full application configuration
    * @param stats Reference to server statistics (owned by TcpServer)
-   * @param loading Reference to loading flag (owned by TcpServer)
-   * @param read_only Reference to read-only flag (owned by TcpServer)
+   * @param dump_load_in_progress Reference to DUMP LOAD flag (owned by TcpServer)
+   * @param dump_save_in_progress Reference to DUMP SAVE flag (owned by TcpServer)
    * @param optimization_in_progress Reference to optimization flag (owned by TcpServer)
    * @param replication_paused_for_dump Reference to replication pause flag (owned by TcpServer)
    * @param mysql_reconnecting Reference to MySQL reconnection flag (owned by TcpServer)
@@ -109,7 +109,7 @@ class ServerLifecycleManager {
    */
   ServerLifecycleManager(const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
                          const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
-                         std::atomic<bool>& loading, std::atomic<bool>& read_only,
+                         std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
                          std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
                          std::atomic<bool>& mysql_reconnecting,
 #ifdef USE_MYSQL
@@ -153,8 +153,8 @@ class ServerLifecycleManager {
 
   // Shared state (non-const references - passed to handlers via HandlerContext)
   ServerStats& stats_;
-  std::atomic<bool>& loading_;
-  std::atomic<bool>& read_only_;
+  std::atomic<bool>& dump_load_in_progress_;
+  std::atomic<bool>& dump_save_in_progress_;
   std::atomic<bool>& optimization_in_progress_;
   std::atomic<bool>& replication_paused_for_dump_;
   std::atomic<bool>& mysql_reconnecting_;

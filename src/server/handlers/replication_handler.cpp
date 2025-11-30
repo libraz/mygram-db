@@ -26,10 +26,9 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
     case query::QueryType::REPLICATION_STOP: {
 #ifdef USE_MYSQL
       if (ctx_.binlog_reader != nullptr) {
-        auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-        if (reader->IsRunning()) {
+        if (ctx_.binlog_reader->IsRunning()) {
           spdlog::info("Stopping binlog replication by user request");
-          reader->Stop();
+          ctx_.binlog_reader->Stop();
           return ResponseFormatter::FormatReplicationStopResponse();
         }
         return ResponseFormatter::FormatError("Replication is not running");
@@ -64,24 +63,23 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       }
 
       // Check if DUMP LOAD is in progress (block REPLICATION START)
-      if (ctx_.loading.load()) {
+      if (ctx_.dump_load_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while DUMP LOAD is in progress. "
             "Please wait for load to complete.");
       }
 
       // Check if DUMP SAVE is in progress (block REPLICATION START)
-      if (ctx_.read_only.load()) {
+      if (ctx_.dump_save_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while DUMP SAVE is in progress. "
             "Please wait for save to complete.");
       }
 
       if (ctx_.binlog_reader != nullptr) {
-        auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-        if (!reader->IsRunning()) {
+        if (!ctx_.binlog_reader->IsRunning()) {
           // Check if GTID is set (required for replication)
-          std::string current_gtid = reader->GetCurrentGTID();
+          std::string current_gtid = ctx_.binlog_reader->GetCurrentGTID();
           if (current_gtid.empty()) {
             return ResponseFormatter::FormatError(
                 "Cannot start replication without GTID position. "
@@ -94,11 +92,11 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
               .Field("gtid", current_gtid)
               .Info();
 
-          if (reader->Start()) {
+          if (ctx_.binlog_reader->Start()) {
             return ResponseFormatter::FormatReplicationStartResponse();
           }
 
-          std::string error = reader->GetLastError();
+          std::string error = ctx_.binlog_reader->GetLastError();
           mygram::utils::StructuredLog()
               .Event("replication_start_failed")
               .Field("source", "user_request")

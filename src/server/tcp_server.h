@@ -140,9 +140,9 @@ class TcpServer {
   ServerStats* GetMutableStats() { return &stats_; }
 
   /**
-   * @brief Get loading flag pointer (for HttpServer)
+   * @brief Get dump load in progress flag pointer (for HttpServer)
    */
-  std::atomic<bool>* GetLoadingFlag() { return &loading_; }
+  std::atomic<bool>* GetDumpLoadInProgressFlag() { return &dump_load_in_progress_; }
 
   /**
    * @brief Get MySQL reconnecting flag pointer (for MysqlReconnectionHandler)
@@ -189,8 +189,8 @@ class TcpServer {
 
   // State
   ServerStats stats_;
-  std::atomic<bool> read_only_{false};
-  std::atomic<bool> loading_{false};
+  std::atomic<bool> dump_save_in_progress_{false};  // DUMP SAVE operation in progress
+  std::atomic<bool> dump_load_in_progress_{false};  // DUMP LOAD operation in progress
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};  // Replication paused for DUMP SAVE/LOAD
   std::atomic<bool> mysql_reconnecting_{false};           // MySQL reconnection in progress

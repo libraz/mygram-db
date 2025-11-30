@@ -79,6 +79,9 @@ class SnapshotSchedulerTest : public ::testing::Test {
 
     // Create minimal config
     full_config_ = CreateMinimalConfig();
+
+    // Initialize read_only flag for mutual exclusion testing
+    dump_save_in_progress_ = false;
   }
 
   void TearDown() override {
@@ -91,6 +94,7 @@ class SnapshotSchedulerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> tables_;
   std::unique_ptr<TableCatalog> catalog_;
   Config full_config_;
+  std::atomic<bool> dump_save_in_progress_{false};  // For mutual exclusion with manual DUMP SAVE
 };
 
 // ===========================================================================
@@ -102,7 +106,7 @@ TEST_F(SnapshotSchedulerTest, ConstructWithValidParams) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   EXPECT_FALSE(scheduler.IsRunning());
 }
@@ -112,7 +116,7 @@ TEST_F(SnapshotSchedulerTest, StartAndStop) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -126,7 +130,7 @@ TEST_F(SnapshotSchedulerTest, DoubleStartIsIdempotent) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -143,7 +147,7 @@ TEST_F(SnapshotSchedulerTest, DoubleStopIsIdempotent) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   scheduler.Stop();
@@ -160,7 +164,7 @@ TEST_F(SnapshotSchedulerTest, DestructorStopsScheduler) {
   dump_config.retain = 3;
 
   {
-    SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+    SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
     scheduler.Start();
     EXPECT_TRUE(scheduler.IsRunning());
     // Destructor should stop the scheduler
@@ -179,7 +183,7 @@ TEST_F(SnapshotSchedulerTest, DisabledWithZeroInterval) {
   dump_config.interval_sec = 0;  // Disabled
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   // Should not start thread when interval is 0
@@ -191,7 +195,7 @@ TEST_F(SnapshotSchedulerTest, DisabledWithNegativeInterval) {
   dump_config.interval_sec = -1;  // Disabled
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   EXPECT_FALSE(scheduler.IsRunning());
@@ -210,7 +214,7 @@ TEST_F(SnapshotSchedulerTest, CleanupPreservesNonAutoFiles) {
   dump_config.interval_sec = 0;  // Disabled (we just want to test cleanup logic)
   dump_config.retain = 1;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   // Files should still exist (cleanup only affects auto_ prefixed files)
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "manual_backup.dmp"));
@@ -226,7 +230,7 @@ TEST_F(SnapshotSchedulerTest, CleanupRetainZeroSkipsCleanup) {
   dump_config.interval_sec = 0;
   dump_config.retain = 0;  // No retention policy = no cleanup
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   // Files should still exist (retain=0 means no cleanup)
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240101_120000.dmp"));
@@ -245,7 +249,7 @@ TEST_F(SnapshotSchedulerTest, EmptyTableCatalog) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, empty_catalog.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, empty_catalog.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -261,7 +265,7 @@ TEST_F(SnapshotSchedulerTest, NonExistentDumpDir) {
   dump_config.retain = 3;
 
   // Scheduler should still construct (directory created on snapshot)
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, non_existent.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, non_existent.string(), nullptr, dump_save_in_progress_);
 
   EXPECT_FALSE(scheduler.IsRunning());
 }
@@ -271,7 +275,7 @@ TEST_F(SnapshotSchedulerTest, StopWithoutStart) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   // Stop without start should be safe
   scheduler.Stop();
@@ -287,7 +291,7 @@ TEST_F(SnapshotSchedulerTest, StartStopRapidly) {
   dump_config.interval_sec = 60;
   dump_config.retain = 3;
 
-  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr);
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr, dump_save_in_progress_);
 
   // Rapid start/stop cycles
   for (int i = 0; i < 5; ++i) {

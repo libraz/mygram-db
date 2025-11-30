@@ -11,7 +11,7 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
   (void)conn_ctx;  // Unused for GET command
 
   // Check if server is loading
-  if (ctx_.loading) {
+  if (ctx_.dump_load_in_progress) {
     return ResponseFormatter::FormatError("Server is loading, please try again later");
   }
 

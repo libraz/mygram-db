@@ -41,13 +41,13 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 #endif
 
       // Check if DUMP LOAD is in progress
-      if (ctx_.loading.load()) {
+      if (ctx_.dump_load_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot optimize while DUMP LOAD is in progress. "
             "Please wait for load to complete.");
       }
 
-      // Note: DUMP SAVE (read_only flag) is allowed during OPTIMIZE
+      // Note: DUMP SAVE (dump_save_in_progress flag) is allowed during OPTIMIZE
       // to support auto-save functionality that runs in background
 
       // Check if another OPTIMIZE is already running globally

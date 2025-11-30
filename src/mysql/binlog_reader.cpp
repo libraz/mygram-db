@@ -64,6 +64,12 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  // Check if currently stopping (running_ is true but should_stop_ is also true)
+  if (should_stop_.load()) {
+    last_error_ = "Binlog reader is stopping, please wait";
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+  }
+
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
@@ -277,6 +283,7 @@ void BinlogReader::Stop() {
   }
 
   running_ = false;
+  should_stop_ = false;  // Reset for next Start()
   mygram::utils::StructuredLog()
       .Event("binlog_reader_stopped")
       .Field("events_processed", static_cast<int64_t>(processed_events_.load()))

@@ -472,13 +472,39 @@ REPLICATION STATUS
 
 ### レスポンス
 
+複数行のキーバリュー形式：
+
 ```
-OK REPLICATION status=<running|stopped> gtid=<current_gtid>
+status: <running|stopped|not_configured>
+current_gtid: <current_gtid>
+processed_events: <count>
+queue_size: <size>
+END
 ```
 
-例：
+- **status**: 現在のレプリケーション状態
+  - `running`: MySQLからアクティブにレプリケーション中
+  - `stopped`: レプリケーションが手動で停止中
+  - `not_configured`: MySQLレプリケーションが設定されていない
+- **current_gtid**: 最後に処理されたGTID位置
+- **processed_events**: 処理されたbinlogイベントの総数
+- **queue_size**: キュー内の保留中イベント数（実行中のみ表示）
+
+例（実行中）：
 ```
-OK REPLICATION status=running gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+status: running
+current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+processed_events: 5000
+queue_size: 0
+END
+```
+
+例（停止中）：
+```
+status: stopped
+current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
+processed_events: 5000
+END
 ```
 
 ---

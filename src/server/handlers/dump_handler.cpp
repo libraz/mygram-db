@@ -20,7 +20,7 @@
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
-#include "mysql/binlog_reader.h"
+#include "mysql/binlog_reader_interface.h"
 #endif
 
 namespace mygramdb::server {
@@ -75,8 +75,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   std::string current_gtid;
   bool replication_was_running = false;
   if (ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-    current_gtid = reader->GetCurrentGTID();
+    current_gtid = ctx_.binlog_reader->GetCurrentGTID();
     if (current_gtid.empty()) {
       return ResponseFormatter::FormatError(
           "Cannot save dump without GTID position. "
@@ -84,7 +83,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     }
 
     // Check if replication is running
-    replication_was_running = reader->IsRunning();
+    replication_was_running = ctx_.binlog_reader->IsRunning();
   }
 
   // Block if any table is currently syncing
@@ -102,14 +101,14 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #endif
 
   // Check if DUMP LOAD is in progress (block DUMP SAVE)
-  if (ctx_.loading.load()) {
+  if (ctx_.dump_load_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while DUMP LOAD is in progress. "
         "Please wait for load to complete.");
   }
 
   // Check if another DUMP SAVE is in progress (block concurrent saves)
-  if (ctx_.read_only.load()) {
+  if (ctx_.dump_save_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while another DUMP SAVE is in progress. "
         "Please wait for current save to complete.");
@@ -118,8 +117,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
   // Stop replication before DUMP SAVE (if running)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-    reader->Stop();
+    ctx_.binlog_reader->Stop();
     ctx_.replication_paused_for_dump = true;
     spdlog::info("Stopped replication before DUMP SAVE (will auto-restart after completion)");
     mygram::utils::StructuredLog()
@@ -174,13 +172,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   std::string gtid;
 #ifdef USE_MYSQL
   if (ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-    gtid = reader->GetCurrentGTID();
+    gtid = ctx_.binlog_reader->GetCurrentGTID();
   }
 #endif
 
   // Set read-only mode (RAII guard ensures it's cleared even on exceptions)
-  FlagGuard read_only_guard(ctx_.read_only);
+  FlagGuard read_only_guard(ctx_.dump_save_in_progress);
 
   // Convert table_contexts to format expected by dump_v1::WriteDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
@@ -194,10 +191,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
   // Auto-restart replication after DUMP SAVE (regardless of success/failure)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
     ctx_.replication_paused_for_dump = false;
 
-    if (reader->Start()) {
+    if (ctx_.binlog_reader->Start()) {
       spdlog::info("Auto-restarted replication after DUMP SAVE");
       mygram::utils::StructuredLog()
           .Event("replication_resumed")
@@ -205,7 +201,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
           .Field("reason", "automatic_restart_after_completion")
           .Info();
     } else {
-      std::string replication_error = reader->GetLastError();
+      std::string replication_error = ctx_.binlog_reader->GetLastError();
       mygram::utils::StructuredLog()
           .Event("replication_restart_failed")
           .Field("operation", "dump_save")
@@ -237,8 +233,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Check if replication is running (need to stop it before DUMP LOAD)
   bool replication_was_running = false;
   if (ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-    replication_was_running = reader->IsRunning();
+    replication_was_running = ctx_.binlog_reader->IsRunning();
   }
 
   // Check if any table is currently syncing (block DUMP LOAD)
@@ -263,14 +258,14 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
 
   // Check if DUMP SAVE is in progress (block DUMP LOAD)
-  if (ctx_.read_only.load()) {
+  if (ctx_.dump_save_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while DUMP SAVE is in progress. "
         "Please wait for save to complete.");
   }
 
   // Check if another DUMP LOAD is in progress (block concurrent loads)
-  if (ctx_.loading.load()) {
+  if (ctx_.dump_load_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while another DUMP LOAD is in progress. "
         "Please wait for current load to complete.");
@@ -279,8 +274,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 #ifdef USE_MYSQL
   // Stop replication before DUMP LOAD (if running)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
-    reader->Stop();
+    ctx_.binlog_reader->Stop();
     ctx_.replication_paused_for_dump = true;
     spdlog::info("Stopped replication before DUMP LOAD (will auto-restart after completion)");
     mygram::utils::StructuredLog()
@@ -315,7 +309,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   spdlog::info("Attempting to load dump from: {}", filepath);
 
   // Set loading mode (RAII guard ensures it's cleared even on exceptions)
-  FlagGuard loading_guard(ctx_.loading);
+  FlagGuard loading_guard(ctx_.dump_load_in_progress);
 
   // Convert table_contexts to format expected by dump_v1::ReadDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
@@ -333,18 +327,19 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
                                              &integrity_error);
 
 #ifdef USE_MYSQL
-  // Auto-restart replication after DUMP LOAD (regardless of success/failure)
+  // Update GTID from loaded dump (if load was successful and GTID is available)
+  // This must be done regardless of whether replication was running before,
+  // to enable manual REPLICATION START after DUMP LOAD
+  if (result && !gtid.empty() && ctx_.binlog_reader != nullptr) {
+    ctx_.binlog_reader->SetCurrentGTID(gtid);
+    spdlog::info("Updated replication GTID to loaded position: {}", gtid);
+  }
+
+  // Auto-restart replication after DUMP LOAD (only if it was running before)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    auto* reader = static_cast<mysql::BinlogReader*>(ctx_.binlog_reader);
     ctx_.replication_paused_for_dump = false;
 
-    // Update GTID from loaded dump (if load was successful and GTID is available)
-    if (result && !gtid.empty()) {
-      reader->SetCurrentGTID(gtid);
-      spdlog::info("Updated replication GTID to loaded position: {}", gtid);
-    }
-
-    if (reader->Start()) {
+    if (ctx_.binlog_reader->Start()) {
       spdlog::info("Auto-restarted replication after DUMP LOAD");
       mygram::utils::StructuredLog()
           .Event("replication_resumed")
@@ -353,7 +348,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
           .Field("gtid", gtid)
           .Info();
     } else {
-      std::string replication_error = reader->GetLastError();
+      std::string replication_error = ctx_.binlog_reader->GetLastError();
       mygram::utils::StructuredLog()
           .Event("replication_restart_failed")
           .Field("operation", "dump_load")

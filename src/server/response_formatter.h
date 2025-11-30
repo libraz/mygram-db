@@ -20,7 +20,7 @@
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
-class BinlogReader;
+class IBinlogReader;
 }  // namespace mygramdb::mysql
 #endif
 
@@ -79,7 +79,7 @@ class ResponseFormatter {
   static std::string FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                         const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-                                        mysql::BinlogReader* binlog_reader = nullptr,
+                                        mysql::IBinlogReader* binlog_reader = nullptr,
 #else
                                         void* binlog_reader = nullptr,
 #endif
@@ -106,7 +106,7 @@ class ResponseFormatter {
    */
   static std::string FormatReplicationStatusResponse(
 #ifdef USE_MYSQL
-      mysql::BinlogReader* binlog_reader
+      mysql::IBinlogReader* binlog_reader
 #else
       void* binlog_reader
 #endif
@@ -147,7 +147,7 @@ class ResponseFormatter {
   static std::string FormatPrometheusMetrics(const AggregatedMetrics& metrics, const ServerStats& stats,
                                              const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-                                             mysql::BinlogReader* binlog_reader = nullptr
+                                             mysql::IBinlogReader* binlog_reader = nullptr
 #else
                                              void* binlog_reader = nullptr
 #endif

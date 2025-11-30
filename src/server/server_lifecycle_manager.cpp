@@ -18,6 +18,7 @@
 #include "server/handlers/search_handler.h"
 #include "server/handlers/variable_handler.h"
 #ifdef USE_MYSQL
+#include "mysql/binlog_reader.h"
 #include "server/handlers/sync_handler.h"
 #include "server/sync_operation_manager.h"
 #endif
@@ -32,8 +33,9 @@ constexpr size_t kThreadPoolQueueSize = 1000;
 
 ServerLifecycleManager::ServerLifecycleManager(
     const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
-    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats, std::atomic<bool>& loading,
-    std::atomic<bool>& read_only, std::atomic<bool>& optimization_in_progress,
+    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
+    std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
+    std::atomic<bool>& optimization_in_progress,
     std::atomic<bool>& replication_paused_for_dump, std::atomic<bool>& mysql_reconnecting,
 #ifdef USE_MYSQL
     mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
@@ -46,8 +48,8 @@ ServerLifecycleManager::ServerLifecycleManager(
       dump_dir_(dump_dir),
       full_config_(full_config),
       stats_(stats),
-      loading_(loading),
-      read_only_(read_only),
+      dump_load_in_progress_(dump_load_in_progress),
+      dump_save_in_progress_(dump_save_in_progress),
       optimization_in_progress_(optimization_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
       mysql_reconnecting_(mysql_reconnecting),
@@ -275,8 +277,8 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .stats = stats_,
         .full_config = full_config_,
         .dump_dir = dump_dir_,
-        .loading = loading_,
-        .read_only = read_only_,
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
@@ -292,8 +294,8 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
         .stats = stats_,
         .full_config = full_config_,
         .dump_dir = dump_dir_,
-        .loading = loading_,
-        .read_only = read_only_,
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
@@ -440,8 +442,8 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
   }
 
   try {
-    auto scheduler =
-        std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_);
+    auto scheduler = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_,
+                                                         binlog_reader_, dump_save_in_progress_);
 
     // Start the scheduler
     scheduler->Start();

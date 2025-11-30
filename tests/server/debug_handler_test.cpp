@@ -44,8 +44,8 @@ class DebugHandlerTest : public ::testing::Test {
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = "/tmp",
-        .loading = loading_,
-        .read_only = read_only_,
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
@@ -66,8 +66,8 @@ class DebugHandlerTest : public ::testing::Test {
 
   void TearDown() override {
     // Reset flags
-    loading_ = false;
-    read_only_ = false;
+    dump_load_in_progress_ = false;
+    dump_save_in_progress_ = false;
     optimization_in_progress_ = false;
   }
 
@@ -87,8 +87,8 @@ class DebugHandlerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
-  std::atomic<bool> loading_{false};
-  std::atomic<bool> read_only_{false};
+  std::atomic<bool> dump_load_in_progress_{false};
+  std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};
@@ -131,7 +131,7 @@ TEST_F(DebugHandlerTest, DebugOffBasic) {
 
 TEST_F(DebugHandlerTest, OptimizeBlockedDuringDumpLoad) {
   // Simulate DUMP LOAD in progress
-  loading_ = true;
+  dump_load_in_progress_ = true;
 
   query::Query query;
   query.type = query::QueryType::OPTIMIZE;
@@ -149,7 +149,7 @@ TEST_F(DebugHandlerTest, OptimizeBlockedDuringDumpLoad) {
 
 TEST_F(DebugHandlerTest, OptimizeAllowedDuringDumpSave) {
   // Simulate DUMP SAVE in progress (read_only flag set)
-  read_only_ = true;
+  dump_save_in_progress_ = true;
 
   query::Query query;
   query.type = query::QueryType::OPTIMIZE;
@@ -184,8 +184,8 @@ TEST_F(DebugHandlerTest, OptimizeBlockedWhenAlreadyRunning) {
 
 TEST_F(DebugHandlerTest, OptimizeAllowedWhenNoBlockingOperations) {
   // Ensure all flags are false
-  EXPECT_FALSE(loading_);
-  EXPECT_FALSE(read_only_);
+  EXPECT_FALSE(dump_load_in_progress_);
+  EXPECT_FALSE(dump_save_in_progress_);
   EXPECT_FALSE(optimization_in_progress_);
 
   query::Query query;

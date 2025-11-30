@@ -27,7 +27,7 @@ std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& 
 
 std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionContext& conn_ctx) {
   // Check if server is loading
-  if (ctx_.loading) {
+  if (ctx_.dump_load_in_progress) {
     return ResponseFormatter::FormatError("Server is loading, please try again later");
   }
 
@@ -325,7 +325,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
 std::string SearchHandler::HandleCount(const query::Query& query, ConnectionContext& conn_ctx) {
   // Check if server is loading
-  if (ctx_.loading) {
+  if (ctx_.dump_load_in_progress) {
     return ResponseFormatter::FormatError("Server is loading, please try again later");
   }
 
