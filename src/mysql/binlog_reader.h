@@ -61,7 +61,7 @@ struct BinlogEvent {
  *
  * Reads binlog events from MySQL and queues them for processing
  */
-class BinlogReader : public IBinlogReader {
+class BinlogReader final : public IBinlogReader {
  public:
   /**
    * @brief Configuration for binlog reader
@@ -95,7 +95,7 @@ class BinlogReader : public IBinlogReader {
   BinlogReader(Connection& connection, std::unordered_map<std::string, server::TableContext*> table_contexts,
                config::MysqlConfig mysql_config, const Config& config, server::ServerStats* stats = nullptr);
 
-  ~BinlogReader();
+  ~BinlogReader() override;
 
   // Non-copyable and non-movable (manages thread and connection state)
   BinlogReader(const BinlogReader&) = delete;

@@ -100,6 +100,7 @@ bool Query::IsValid() const {
       case QueryType::DUMP_LOAD:
       case QueryType::DUMP_VERIFY:
       case QueryType::DUMP_INFO:
+      case QueryType::DUMP_STATUS:
       case QueryType::REPLICATION_STATUS:
       case QueryType::REPLICATION_STOP:
       case QueryType::REPLICATION_START:
@@ -210,7 +211,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     // DUMP SAVE | LOAD | VERIFY | INFO
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: DUMP + subcommand
-      SetError("DUMP requires a subcommand (SAVE, LOAD, VERIFY, INFO)");
+      SetError("DUMP requires a subcommand (SAVE, LOAD, VERIFY, INFO, STATUS)");
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
@@ -264,6 +265,9 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
         SetError("DUMP INFO requires a filepath");
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
+    } else if (subcommand == "STATUS") {
+      query.type = QueryType::DUMP_STATUS;
+      // DUMP STATUS - no arguments required
     } else {
       SetError("Unknown DUMP subcommand: " + subcommand);
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));

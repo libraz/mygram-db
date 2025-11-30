@@ -33,6 +33,7 @@ enum class QueryType : uint8_t {
   DUMP_LOAD,    // DUMP LOAD filepath
   DUMP_VERIFY,  // DUMP VERIFY filepath
   DUMP_INFO,    // DUMP INFO filepath
+  DUMP_STATUS,  // DUMP STATUS
 
   // Legacy dump commands (for backward compatibility)
   SAVE,  // SAVE filepath (deprecated, use DUMP SAVE)

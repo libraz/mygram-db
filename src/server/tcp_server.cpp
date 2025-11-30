@@ -170,8 +170,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // This centralizes component creation and dependency ordering
   ServerLifecycleManager lifecycle_manager(config_, table_contexts_, dump_dir_, full_config_, stats_,
                                            dump_load_in_progress_, dump_save_in_progress_, optimization_in_progress_,
-                                           replication_paused_for_dump_,
-                                           mysql_reconnecting_,
+                                           replication_paused_for_dump_, mysql_reconnecting_,
 #ifdef USE_MYSQL
                                            binlog_reader_, sync_manager_.get()
 #else
@@ -196,6 +195,9 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // (The original pointer in HandlerContext pointed to the components.variable_manager
   // which would become invalid after this scope)
   handler_context_->variable_manager = variable_manager_.get();
+
+  // Set dump progress tracking pointer
+  handler_context_->dump_progress = &dump_progress_;
 
   search_handler_ = std::move(components.search_handler);
   document_handler_ = std::move(components.document_handler);

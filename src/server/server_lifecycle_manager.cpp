@@ -31,18 +31,20 @@ namespace {
 constexpr size_t kThreadPoolQueueSize = 1000;
 }  // namespace
 
-ServerLifecycleManager::ServerLifecycleManager(
-    const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
-    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
-    std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
-    std::atomic<bool>& optimization_in_progress,
-    std::atomic<bool>& replication_paused_for_dump, std::atomic<bool>& mysql_reconnecting,
+ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
+                                               std::unordered_map<std::string, TableContext*>& table_contexts,
+                                               const std::string& dump_dir, const config::Config* full_config,
+                                               ServerStats& stats, std::atomic<bool>& dump_load_in_progress,
+                                               std::atomic<bool>& dump_save_in_progress,
+                                               std::atomic<bool>& optimization_in_progress,
+                                               std::atomic<bool>& replication_paused_for_dump,
+                                               std::atomic<bool>& mysql_reconnecting,
 #ifdef USE_MYSQL
-    mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
+                                               mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
 #else
-    void* binlog_reader
+                                               void* binlog_reader
 #endif
-    )
+                                               )
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -369,6 +371,7 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
     dispatcher->RegisterHandler(query::QueryType::DUMP_LOAD, handlers.dump_handler.get());
     dispatcher->RegisterHandler(query::QueryType::DUMP_VERIFY, handlers.dump_handler.get());
     dispatcher->RegisterHandler(query::QueryType::DUMP_INFO, handlers.dump_handler.get());
+    dispatcher->RegisterHandler(query::QueryType::DUMP_STATUS, handlers.dump_handler.get());
     dispatcher->RegisterHandler(query::QueryType::INFO, handlers.admin_handler.get());
     dispatcher->RegisterHandler(query::QueryType::CONFIG_HELP, handlers.admin_handler.get());
     dispatcher->RegisterHandler(query::QueryType::CONFIG_SHOW, handlers.admin_handler.get());

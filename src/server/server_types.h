@@ -6,8 +6,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -82,6 +85,107 @@ struct TableContext {
 };
 
 /**
+ * @brief Dump operation status
+ */
+enum class DumpStatus : uint8_t {
+  IDLE,       // No dump operation in progress
+  SAVING,     // DUMP SAVE in progress
+  LOADING,    // DUMP LOAD in progress
+  COMPLETED,  // Last dump operation completed successfully
+  FAILED      // Last dump operation failed
+};
+
+/**
+ * @brief Progress tracking for async dump operations
+ */
+struct DumpProgress {
+  mutable std::mutex mutex;
+  DumpStatus status = DumpStatus::IDLE;
+  std::string filepath;                              // Target/source file path
+  std::string current_table;                         // Currently processing table
+  size_t tables_processed = 0;                       // Number of tables processed
+  size_t tables_total = 0;                           // Total number of tables
+  std::chrono::steady_clock::time_point start_time;  // Operation start time
+  std::chrono::steady_clock::time_point end_time;    // Operation end time (if completed/failed)
+  std::string error_message;                         // Error message (if failed)
+  std::string last_result_filepath;                  // Last completed dump filepath
+  std::unique_ptr<std::thread> worker_thread;        // Background worker thread
+
+  /**
+   * @brief Reset progress for a new operation
+   */
+  void Reset(DumpStatus new_status, const std::string& path, size_t total_tables) {
+    std::lock_guard<std::mutex> lock(mutex);
+    status = new_status;
+    filepath = path;
+    current_table.clear();
+    tables_processed = 0;
+    tables_total = total_tables;
+    start_time = std::chrono::steady_clock::now();
+    end_time = {};
+    error_message.clear();
+  }
+
+  /**
+   * @brief Update progress for current table
+   */
+  void UpdateTable(const std::string& table_name, size_t processed) {
+    std::lock_guard<std::mutex> lock(mutex);
+    current_table = table_name;
+    tables_processed = processed;
+  }
+
+  /**
+   * @brief Mark operation as completed
+   */
+  void Complete(const std::string& result_path) {
+    std::lock_guard<std::mutex> lock(mutex);
+    status = DumpStatus::COMPLETED;
+    end_time = std::chrono::steady_clock::now();
+    last_result_filepath = result_path;
+    error_message.clear();
+  }
+
+  /**
+   * @brief Mark operation as failed
+   */
+  void Fail(const std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex);
+    status = DumpStatus::FAILED;
+    end_time = std::chrono::steady_clock::now();
+    error_message = error;
+  }
+
+  /**
+   * @brief Get elapsed time in seconds
+   */
+  double GetElapsedSeconds() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto end =
+        (status == DumpStatus::SAVING || status == DumpStatus::LOADING) ? std::chrono::steady_clock::now() : end_time;
+    return std::chrono::duration<double>(end - start_time).count();
+  }
+
+  /**
+   * @brief Check if a dump operation is currently in progress
+   */
+  bool IsInProgress() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return status == DumpStatus::SAVING || status == DumpStatus::LOADING;
+  }
+
+  /**
+   * @brief Join worker thread if exists
+   */
+  void JoinWorker() {
+    if (worker_thread && worker_thread->joinable()) {
+      worker_thread->join();
+      worker_thread.reset();
+    }
+  }
+};
+
+/**
  * @brief Context passed to command handlers
  *
  * Contains all necessary dependencies and state for command execution.
@@ -101,8 +205,8 @@ struct HandlerContext {
   ServerStats& stats;
   const config::Config* full_config;
   std::string dump_dir;
-  std::atomic<bool>& dump_load_in_progress;        // True when DUMP LOAD operation is in progress
-  std::atomic<bool>& dump_save_in_progress;        // True when DUMP SAVE operation is in progress
+  std::atomic<bool>& dump_load_in_progress;  // True when DUMP LOAD operation is in progress
+  std::atomic<bool>& dump_save_in_progress;  // True when DUMP SAVE operation is in progress
   std::atomic<bool>& optimization_in_progress;
   std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
   std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
@@ -115,6 +219,7 @@ struct HandlerContext {
 #endif
   cache::CacheManager* cache_manager = nullptr;
   config::RuntimeVariableManager* variable_manager = nullptr;
+  DumpProgress* dump_progress = nullptr;  // Progress tracking for async dump operations
 };
 
 }  // namespace mygramdb::server

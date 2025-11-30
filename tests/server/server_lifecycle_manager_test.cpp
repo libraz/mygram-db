@@ -61,15 +61,14 @@ class ServerLifecycleManagerTest : public ::testing::Test {
 
   // Helper: Create lifecycle manager with current config
   std::unique_ptr<ServerLifecycleManager> CreateManager() {
-    return std::make_unique<ServerLifecycleManager>(server_config_, table_contexts_, dump_dir_, &full_config_, stats_,
-                                                    dump_load_in_progress_, dump_save_in_progress_,
-                                                    optimization_in_progress_, replication_paused_for_dump_,
-                                                    mysql_reconnecting_,
+    return std::make_unique<ServerLifecycleManager>(
+        server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
+        dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
 #ifdef USE_MYSQL
-                                                    nullptr,  // binlog_reader
-                                                    sync_manager_.get()
+        nullptr,  // binlog_reader
+        sync_manager_.get()
 #else
-                                                    nullptr  // binlog_reader
+        nullptr  // binlog_reader
 #endif
     );
   }

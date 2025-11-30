@@ -194,6 +194,7 @@ class TcpServer {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};  // Replication paused for DUMP SAVE/LOAD
   std::atomic<bool> mysql_reconnecting_{false};           // MySQL reconnection in progress
+  DumpProgress dump_progress_;                            // Progress tracking for async dump operations
 
   // Services (composition) - NEW
   std::unique_ptr<TableCatalog> table_catalog_;

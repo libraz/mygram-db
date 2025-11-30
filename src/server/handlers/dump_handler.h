@@ -40,6 +40,17 @@ class DumpHandler : public CommandHandler {
    * @brief Handle DUMP_INFO command
    */
   std::string HandleDumpInfo(const query::Query& query);
+
+  /**
+   * @brief Handle DUMP_STATUS command
+   */
+  std::string HandleDumpStatus();
+
+  /**
+   * @brief Background worker for async DUMP SAVE
+   * @param filepath Path to save dump file
+   */
+  void DumpSaveWorker(const std::string& filepath);
 };
 
 }  // namespace mygramdb::server

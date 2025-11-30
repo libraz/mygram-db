@@ -390,6 +390,76 @@ TEST_F(DumpHandlerTest, DumpInfoNonExistentFile) {
 }
 
 // ============================================================================
+// DUMP_STATUS Tests
+// ============================================================================
+
+TEST_F(DumpHandlerTest, DumpStatusBasicIdle) {
+  query::Query query;
+  query.type = query::QueryType::DUMP_STATUS;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK DUMP_STATUS") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("save_in_progress: false") != std::string::npos);
+  EXPECT_TRUE(response.find("load_in_progress: false") != std::string::npos);
+  EXPECT_TRUE(response.find("replication_paused_for_dump: false") != std::string::npos);
+  EXPECT_TRUE(response.find("status: IDLE") != std::string::npos);
+  EXPECT_TRUE(response.find("END") != std::string::npos);
+}
+
+TEST_F(DumpHandlerTest, DumpStatusDuringSave) {
+  // Simulate DUMP SAVE in progress
+  dump_save_in_progress_ = true;
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_STATUS;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK DUMP_STATUS") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("save_in_progress: true") != std::string::npos);
+  EXPECT_TRUE(response.find("load_in_progress: false") != std::string::npos);
+  EXPECT_TRUE(response.find("status: SAVE_IN_PROGRESS") != std::string::npos);
+
+  // Clean up
+  dump_save_in_progress_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpStatusDuringLoad) {
+  // Simulate DUMP LOAD in progress
+  dump_load_in_progress_ = true;
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_STATUS;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK DUMP_STATUS") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("save_in_progress: false") != std::string::npos);
+  EXPECT_TRUE(response.find("load_in_progress: true") != std::string::npos);
+  EXPECT_TRUE(response.find("status: LOAD_IN_PROGRESS") != std::string::npos);
+
+  // Clean up
+  dump_load_in_progress_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpStatusReplicationPaused) {
+  // Simulate replication paused for dump
+  replication_paused_for_dump_ = true;
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_STATUS;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK DUMP_STATUS") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("replication_paused_for_dump: true") != std::string::npos);
+
+  // Clean up
+  replication_paused_for_dump_ = false;
+}
+
+// ============================================================================
 // GTID Tests (Critical for Replication)
 // ============================================================================
 
@@ -1001,9 +1071,7 @@ class DumpHandlerGtidTest : public ::testing::Test {
     test_filepath_ = (test_dump_dir_ / ("gtid_test_" + std::to_string(getpid()) + ".dmp")).string();
   }
 
-  void TearDown() override {
-    std::filesystem::remove_all(test_dump_dir_);
-  }
+  void TearDown() override { std::filesystem::remove_all(test_dump_dir_); }
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -1265,8 +1333,7 @@ TEST_F(DumpHandlerGtidTest, ConfigNotOverwrittenByDump) {
   // Verify config was NOT overwritten by dump
   EXPECT_EQ(config_->tables[0].ngram_size, new_ngram_size)
       << "Config should NOT be overwritten by dump - server config takes precedence";
-  EXPECT_EQ(table_ctx_->config.ngram_size, new_ngram_size)
-      << "TableContext config should NOT be overwritten by dump";
+  EXPECT_EQ(table_ctx_->config.ngram_size, new_ngram_size) << "TableContext config should NOT be overwritten by dump";
 }
 
 /**
@@ -1314,5 +1381,209 @@ TEST_F(DumpHandlerGtidTest, MultipleDumpLoadsWithDifferentGtids) {
   EXPECT_EQ(mock_binlog_reader_->GetLastSetGtid(), gtid1);
 }
 #endif  // USE_MYSQL
+
+// ============================================================================
+// Async DUMP SAVE Tests (with DumpProgress)
+// ============================================================================
+
+/**
+ * @brief Test fixture for async DUMP SAVE tests
+ *
+ * This fixture sets up DumpProgress to test the async behavior
+ */
+class DumpHandlerAsyncTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    spdlog::set_level(spdlog::level::debug);
+
+    // Create test table context
+    table_ctx_ = std::make_unique<TableContext>();
+    table_ctx_->name = "test_table";
+    table_ctx_->config.ngram_size = 2;
+    table_ctx_->index = std::make_unique<index::Index>(2);
+    table_ctx_->doc_store = std::make_unique<storage::DocumentStore>();
+
+    // Setup table contexts map
+    table_contexts_["test_table"] = table_ctx_.get();
+
+    // Create handler context
+    config_ = std::make_unique<config::Config>();
+    config::TableConfig table_config;
+    table_config.name = "test_table";
+    table_config.ngram_size = 2;
+    config_->tables.push_back(table_config);
+
+    stats_ = std::make_unique<ServerStats>();
+
+    // Create test dump directory
+    test_dump_dir_ = std::filesystem::temp_directory_path() / ("dump_async_test_" + std::to_string(getpid()));
+    std::filesystem::create_directories(test_dump_dir_);
+
+    // Create DumpProgress for async testing
+    dump_progress_ = std::make_unique<DumpProgress>();
+
+    handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
+        .table_contexts = table_contexts_,
+        .stats = *stats_,
+        .full_config = config_.get(),
+        .dump_dir = test_dump_dir_.string(),
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
+        .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+        .mysql_reconnecting = mysql_reconnecting_,
+#ifdef USE_MYSQL
+        .binlog_reader = nullptr,
+        .sync_manager = nullptr,
+#else
+        .binlog_reader = nullptr,
+#endif
+        .dump_progress = dump_progress_.get(),  // Enable async behavior
+    });
+
+    handler_ = std::make_unique<DumpHandler>(*handler_ctx_);
+
+    // Setup test data
+    auto doc_id1 = table_ctx_->doc_store->AddDocument("1", {{"content", "hello world"}});
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
+    auto doc_id2 = table_ctx_->doc_store->AddDocument("2", {{"content", "test document"}});
+    table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id2), "test document");
+
+    test_filepath_ = "async_test_" + std::to_string(getpid()) + ".dmp";
+  }
+
+  void TearDown() override {
+    // Join worker thread if running
+    if (dump_progress_) {
+      dump_progress_->JoinWorker();
+    }
+    // Clean up test dump directory
+    if (std::filesystem::exists(test_dump_dir_)) {
+      std::filesystem::remove_all(test_dump_dir_);
+    }
+  }
+
+  std::unique_ptr<TableContext> table_ctx_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<config::Config> config_;
+  std::unique_ptr<ServerStats> stats_;
+  std::unique_ptr<DumpProgress> dump_progress_;
+  std::atomic<bool> dump_load_in_progress_{false};
+  std::atomic<bool> dump_save_in_progress_{false};
+  std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};
+  std::atomic<bool> mysql_reconnecting_{false};
+  std::unique_ptr<HandlerContext> handler_ctx_;
+  std::unique_ptr<DumpHandler> handler_;
+  std::string test_filepath_;
+  std::filesystem::path test_dump_dir_;
+  ConnectionContext conn_ctx_;
+};
+
+TEST_F(DumpHandlerAsyncTest, AsyncDumpSaveReturnsStartedMessage) {
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  query.filepath = test_filepath_;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // Should return DUMP_STARTED immediately (async mode)
+  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find(test_filepath_) != std::string::npos);
+  EXPECT_TRUE(response.find("DUMP STATUS") != std::string::npos);
+
+  // Wait for worker to complete
+  dump_progress_->JoinWorker();
+
+  // Verify file was created
+  std::filesystem::path full_path = test_dump_dir_ / test_filepath_;
+  EXPECT_TRUE(std::filesystem::exists(full_path)) << "Dump file should be created";
+}
+
+TEST_F(DumpHandlerAsyncTest, DumpStatusShowsProgressDuringSave) {
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+
+  // Start async save
+  handler_->Handle(save_query, conn_ctx_);
+
+  // Immediately check status (might be SAVING or already COMPLETED)
+  query::Query status_query;
+  status_query.type = query::QueryType::DUMP_STATUS;
+  std::string status_response = handler_->Handle(status_query, conn_ctx_);
+
+  EXPECT_TRUE(status_response.find("OK DUMP_STATUS") == 0) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("filepath:") != std::string::npos) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("tables_processed:") != std::string::npos) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("tables_total:") != std::string::npos) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("elapsed_seconds:") != std::string::npos) << "Response: " << status_response;
+
+  // Wait for completion
+  dump_progress_->JoinWorker();
+}
+
+TEST_F(DumpHandlerAsyncTest, DumpStatusShowsCompletedAfterSave) {
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+
+  // Start async save
+  handler_->Handle(save_query, conn_ctx_);
+
+  // Wait for completion
+  dump_progress_->JoinWorker();
+
+  // Check status after completion
+  query::Query status_query;
+  status_query.type = query::QueryType::DUMP_STATUS;
+  std::string status_response = handler_->Handle(status_query, conn_ctx_);
+
+  EXPECT_TRUE(status_response.find("OK DUMP_STATUS") == 0) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("status: COMPLETED") != std::string::npos) << "Response: " << status_response;
+  EXPECT_TRUE(status_response.find("result_filepath:") != std::string::npos) << "Response: " << status_response;
+}
+
+TEST_F(DumpHandlerAsyncTest, AsyncDumpSaveClearsFlagOnCompletion) {
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  query.filepath = test_filepath_;
+
+  EXPECT_FALSE(dump_save_in_progress_);
+
+  handler_->Handle(query, conn_ctx_);
+
+  // Flag should be set during save
+  // (might already be false if save completed very fast)
+
+  // Wait for completion
+  dump_progress_->JoinWorker();
+
+  // Flag should be cleared after completion
+  EXPECT_FALSE(dump_save_in_progress_) << "Flag should be cleared after async save completes";
+}
+
+TEST_F(DumpHandlerAsyncTest, ConcurrentAsyncSaveBlocked) {
+  query::Query query1;
+  query1.type = query::QueryType::DUMP_SAVE;
+  query1.filepath = test_filepath_;
+
+  // Start first async save
+  std::string response1 = handler_->Handle(query1, conn_ctx_);
+  EXPECT_TRUE(response1.find("OK DUMP_STARTED") == 0) << "Response: " << response1;
+
+  // Immediately try second save (should be blocked)
+  query::Query query2;
+  query2.type = query::QueryType::DUMP_SAVE;
+  query2.filepath = "second_" + test_filepath_;
+  std::string response2 = handler_->Handle(query2, conn_ctx_);
+
+  // Second save should be blocked
+  EXPECT_TRUE(response2.find("ERROR") == 0) << "Response: " << response2;
+  EXPECT_TRUE(response2.find("another DUMP SAVE is in progress") != std::string::npos) << "Response: " << response2;
+
+  // Clean up
+  dump_progress_->JoinWorker();
+}
 
 }  // namespace mygramdb::server

@@ -21,6 +21,12 @@ class IBinlogReader {
  public:
   virtual ~IBinlogReader() = default;
 
+  // Non-copyable and non-movable (polymorphic base class)
+  IBinlogReader(const IBinlogReader&) = delete;
+  IBinlogReader& operator=(const IBinlogReader&) = delete;
+  IBinlogReader(IBinlogReader&&) = delete;
+  IBinlogReader& operator=(IBinlogReader&&) = delete;
+
   /**
    * @brief Start reading binlog events
    * @return Expected<void, Error> - success or start error
@@ -62,6 +68,9 @@ class IBinlogReader {
    * @brief Get queue size
    */
   virtual size_t GetQueueSize() const = 0;
+
+ protected:
+  IBinlogReader() = default;
 };
 
 }  // namespace mygramdb::mysql

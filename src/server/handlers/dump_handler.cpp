@@ -13,6 +13,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 #include "server/sync_operation_manager.h"
@@ -64,6 +65,8 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
       return HandleDumpVerify(query);
     case query::QueryType::DUMP_INFO:
       return HandleDumpInfo(query);
+    case query::QueryType::DUMP_STATUS:
+      return HandleDumpStatus();
     default:
       return ResponseFormatter::FormatError("Invalid query type for DumpHandler");
   }
@@ -73,7 +76,6 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
   // Check if GTID is set (required for consistent dump)
   std::string current_gtid;
-  bool replication_was_running = false;
   if (ctx_.binlog_reader != nullptr) {
     current_gtid = ctx_.binlog_reader->GetCurrentGTID();
     if (current_gtid.empty()) {
@@ -81,9 +83,6 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
           "Cannot save dump without GTID position. "
           "Please run SYNC command first to establish initial position.");
     }
-
-    // Check if replication is running
-    replication_was_running = ctx_.binlog_reader->IsRunning();
   }
 
   // Block if any table is currently syncing
@@ -111,22 +110,19 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (ctx_.dump_save_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while another DUMP SAVE is in progress. "
-        "Please wait for current save to complete.");
+        "Please wait for current save to complete or use DUMP STATUS to check progress.");
   }
 
-#ifdef USE_MYSQL
-  // Stop replication before DUMP SAVE (if running)
-  if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.binlog_reader->Stop();
-    ctx_.replication_paused_for_dump = true;
-    spdlog::info("Stopped replication before DUMP SAVE (will auto-restart after completion)");
+  // Check if full_config is available
+  if (ctx_.full_config == nullptr) {
+    std::string error_msg = "Cannot save dump: server configuration is not available";
     mygram::utils::StructuredLog()
-        .Event("replication_paused")
+        .Event("server_error")
         .Field("operation", "dump_save")
-        .Field("reason", "automatic_pause_for_consistency")
-        .Info();
+        .Field("reason", "config_not_available")
+        .Error();
+    return ResponseFormatter::FormatError(error_msg);
   }
-#endif
 
   // Determine filepath
   std::string filepath;
@@ -155,18 +151,56 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     filepath = ctx_.dump_dir + "/" + std::string(buf.data());
   }
 
-  spdlog::info("Attempting to save dump to: {}", filepath);
+  // Set flag to indicate save is starting
+  ctx_.dump_save_in_progress = true;
 
-  // Check if full_config is available
-  if (ctx_.full_config == nullptr) {
-    std::string error_msg = "Cannot save dump: server configuration is not available";
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "dump_save")
-        .Field("reason", "config_not_available")
-        .Error();
-    return ResponseFormatter::FormatError(error_msg);
+  // Initialize progress tracking and run async if progress tracking is available
+  if (ctx_.dump_progress != nullptr) {
+    spdlog::info("Starting async DUMP SAVE to: {}", filepath);
+
+    // Join any previous worker thread
+    ctx_.dump_progress->JoinWorker();
+    ctx_.dump_progress->Reset(DumpStatus::SAVING, filepath, ctx_.table_contexts.size());
+
+    // Start background worker thread
+    ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
+
+    // Return immediately with started message (async mode)
+    return "OK DUMP_STARTED " + filepath + "\r\nUse DUMP STATUS to monitor progress";
   }
+
+  // Fallback: run synchronously if no progress tracking available (e.g., in tests)
+  spdlog::info("Starting synchronous DUMP SAVE to: {}", filepath);
+  DumpSaveWorker(filepath);
+
+  // Check result and return appropriate response (sync mode)
+  if (!ctx_.dump_save_in_progress.load()) {
+    // Worker completed successfully (it resets the flag)
+    return "OK SAVED " + filepath;
+  }
+  // This shouldn't happen in sync mode, but handle it gracefully
+  return ResponseFormatter::FormatError("Dump save failed: unexpected state");
+}
+
+void DumpHandler::DumpSaveWorker(const std::string& filepath) {
+  bool replication_was_running = false;
+
+#ifdef USE_MYSQL
+  // Check if replication is running and stop it
+  if (ctx_.binlog_reader != nullptr) {
+    replication_was_running = ctx_.binlog_reader->IsRunning();
+    if (replication_was_running) {
+      ctx_.binlog_reader->Stop();
+      ctx_.replication_paused_for_dump = true;
+      spdlog::info("Stopped replication for async DUMP SAVE");
+      mygram::utils::StructuredLog()
+          .Event("replication_paused")
+          .Field("operation", "dump_save")
+          .Field("reason", "automatic_pause_for_consistency")
+          .Info();
+    }
+  }
+#endif
 
   // Get current GTID
   std::string gtid;
@@ -176,13 +210,17 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   }
 #endif
 
-  // Set read-only mode (RAII guard ensures it's cleared even on exceptions)
-  FlagGuard read_only_guard(ctx_.dump_save_in_progress);
-
   // Convert table_contexts to format expected by dump_v1::WriteDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
+  size_t table_index = 0;
   for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
     converted_contexts[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};
+
+    // Update progress
+    if (ctx_.dump_progress != nullptr) {
+      ctx_.dump_progress->UpdateTable(table_name, table_index);
+    }
+    ++table_index;
   }
 
   // Call dump_v1 API
@@ -194,7 +232,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     ctx_.replication_paused_for_dump = false;
 
     if (ctx_.binlog_reader->Start()) {
-      spdlog::info("Auto-restarted replication after DUMP SAVE");
+      spdlog::info("Auto-restarted replication after async DUMP SAVE");
       mygram::utils::StructuredLog()
           .Event("replication_resumed")
           .Field("operation", "dump_save")
@@ -207,25 +245,32 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
           .Field("operation", "dump_save")
           .Field("error", replication_error)
           .Error();
-      // Don't fail DUMP SAVE due to replication restart failure
-      // User can manually restart replication
     }
   }
 #endif
 
+  // Update progress and clear flag
   if (result) {
-    spdlog::info("Successfully saved dump to: {}", filepath);
-    return ResponseFormatter::FormatSaveResponse(filepath);
+    spdlog::info("Async DUMP SAVE completed successfully: {}", filepath);
+    if (ctx_.dump_progress != nullptr) {
+      ctx_.dump_progress->Complete(filepath);
+    }
+  } else {
+    std::string error_msg = "Failed to save dump to " + filepath + ": " + result.error().message();
+    spdlog::error("Async DUMP SAVE failed: {}", error_msg);
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "dump_save")
+        .Field("filepath", filepath)
+        .Field("error", result.error().message())
+        .Error();
+    if (ctx_.dump_progress != nullptr) {
+      ctx_.dump_progress->Fail(error_msg);
+    }
   }
 
-  std::string error_msg = "Failed to save dump to " + filepath + ": " + result.error().message();
-  mygram::utils::StructuredLog()
-      .Event("server_error")
-      .Field("operation", "dump_save")
-      .Field("filepath", filepath)
-      .Field("error", result.error().message())
-      .Error();
-  return ResponseFormatter::FormatError(error_msg);
+  // Clear the in-progress flag
+  ctx_.dump_save_in_progress = false;
 }
 
 std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
@@ -466,6 +511,89 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   result << "has_statistics: " << (info.has_statistics ? "true" : "false") << "\r\n";
   result << "END";
 
+  return result.str();
+}
+
+std::string DumpHandler::HandleDumpStatus() {
+  std::ostringstream result;
+  result << "OK DUMP_STATUS\r\n";
+
+  // Check dump save status
+  bool save_in_progress = ctx_.dump_save_in_progress.load();
+  result << "save_in_progress: " << (save_in_progress ? "true" : "false") << "\r\n";
+
+  // Check dump load status
+  bool load_in_progress = ctx_.dump_load_in_progress.load();
+  result << "load_in_progress: " << (load_in_progress ? "true" : "false") << "\r\n";
+
+  // Check if replication is paused for dump
+  bool replication_paused = ctx_.replication_paused_for_dump.load();
+  result << "replication_paused_for_dump: " << (replication_paused ? "true" : "false") << "\r\n";
+
+  // Overall status from DumpProgress (if available)
+  std::string status;
+  if (ctx_.dump_progress != nullptr) {
+    std::lock_guard<std::mutex> lock(ctx_.dump_progress->mutex);
+    switch (ctx_.dump_progress->status) {
+      case DumpStatus::IDLE:
+        status = "IDLE";
+        break;
+      case DumpStatus::SAVING:
+        status = "SAVING";
+        break;
+      case DumpStatus::LOADING:
+        status = "LOADING";
+        break;
+      case DumpStatus::COMPLETED:
+        status = "COMPLETED";
+        break;
+      case DumpStatus::FAILED:
+        status = "FAILED";
+        break;
+    }
+    result << "status: " << status << "\r\n";
+
+    // Show progress details if operation in progress or recently completed/failed
+    if (ctx_.dump_progress->status != DumpStatus::IDLE) {
+      result << "filepath: " << ctx_.dump_progress->filepath << "\r\n";
+      result << "tables_processed: " << ctx_.dump_progress->tables_processed << "\r\n";
+      result << "tables_total: " << ctx_.dump_progress->tables_total << "\r\n";
+
+      if (!ctx_.dump_progress->current_table.empty()) {
+        result << "current_table: " << ctx_.dump_progress->current_table << "\r\n";
+      }
+
+      // Show elapsed time
+      auto now = std::chrono::steady_clock::now();
+      auto end = (ctx_.dump_progress->status == DumpStatus::SAVING || ctx_.dump_progress->status == DumpStatus::LOADING)
+                     ? now
+                     : ctx_.dump_progress->end_time;
+      double elapsed = std::chrono::duration<double>(end - ctx_.dump_progress->start_time).count();
+      result << "elapsed_seconds: " << std::fixed << std::setprecision(2) << elapsed << "\r\n";
+
+      // Show error message if failed
+      if (ctx_.dump_progress->status == DumpStatus::FAILED && !ctx_.dump_progress->error_message.empty()) {
+        result << "error: " << ctx_.dump_progress->error_message << "\r\n";
+      }
+
+      // Show last result filepath if completed
+      if (ctx_.dump_progress->status == DumpStatus::COMPLETED && !ctx_.dump_progress->last_result_filepath.empty()) {
+        result << "result_filepath: " << ctx_.dump_progress->last_result_filepath << "\r\n";
+      }
+    }
+  } else {
+    // Fallback when dump_progress not available
+    if (save_in_progress) {
+      status = "SAVE_IN_PROGRESS";
+    } else if (load_in_progress) {
+      status = "LOAD_IN_PROGRESS";
+    } else {
+      status = "IDLE";
+    }
+    result << "status: " << status << "\r\n";
+  }
+
+  result << "END";
   return result.str();
 }
 
