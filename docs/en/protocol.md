@@ -402,17 +402,25 @@ The DUMP command family provides unified snapshot management with integrity veri
 
 ### DUMP SAVE
 
-Save complete snapshot to single binary file (`.dmp`).
+Save complete snapshot to single binary file (`.dmp`). This command runs **asynchronously** and returns immediately.
 
 **Syntax:**
 ```
 DUMP SAVE [<filepath>] [--with-stats]
 ```
 
+**Response:**
+```
+OK DUMP_STARTED <filepath>
+Use DUMP STATUS to monitor progress
+```
+
 **Example:**
 ```
 DUMP SAVE /backup/mygramdb.dmp --with-stats
 ```
+
+Use `DUMP STATUS` to monitor progress and check completion.
 
 ### DUMP LOAD
 
@@ -454,6 +462,54 @@ DUMP INFO [<filepath>]
 **Example:**
 ```
 DUMP INFO /backup/mygramdb.dmp
+```
+
+### DUMP STATUS
+
+Monitor the progress of async dump operations (DUMP SAVE).
+
+**Syntax:**
+```
+DUMP STATUS
+```
+
+**Response:**
+```
+OK DUMP_STATUS
+save_in_progress: <true|false>
+load_in_progress: <true|false>
+replication_paused_for_dump: <true|false>
+status: <IDLE|SAVING|LOADING|COMPLETED|FAILED>
+filepath: <path>
+tables_processed: <count>
+tables_total: <count>
+current_table: <table_name>
+elapsed_seconds: <seconds>
+result_filepath: <path>        (when COMPLETED)
+error: <message>               (when FAILED)
+END
+```
+
+**Status values:**
+- `IDLE`: No dump operation in progress
+- `SAVING`: DUMP SAVE in progress
+- `LOADING`: DUMP LOAD in progress
+- `COMPLETED`: Last dump operation completed successfully
+- `FAILED`: Last dump operation failed
+
+**Example (during save):**
+```
+OK DUMP_STATUS
+save_in_progress: true
+load_in_progress: false
+replication_paused_for_dump: true
+status: SAVING
+filepath: /backup/mygramdb.dmp
+tables_processed: 2
+tables_total: 5
+current_table: users
+elapsed_seconds: 3.45
+END
 ```
 
 **For detailed snapshot management, integrity protection, best practices, and troubleshooting, see [Snapshot Guide](snapshot.md).**

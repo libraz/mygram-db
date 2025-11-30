@@ -402,17 +402,25 @@ DUMPコマンドファミリーは、整合性検証を備えた統一的なス�
 
 ### DUMP SAVE
 
-完全なスナップショットを単一のバイナリファイル（`.dmp`）に保存します。
+完全なスナップショットを単一のバイナリファイル（`.dmp`）に保存します。このコマンドは**非同期**で実行され、即座にレスポンスを返します。
 
 **構文:**
 ```
 DUMP SAVE [<filepath>] [--with-stats]
 ```
 
+**レスポンス:**
+```
+OK DUMP_STARTED <filepath>
+Use DUMP STATUS to monitor progress
+```
+
 **例:**
 ```
 DUMP SAVE /backup/mygramdb.dmp --with-stats
 ```
+
+`DUMP STATUS` で進捗を監視し、完了を確認できます。
 
 ### DUMP LOAD
 
@@ -454,6 +462,54 @@ DUMP INFO [<filepath>]
 **例:**
 ```
 DUMP INFO /backup/mygramdb.dmp
+```
+
+### DUMP STATUS
+
+非同期ダンプ操作（DUMP SAVE）の進捗を監視します。
+
+**構文:**
+```
+DUMP STATUS
+```
+
+**レスポンス:**
+```
+OK DUMP_STATUS
+save_in_progress: <true|false>
+load_in_progress: <true|false>
+replication_paused_for_dump: <true|false>
+status: <IDLE|SAVING|LOADING|COMPLETED|FAILED>
+filepath: <path>
+tables_processed: <count>
+tables_total: <count>
+current_table: <table_name>
+elapsed_seconds: <seconds>
+result_filepath: <path>        (COMPLETED時)
+error: <message>               (FAILED時)
+END
+```
+
+**ステータス値:**
+- `IDLE`: ダンプ操作なし
+- `SAVING`: DUMP SAVE 実行中
+- `LOADING`: DUMP LOAD 実行中
+- `COMPLETED`: 最後のダンプ操作が正常に完了
+- `FAILED`: 最後のダンプ操作が失敗
+
+**例（保存中）:**
+```
+OK DUMP_STATUS
+save_in_progress: true
+load_in_progress: false
+replication_paused_for_dump: true
+status: SAVING
+filepath: /backup/mygramdb.dmp
+tables_processed: 2
+tables_total: 5
+current_table: users
+elapsed_seconds: 3.45
+END
 ```
 
 **詳細なスナップショット管理、整合性保護、ベストプラクティス、トラブルシューティングについては、[スナップショットガイド](snapshot.md)を参照してください。**
