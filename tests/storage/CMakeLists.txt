@@ -33,6 +33,27 @@ gtest_discover_tests(document_store_concurrent_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# DocumentStore stress tests (marked as SLOW for CI)
+add_executable(document_store_stress_test
+  document_store_stress_test.cpp
+)
+
+target_link_libraries(document_store_stress_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+# Note: Stress tests are designed to detect concurrency bugs like use-after-free
+# through high memory pressure. They are excluded from regular CI runs.
+gtest_discover_tests(document_store_stress_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK storage_io
+    TIMEOUT 60
+)
+
 # DocumentStore serialization tests
 add_executable(document_store_serialization_test
   document_store_serialization_test.cpp

@@ -231,7 +231,8 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
     return false;
   }
 
-  const std::string& primary_key = pk_it->second;
+  // Copy the primary key before erasing (avoid use-after-free)
+  std::string primary_key = pk_it->second;
 
   // Remove mappings
   pk_to_doc_id_.erase(primary_key);
