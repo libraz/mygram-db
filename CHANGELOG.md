@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.7] - 2025-12-02
+
+### Added
+
+- **Async DUMP SAVE** - Non-blocking dump operations; returns immediately with `OK DUMP_STARTED <filepath>` while dump runs in background
+- **DUMP STATUS command** - Real-time progress monitoring for dump operations with status, tables processed, elapsed time, and error reporting
+
+### Fixed
+
+- **Critical: SIGSEGV on SET/SHOW VARIABLES** - Transfer VariableHandler ownership to TcpServer to prevent use-after-free crash
+- **Medium: auto-dump/manual dump conflict** - Add mutual exclusion between SnapshotScheduler and manual DUMP SAVE operations
+- **Low: DUMP LOAD GTID restoration** - Restore GTID even when replication was not running, enabling manual REPLICATION START after load
+- **Low: BinlogReader::IsRunning()** - Check both running_ and should_stop_ flags; reset should_stop_ in Stop() for proper restart
+
+### Refactoring
+
+- **Structured logging migration** - Convert spdlog calls to StructuredLog format across 25+ files
+- **IBinlogReader interface** - Introduce interface for better testability; handlers use interface instead of concrete class
+- **Flag renaming** - read_only_ -> dump_save_in_progress_, loading_ -> dump_load_in_progress_ for clarity
+
+### Documentation
+
+- Document async DUMP SAVE behavior and DUMP STATUS command in protocol.md (EN/JA)
+
+**Detailed Release Notes**: [docs/releases/v1.3.7.md](docs/releases/v1.3.7.md)
+
 ## [1.3.6] - 2025-11-26
 
 ### Performance
@@ -266,7 +292,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.6...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.7...HEAD
+[1.3.7]: https://github.com/libraz/mygram-db/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/libraz/mygram-db/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/libraz/mygram-db/compare/v1.3.4...v1.3.5
 [1.3.4]: https://github.com/libraz/mygram-db/compare/v1.3.3...v1.3.4

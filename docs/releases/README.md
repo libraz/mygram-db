@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.3.6](v1.3.6.md) - Latest release (2025-11-26) - Cache Optimization & Log Cleanup
+- [v1.3.7](v1.3.7.md) - Latest release (2025-12-02) - Async DUMP SAVE & DUMP STATUS
+- [v1.3.6](v1.3.6.md) - 2025-11-26 - Cache Optimization & Log Cleanup
 - [v1.3.5](v1.3.5.md) - 2025-11-26 - Parallel Query Performance (QPS 372)
 - [v1.3.4](v1.3.4.md) - 2025-11-25 - Log Rotation & Testing Improvements
 - [v1.3.3](v1.3.3.md) - 2025-11-25 - DATETIME2/server_id Bug Fixes
