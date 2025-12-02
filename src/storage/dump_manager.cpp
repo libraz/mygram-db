@@ -9,23 +9,25 @@
 
 #include <utility>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::storage {
 
 DumpManager::DumpManager(std::string dump_dir) : dump_dir_(std::move(dump_dir)) {
-  spdlog::info("Dump manager initialized: {}", dump_dir_);
+  mygram::utils::StructuredLog().Event("dump_manager_initialized").Field("path", dump_dir_).Info();
 }
 
 bool DumpManager::Save(const std::string& name) {
   // Future feature: mmap-based dump save for faster recovery
   // Currently using InitialLoader for incremental dump building
-  spdlog::info("Saving dump: {} to {} (not yet implemented)", name, dump_dir_);
+  mygram::utils::StructuredLog().Event("dump_save_not_implemented").Field("name", name).Field("path", dump_dir_).Info();
   return false;
 }
 
 bool DumpManager::Load(const std::string& name) {
   // Future feature: mmap-based dump load for faster startup
   // Currently using InitialLoader for dump management
-  spdlog::info("Loading dump: {} from {} (not yet implemented)", name, dump_dir_);
+  mygram::utils::StructuredLog().Event("dump_load_not_implemented").Field("name", name).Field("path", dump_dir_).Info();
   return false;
 }
 

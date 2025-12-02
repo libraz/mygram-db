@@ -122,6 +122,58 @@ TEST_F(MySQLIntegrationTest, Reconnect) {
 }
 
 /**
+ * @brief Test MySQL silent reconnection
+ *
+ * Silent reconnection is used during idle timeout recovery to avoid
+ * noisy info-level logs during expected reconnects.
+ */
+TEST_F(MySQLIntegrationTest, ReconnectSilent) {
+  Connection::Config config;
+  const char* host = std::getenv("MYSQL_HOST");
+  config.host = host ? host : "127.0.0.1";
+  config.port = 3306;
+  const char* user = std::getenv("MYSQL_USER");
+  config.user = user ? user : "root";
+  const char* password = std::getenv("MYSQL_PASSWORD");
+  config.password = password ? password : "";
+
+  Connection conn(config);
+  ASSERT_TRUE(conn.Connect());
+
+  // Silent reconnect (true) - should work the same as normal reconnect
+  // but without info-level logging
+  EXPECT_TRUE(conn.Reconnect(true));
+  EXPECT_TRUE(conn.IsConnected());
+
+  // Verify connection is functional after silent reconnect
+  EXPECT_TRUE(conn.Ping());
+}
+
+/**
+ * @brief Test MySQL reconnection without prior connection
+ *
+ * Reconnect should still work even if connection was never established,
+ * as it closes the old handle (if any), reinitializes, and connects.
+ */
+TEST_F(MySQLIntegrationTest, ReconnectWithoutPriorConnection) {
+  Connection::Config config;
+  const char* host = std::getenv("MYSQL_HOST");
+  config.host = host ? host : "127.0.0.1";
+  config.port = 3306;
+  const char* user = std::getenv("MYSQL_USER");
+  config.user = user ? user : "root";
+  const char* password = std::getenv("MYSQL_PASSWORD");
+  config.password = password ? password : "";
+
+  Connection conn(config);
+  // Don't call Connect() first
+
+  // Reconnect should establish the connection
+  EXPECT_TRUE(conn.Reconnect());
+  EXPECT_TRUE(conn.IsConnected());
+}
+
+/**
  * @brief Test getting latest GTID from SHOW MASTER STATUS
  */
 TEST_F(MySQLIntegrationTest, GetLatestGTID) {

@@ -23,8 +23,11 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(
     }
   }
 
-  spdlog::debug("Creating thread pool with {} workers, queue size: {}", num_threads,
-                queue_size == 0 ? "unbounded" : std::to_string(queue_size));
+  mygram::utils::StructuredLog()
+      .Event("thread_pool_created")
+      .Field("workers", static_cast<uint64_t>(num_threads))
+      .Field("queue_size", queue_size == 0 ? "unbounded" : std::to_string(queue_size))
+      .Debug();
 
   // Start worker threads
   workers_.reserve(num_threads);
@@ -98,7 +101,10 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
   condition_.notify_all();
 
   if (graceful && pending_tasks > 0) {
-    spdlog::info("Graceful shutdown: waiting for {} pending tasks to complete", pending_tasks);
+    mygram::utils::StructuredLog()
+        .Event("thread_pool_graceful_shutdown")
+        .Field("pending_tasks", static_cast<uint64_t>(pending_tasks))
+        .Info();
 
     if (timeout_ms > 0) {
       // Wait with timeout by polling queue status and active workers
@@ -144,7 +150,11 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
       }
 
       if (elapsed < std::chrono::milliseconds(timeout_ms)) {
-        spdlog::debug("Thread pool shut down gracefully (all tasks completed)");
+        mygram::utils::StructuredLog()
+            .Event("thread_pool_shutdown")
+            .Field("type", "graceful")
+            .Field("status", "all_tasks_completed")
+            .Debug();
       }
     } else {
       // No timeout - wait for all workers
@@ -153,7 +163,11 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
           worker.join();
         }
       }
-      spdlog::debug("Thread pool shut down gracefully (all tasks completed)");
+      mygram::utils::StructuredLog()
+          .Event("thread_pool_shutdown")
+          .Field("type", "graceful")
+          .Field("status", "all_tasks_completed")
+          .Debug();
     }
   } else {
     // Non-graceful or no pending tasks - just join workers
@@ -163,9 +177,17 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
       }
     }
     if (!graceful) {
-      spdlog::debug("Thread pool shut down immediately (non-graceful)");
+      mygram::utils::StructuredLog()
+          .Event("thread_pool_shutdown")
+          .Field("type", "immediate")
+          .Field("status", "non_graceful")
+          .Debug();
     } else {
-      spdlog::debug("Thread pool shut down (no pending tasks)");
+      mygram::utils::StructuredLog()
+          .Event("thread_pool_shutdown")
+          .Field("type", "graceful")
+          .Field("status", "no_pending_tasks")
+          .Debug();
     }
   }
 }

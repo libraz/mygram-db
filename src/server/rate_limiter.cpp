@@ -75,10 +75,14 @@ RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients
       max_clients_(max_clients),
       cleanup_interval_(cleanup_interval),
       inactivity_timeout_(inactivity_timeout_sec) {
-  spdlog::debug(
-      "RateLimiter created: capacity={}, refill_rate={}, max_clients={}, cleanup_interval={}, "
-      "inactivity_timeout={}s",
-      capacity, refill_rate, max_clients, cleanup_interval, inactivity_timeout_sec);
+  mygram::utils::StructuredLog()
+      .Event("rate_limiter_created")
+      .Field("capacity", static_cast<uint64_t>(capacity))
+      .Field("refill_rate", static_cast<uint64_t>(refill_rate))
+      .Field("max_clients", static_cast<uint64_t>(max_clients))
+      .Field("cleanup_interval", static_cast<uint64_t>(cleanup_interval))
+      .Field("inactivity_timeout_sec", static_cast<uint64_t>(inactivity_timeout_sec))
+      .Debug();
 }
 
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
@@ -112,8 +116,11 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
     }
 
     if (removed > 0) {
-      spdlog::debug("Rate limiter: cleaned up {} inactive clients (total tracked: {})", removed,
-                    client_buckets_.size());
+      mygram::utils::StructuredLog()
+          .Event("rate_limiter_cleanup")
+          .Field("removed_clients", static_cast<uint64_t>(removed))
+          .Field("total_tracked", static_cast<uint64_t>(client_buckets_.size()))
+          .Debug();
     }
   }
 
@@ -204,7 +211,11 @@ void RateLimiter::CleanupOldClients() {
   }
 
   if (removed > 0) {
-    spdlog::debug("Rate limiter: cleaned up {} inactive clients (total tracked: {})", removed, client_buckets_.size());
+    mygram::utils::StructuredLog()
+        .Event("rate_limiter_cleanup")
+        .Field("removed_clients", static_cast<uint64_t>(removed))
+        .Field("total_tracked", static_cast<uint64_t>(client_buckets_.size()))
+        .Debug();
   }
 }
 

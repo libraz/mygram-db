@@ -10,6 +10,7 @@
 #include "server/handlers/command_handler.h"
 #include "server/response_formatter.h"
 #include "server/table_catalog.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -23,7 +24,7 @@ void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* h
 }
 
 std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionContext& conn_ctx) {
-  spdlog::debug("Dispatching request: {}", request);
+  mygram::utils::StructuredLog().Event("request_dispatching").Field("request", request).Debug();
 
   // Create a thread-local parser for this request
   query::QueryParser parser;

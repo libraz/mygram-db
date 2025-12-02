@@ -263,7 +263,7 @@ std::optional<ProcessMemoryInfo> GetProcessMemoryInfo() {
 bool CheckMemoryAvailability(uint64_t required_bytes, double safety_margin_ratio) {
   auto system_info = GetSystemMemoryInfo();
   if (!system_info) {
-    spdlog::warn("Unable to check memory availability, allowing operation");
+    mygram::utils::StructuredLog().Event("memory_check_unavailable").Field("action", "allowing operation").Warn();
     return true;  // Fail-open: allow operation if we can't check
   }
 
@@ -272,8 +272,12 @@ bool CheckMemoryAvailability(uint64_t required_bytes, double safety_margin_ratio
 
   // Check if available physical memory is sufficient
   if (system_info->available_physical_bytes < required_with_margin) {
-    spdlog::warn("Insufficient memory: required={} ({} with margin), available={}", FormatBytes(required_bytes),
-                 FormatBytes(required_with_margin), FormatBytes(system_info->available_physical_bytes));
+    mygram::utils::StructuredLog()
+        .Event("memory_insufficient")
+        .Field("required", FormatBytes(required_bytes))
+        .Field("required_with_margin", FormatBytes(required_with_margin))
+        .Field("available", FormatBytes(system_info->available_physical_bytes))
+        .Warn();
     return false;
   }
 

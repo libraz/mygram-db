@@ -22,7 +22,7 @@ namespace mygramdb::utils {
 bool Daemonize() {
 #ifdef _WIN32
   // Windows does not support traditional UNIX daemonization
-  spdlog::warn("Daemonization is not supported on Windows");
+  mygram::utils::StructuredLog().Event("daemon_not_supported").Field("platform", "Windows").Warn();
   return false;
 #else
   // Step 1: Fork and exit parent
@@ -78,7 +78,7 @@ bool Daemonize() {
   // Step 4: Change working directory to root
   // This prevents the daemon from holding any directory in use
   if (chdir("/") < 0) {
-    spdlog::warn("Failed to change working directory to /");
+    mygram::utils::StructuredLog().Event("daemon_warning").Field("type", "chdir_failed").Field("target", "/").Warn();
     // Not fatal, continue
   }
 
@@ -99,11 +99,14 @@ bool Daemonize() {
       close(null_fd);
     }
   } else {
-    spdlog::warn("Failed to open /dev/null for file descriptor redirection");
+    mygram::utils::StructuredLog()
+        .Event("daemon_warning")
+        .Field("error", "Failed to open /dev/null for file descriptor redirection")
+        .Warn();
     // Not fatal, continue
   }
 
-  spdlog::info("Process successfully daemonized");
+  mygram::utils::StructuredLog().Event("process_daemonized").Info();
   return true;
 #endif
 }

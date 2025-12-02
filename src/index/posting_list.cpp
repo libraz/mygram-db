@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::index {
 
 // Hysteresis factor to prevent oscillation between delta and roaring formats
@@ -427,11 +429,19 @@ void PostingList::Optimize(uint64_t total_docs) {
   if (density >= roaring_threshold_ && strategy_ == PostingStrategy::kDeltaCompressed) {
     // Convert to Roaring for high density
     ConvertToRoaring();
-    spdlog::debug("Converted posting list to Roaring (density={:.2f})", density);
+    mygram::utils::StructuredLog()
+        .Event("posting_list_converted")
+        .Field("to", "roaring")
+        .Field("density", density)
+        .Debug();
   } else if (density < roaring_threshold_ * kHysteresisFactor && strategy_ == PostingStrategy::kRoaringBitmap) {
     // Convert back to delta for low density (with hysteresis)
     ConvertToDelta();
-    spdlog::debug("Converted posting list to delta (density={:.2f})", density);
+    mygram::utils::StructuredLog()
+        .Event("posting_list_converted")
+        .Field("to", "delta")
+        .Field("density", density)
+        .Debug();
   }
 }
 

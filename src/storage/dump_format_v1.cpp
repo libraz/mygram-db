@@ -887,7 +887,7 @@ Expected<void, Error> WriteDumpV1(
         LogStorageError("create_directory", parent_dir.string(), error_code.message());
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
-      spdlog::info("Created dump directory: {}", parent_dir.string());
+      StructuredLog().Event("dump_directory_created").Field("path", parent_dir.string()).Info();
     }
 
 #ifndef _WIN32
@@ -1117,7 +1117,7 @@ Expected<void, Error> WriteDumpV1(
       }
       ofs.write(doc_data.data(), static_cast<std::streamsize>(doc_len));
 
-      spdlog::info("Saved table to dump: {}", table_name);
+      StructuredLog().Event("dump_table_saved").Field("table", table_name).Info();
     }
 
     ofs.close();
@@ -1199,7 +1199,11 @@ Expected<void, Error> WriteDumpV1(
       }
     }
 
-    spdlog::debug("Snapshot CRC32: 0x{:08x}, Size: {} bytes", calculated_crc, file_size);
+    StructuredLog()
+        .Event("dump_crc_calculated")
+        .Field("crc32", static_cast<uint64_t>(calculated_crc))
+        .Field("file_size", file_size)
+        .Debug();
 
     return {};
 
@@ -1338,7 +1342,7 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
 
-      spdlog::debug("Snapshot CRC32 verified: 0x{:08x}", calculated_crc);
+      StructuredLog().Event("dump_crc_verified").Field("crc32", static_cast<uint64_t>(calculated_crc)).Debug();
 
       // Restore file position
       ifs.seekg(current_pos);
@@ -1495,7 +1499,7 @@ Expected<void, Error> ReadDumpV1(
         return result;
       }
 
-      spdlog::info("Loaded table from dump: {}", table_name);
+      StructuredLog().Event("dump_table_loaded").Field("table", table_name).Info();
     }
 
     return {};
@@ -1615,9 +1619,9 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
 
-      spdlog::info("Snapshot file verification passed (CRC verified): {}", filepath);
+      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", true).Info();
     } else {
-      spdlog::info("Snapshot file verification passed (basic check, no CRC): {}", filepath);
+      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", false).Info();
     }
 
     integrity_error.type = dump_format::CRCErrorType::None;

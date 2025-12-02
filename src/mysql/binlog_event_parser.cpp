@@ -166,7 +166,12 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
   auto event_type = static_cast<MySQLBinlogEventType>(buffer[4]);
 
   // Log event type for debugging
-  spdlog::debug("Received binlog event: {} (type={})", GetEventTypeName(event_type), static_cast<int>(buffer[4]));
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "received_event")
+      .Field("event_name", GetEventTypeName(event_type))
+      .Field("event_type", static_cast<int64_t>(buffer[4]))
+      .Debug();
 
   // Handle different event types
   switch (event_type) {
@@ -180,7 +185,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
     case MySQLBinlogEventType::WRITE_ROWS_EVENT: {
       // Parse INSERT operations
-      spdlog::debug("WRITE_ROWS_EVENT detected");
+      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "write_rows_detected").Debug();
 
       // Extract table_id from post-header (skip common header 19 bytes)
       const unsigned char* post_header = buffer + 19;
@@ -192,7 +197,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::debug("Unknown table_id in write_rows event: {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "unknown_table_id_write")
+            .Field("table_id", table_id)
+            .Debug();
         return std::nullopt;
       }
 
@@ -201,7 +210,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::debug("Table not in replication context (write_rows): table_name={}", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "table_not_monitored_write")
+              .Field("table", table_meta->table_name)
+              .Debug();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -250,15 +263,20 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
-      spdlog::debug("Parsed WRITE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
-                    event.filters.size());
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "parsed_write_rows")
+          .Field("pk", event.primary_key)
+          .Field("text_len", static_cast<uint64_t>(event.text.length()))
+          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Debug();
 
       return event;
     }
 
     case MySQLBinlogEventType::UPDATE_ROWS_EVENT: {
       // Parse UPDATE operations
-      spdlog::debug("UPDATE_ROWS_EVENT detected");
+      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "update_rows_detected").Debug();
 
       // Extract table_id from post-header
       const unsigned char* post_header = buffer + 19;
@@ -270,7 +288,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::debug("Unknown table_id in update_rows event: {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "unknown_table_id_update")
+            .Field("table_id", table_id)
+            .Debug();
         return std::nullopt;
       }
 
@@ -279,7 +301,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::debug("Table not in replication context (update_rows): table_name={}", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "table_not_monitored_update")
+              .Field("table", table_meta->table_name)
+              .Debug();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -332,15 +358,20 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto required_filters = ExtractFilters(after_row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
-      spdlog::debug("Parsed UPDATE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
-                    event.filters.size());
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "parsed_update_rows")
+          .Field("pk", event.primary_key)
+          .Field("text_len", static_cast<uint64_t>(event.text.length()))
+          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Debug();
 
       return event;
     }
 
     case MySQLBinlogEventType::DELETE_ROWS_EVENT: {
       // Parse DELETE operations
-      spdlog::debug("DELETE_ROWS_EVENT detected");
+      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "delete_rows_detected").Debug();
 
       // Extract table_id from post-header
       const unsigned char* post_header = buffer + 19;
@@ -352,7 +383,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Get table metadata from cache
       const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
       if (table_meta == nullptr) {
-        spdlog::debug("Unknown table_id in delete_rows event: {}", table_id);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "unknown_table_id_delete")
+            .Field("table_id", table_id)
+            .Debug();
         return std::nullopt;
       }
 
@@ -361,7 +396,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       if (multi_table_mode) {
         auto table_iter = table_contexts.find(table_meta->table_name);
         if (table_iter == table_contexts.end()) {
-          spdlog::debug("Table not in replication context (delete_rows): table_name={}", table_meta->table_name);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "table_not_monitored_delete")
+              .Field("table", table_meta->table_name)
+              .Debug();
           return std::nullopt;
         }
         current_config = &table_iter->second->config;
@@ -410,8 +449,13 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
       event.filters.insert(required_filters.begin(), required_filters.end());
 
-      spdlog::debug("Parsed DELETE_ROWS: pk={}, text_len={}, filters={}", event.primary_key, event.text.length(),
-                    event.filters.size());
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "parsed_delete_rows")
+          .Field("pk", event.primary_key)
+          .Field("text_len", static_cast<uint64_t>(event.text.length()))
+          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Debug();
 
       return event;
     }
@@ -424,7 +468,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       }
 
       std::string query = query_opt.value();
-      spdlog::debug("QUERY_EVENT: {}", query);
+      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "query_event").Field("query", query).Debug();
 
       // Check if this affects any of our target tables
       if (multi_table_mode) {
@@ -503,7 +547,12 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
 std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 8) {
     // Minimum TABLE_MAP event size (6 bytes table_id + 2 bytes flags)
-    spdlog::error("ParseTableMapEvent: buffer null or length {} < 8", length);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "buffer_null_or_too_short")
+        .Field("length", static_cast<uint64_t>(length))
+        .Error();
     return std::nullopt;
   }
 
@@ -516,10 +565,20 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   const unsigned char* ptr = buffer + 19;
   unsigned long remaining = length - 19;
 
-  spdlog::debug("ParseTableMapEvent: length={}, remaining after header={}", length, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_start")
+      .Field("length", static_cast<uint64_t>(length))
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   if (remaining < 8) {
-    spdlog::error("ParseTableMapEvent: remaining {} < 8 after header skip", remaining);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "insufficient_after_header")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Error();
     return std::nullopt;
   }
 
@@ -531,14 +590,24 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   ptr += 6;
   remaining -= 6;
 
-  spdlog::debug("ParseTableMapEvent: table_id={}, remaining={}", metadata.table_id, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_table_id")
+      .Field("table_id", metadata.table_id)
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   // Skip flags (2 bytes)
   ptr += 2;
   remaining -= 2;
 
   if (remaining < 1) {
-    spdlog::error("ParseTableMapEvent: remaining {} < 1 before db_len", remaining);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "no_space_for_db_len")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Error();
     return std::nullopt;
   }
 
@@ -546,10 +615,21 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   uint8_t db_len = *ptr++;
   remaining--;
 
-  spdlog::debug("ParseTableMapEvent: db_len={}, remaining={}", db_len, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_db_len")
+      .Field("db_len", static_cast<uint64_t>(db_len))
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   if (remaining < static_cast<size_t>(db_len) + 1) {  // +1 for null terminator
-    spdlog::error("ParseTableMapEvent: remaining {} < db_len {} + 1", remaining, db_len);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "insufficient_for_db_name")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Field("db_len", static_cast<uint64_t>(db_len))
+        .Error();
     return std::nullopt;
   }
 
@@ -557,10 +637,20 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   ptr += db_len + 1;  // +1 for null terminator
   remaining -= (db_len + 1);
 
-  spdlog::debug("ParseTableMapEvent: database_name={}, remaining={}", metadata.database_name, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_db_name")
+      .Field("database", metadata.database_name)
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   if (remaining < 1) {
-    spdlog::error("ParseTableMapEvent: remaining {} < 1 before table_len", remaining);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "no_space_for_table_len")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Error();
     return std::nullopt;
   }
 
@@ -568,10 +658,21 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   uint8_t table_len = *ptr++;
   remaining--;
 
-  spdlog::debug("ParseTableMapEvent: table_len={}, remaining={}", table_len, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_table_len")
+      .Field("table_len", static_cast<uint64_t>(table_len))
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   if (remaining < static_cast<size_t>(table_len) + 1) {
-    spdlog::error("ParseTableMapEvent: remaining {} < table_len {} + 1", remaining, table_len);
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "insufficient_for_table_name")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Field("table_len", static_cast<uint64_t>(table_len))
+        .Error();
     return std::nullopt;
   }
 
@@ -579,7 +680,12 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   ptr += table_len + 1;
   remaining -= (table_len + 1);
 
-  spdlog::debug("ParseTableMapEvent: table_name={}, remaining={}", metadata.table_name, remaining);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "parse_table_map_table_name")
+      .Field("table", metadata.table_name)
+      .Field("remaining", static_cast<int64_t>(remaining))
+      .Debug();
 
   if (remaining < 1) {
     return std::nullopt;
@@ -767,8 +873,14 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
     }
   }
 
-  spdlog::debug("TABLE_MAP: {}.{} (table_id={}, columns={})", metadata.database_name, metadata.table_name,
-                metadata.table_id, column_count);
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "table_map_complete")
+      .Field("database", metadata.database_name)
+      .Field("table", metadata.table_name)
+      .Field("table_id", metadata.table_id)
+      .Field("columns", column_count)
+      .Debug();
 
   return metadata;
 }

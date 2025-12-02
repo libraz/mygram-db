@@ -94,7 +94,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Start transaction with consistent snapshot for GTID consistency
-  spdlog::info("Starting consistent snapshot transaction for initial load");
+  mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
     std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
     mygram::utils::StructuredLog()
@@ -141,11 +141,11 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  spdlog::info("Initial load starting from GTID: {}", start_gtid_);
+  mygram::utils::StructuredLog().Event("initial_load_starting").Field("gtid", start_gtid_).Info();
 
   // Build SELECT query
   std::string query = BuildSelectQuery();
-  spdlog::info("Loading initial data with query: {}", query);
+  mygram::utils::StructuredLog().Event("initial_load_query").Field("query", query).Info();
 
   auto start_time = std::chrono::steady_clock::now();
 
@@ -164,14 +164,19 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // Get total row count (approximate from result)
   uint64_t total_rows = mysql_num_rows(result_exp->get());
 
-  spdlog::info("Processing {} rows from table {}", total_rows, table_config_.name);
-
   // Process rows in batches
   MYSQL_ROW row = nullptr;
   processed_rows_ = 0;
 
   // Determine batch size (use default if not specified)
   size_t batch_size = build_config_.batch_size > 0 ? build_config_.batch_size : kDefaultBatchSize;
+
+  mygram::utils::StructuredLog()
+      .Event("initial_load_processing")
+      .Field("table", table_config_.name)
+      .Field("rows", total_rows)
+      .Field("batch_size", static_cast<uint64_t>(batch_size))
+      .Info();
 
   std::vector<storage::DocumentStore::DocumentItem> doc_batch;
   std::vector<index::Index::DocumentItem> index_batch;
@@ -198,7 +203,11 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     // Extract text
     std::string text = ExtractText(row, fields, num_fields);
     if (text.empty()) {
-      spdlog::debug("Empty text for primary key {}, skipping", primary_key);
+      mygram::utils::StructuredLog()
+          .Event("initial_load_skip")
+          .Field("reason", "empty_text")
+          .Field("primary_key", primary_key)
+          .Debug();
       continue;
     }
 
@@ -290,9 +299,15 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
   auto end_time = std::chrono::steady_clock::now();
   double total_elapsed = std::chrono::duration<double>(end_time - start_time).count();
+  double rows_per_second = total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0;
 
-  spdlog::info("Initial load completed: {} rows in {:.2f}s ({:.0f} rows/s)", processed_rows_, total_elapsed,
-               total_elapsed > 0 ? static_cast<double>(processed_rows_) / total_elapsed : 0.0);
+  mygram::utils::StructuredLog()
+      .Event("initial_load_completed")
+      .Field("table", table_config_.name)
+      .Field("rows", processed_rows_)
+      .Field("elapsed_sec", total_elapsed)
+      .Field("rows_per_sec", rows_per_second)
+      .Info();
 
   return {};  // Success
 }
@@ -403,7 +418,11 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   // Extract text
   std::string text = ExtractText(row, fields, num_fields);
   if (text.empty()) {
-    spdlog::debug("Empty text for primary key {}, skipping", primary_key);
+    mygram::utils::StructuredLog()
+        .Event("initial_load_skip")
+        .Field("reason", "empty_text")
+        .Field("primary_key", primary_key)
+        .Debug();
     return {};  // Skip empty documents (success)
   }
 

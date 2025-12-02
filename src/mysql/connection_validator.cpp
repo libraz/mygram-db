@@ -162,7 +162,11 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
   if (last_gtid && !purged_gtid->empty() && !last_gtid->empty()) {
     // Simple check: if purged set is not empty, warn that some GTIDs may be unavailable
     // A more sophisticated check would parse the GTID sets and compare ranges
-    spdlog::debug("GTID consistency check - Executed: {}, Purged: {}", *executed_gtid, *purged_gtid);
+    mygram::utils::StructuredLog()
+        .Event("gtid_consistency_check")
+        .Field("executed_gtid", *executed_gtid)
+        .Field("purged_gtid", *purged_gtid)
+        .Debug();
   }
 
   return true;

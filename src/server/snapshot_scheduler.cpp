@@ -85,11 +85,15 @@ void SnapshotScheduler::Start() {
   }
 
   if (config_.interval_sec <= 0) {
-    spdlog::info("SnapshotScheduler disabled (interval_sec <= 0)");
+    mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return;
   }
 
-  spdlog::info("Starting SnapshotScheduler (interval: {}s, retain: {})", config_.interval_sec, config_.retain);
+  mygram::utils::StructuredLog()
+      .Event("snapshot_scheduler_starting")
+      .Field("interval_sec", static_cast<uint64_t>(config_.interval_sec))
+      .Field("retain", static_cast<uint64_t>(config_.retain))
+      .Info();
 
   running_ = true;
   scheduler_thread_ = std::make_unique<std::thread>(&SnapshotScheduler::SchedulerLoop, this);
@@ -100,21 +104,21 @@ void SnapshotScheduler::Stop() {
     return;
   }
 
-  spdlog::info("Stopping SnapshotScheduler...");
+  mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();
   running_ = false;
 
   if (scheduler_thread_ && scheduler_thread_->joinable()) {
     scheduler_thread_->join();
   }
 
-  spdlog::info("SnapshotScheduler stopped");
+  mygram::utils::StructuredLog().Event("snapshot_scheduler_stopped").Info();
 }
 
 void SnapshotScheduler::SchedulerLoop() {
   const int interval_sec = config_.interval_sec;
   const int check_interval_ms = 1000;  // Check for shutdown every second
 
-  spdlog::info("SnapshotScheduler thread started");
+  mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_started").Info();
 
   // Calculate next save time
   auto next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(interval_sec);
@@ -135,14 +139,17 @@ void SnapshotScheduler::SchedulerLoop() {
     std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
   }
 
-  spdlog::info("SnapshotScheduler thread exiting");
+  mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_exiting").Info();
 }
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
     // Check if manual DUMP SAVE is in progress (mutual exclusion)
     if (dump_save_in_progress_.load()) {
-      spdlog::info("Auto-snapshot skipped: manual DUMP SAVE is in progress");
+      mygram::utils::StructuredLog()
+          .Event("auto_snapshot_skipped")
+          .Field("reason", "manual DUMP SAVE is in progress")
+          .Info();
       return;
     }
 
@@ -159,7 +166,7 @@ void SnapshotScheduler::TakeSnapshot() {
 
     std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
 
-    spdlog::info("Taking snapshot: {}", dump_path.string());
+    mygram::utils::StructuredLog().Event("snapshot_taking").Field("path", dump_path.string()).Info();
 
     // Get current GTID
     std::string gtid;
@@ -177,7 +184,7 @@ void SnapshotScheduler::TakeSnapshot() {
     auto result = storage::dump_v1::WriteDumpV1(dump_path.string(), gtid, *full_config_, dumpable);
 
     if (result) {
-      spdlog::info("Snapshot completed successfully: {}", dump_path.string());
+      mygram::utils::StructuredLog().Event("snapshot_completed").Field("path", dump_path.string()).Info();
     } else {
       mygram::utils::StructuredLog()
           .Event("server_error")
@@ -228,7 +235,7 @@ void SnapshotScheduler::CleanupOldSnapshots() {
     // Delete old files beyond retain count
     const auto retain_count = static_cast<size_t>(config_.retain);
     for (size_t i = retain_count; i < dump_files.size(); ++i) {
-      spdlog::info("Removing old snapshot file: {}", dump_files[i].first.string());
+      mygram::utils::StructuredLog().Event("snapshot_removing_old").Field("path", dump_files[i].first.string()).Info();
       std::filesystem::remove(dump_files[i].first);
     }
 

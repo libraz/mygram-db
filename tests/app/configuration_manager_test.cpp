@@ -419,7 +419,7 @@ TEST_F(ConfigurationManagerTestFixture, ReopenLogFileRotation) {
   std::string new_content = ReadFile(log_file);
   EXPECT_NE(new_content.find("After rotation message"), std::string::npos)
       << "New log should contain message after rotation";
-  EXPECT_NE(new_content.find("Log file reopened"), std::string::npos)
+  EXPECT_NE(new_content.find("log_file_reopened"), std::string::npos)
       << "New log should contain reopen confirmation message";
 
   // Cleanup

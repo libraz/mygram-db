@@ -127,7 +127,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
       mysql_options(mysql_, MYSQL_OPT_SSL_KEY, config_.ssl_key.c_str());
     }
 
-    spdlog::debug("SSL/TLS enabled for MySQL connection");
+    mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "ssl_enabled").Debug();
   }
 
   // Connect to MySQL
@@ -156,15 +156,31 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   if (mysql_query(mysql_, set_timeout_query.c_str()) != 0) {
     // Log warning but don't fail connection - timeout setting is not critical
     SetMySQLError();
-    spdlog::warn("Failed to set session timeouts (non-critical): {}", last_error_);
+    mygram::utils::StructuredLog()
+        .Event("mysql_session_timeout_warning")
+        .Field("error", last_error_)
+        .Field("note", "non-critical")
+        .Warn();
   } else {
-    spdlog::debug("Session timeouts set to {} seconds", config_.session_timeout_sec);
+    mygram::utils::StructuredLog()
+        .Event("mysql_debug")
+        .Field("action", "session_timeout_set")
+        .Field("timeout_sec", static_cast<uint64_t>(config_.session_timeout_sec))
+        .Debug();
   }
 
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
   std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";
-  spdlog::debug("{}Connected to MySQL {}:{}{}{}", context_prefix, config_.host, config_.port, db_info, ssl_info);
+  mygram::utils::StructuredLog()
+      .Event("mysql_debug")
+      .Field("action", "connected")
+      .Field("context", context)
+      .Field("host", config_.host)
+      .Field("port", static_cast<uint64_t>(config_.port))
+      .Field("database", config_.database)
+      .Field("ssl", config_.ssl_enable)
+      .Debug();
   return {};
 }
 
@@ -198,7 +214,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Ping() {
   return {};
 }
 
-mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect() {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool silent) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -209,7 +225,13 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect() {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
-  spdlog::info("Attempting to reconnect to MySQL {}:{}...", config_.host, config_.port);
+  if (!silent) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_reconnecting")
+        .Field("host", config_.host)
+        .Field("port", static_cast<uint64_t>(config_.port))
+        .Info();
+  }
 
   // Close existing connection if any
   if (mysql_ != nullptr) {
@@ -237,7 +259,7 @@ void Connection::Close() {
   if (mysql_ != nullptr) {
     mysql_close(mysql_);
     mysql_ = nullptr;
-    spdlog::debug("MySQL connection closed");
+    mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "connection_closed").Debug();
   }
 }
 
@@ -252,7 +274,7 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(c
     return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
-  spdlog::debug("Executing query: {}", query);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_query").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
     SetMySQLError();
@@ -281,7 +303,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
     return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
   }
 
-  spdlog::debug("Executing update: {}", query);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_update").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
     SetMySQLError();
@@ -311,7 +333,7 @@ std::optional<std::string> Connection::GetExecutedGTID() {
   std::string gtid(row[0]);
   // result is automatically freed by MySQLResult destructor
 
-  spdlog::debug("Executed GTID: {}", gtid);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_executed_gtid").Field("gtid", gtid).Debug();
   return gtid;
 }
 
@@ -329,7 +351,7 @@ std::optional<std::string> Connection::GetPurgedGTID() {
   std::string gtid(row[0]);
   // result is automatically freed by MySQLResult destructor
 
-  spdlog::debug("Purged GTID: {}", gtid);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_purged_gtid").Field("gtid", gtid).Debug();
   return gtid;
 }
 
@@ -371,7 +393,7 @@ std::optional<std::string> Connection::GetServerUUID() {
   std::string uuid(row[0]);
   // result is automatically freed by MySQLResult destructor
 
-  spdlog::debug("Server UUID: {}", uuid);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_server_uuid").Field("uuid", uuid).Debug();
   return uuid;
 }
 
@@ -394,7 +416,7 @@ bool Connection::IsGTIDModeEnabled() {
   std::string mode(row[0]);
   // result is automatically freed by MySQLResult destructor
 
-  spdlog::debug("GTID mode: {}", mode);
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_gtid_mode").Field("mode", mode).Debug();
 
   // GTID mode can be ON, OFF, ON_PERMISSIVE, or OFF_PERMISSIVE
   // For replication, we need it to be ON
@@ -407,7 +429,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
 
   // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
   if (!result_exp) {
-    spdlog::debug("SHOW BINARY LOG STATUS failed, trying SHOW MASTER STATUS");
+    mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "fallback_show_master_status").Debug();
     result_exp = Execute("SHOW MASTER STATUS");
   }
 
@@ -465,7 +487,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
     return std::nullopt;
   }
 
-  spdlog::info("Latest GTID from binary log: {}", gtid_set);
+  mygram::utils::StructuredLog().Event("mysql_latest_gtid").Field("gtid_set", gtid_set).Info();
   return gtid_set;
 }
 
@@ -558,7 +580,12 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
     return false;
   }
 
-  spdlog::info("Validated unique column: {}.{}.{}", database, table, column);
+  mygram::utils::StructuredLog()
+      .Event("mysql_unique_column_validated")
+      .Field("database", database)
+      .Field("table", table)
+      .Field("column", column)
+      .Info();
   return true;
 }
 

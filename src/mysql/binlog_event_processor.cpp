@@ -50,13 +50,23 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           index.AddDocument(doc_id, normalized);
 
-          spdlog::debug("INSERT: pk={} (added to index)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_insert")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Field("text_length", static_cast<uint64_t>(event.text.size()))
+              .Field("action", "added_to_index")
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplInsertApplied();
           }
         } else {
           // Condition not satisfied -> do not index
-          spdlog::debug("INSERT: pk={} (skipped, does not match required_filters)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_insert")
+              .Field("primary_key", event.primary_key)
+              .Field("action", "skipped")
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplInsertSkipped();
           }
@@ -77,7 +87,11 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
           doc_store.RemoveDocument(doc_id);
 
-          spdlog::info("UPDATE: pk={} (removed from index, no longer matches required_filters)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_update_removed")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateRemoved();
           }
@@ -100,7 +114,12 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
           index.AddDocument(doc_id, normalized);
 
-          spdlog::info("UPDATE: pk={} (added to index, now matches required_filters)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_update_added")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Field("text_length", static_cast<uint64_t>(event.text.size()))
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateAdded();
           }
@@ -130,18 +149,23 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             }
           }
 
-          if (text_changed) {
-            spdlog::debug("UPDATE: pk={} (filters and text updated)", event.primary_key);
-          } else {
-            spdlog::debug("UPDATE: pk={} (filters updated)", event.primary_key);
-          }
+          mygram::utils::StructuredLog()
+              .Event("binlog_update")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Field("text_changed", text_changed)
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateModified();
           }
 
         } else {
           // !exists && !matches_required -> do nothing
-          spdlog::debug("UPDATE: pk={} (ignored, not in index and does not match required_filters)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_update")
+              .Field("primary_key", event.primary_key)
+              .Field("action", "ignored")
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateSkipped();
           }
@@ -164,13 +188,21 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Remove from document store
           doc_store.RemoveDocument(doc_id);
 
-          spdlog::debug("DELETE: pk={} (removed from index)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_delete")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplDeleteApplied();
           }
         } else {
           // Not in index, nothing to do
-          spdlog::debug("DELETE: pk={} (not in index, ignored)", event.primary_key);
+          mygram::utils::StructuredLog()
+              .Event("binlog_delete")
+              .Field("primary_key", event.primary_key)
+              .Field("action", "ignored")
+              .Debug();
           if (stats != nullptr) {
             stats->IncrementReplDeleteSkipped();
           }
@@ -194,7 +226,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Warn();
           index.Clear();
           doc_store.Clear();
-          spdlog::info("Cleared index and document store due to TRUNCATE");
+          mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
         } else if (query_upper.find("DROP") != std::string::npos) {
           // DROP TABLE - clear all data and warn
           mygram::utils::StructuredLog()

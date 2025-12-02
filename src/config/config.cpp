@@ -641,7 +641,11 @@ Config ParseConfigFromJson(const json& root) {
           throw std::runtime_error(err_msg.str());
         }
       } else {
-        spdlog::warn("Unable to validate cache memory against physical memory (could not get system memory info)");
+        mygram::utils::StructuredLog()
+            .Event("config_warning")
+            .Field("type", "cache_memory_validation_skipped")
+            .Field("reason", "system_memory_info_unavailable")
+            .Warn();
       }
     }
   }
@@ -740,7 +744,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std
 
     try {
       validator.validate(config_json);
-      spdlog::debug("Configuration validation passed");
+      mygram::utils::StructuredLog().Event("config_validation_passed").Debug();
     } catch (const std::exception& e) {
       std::stringstream err_msg;
       err_msg << "Configuration validation failed:\n";
@@ -817,6 +821,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
     // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(config_json);
 
+    // Apply log format immediately so subsequent logs use the configured format
+    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
+
     mygram::utils::StructuredLog()
         .Event("config_loaded")
         .Field("path", path)
@@ -844,6 +851,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
 
     // Parse config (this may throw std::runtime_error from helper functions)
     Config config = ParseConfigFromJson(json_root);
+
+    // Apply log format immediately so subsequent logs use the configured format
+    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
 
     mygram::utils::StructuredLog()
         .Event("config_loaded")
@@ -886,11 +896,19 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
 
   switch (format) {
     case FileFormat::kJson:
-      spdlog::debug("Detected JSON format for config file: {}", path);
+      mygram::utils::StructuredLog()
+          .Event("config_format_detected")
+          .Field("format", "json")
+          .Field("path", path)
+          .Debug();
       return LoadConfigJson(path, schema_path);
 
     case FileFormat::kYaml:
-      spdlog::debug("Detected YAML format for config file: {}", path);
+      mygram::utils::StructuredLog()
+          .Event("config_format_detected")
+          .Field("format", "yaml")
+          .Field("path", path)
+          .Debug();
       // Always validate YAML configs - convert to JSON first
       try {
         YAML::Node yaml_root = YAML::LoadFile(path);
@@ -917,13 +935,22 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
     case FileFormat::kUnknown:
     default:
       // Try YAML first (legacy default), then JSON
-      spdlog::debug("Unknown file format, trying YAML first: {}", path);
+      mygram::utils::StructuredLog()
+          .Event("config_format_unknown")
+          .Field("path", path)
+          .Field("trying", "yaml_first")
+          .Debug();
       auto yaml_result = LoadConfigYaml(path);
       if (yaml_result) {
         return yaml_result;
       }
 
-      spdlog::debug("YAML parsing failed, trying JSON: {}", path);
+      mygram::utils::StructuredLog()
+          .Event("config_fallback")
+          .Field("path", path)
+          .Field("from", "yaml")
+          .Field("to", "json")
+          .Debug();
       auto json_result = LoadConfigJson(path, schema_path);
       if (json_result) {
         return json_result;

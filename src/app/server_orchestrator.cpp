@@ -97,7 +97,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
     if (!start_result) {
       return mygram::utils::MakeUnexpected(start_result.error());
     }
-    spdlog::info("Binlog replication started from GTID: {}", snapshot_gtid_);
+    mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
   }
 #endif
 
@@ -115,20 +115,28 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
       tcp_server_->Stop();
       return mygram::utils::MakeUnexpected(http_start.error());
     }
-    spdlog::info("HTTP server started on {}:{}", deps_.config.api.http.bind, deps_.config.api.http.port);
+    mygram::utils::StructuredLog()
+        .Event("http_server_started")
+        .Field("bind", deps_.config.api.http.bind)
+        .Field("port", static_cast<uint64_t>(deps_.config.api.http.port))
+        .Info();
   }
 
   started_ = true;
-  spdlog::info("MygramDB is ready to serve requests");
+  mygram::utils::StructuredLog()
+      .Event("server_ready")
+      .Field("tables", static_cast<uint64_t>(table_contexts_.size()))
+      .Field("tcp_port", static_cast<uint64_t>(deps_.config.api.tcp.port))
+      .Info();
   return {};
 }
 
 void ServerOrchestrator::Stop() {
-  spdlog::debug("Stopping server components...");
+  mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_components").Debug();
 
   // Stop HTTP server first (depends on TCP server's cache manager)
   if (http_server_ && http_server_->IsRunning()) {
-    spdlog::debug("Stopping HTTP server");
+    mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_http_server").Debug();
     http_server_->Stop();
   }
 
@@ -140,7 +148,7 @@ void ServerOrchestrator::Stop() {
 #ifdef USE_MYSQL
   // Stop BinlogReader
   if (binlog_reader_ && binlog_reader_->IsRunning()) {
-    spdlog::debug("Stopping binlog reader");
+    mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_binlog_reader").Debug();
     binlog_reader_->Stop();
   }
 
@@ -152,7 +160,7 @@ void ServerOrchestrator::Stop() {
 
   // Table contexts will be automatically destroyed
   started_ = false;
-  spdlog::debug("All server components stopped");
+  mygram::utils::StructuredLog().Event("server_debug").Field("action", "all_components_stopped").Debug();
 }
 
 bool ServerOrchestrator::IsRunning() const {
@@ -160,10 +168,18 @@ bool ServerOrchestrator::IsRunning() const {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeTables() {
-  spdlog::debug("Initializing {} table(s)...", deps_.config.tables.size());
+  mygram::utils::StructuredLog()
+      .Event("server_debug")
+      .Field("action", "initializing_tables")
+      .Field("count", static_cast<uint64_t>(deps_.config.tables.size()))
+      .Debug();
 
   for (const auto& table_config : deps_.config.tables) {
-    spdlog::debug("Initializing table: {}", table_config.name);
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "initializing_table")
+        .Field("table", table_config.name)
+        .Debug();
 
     auto ctx = std::make_unique<server::TableContext>();
     ctx->name = table_config.name;
@@ -174,16 +190,24 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
     table_contexts_[table_config.name] = std::move(ctx);
-    spdlog::debug("Table initialized successfully: {}", table_config.name);
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "table_initialized")
+        .Field("table", table_config.name)
+        .Debug();
   }
 
-  spdlog::debug("All {} table(s) initialized", table_contexts_.size());
+  mygram::utils::StructuredLog()
+      .Event("server_debug")
+      .Field("action", "all_tables_initialized")
+      .Field("count", static_cast<uint64_t>(table_contexts_.size()))
+      .Debug();
   return {};
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeMySQL() {
 #ifdef USE_MYSQL
-  spdlog::debug("Initializing MySQL connection...");
+  mygram::utils::StructuredLog().Event("server_debug").Field("action", "initializing_mysql").Debug();
 
   mysql::Connection::Config mysql_config;
   mysql_config.host = deps_.config.mysql.host;
@@ -209,7 +233,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
                                  "Failed to connect to MySQL: " + mysql_connection_->GetLastError()));
   }
 
-  spdlog::debug("MySQL connection established");
+  mygram::utils::StructuredLog().Event("server_debug").Field("action", "mysql_connected").Debug();
 #endif
   return {};
 }
@@ -217,16 +241,23 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSnapshots() {
 #ifdef USE_MYSQL
   if (!deps_.config.replication.auto_initial_snapshot) {
-    spdlog::debug("Skipping automatic snapshot build (auto_initial_snapshot=false)");
-    spdlog::debug("Use SYNC command to manually trigger snapshot synchronization");
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "skip_auto_snapshot")
+        .Field("reason", "auto_initial_snapshot=false")
+        .Debug();
+    mygram::utils::StructuredLog().Event("server_debug").Field("action", "manual_sync_required").Debug();
     return {};
   }
 
   for (const auto& table_config : deps_.config.tables) {
     auto& ctx = table_contexts_[table_config.name];
 
-    spdlog::info("Building snapshot from table: {}", table_config.name);
-    spdlog::info("This may take a while for large tables. Please wait...");
+    mygram::utils::StructuredLog()
+        .Event("snapshot_building")
+        .Field("table", table_config.name)
+        .Field("message", "This may take a while for large tables")
+        .Info();
 
     loader::InitialLoader initial_loader(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
                                          deps_.config.mysql, deps_.config.build);
@@ -234,19 +265,28 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     auto load_result = initial_loader.Load([this, &table_config, &initial_loader](const auto& progress) {
       // Check cancellation flag in progress callback
       if (SignalManager::IsShutdownRequested()) {
-        spdlog::info("Initial load cancellation requested during build");
+        mygram::utils::StructuredLog().Event("initial_load_cancellation_requested").Info();
         initial_loader.Cancel();
       }
 
       if (progress.processed_rows % kProgressLogInterval == 0) {
-        spdlog::debug("table: {} - Progress: {} rows processed ({:.0f} rows/s)", table_config.name,
-                      progress.processed_rows, progress.rows_per_second);
+        mygram::utils::StructuredLog()
+            .Event("server_debug")
+            .Field("action", "initial_load_progress")
+            .Field("table", table_config.name)
+            .Field("rows", progress.processed_rows)
+            .Field("rows_per_sec", progress.rows_per_second)
+            .Debug();
       }
     });
 
     // Check if shutdown was requested
     if (SignalManager::IsShutdownRequested()) {
-      spdlog::warn("Initial load cancelled by shutdown signal for table: {}", table_config.name);
+      mygram::utils::StructuredLog()
+          .Event("initial_load_cancelled")
+          .Field("table", table_config.name)
+          .Field("reason", "shutdown_signal")
+          .Warn();
       return mygram::utils::MakeUnexpected(
           mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Initial load cancelled"));
     }
@@ -255,14 +295,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
       return mygram::utils::MakeUnexpected(load_result.error());
     }
 
-    spdlog::info("Initial load completed - table: {}, documents: {}", table_config.name,
-                 initial_loader.GetProcessedRows());
+    mygram::utils::StructuredLog()
+        .Event("initial_load_completed")
+        .Field("table", table_config.name)
+        .Field("documents", initial_loader.GetProcessedRows())
+        .Info();
 
     // Capture GTID from first table's initial load
     if (snapshot_gtid_.empty() && deps_.config.replication.enable) {
       snapshot_gtid_ = initial_loader.GetStartGTID();
       if (!snapshot_gtid_.empty()) {
-        spdlog::info("Captured snapshot GTID for replication: {}", snapshot_gtid_);
+        mygram::utils::StructuredLog().Event("snapshot_gtid_captured").Field("gtid", snapshot_gtid_).Info();
       }
     }
   }
@@ -273,12 +316,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeBinlogReader() {
 #ifdef USE_MYSQL
   if (!deps_.config.replication.enable) {
-    spdlog::info("Binlog replication disabled");
+    mygram::utils::StructuredLog().Event("binlog_replication_disabled").Info();
     return {};
   }
 
   if (table_contexts_.empty()) {
-    spdlog::warn("No tables configured, skipping binlog reader initialization");
+    mygram::utils::StructuredLog().Event("binlog_reader_skipped").Field("reason", "no_tables_configured").Warn();
     return {};
   }
 
@@ -289,24 +332,39 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     // Use GTID captured during snapshot build
     start_gtid = snapshot_gtid_;
     if (start_gtid.empty()) {
-      spdlog::warn("Snapshot GTID not available, replication may miss changes");
+      mygram::utils::StructuredLog()
+          .Event("snapshot_gtid_unavailable")
+          .Field("warning", "replication may miss changes")
+          .Warn();
     } else {
-      spdlog::debug("Replication will start from snapshot GTID: {}", start_gtid);
+      mygram::utils::StructuredLog()
+          .Event("server_debug")
+          .Field("action", "replication_from_snapshot_gtid")
+          .Field("gtid", start_gtid)
+          .Debug();
     }
   } else if (start_from == "latest") {
     // Get current GTID from MySQL
     auto latest_gtid = mysql_connection_->GetLatestGTID();
     if (latest_gtid) {
       start_gtid = latest_gtid.value();
-      spdlog::debug("Replication will start from latest GTID: {}", start_gtid);
+      mygram::utils::StructuredLog()
+          .Event("server_debug")
+          .Field("action", "replication_from_latest_gtid")
+          .Field("gtid", start_gtid)
+          .Debug();
     } else {
-      spdlog::warn("Failed to get latest GTID, starting from empty");
+      mygram::utils::StructuredLog().Event("latest_gtid_failed").Field("fallback", "starting from empty").Warn();
       start_gtid = "";
     }
   } else if (start_from.find("gtid=") == 0) {
     // Extract GTID from "gtid=<UUID:txn>" format
     start_gtid = start_from.substr(kGtidPrefixLength);
-    spdlog::debug("Replication will start from specified GTID: {}", start_gtid);
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "replication_from_specified_gtid")
+        .Field("gtid", start_gtid)
+        .Debug();
   }
 
   // Prepare table_contexts map for BinlogReader
@@ -328,9 +386,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   snapshot_gtid_ = start_gtid;
 
   if (start_gtid.empty()) {
-    spdlog::debug("Binlog replication initialized but not started (waiting for GTID)");
+    mygram::utils::StructuredLog().Event("server_debug").Field("action", "binlog_initialized_waiting_gtid").Debug();
   } else {
-    spdlog::debug("Binlog replication initialized (will start on Start() call)");
+    mygram::utils::StructuredLog().Event("server_debug").Field("action", "binlog_initialized").Debug();
   }
 #endif
   return {};
@@ -339,10 +397,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeServers() {
   // Validate network ACL configuration
   if (deps_.config.network.allow_cidrs.empty()) {
-    spdlog::warn(
-        "Network ACL is empty - all connections will be DENIED by default. "
-        "Configure 'network.allow_cidrs' to allow specific IP ranges, "
-        "or use ['0.0.0.0/0'] to allow all (NOT RECOMMENDED for production).");
+    mygram::utils::StructuredLog()
+        .Event("network_acl_empty")
+        .Field("action", "all connections will be DENIED by default")
+        .Field("hint", "Configure network.allow_cidrs to allow specific IP ranges")
+        .Warn();
   }
 
   // Prepare table_contexts map for servers
@@ -373,7 +432,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
       std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, nullptr);
 #endif
 
-  spdlog::debug("TCP server initialized");
+  mygram::utils::StructuredLog().Event("server_debug").Field("action", "tcp_server_initialized").Debug();
 
 #ifdef USE_MYSQL
   // Setup MySQL reconnection callback for RuntimeVariableManager
@@ -390,7 +449,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         return handler->Reconnect(host, port);
       });
 
-      spdlog::info("MySQL reconnection callback registered");
+      mygram::utils::StructuredLog().Event("mysql_reconnection_callback_registered").Info();
     }
   }
 #endif
@@ -406,7 +465,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         (void)enabled;  // Suppress unused parameter warning
         rate_limiter->UpdateParameters(capacity, refill_rate);
       });
-      spdlog::info("Rate limiter callback registered");
+      mygram::utils::StructuredLog().Event("rate_limiter_callback_registered").Info();
     }
   }
 
@@ -429,7 +488,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats());
 #endif
 
-    spdlog::info("HTTP server initialized");
+    mygram::utils::StructuredLog()
+        .Event("http_server_initialized")
+        .Field("bind", http_config.bind)
+        .Field("port", static_cast<uint64_t>(http_config.port))
+        .Info();
   }
 
   return {};

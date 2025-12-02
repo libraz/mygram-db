@@ -621,7 +621,11 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     // Parse extra_row_info if present
     size_t extra_info_size = binlog_util::skip_extra_row_info(&ptr, end, flags);
     if (extra_info_size > 0) {
-      spdlog::debug("Skipped {} bytes of extra_row_info", extra_info_size);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "skipped_extra_row_info")
+          .Field("bytes", static_cast<uint64_t>(extra_info_size))
+          .Debug();
     }
 
     // Pre-calculate bitmap sizes for better cache locality
@@ -711,8 +715,13 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
       rows.push_back(std::move(row));
     }
 
-    spdlog::debug("Parsed {} rows from WRITE_ROWS event for table {}.{}", rows.size(), table_metadata->database_name,
-                  table_metadata->table_name);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "parsed_write_rows")
+        .Field("rows", static_cast<uint64_t>(rows.size()))
+        .Field("database", table_metadata->database_name)
+        .Field("table", table_metadata->table_name)
+        .Debug();
 
     return rows;
 
@@ -747,7 +756,12 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: BINLOG_CHECKSUM_LEN = 4)
     const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
 
-    spdlog::debug("UPDATE_ROWS buffer: length_param={}, event_size_from_header={}", length, event_size);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "update_rows_buffer")
+        .Field("length_param", static_cast<uint64_t>(length))
+        .Field("event_size", static_cast<uint64_t>(event_size))
+        .Debug();
 
     // Parse post-header (same as WRITE_ROWS)
     if (ptr + 8 > end) {
@@ -763,7 +777,12 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     uint16_t flags = binlog_util::uint2korr(ptr);
     ptr += 2;  // flags
 
-    spdlog::debug("UPDATE_ROWS flags: 0x{:04x}, ptr offset after flags: {}", flags, ptr - buffer);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "update_rows_flags")
+        .Field("flags", static_cast<uint64_t>(flags))
+        .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
+        .Debug();
 
     // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
     // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
@@ -786,13 +805,22 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
       for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
         snprintf(&pre_hex[i * 3], 4, "%02x ", ptr[i]);
       }
-      spdlog::debug("Before extra_row_info_len read: {}", pre_hex);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "before_extra_row_info_read")
+          .Field("hex", std::string(pre_hex))
+          .Debug();
 
       const unsigned char* ptr_before = ptr;
       uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
       auto len_bytes = static_cast<int>(ptr - ptr_before);
 
-      spdlog::debug("Extra_row_info_len: {} bytes, packed_int used {} bytes", extra_info_len, len_bytes);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "extra_row_info_len")
+          .Field("total_bytes", extra_info_len)
+          .Field("packed_int_bytes", static_cast<int64_t>(len_bytes))
+          .Debug();
 
       // IMPORTANT: extra_row_info_len is the TOTAL length INCLUDING the packed integer itself.
       // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
@@ -825,11 +853,20 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         for (int i = 0; i < std::min(10, skip_bytes); i++) {
           snprintf(&skip_hex[i * 3], 4, "%02x ", ptr[i]);
         }
-        spdlog::debug("Skipping {} extra_row_info bytes: {}", skip_bytes, skip_hex);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "skipping_extra_row_info")
+            .Field("bytes", static_cast<int64_t>(skip_bytes))
+            .Field("hex", std::string(skip_hex))
+            .Debug();
       }
 
       ptr += skip_bytes;  // Skip the extra row info data
-      spdlog::debug("After extra_row_info skip, now at offset {}", ptr - buffer);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "after_extra_row_info_skip")
+          .Field("offset", static_cast<int64_t>(ptr - buffer))
+          .Debug();
     }
 
     // Parse body
@@ -847,14 +884,23 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
       snprintf(&debug_hex[i * 3], 4, "%02x ", ptr[i]);
     }
-    spdlog::debug("UPDATE_ROWS body start hex: {}", debug_hex);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "update_rows_body_start")
+        .Field("hex", std::string(debug_hex))
+        .Debug();
     // NOLINTEND(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
 
     const unsigned char* column_count_ptr = ptr;  // Save position before read
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
-    spdlog::debug("Column count parsed: {} (ptr moved {} bytes from 0x{:02x})", column_count, ptr - column_count_ptr,
-                  *column_count_ptr);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "column_count_parsed")
+        .Field("column_count", column_count)
+        .Field("ptr_moved", static_cast<int64_t>(ptr - column_count_ptr))
+        .Field("first_byte", static_cast<uint64_t>(*column_count_ptr))
+        .Debug();
 
     if (column_count != table_metadata->columns.size()) {
       mygram::utils::StructuredLog()
@@ -918,18 +964,31 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
       row_pairs.reserve(estimated_pairs);
     }
 
-    spdlog::debug("Starting row parsing loop: ptr offset={}, end offset={}, available={} bytes", ptr - buffer,
-                  end - buffer, end - ptr);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "starting_row_parsing")
+        .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
+        .Field("end_offset", static_cast<int64_t>(end - buffer))
+        .Field("available_bytes", static_cast<int64_t>(end - ptr))
+        .Debug();
 
     while (ptr < end) {
       RowData before_row;
       RowData after_row;
 
-      spdlog::debug("Row start: ptr offset={}, kNullBitmapSize={}", ptr - buffer, kNullBitmapSize);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "row_start")
+          .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
+          .Field("null_bitmap_size", static_cast<uint64_t>(kNullBitmapSize))
+          .Debug();
 
       // Parse before image
       if (ptr + kNullBitmapSize > end) {
-        spdlog::debug("Not enough space for NULL bitmap, breaking loop");
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "insufficient_space_for_null_bitmap")
+            .Debug();
         break;
       }
       const unsigned char* null_bitmap_before = ptr;
@@ -942,26 +1001,46 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         col_bitmap_str += binlog_util::bitmap_is_set(columns_before, i) ? "1" : "0";
         null_bitmap_str += binlog_util::bitmap_is_set(null_bitmap_before, i) ? "N" : ".";
       }
-      spdlog::debug("Before image - columns_bitmap: {} (1=included)", col_bitmap_str);
-      spdlog::debug("Before image - null_bitmap:    {} (N=null, .=not null)", null_bitmap_str);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "before_image_bitmaps")
+          .Field("columns_bitmap", col_bitmap_str)
+          .Field("null_bitmap", null_bitmap_str)
+          .Debug();
 
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_before, col_idx)) {
-          spdlog::debug("  Col {} ({}) - not in bitmap, skipping", col_idx,
-                        col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?");
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "column_not_in_bitmap")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Field("col_name", col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?")
+              .Debug();
           continue;
         }
 
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap_before, col_idx);
 
-        spdlog::debug("  Col {} ({}, type={}) - ptr_offset={}, end_offset={}, remaining={} bytes, is_null={}", col_idx,
-                      col_meta.name, static_cast<int>(col_meta.type), ptr - buffer, end - buffer, end - ptr, is_null);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "parsing_column")
+            .Field("col_idx", static_cast<uint64_t>(col_idx))
+            .Field("col_name", col_meta.name)
+            .Field("col_type", static_cast<int64_t>(col_meta.type))
+            .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
+            .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+            .Field("is_null", is_null)
+            .Debug();
 
         // Check if we have data remaining before attempting to decode
         // If not, this means we've reached the end (e.g., checksum/padding bytes)
         if (ptr >= end) {
-          spdlog::debug("Reached end of event data while parsing before image at column {}, breaking", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "reached_end_before_image")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Debug();
           goto end_of_rows;  // Exit both loops cleanly
         }
 
@@ -981,7 +1060,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
         // Check again after decode, as DecodeFieldValue advances ptr
         if (ptr > end) {
-          spdlog::debug("Exceeded end after decoding column {}, breaking", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "exceeded_end_after_decode")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Debug();
           goto end_of_rows;  // Exit both loops cleanly
         }
 
@@ -990,7 +1073,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         // Check using cached indices
         if (static_cast<int>(col_idx) == pk_col_idx) {
           before_row.primary_key = value;
-          spdlog::debug("    -> Set PK = '{}'", value);
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "set_pk").Field("value", value).Debug();
         }
         if (static_cast<int>(col_idx) == text_col_idx) {
           before_row.text = value;
@@ -1010,18 +1093,25 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
                 .Warn();
             return std::nullopt;
           }
-          spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
-                        value.size() > 50 ? value.substr(0, 50) + "..." : value, field_size,
-                        (ptr + field_size) - buffer);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "decoded_value")
+              .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
+              .Field("field_size", static_cast<uint64_t>(field_size))
+              .Field("new_ptr_offset", static_cast<int64_t>((ptr + field_size) - buffer))
+              .Debug();
           ptr += field_size;
         } else {
-          spdlog::debug("    -> Column is NULL, not advancing ptr");
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
         }
       }
 
       // Parse after image
       if (ptr + kNullBitmapSize > end) {
-        spdlog::debug("Not enough space for after image NULL bitmap, breaking loop");
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "insufficient_space_for_after_null_bitmap")
+            .Debug();
         break;
       }
       const unsigned char* null_bitmap_after = ptr;
@@ -1034,25 +1124,45 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         col_bitmap_after_str += binlog_util::bitmap_is_set(columns_after, i) ? "1" : "0";
         null_bitmap_after_str += binlog_util::bitmap_is_set(null_bitmap_after, i) ? "N" : ".";
       }
-      spdlog::debug("After image - columns_bitmap: {} (1=included)", col_bitmap_after_str);
-      spdlog::debug("After image - null_bitmap:    {} (N=null, .=not null)", null_bitmap_after_str);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "after_image_bitmaps")
+          .Field("columns_bitmap", col_bitmap_after_str)
+          .Field("null_bitmap", null_bitmap_after_str)
+          .Debug();
 
       for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
         if (!binlog_util::bitmap_is_set(columns_after, col_idx)) {
-          spdlog::debug("  Col {} ({}) - not in after bitmap, skipping", col_idx,
-                        col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?");
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "column_not_in_after_bitmap")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Field("col_name", col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?")
+              .Debug();
           continue;
         }
 
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap_after, col_idx);
 
-        spdlog::debug("  Col {} ({}, type={}) - ptr_offset={}, end_offset={}, remaining={} bytes, is_null={}", col_idx,
-                      col_meta.name, static_cast<int>(col_meta.type), ptr - buffer, end - buffer, end - ptr, is_null);
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "parsing_column")
+            .Field("col_idx", static_cast<uint64_t>(col_idx))
+            .Field("col_name", col_meta.name)
+            .Field("col_type", static_cast<int64_t>(col_meta.type))
+            .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
+            .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+            .Field("is_null", is_null)
+            .Debug();
 
         // Check if we have data remaining before attempting to decode
         if (ptr >= end) {
-          spdlog::debug("Reached end of event data while parsing after image at column {}, breaking", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "reached_end_after_image")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Debug();
           goto end_of_rows;
         }
 
@@ -1072,7 +1182,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 
         // Check again after decode
         if (ptr > end) {
-          spdlog::debug("Exceeded end after decoding after image column {}, breaking", col_idx);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "exceeded_end_after_decode_after_image")
+              .Field("col_idx", static_cast<uint64_t>(col_idx))
+              .Debug();
           goto end_of_rows;
         }
 
@@ -1081,7 +1195,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         // Check using cached indices
         if (static_cast<int>(col_idx) == pk_col_idx) {
           after_row.primary_key = value;
-          spdlog::debug("    -> Set PK = '{}'", value);
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "set_pk").Field("value", value).Debug();
         }
         if (static_cast<int>(col_idx) == text_col_idx) {
           after_row.text = value;
@@ -1101,12 +1215,16 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
                 .Warn();
             return std::nullopt;
           }
-          spdlog::debug("    -> Decoded value='{}', field_size={}, advancing ptr to offset={}",
-                        value.size() > 50 ? value.substr(0, 50) + "..." : value, field_size,
-                        (ptr + field_size) - buffer);
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "decoded_value")
+              .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
+              .Field("field_size", static_cast<uint64_t>(field_size))
+              .Field("new_ptr_offset", static_cast<int64_t>((ptr + field_size) - buffer))
+              .Debug();
           ptr += field_size;
         } else {
-          spdlog::debug("    -> Column is NULL, not advancing ptr");
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
         }
       }
 
@@ -1114,8 +1232,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
     }
 
   end_of_rows:  // Label for graceful early exit from nested loops
-    spdlog::debug("Parsed {} row pairs from UPDATE_ROWS event for table {}.{}", row_pairs.size(),
-                  table_metadata->database_name, table_metadata->table_name);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "parsed_update_rows")
+        .Field("row_pairs", static_cast<uint64_t>(row_pairs.size()))
+        .Field("database", table_metadata->database_name)
+        .Field("table", table_metadata->table_name)
+        .Debug();
 
     return row_pairs;
 
@@ -1231,7 +1354,11 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     // Parse extra_row_info if present
     size_t extra_info_size = binlog_util::skip_extra_row_info(&ptr, end, flags);
     if (extra_info_size > 0) {
-      spdlog::debug("Skipped {} bytes of extra_row_info in DELETE_ROWS", extra_info_size);
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "skipped_extra_row_info_delete")
+          .Field("bytes", static_cast<uint64_t>(extra_info_size))
+          .Debug();
     }
 
     // Pre-calculate bitmap size
@@ -1328,8 +1455,13 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
       rows.push_back(std::move(row));
     }
 
-    spdlog::debug("Parsed {} rows from DELETE_ROWS event for table {}.{}", rows.size(), table_metadata->database_name,
-                  table_metadata->table_name);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "parsed_delete_rows")
+        .Field("rows", static_cast<uint64_t>(rows.size()))
+        .Field("database", table_metadata->database_name)
+        .Field("table", table_metadata->table_name)
+        .Debug();
 
     return rows;
 

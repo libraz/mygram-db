@@ -130,9 +130,10 @@ class Connection {
 
   /**
    * @brief Reconnect to MySQL server
+   * @param silent If true, skip info-level logging (use for expected reconnects like timeouts)
    * @return Expected<void, Error> - success or reconnection error
    */
-  mygram::utils::Expected<void, mygram::utils::Error> Reconnect();
+  mygram::utils::Expected<void, mygram::utils::Error> Reconnect(bool silent = false);
 
   /**
    * @brief Close connection

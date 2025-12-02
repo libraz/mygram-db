@@ -132,7 +132,12 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
     doc_filters_[doc_id] = filters;
   }
 
-  spdlog::debug("Added document: DocID={}, PK={}, filters={}", doc_id, primary_key, filters.size());
+  mygram::utils::StructuredLog()
+      .Event("document_added")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("primary_key", primary_key)
+      .Field("filters", static_cast<uint64_t>(filters.size()))
+      .Debug();
 
   return doc_id;
 }
@@ -183,7 +188,10 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     doc_ids.push_back(doc_id);
   }
 
-  spdlog::debug("Added batch of {} documents", documents.size());
+  mygram::utils::StructuredLog()
+      .Event("documents_batch_added")
+      .Field("count", static_cast<uint64_t>(documents.size()))
+      .Debug();
 
   return doc_ids;
 }
@@ -205,7 +213,11 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::s
   // Update filters
   doc_filters_[doc_id] = filters;
 
-  spdlog::debug("Updated document: DocID={}, filters={}", doc_id, filters.size());
+  mygram::utils::StructuredLog()
+      .Event("document_updated")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("filters", static_cast<uint64_t>(filters.size()))
+      .Debug();
 
   return true;
 }
@@ -228,7 +240,11 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
   // Remove filters
   doc_filters_.erase(doc_id);
 
-  spdlog::debug("Removed document: DocID={}, PK={}", doc_id, primary_key);
+  mygram::utils::StructuredLog()
+      .Event("document_removed")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("primary_key", primary_key)
+      .Debug();
 
   return true;
 }
@@ -395,7 +411,7 @@ void DocumentStore::Clear() {
   pk_to_doc_id_.clear();
   doc_filters_.clear();
   next_doc_id_ = 1;
-  spdlog::info("Document store cleared");
+  mygram::utils::StructuredLog().Event("document_store_cleared").Info();
 }
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
@@ -494,8 +510,12 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
     }
 
     ofs.close();
-    spdlog::info("Saved document store to {}: {} documents, {} MB", filepath, doc_count,
-                 MemoryUsage() / kBytesPerMegabyte);
+    mygram::utils::StructuredLog()
+        .Event("document_store_saved")
+        .Field("path", filepath)
+        .Field("documents", doc_count)
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / kBytesPerMegabyte))
+        .Info();
     return {};
   } catch (const std::exception& e) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
@@ -748,8 +768,12 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
       next_doc_id_ = next_id;
     }
 
-    spdlog::info("Loaded document store from {}: {} documents, {} MB", filepath, doc_count,
-                 MemoryUsage() / kBytesPerMegabyte);
+    mygram::utils::StructuredLog()
+        .Event("document_store_loaded")
+        .Field("path", filepath)
+        .Field("documents", doc_count)
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / kBytesPerMegabyte))
+        .Info();
     return {};
   } catch (const std::exception& e) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
@@ -857,7 +881,7 @@ Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
           MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Stream error while saving document store"));
     }
 
-    spdlog::debug("Saved document store to stream: {} documents", doc_count);
+    mygram::utils::StructuredLog().Event("document_store_saved_to_stream").Field("documents", doc_count).Debug();
     return {};
   } catch (const std::exception& e) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
@@ -1121,7 +1145,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       next_doc_id_ = next_id;
     }
 
-    spdlog::debug("Loaded document store from stream: {} documents", doc_count);
+    mygram::utils::StructuredLog().Event("document_store_loaded_from_stream").Field("documents", doc_count).Debug();
     return {};
   } catch (const std::exception& e) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,

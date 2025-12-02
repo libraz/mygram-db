@@ -41,7 +41,14 @@ void Index::AddDocument(DocId doc_id, std::string_view text) {
   }
 
   const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
-  spdlog::debug("Added document {} with {} unique {}-grams ({})", doc_id, ngrams.size(), ngram_size_, mode);
+  mygram::utils::StructuredLog()
+      .Event("document_added")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("text_length", static_cast<uint64_t>(text.size()))
+      .Field("unique_ngrams", static_cast<uint64_t>(ngrams.size()))
+      .Field("ngram_size", static_cast<int64_t>(ngram_size_))
+      .Field("mode", mode)
+      .Debug();
 }
 
 void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
@@ -118,7 +125,12 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
     posting->Add(doc_id);
   }
 
-  spdlog::debug("Updated document {}", doc_id);
+  mygram::utils::StructuredLog()
+      .Event("document_updated")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("ngrams_removed", static_cast<uint64_t>(to_remove.size()))
+      .Field("ngrams_added", static_cast<uint64_t>(to_add.size()))
+      .Debug();
 }
 
 void Index::RemoveDocument(DocId doc_id, std::string_view text) {
@@ -138,7 +150,11 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
     posting->Remove(doc_id);
   }
 
-  spdlog::debug("Removed document {}", doc_id);
+  mygram::utils::StructuredLog()
+      .Event("document_removed")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("ngrams_removed", static_cast<uint64_t>(ngrams.size()))
+      .Debug();
 }
 
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_t limit, bool reverse) const {
@@ -319,11 +335,22 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
       }
 
       // Merge join always produces exact results (or all available)
-      spdlog::debug("Merge join: {} terms, selectivity={:.2f}, min={}, max={}, found={}", terms.size(), selectivity,
-                    min_size, max_size, result.size());
+      mygram::utils::StructuredLog()
+          .Event("merge_join_search")
+          .Field("terms", static_cast<uint64_t>(terms.size()))
+          .Field("selectivity", selectivity)
+          .Field("min_size", static_cast<uint64_t>(min_size))
+          .Field("max_size", static_cast<uint64_t>(max_size))
+          .Field("found", static_cast<uint64_t>(result.size()))
+          .Debug();
       return result;
     }
-    spdlog::debug("Using standard intersection: selectivity={:.2f}, min={}, max={}", selectivity, min_size, max_size);
+    mygram::utils::StructuredLog()
+        .Event("standard_intersection_search")
+        .Field("selectivity", selectivity)
+        .Field("min_size", static_cast<uint64_t>(min_size))
+        .Field("max_size", static_cast<uint64_t>(max_size))
+        .Debug();
     // Fall through to standard path
   }
 
@@ -475,7 +502,7 @@ void Index::Optimize(uint64_t total_docs) {
   // Check if already optimizing (prevent concurrent Optimize() calls)
   bool expected = false;
   if (!is_optimizing_.compare_exchange_strong(expected, true)) {
-    spdlog::warn("Optimization already in progress, ignoring Optimize() request");
+    mygram::utils::StructuredLog().Event("index_optimization_skipped").Field("reason", "already in progress").Warn();
     return;
   }
 
@@ -554,7 +581,10 @@ void Index::Optimize(uint64_t total_docs) {
   }
 
   if (merged_count > 0) {
-    spdlog::debug("Merged concurrent additions for {} terms during optimization", merged_count);
+    mygram::utils::StructuredLog()
+        .Event("index_optimization_merge")
+        .Field("merged_terms", static_cast<uint64_t>(merged_count))
+        .Debug();
   }
 
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -564,8 +594,12 @@ void Index::Optimize(uint64_t total_docs) {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
     final_term_count = term_postings_.size();
   }
-  spdlog::info("Optimized index: {} terms optimized, {} terms final, {} MB", term_count, final_term_count,
-               MemoryUsage() / (1024 * 1024));
+  mygram::utils::StructuredLog()
+      .Event("index_optimized")
+      .Field("terms_optimized", static_cast<uint64_t>(term_count))
+      .Field("terms_final", static_cast<uint64_t>(final_term_count))
+      .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+      .Info();
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 }
 
@@ -573,7 +607,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   // Check if already optimizing
   bool expected = false;
   if (!is_optimizing_.compare_exchange_strong(expected, true)) {
-    spdlog::warn("Optimization already in progress, ignoring request");
+    mygram::utils::StructuredLog()
+        .Event("index_batch_optimization_skipped")
+        .Field("reason", "already in progress")
+        .Warn();
     return false;
   }
 
@@ -589,7 +626,11 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  spdlog::info("Starting batch optimization: {} terms, batch_size={}", term_postings_.size(), batch_size);
+  mygram::utils::StructuredLog()
+      .Event("index_batch_optimization_starting")
+      .Field("terms", static_cast<uint64_t>(term_postings_.size()))
+      .Field("batch_size", static_cast<uint64_t>(batch_size))
+      .Info();
 
   auto start_time = std::chrono::steady_clock::now();
 
@@ -702,7 +743,12 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     size_t progress = ((batch_end) * 100) / total_terms;
     if (progress % 10 == 0 || batch_end == total_terms) {
       // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-      spdlog::info("Optimization progress: {}/{} terms ({}%)", batch_end, total_terms, progress);
+      mygram::utils::StructuredLog()
+          .Event("index_optimization_progress")
+          .Field("processed", static_cast<uint64_t>(batch_end))
+          .Field("total", static_cast<uint64_t>(total_terms))
+          .Field("percent", static_cast<uint64_t>(progress))
+          .Info();
     }
   }
 
@@ -716,10 +762,13 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
     final_term_count = term_postings_.size();
   }
-  spdlog::info(
-      "Batch optimization completed: {} terms processed, {} terms final, "
-      "{} strategy changes, {:.2f}s elapsed",
-      total_terms, final_term_count, converted_count, static_cast<double>(duration) / 1000.0);
+  mygram::utils::StructuredLog()
+      .Event("index_batch_optimization_completed")
+      .Field("terms_processed", static_cast<uint64_t>(total_terms))
+      .Field("terms_final", static_cast<uint64_t>(final_term_count))
+      .Field("strategy_changes", static_cast<uint64_t>(converted_count))
+      .Field("elapsed_sec", static_cast<double>(duration) / 1000.0)
+      .Info();
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
   return true;
@@ -729,7 +778,7 @@ void Index::Clear() {
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
   term_postings_.clear();
-  spdlog::info("Cleared index");
+  mygram::utils::StructuredLog().Event("index_cleared").Info();
 }
 
 PostingList* Index::GetOrCreatePostingList(std::string_view term) {
@@ -864,7 +913,12 @@ bool Index::SaveToFile(const std::string& filepath) const {
     ofs.close();
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 1024: Standard conversion factor for bytes to KB to MB
-    spdlog::info("Saved index to {}: {} terms, {} MB", filepath, term_count, MemoryUsage() / (1024 * 1024));
+    mygram::utils::StructuredLog()
+        .Event("index_saved")
+        .Field("path", filepath)
+        .Field("terms", term_count)
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+        .Info();
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
@@ -938,7 +992,7 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
       return false;
     }
 
-    spdlog::debug("Saved index to stream: {} terms", term_count);
+    mygram::utils::StructuredLog().Event("index_saved_to_stream").Field("terms", term_count).Debug();
     return true;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
@@ -998,7 +1052,11 @@ bool Index::LoadFromFile(const std::string& filepath) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     ifs.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
     if (static_cast<int>(ngram) != ngram_size_) {
-      spdlog::warn("Index ngram_size mismatch: file={}, current={}", ngram, ngram_size_);
+      mygram::utils::StructuredLog()
+          .Event("index_ngram_mismatch")
+          .Field("file_ngram", static_cast<uint64_t>(ngram))
+          .Field("current_ngram", static_cast<uint64_t>(ngram_size_))
+          .Warn();
       // Continue anyway, but this might cause issues
     }
 
@@ -1056,7 +1114,12 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 1024: Standard conversion factor for bytes to KB to MB
-    spdlog::info("Loaded index from {}: {} terms, {} MB", filepath, term_count, MemoryUsage() / (1024 * 1024));
+    mygram::utils::StructuredLog()
+        .Event("index_loaded")
+        .Field("path", filepath)
+        .Field("terms", term_count)
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+        .Info();
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
@@ -1104,7 +1167,11 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     input_stream.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
     if (static_cast<int>(ngram) != ngram_size_) {
-      spdlog::warn("Index ngram_size mismatch: stream={}, current={}", ngram, ngram_size_);
+      mygram::utils::StructuredLog()
+          .Event("index_ngram_mismatch")
+          .Field("stream_ngram", static_cast<uint64_t>(ngram))
+          .Field("current_ngram", static_cast<uint64_t>(ngram_size_))
+          .Warn();
       // Continue anyway, but this might cause issues
     }
 
@@ -1166,7 +1233,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       term_postings_ = std::move(new_postings);
     }
 
-    spdlog::debug("Loaded index from stream: {} terms", term_count);
+    mygram::utils::StructuredLog().Event("index_loaded_from_stream").Field("terms", term_count).Debug();
     return true;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()

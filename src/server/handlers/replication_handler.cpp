@@ -27,7 +27,7 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 #ifdef USE_MYSQL
       if (ctx_.binlog_reader != nullptr) {
         if (ctx_.binlog_reader->IsRunning()) {
-          spdlog::info("Stopping binlog replication by user request");
+          mygram::utils::StructuredLog().Event("replication_stopping").Field("source", "user_request").Info();
           ctx_.binlog_reader->Stop();
           return ResponseFormatter::FormatReplicationStopResponse();
         }

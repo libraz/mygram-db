@@ -20,13 +20,19 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
   switch (query.type) {
     case query::QueryType::DEBUG_ON: {
       conn_ctx.debug_mode = true;
-      spdlog::debug("Debug mode enabled for connection {}", conn_ctx.client_fd);
+      mygram::utils::StructuredLog()
+          .Event("debug_mode_enabled")
+          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Debug();
       return "OK DEBUG_ON";
     }
 
     case query::QueryType::DEBUG_OFF: {
       conn_ctx.debug_mode = false;
-      spdlog::debug("Debug mode disabled for connection {}", conn_ctx.client_fd);
+      mygram::utils::StructuredLog()
+          .Event("debug_mode_disabled")
+          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Debug();
       return "OK DEBUG_OFF";
     }
 
@@ -127,9 +133,13 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str());
       }
 
-      spdlog::info("Starting index optimization: memory_health={} estimated={} index_size={} docs={}",
-                   utils::MemoryHealthStatusToString(memory_health), utils::FormatBytes(estimated_memory),
-                   utils::FormatBytes(index_memory), total_docs);
+      mygram::utils::StructuredLog()
+          .Event("index_optimization_starting")
+          .Field("memory_health", utils::MemoryHealthStatusToString(memory_health))
+          .Field("estimated_memory", utils::FormatBytes(estimated_memory))
+          .Field("index_size", utils::FormatBytes(index_memory))
+          .Field("docs", total_docs)
+          .Info();
 
       // Run optimization (this will block, but it's intentional for now)
       bool started = current_index->OptimizeInBatches(total_docs, kDefaultBatchSize);

@@ -463,7 +463,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     }
     if (!column_found_as_filter && column_found_as_primary_key) {
       // Info: sorting by primary key column name (not filter column)
-      spdlog::debug("Sorting by primary key column '{}' (not found as filter column)", order_by.column);
+      mygram::utils::StructuredLog().Event("sort_by_primary_key_column").Field("column", order_by.column).Debug();
     }
   }
 

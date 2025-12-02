@@ -52,10 +52,17 @@ void ConnectionIOHandler::HandleConnection(int client_fd, ConnectionContext& ctx
       if (bytes < 0) {
         // With SO_RCVTIMEO set, timeout will trigger EAGAIN/EWOULDBLOCK
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          spdlog::debug("recv timeout on fd {}, closing connection", client_fd);
+          mygram::utils::StructuredLog()
+              .Event("connection_recv_timeout")
+              .Field("fd", static_cast<uint64_t>(client_fd))
+              .Debug();
           break;  // Timeout - close connection
         }
-        spdlog::debug("recv error on fd {}: {}", client_fd, strerror(errno));
+        mygram::utils::StructuredLog()
+            .Event("connection_recv_error")
+            .Field("fd", static_cast<uint64_t>(client_fd))
+            .Field("error", strerror(errno))
+            .Debug();
       }
       break;
     }
@@ -147,13 +154,20 @@ bool ConnectionIOHandler::SendResponse(int client_fd, const std::string& respons
       }
       // EPIPE is expected when client closes connection
       if (errno != EPIPE) {
-        spdlog::debug("writev error on fd {}: {}", client_fd, strerror(errno));
+        mygram::utils::StructuredLog()
+            .Event("connection_writev_error")
+            .Field("fd", static_cast<uint64_t>(client_fd))
+            .Field("error", strerror(errno))
+            .Debug();
       }
       return false;
     }
 
     if (sent == 0) {
-      spdlog::debug("writev returned 0 on fd {}", client_fd);
+      mygram::utils::StructuredLog()
+          .Event("connection_writev_zero")
+          .Field("fd", static_cast<uint64_t>(client_fd))
+          .Debug();
       return false;
     }
 

@@ -79,7 +79,7 @@ int Application::Run() {
   }
 
   // Log startup message
-  spdlog::info("{} starting...", Version::FullString());
+  mygram::utils::StructuredLog().Event("application_starting").Field("version", Version::FullString()).Info();
 
   // Check root privilege
   auto root_check = CheckRootPrivilege();
@@ -159,7 +159,7 @@ int Application::Run() {
   // Graceful shutdown
   Stop();
 
-  spdlog::info("MygramDB stopped");
+  mygram::utils::StructuredLog().Event("application_stopped").Info();
   return 0;
 }
 
@@ -221,7 +221,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::Start() {
 }
 
 void Application::RunMainLoop() {
-  spdlog::debug("Entering main loop...");
+  mygram::utils::StructuredLog().Event("main_loop_entered").Debug();
 
   while (!signal_manager_->IsShutdownRequested()) {
     // Check for log rotation signal (SIGUSR1)
@@ -236,7 +236,7 @@ void Application::RunMainLoop() {
     std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownCheckIntervalMs));
   }
 
-  spdlog::debug("Shutdown requested, cleaning up...");
+  mygram::utils::StructuredLog().Event("shutdown_requested").Debug();
 }
 
 void Application::Stop() {
@@ -296,7 +296,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
 
     // Create directory if it doesn't exist
     if (!std::filesystem::exists(dump_path)) {
-      spdlog::info("Creating dump directory: {}", dump_dir);
+      mygram::utils::StructuredLog().Event("dump_directory_creating").Field("path", dump_dir).Info();
       std::filesystem::create_directories(dump_path);
     }
 
@@ -340,7 +340,11 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
     test_stream.close();
     std::filesystem::remove(test_file);
 
-    spdlog::debug("Dump directory verified: {} (canonical: {})", dump_dir, canonical_dump.string());
+    mygram::utils::StructuredLog()
+        .Event("dump_directory_verified")
+        .Field("path", dump_dir)
+        .Field("canonical_path", canonical_dump.string())
+        .Debug();
   } catch (const std::exception& e) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kIOError, "Failed to verify dump directory: " + std::string(e.what())));
@@ -354,7 +358,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::DaemonizeIfRequ
     return {};  // Not requested, nothing to do
   }
 
-  spdlog::info("Daemonizing process...");
+  mygram::utils::StructuredLog().Event("process_daemonizing").Info();
   if (!utils::Daemonize()) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Failed to daemonize process"));

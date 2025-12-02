@@ -167,7 +167,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
 
-  spdlog::debug("ConnectionAcceptor listening on {}:{}", config_.host, actual_port_);
+  mygram::utils::StructuredLog()
+      .Event("connection_acceptor_listening")
+      .Field("host", config_.host)
+      .Field("port", static_cast<uint64_t>(actual_port_))
+      .Debug();
   return {};
 }
 
@@ -176,7 +180,7 @@ void ConnectionAcceptor::Stop() {
     return;
   }
 
-  spdlog::debug("Stopping ConnectionAcceptor...");
+  mygram::utils::StructuredLog().Event("connection_acceptor_stopping").Debug();
   should_stop_ = true;
   running_ = false;
 
@@ -203,7 +207,7 @@ void ConnectionAcceptor::Stop() {
     active_fds_.clear();
   }
 
-  spdlog::debug("ConnectionAcceptor stopped");
+  mygram::utils::StructuredLog().Event("connection_acceptor_stopped").Debug();
 }
 
 void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
@@ -211,7 +215,11 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
 }
 
 void ConnectionAcceptor::AcceptLoop() {
-  spdlog::debug("Accept loop started");
+  mygram::utils::StructuredLog()
+      .Event("accept_loop_started")
+      .Field("host", config_.host)
+      .Field("port", static_cast<uint64_t>(actual_port_))
+      .Debug();
 
   while (!should_stop_) {
     struct sockaddr_in client_addr = {};
@@ -226,7 +234,7 @@ void ConnectionAcceptor::AcceptLoop() {
             .Field("error", strerror(errno))
             .Error();
       } else {
-        spdlog::debug("Accept interrupted (shutdown in progress)");
+        mygram::utils::StructuredLog().Event("accept_interrupted_shutdown").Debug();
       }
       continue;
     }
@@ -336,7 +344,7 @@ void ConnectionAcceptor::AcceptLoop() {
     }
   }
 
-  spdlog::debug("Accept loop exited");
+  mygram::utils::StructuredLog().Event("accept_loop_exited").Debug();
 }
 
 bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {

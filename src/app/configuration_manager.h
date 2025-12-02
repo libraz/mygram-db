@@ -92,7 +92,7 @@ class ConfigurationManager {
    *
    * Note: Runtime logging level changes are handled by RuntimeVariableManager
    */
-  Expected<void, mygram::utils::Error> ApplyLoggingConfig();
+  Expected<void, mygram::utils::Error> ApplyLoggingConfig() const;
 
   /**
    * @brief Reopen log file for log rotation

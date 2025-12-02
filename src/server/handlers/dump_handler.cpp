@@ -128,19 +128,33 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   std::string filepath;
   if (!query.filepath.empty()) {
     filepath = query.filepath;
-    if (filepath[0] != '/') {
+
+    // Security check: reject relative paths containing "./" or "../"
+    // Only allow: simple filename (no '/') or absolute path (starts with '/')
+    if (filepath.find("./") != std::string::npos || filepath.find("../") != std::string::npos) {
+      return ResponseFormatter::FormatError(
+          "Invalid filepath: relative paths with './' or '../' are not allowed. "
+          "Use a simple filename (saved to dump directory) or an absolute path.");
+    }
+
+    // Prepend dump_dir only for simple filenames (no path separator)
+    if (filepath.find('/') == std::string::npos) {
       filepath = ctx_.dump_dir + "/" + filepath;
     }
-    // Canonicalize path and validate it's within dump_dir
-    try {
-      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
-      auto rel = canonical.lexically_relative(dump_canonical);
-      if (rel.empty() || rel.string().substr(0, 2) == "..") {
-        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
+
+    // For absolute paths, validate they're within dump_dir for security
+    if (filepath[0] == '/') {
+      try {
+        std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+        std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
+        auto rel = canonical.lexically_relative(dump_canonical);
+        if (rel.empty() || rel.string().substr(0, 2) == "..") {
+          return ResponseFormatter::FormatError("Invalid filepath: absolute path must be within dump directory (" +
+                                                ctx_.dump_dir + ")");
+        }
+      } catch (const std::exception& e) {
+        return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
       }
-    } catch (const std::exception& e) {
-      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
     }
   } else {
     auto now = std::time(nullptr);
@@ -156,7 +170,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 
   // Initialize progress tracking and run async if progress tracking is available
   if (ctx_.dump_progress != nullptr) {
-    spdlog::info("Starting async DUMP SAVE to: {}", filepath);
+    mygram::utils::StructuredLog()
+        .Event("dump_save_started")
+        .Field("filepath", filepath)
+        .Field("mode", "async")
+        .Field("tables", static_cast<uint64_t>(ctx_.table_contexts.size()))
+        .Info();
 
     // Join any previous worker thread
     ctx_.dump_progress->JoinWorker();
@@ -170,7 +189,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   }
 
   // Fallback: run synchronously if no progress tracking available (e.g., in tests)
-  spdlog::info("Starting synchronous DUMP SAVE to: {}", filepath);
+  mygram::utils::StructuredLog()
+      .Event("dump_save_started")
+      .Field("filepath", filepath)
+      .Field("mode", "sync")
+      .Field("tables", static_cast<uint64_t>(ctx_.table_contexts.size()))
+      .Info();
   DumpSaveWorker(filepath);
 
   // Check result and return appropriate response (sync mode)
@@ -186,28 +210,30 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
   bool replication_was_running = false;
 
 #ifdef USE_MYSQL
-  // Check if replication is running and stop it
-  if (ctx_.binlog_reader != nullptr) {
-    replication_was_running = ctx_.binlog_reader->IsRunning();
-    if (replication_was_running) {
-      ctx_.binlog_reader->Stop();
-      ctx_.replication_paused_for_dump = true;
-      spdlog::info("Stopped replication for async DUMP SAVE");
-      mygram::utils::StructuredLog()
-          .Event("replication_paused")
-          .Field("operation", "dump_save")
-          .Field("reason", "automatic_pause_for_consistency")
-          .Info();
-    }
-  }
-#endif
-
-  // Get current GTID
+  // Get current GTID first (before stopping replication)
   std::string gtid;
-#ifdef USE_MYSQL
   if (ctx_.binlog_reader != nullptr) {
     gtid = ctx_.binlog_reader->GetCurrentGTID();
   }
+
+  // Check if replication is running and stop it
+  if (ctx_.binlog_reader != nullptr) {
+    replication_was_running = ctx_.binlog_reader->IsRunning();
+
+    if (replication_was_running) {
+      ctx_.binlog_reader->Stop();
+      ctx_.replication_paused_for_dump = true;
+      mygram::utils::StructuredLog()
+          .Event("replication_paused_for_dump")
+          .Field("operation", "dump_save")
+          .Field("gtid", gtid)
+          .Field("filepath", filepath)
+          .Field("auto_resume", "true")
+          .Info();
+    }
+  }
+#else
+  std::string gtid;
 #endif
 
   // Convert table_contexts to format expected by dump_v1::WriteDumpV1
@@ -224,7 +250,21 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
   }
 
   // Call dump_v1 API
+  mygram::utils::StructuredLog()
+      .Event("dump_save_write_starting")
+      .Field("filepath", filepath)
+      .Field("gtid", gtid)
+      .Field("tables", static_cast<uint64_t>(converted_contexts.size()))
+      .Info();
+
   auto result = storage::dump_v1::WriteDumpV1(filepath, gtid, *ctx_.full_config, converted_contexts);
+
+  mygram::utils::StructuredLog()
+      .Event("dump_save_write_finished")
+      .Field("filepath", filepath)
+      .Field("success", result.has_value() ? "true" : "false")
+      .Field("error", result.has_value() ? "" : result.error().message())
+      .Info();
 
 #ifdef USE_MYSQL
   // Auto-restart replication after DUMP SAVE (regardless of success/failure)
@@ -232,17 +272,19 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
     ctx_.replication_paused_for_dump = false;
 
     if (ctx_.binlog_reader->Start()) {
-      spdlog::info("Auto-restarted replication after async DUMP SAVE");
       mygram::utils::StructuredLog()
-          .Event("replication_resumed")
+          .Event("replication_resumed_after_dump")
           .Field("operation", "dump_save")
-          .Field("reason", "automatic_restart_after_completion")
+          .Field("gtid", gtid)
+          .Field("filepath", filepath)
           .Info();
     } else {
       std::string replication_error = ctx_.binlog_reader->GetLastError();
       mygram::utils::StructuredLog()
           .Event("replication_restart_failed")
           .Field("operation", "dump_save")
+          .Field("gtid", gtid)
+          .Field("filepath", filepath)
           .Field("error", replication_error)
           .Error();
     }
@@ -251,21 +293,20 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   // Update progress and clear flag
   if (result) {
-    spdlog::info("Async DUMP SAVE completed successfully: {}", filepath);
+    mygram::utils::StructuredLog().Event("dump_save_completed").Field("filepath", filepath).Field("gtid", gtid).Info();
     if (ctx_.dump_progress != nullptr) {
       ctx_.dump_progress->Complete(filepath);
     }
   } else {
-    std::string error_msg = "Failed to save dump to " + filepath + ": " + result.error().message();
-    spdlog::error("Async DUMP SAVE failed: {}", error_msg);
+    std::string error_msg = result.error().message();
     mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "dump_save")
+        .Event("dump_save_failed")
         .Field("filepath", filepath)
-        .Field("error", result.error().message())
+        .Field("gtid", gtid)
+        .Field("error", error_msg)
         .Error();
     if (ctx_.dump_progress != nullptr) {
-      ctx_.dump_progress->Fail(error_msg);
+      ctx_.dump_progress->Fail("Failed to save dump: " + error_msg);
     }
   }
 
@@ -321,7 +362,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
     ctx_.binlog_reader->Stop();
     ctx_.replication_paused_for_dump = true;
-    spdlog::info("Stopped replication before DUMP LOAD (will auto-restart after completion)");
     mygram::utils::StructuredLog()
         .Event("replication_paused")
         .Field("operation", "dump_load")
@@ -351,7 +391,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     return ResponseFormatter::FormatError("DUMP LOAD requires a filepath");
   }
 
-  spdlog::info("Attempting to load dump from: {}", filepath);
+  mygram::utils::StructuredLog().Event("dump_load_starting").Field("path", filepath).Info();
 
   // Set loading mode (RAII guard ensures it's cleared even on exceptions)
   FlagGuard loading_guard(ctx_.dump_load_in_progress);
@@ -377,7 +417,11 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // to enable manual REPLICATION START after DUMP LOAD
   if (result && !gtid.empty() && ctx_.binlog_reader != nullptr) {
     ctx_.binlog_reader->SetCurrentGTID(gtid);
-    spdlog::info("Updated replication GTID to loaded position: {}", gtid);
+    mygram::utils::StructuredLog()
+        .Event("replication_gtid_updated")
+        .Field("gtid", gtid)
+        .Field("source", "dump_load")
+        .Info();
   }
 
   // Auto-restart replication after DUMP LOAD (only if it was running before)
@@ -385,7 +429,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     ctx_.replication_paused_for_dump = false;
 
     if (ctx_.binlog_reader->Start()) {
-      spdlog::info("Auto-restarted replication after DUMP LOAD");
       mygram::utils::StructuredLog()
           .Event("replication_resumed")
           .Field("operation", "dump_load")
@@ -406,7 +449,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 #endif
 
   if (result) {
-    spdlog::info("Successfully loaded dump from: {} (GTID: {})", filepath, gtid);
+    mygram::utils::StructuredLog().Event("dump_load_completed").Field("path", filepath).Field("gtid", gtid).Info();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }
 
@@ -445,13 +488,13 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
     return ResponseFormatter::FormatError("DUMP VERIFY requires a filepath");
   }
 
-  spdlog::info("Verifying dump: {}", filepath);
+  mygram::utils::StructuredLog().Event("dump_verify_starting").Field("path", filepath).Info();
 
   storage::dump_format::IntegrityError integrity_error;
   auto result = storage::dump_v1::VerifyDumpIntegrity(filepath, integrity_error);
 
   if (result) {
-    spdlog::info("Dump verification succeeded: {}", filepath);
+    mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field("path", filepath).Info();
     return "OK DUMP_VERIFIED " + filepath;
   }
 
@@ -490,7 +533,7 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
     return ResponseFormatter::FormatError("DUMP INFO requires a filepath");
   }
 
-  spdlog::info("Reading dump info: {}", filepath);
+  mygram::utils::StructuredLog().Event("dump_info_reading").Field("path", filepath).Info();
 
   storage::dump_v1::DumpInfo info;
   auto info_result = storage::dump_v1::GetDumpInfo(filepath, info);

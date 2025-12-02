@@ -49,7 +49,7 @@ int ConfigurationManager::PrintConfigTest() const {
   return 0;
 }
 
-mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyLoggingConfig() {
+mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyLoggingConfig() const {
   // Configure log output (file or stdout) BEFORE setting level
   if (!config_.logging.file.empty()) {
     try {
@@ -88,7 +88,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
 
   // Log confirmation message (after logger is configured)
   if (!config_.logging.file.empty()) {
-    spdlog::info("Logging to file: {}", config_.logging.file);
+    mygram::utils::StructuredLog().Event("logging_to_file").Field("path", config_.logging.file).Info();
   }
 
   return {};
@@ -114,7 +114,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reopen
     // Restore log level
     spdlog::set_level(current_level);
 
-    spdlog::info("Log file reopened for rotation");
+    mygram::utils::StructuredLog().Event("log_file_reopened").Info();
   } catch (const spdlog::spdlog_ex& ex) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kIOError,
                                                                   "Log file reopen failed: " + std::string(ex.what())));

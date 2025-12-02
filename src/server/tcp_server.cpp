@@ -155,9 +155,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
-    spdlog::info("Rate limiter initialized: capacity={}, refill_rate={}/s, max_clients={}",
-                 full_config_->api.rate_limiting.capacity, full_config_->api.rate_limiting.refill_rate,
-                 full_config_->api.rate_limiting.max_clients);
+    mygram::utils::StructuredLog()
+        .Event("rate_limiter_initialized")
+        .Field("capacity", static_cast<uint64_t>(full_config_->api.rate_limiting.capacity))
+        .Field("refill_rate", static_cast<uint64_t>(full_config_->api.rate_limiting.refill_rate))
+        .Field("max_clients", static_cast<uint64_t>(full_config_->api.rate_limiting.max_clients))
+        .Info();
   }
 
 #ifdef USE_MYSQL
@@ -217,12 +220,16 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Set connection handler callback (must be done after acceptor_ is assigned)
   acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
 
-  spdlog::info("TCP server started on {}:{}", config_.host, acceptor_->GetPort());
+  mygram::utils::StructuredLog()
+      .Event("tcp_server_started")
+      .Field("host", config_.host)
+      .Field("port", static_cast<uint64_t>(acceptor_->GetPort()))
+      .Info();
   return {};
 }
 
 void TcpServer::Stop() {
-  spdlog::debug("Stopping TCP server...");
+  mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
   // Signal shutdown to all connection handlers
   shutdown_requested_ = true;
@@ -250,7 +257,7 @@ void TcpServer::Stop() {
     thread_pool_->Shutdown();
   }
 
-  spdlog::debug("TCP server stopped. Handled {} total requests", stats_.GetTotalRequests());
+  mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
 }
 
 void TcpServer::HandleConnection(int client_fd) {
@@ -335,7 +342,10 @@ void TcpServer::HandleConnection(int client_fd) {
     connection_contexts_.erase(client_fd);
   }
 
-  spdlog::debug("Connection closed (active: {})", stats_.GetActiveConnections());
+  mygram::utils::StructuredLog()
+      .Event("connection_closed")
+      .Field("active_connections", static_cast<uint64_t>(stats_.GetActiveConnections()))
+      .Debug();
 
   // Note: FD guard will close the FD, stats_cleanup will decrement the connection count
 }

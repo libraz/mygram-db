@@ -51,13 +51,17 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
 
   // Step 2: Stop BinlogReader (graceful shutdown)
   if (binlog_reader_ != nullptr && binlog_reader_->IsRunning()) {
-    spdlog::info("Stopping BinlogReader for reconnection...");
+    mygram::utils::StructuredLog().Event("mysql_reconnection_stopping_binlog").Info();
     binlog_reader_->Stop();
     mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_stopped").Info();
   }
 
   // Step 3: Reconnect to new MySQL host/port
-  spdlog::info("Reconnecting to new MySQL host: {}:{}", new_host, new_port);
+  mygram::utils::StructuredLog()
+      .Event("mysql_reconnection_connecting")
+      .Field("host", new_host)
+      .Field("port", static_cast<int64_t>(new_port))
+      .Info();
 
   // Get current connection config and update host/port
   auto config = mysql_connection_->GetConfig();
@@ -111,7 +115,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   if (binlog_reader_ != nullptr) {
     if (!current_gtid.empty()) {
       // Resume from saved GTID position
-      spdlog::info("Restarting BinlogReader from GTID: {}", current_gtid);
+      mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("gtid", current_gtid).Info();
       auto start_result = binlog_reader_->StartFromGtid(current_gtid);
       if (!start_result) {
         // Clear reconnecting flag on error
@@ -126,7 +130,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       }
     } else {
       // Start from latest position
-      spdlog::info("Restarting BinlogReader from latest position");
+      mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("position", "latest").Info();
       binlog_reader_->Start();
     }
 
@@ -144,7 +148,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
     reconnecting_flag_->store(false);
   }
 
-  spdlog::info("MySQL reconnection completed successfully");
+  mygram::utils::StructuredLog().Event("mysql_reconnection_completed").Info();
   return {};
 }
 

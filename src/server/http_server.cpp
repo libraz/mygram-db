@@ -120,9 +120,12 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                     static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
                                                     static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
-      spdlog::info("HTTP server: Rate limiter initialized: capacity={}, refill_rate={}/s, max_clients={}",
-                   full_config_->api.rate_limiting.capacity, full_config_->api.rate_limiting.refill_rate,
-                   full_config_->api.rate_limiting.max_clients);
+      mygram::utils::StructuredLog()
+          .Event("http_rate_limiter_initialized")
+          .Field("capacity", static_cast<uint64_t>(full_config_->api.rate_limiting.capacity))
+          .Field("refill_rate", static_cast<uint64_t>(full_config_->api.rate_limiting.refill_rate))
+          .Field("max_clients", static_cast<uint64_t>(full_config_->api.rate_limiting.max_clients))
+          .Info();
     }
   }
 
@@ -260,7 +263,11 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 
   // Start server in separate thread
   server_thread_ = std::make_unique<std::thread>([this, &thread_error, &error_mutex]() {
-    spdlog::info("Starting HTTP server on {}:{}", config_.bind, config_.port);
+    mygram::utils::StructuredLog()
+        .Event("http_server_starting")
+        .Field("bind", config_.bind)
+        .Field("port", static_cast<uint64_t>(config_.port))
+        .Info();
 
     if (!server_->listen(config_.bind, config_.port)) {
       std::lock_guard<std::mutex> lock(error_mutex);
@@ -290,7 +297,11 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
     return MakeUnexpected(error);
   }
 
-  spdlog::info("HTTP server started successfully on {}:{}", config_.bind, config_.port);
+  mygram::utils::StructuredLog()
+      .Event("http_server_started")
+      .Field("bind", config_.bind)
+      .Field("port", static_cast<uint64_t>(config_.port))
+      .Info();
   return {};
 }
 
@@ -299,7 +310,7 @@ void HttpServer::Stop() {
     return;
   }
 
-  spdlog::info("Stopping HTTP server...");
+  mygram::utils::StructuredLog().Event("http_server_stopping").Info();
   running_ = false;
 
   if (server_) {
@@ -310,7 +321,7 @@ void HttpServer::Stop() {
     server_thread_->join();
   }
 
-  spdlog::info("HTTP server stopped");
+  mygram::utils::StructuredLog().Event("http_server_stopped").Info();
 }
 
 void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {

@@ -7,10 +7,15 @@
 
 #include <spdlog/spdlog.h>
 
+#include "utils/structured_log.h"
+
 namespace mygramdb::server {
 
 TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables) : tables_(std::move(tables)) {
-  spdlog::debug("TableCatalog initialized with {} tables", tables_.size());
+  mygram::utils::StructuredLog()
+      .Event("table_catalog_initialized")
+      .Field("table_count", static_cast<uint64_t>(tables_.size()))
+      .Debug();
 }
 
 TableContext* TableCatalog::GetTable(const std::string& name) {
@@ -46,12 +51,12 @@ std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*
 
 void TableCatalog::SetReadOnly(bool read_only) {
   read_only_ = read_only;
-  spdlog::info("TableCatalog: read_only={}", read_only);
+  mygram::utils::StructuredLog().Event("table_catalog_read_only_changed").Field("read_only", read_only).Info();
 }
 
 void TableCatalog::SetLoading(bool loading) {
   loading_ = loading;
-  spdlog::info("TableCatalog: loading={}", loading);
+  mygram::utils::StructuredLog().Event("table_catalog_loading_changed").Field("loading", loading).Info();
 }
 
 }  // namespace mygramdb::server

@@ -49,7 +49,7 @@ SyncOperationManager::~SyncOperationManager() {
   // Join threads WITHOUT holding sync_mutex_
   for (auto& [table_name, thread] : threads_to_join) {
     if (thread.joinable()) {
-      spdlog::debug("Joining sync thread for table: {}", table_name);
+      mygram::utils::StructuredLog().Event("sync_thread_joining").Field("table", table_name).Debug();
       thread.join();
     }
   }
@@ -76,10 +76,12 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
 
   // Log session timeout warning
   uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
-  spdlog::info(
-      "Starting SYNC for table '{}' with MySQL session_timeout_sec={} "
-      "(ensure this is sufficient for snapshot duration)",
-      table_name, session_timeout);
+  mygram::utils::StructuredLog()
+      .Event("sync_starting")
+      .Field("table", table_name)
+      .Field("session_timeout_sec", static_cast<uint64_t>(session_timeout))
+      .Field("hint", "ensure session_timeout_sec is sufficient for snapshot duration")
+      .Info();
 
   // Mark as syncing
   {
@@ -255,7 +257,11 @@ void SyncOperationManager::RequestShutdown() {
   // Cancel all active loaders
   std::lock_guard<std::mutex> lock(loaders_mutex_);
   for (auto& [table_name, loader] : active_loaders_) {
-    spdlog::info("Cancelling SYNC for table: {}", table_name);
+    mygram::utils::StructuredLog()
+        .Event("sync_cancelling")
+        .Field("table", table_name)
+        .Field("reason", "shutdown_requested")
+        .Info();
     loader->Cancel();
   }
 }
