@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.8] - 2025-12-21
+
+### Added
+
+- **C API: mygramclient_send_command** - Generic command sending function for arbitrary command execution; useful for custom commands and future protocol extensions
+
+### Fixed
+
+- **Medium: TCP protocol CRLF line endings** - Fix inconsistent line endings in multi-line responses (CONFIG HELP/SHOW/VERIFY, SYNC STATUS) that could cause client timeouts; now consistently uses CRLF (`\r\n`) per TCP text protocol conventions
+
+### Testing
+
+- 8 new tests for C API send_command and CRLF line ending compliance
+
+**Detailed Release Notes**: [docs/releases/v1.3.8.md](docs/releases/v1.3.8.md)
+
 ## [1.3.7] - 2025-12-02
 
 ### Added
@@ -293,7 +309,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.7...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.8...HEAD
+[1.3.8]: https://github.com/libraz/mygram-db/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/libraz/mygram-db/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/libraz/mygram-db/compare/v1.3.5...v1.3.6
 [1.3.5]: https://github.com/libraz/mygram-db/compare/v1.3.4...v1.3.5

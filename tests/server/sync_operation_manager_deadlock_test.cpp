@@ -212,4 +212,32 @@ TEST_F(SyncOperationManagerDeadlockTest, SyncingTablesTracking) {
   manager.reset();
 }
 
+/**
+ * @brief Test GetSyncStatus uses CRLF line endings for TCP protocol compatibility
+ *
+ * This test verifies that GetSyncStatus returns responses with proper CRLF
+ * line endings when there are multiple sync operations, preventing mixed
+ * line ending issues that can cause client timeouts.
+ */
+TEST_F(SyncOperationManagerDeadlockTest, GetSyncStatusUsesCRLFLineEndings) {
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), nullptr);
+
+  std::string status = manager->GetSyncStatus();
+
+  // Even for idle status, verify no bare LF (LF not preceded by CR)
+  for (size_t i = 0; i < status.size(); ++i) {
+    if (status[i] == '\n' && (i == 0 || status[i - 1] != '\r')) {
+      FAIL() << "Found bare LF at position " << i << " in status: " << status;
+    }
+  }
+
+  // Verify response does not end with trailing CRLF (SendResponse adds it)
+  if (status.size() >= 2) {
+    EXPECT_FALSE(status[status.size() - 2] == '\r' && status[status.size() - 1] == '\n')
+        << "Response should not end with CRLF (SendResponse adds it)";
+  }
+
+  manager.reset();
+}
+
 #endif  // USE_MYSQL

@@ -318,9 +318,11 @@ void MaskSensitiveFieldsRecursive(nlohmann::json& json, const std::string& path)
 /**
  * @brief Convert JSON to YAML-like string format
  *
+ * Uses CRLF line endings for TCP protocol compatibility.
+ *
  * @param json JSON object
  * @param indent Current indentation level
- * @return YAML-formatted string
+ * @return YAML-formatted string with CRLF line endings
  */
 std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
   std::ostringstream oss;
@@ -330,9 +332,9 @@ std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
     for (const auto& [key, child] : json.items()) {
       oss << indent_str << key << ":";
       if (child.is_object() || child.is_array()) {
-        oss << "\n" << JsonToYaml(child, indent + 1);
+        oss << "\r\n" << JsonToYaml(child, indent + 1);
       } else {
-        oss << " " << JsonValueToString(child) << "\n";
+        oss << " " << JsonValueToString(child) << "\r\n";
       }
     }
   } else if (json.is_array()) {
@@ -345,26 +347,26 @@ std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
           if (first) {
             oss << " " << key << ":";
             if (value.is_object() || value.is_array()) {
-              oss << "\n" << JsonToYaml(value, indent + 2);
+              oss << "\r\n" << JsonToYaml(value, indent + 2);
             } else {
-              oss << " " << JsonValueToString(value) << "\n";
+              oss << " " << JsonValueToString(value) << "\r\n";
             }
             first = false;
           } else {
             oss << std::string((indent + 1) * 2, ' ') << key << ":";
             if (value.is_object() || value.is_array()) {
-              oss << "\n" << JsonToYaml(value, indent + 2);
+              oss << "\r\n" << JsonToYaml(value, indent + 2);
             } else {
-              oss << " " << JsonValueToString(value) << "\n";
+              oss << " " << JsonValueToString(value) << "\r\n";
             }
           }
         }
       } else {
-        oss << " " << JsonValueToString(item) << "\n";
+        oss << " " << JsonValueToString(item) << "\r\n";
       }
     }
   } else {
-    oss << indent_str << JsonValueToString(json) << "\n";
+    oss << indent_str << JsonValueToString(json) << "\r\n";
   }
 
   return oss.str();
@@ -424,18 +426,18 @@ std::map<std::string, std::string> ConfigSchemaExplorer::ListPaths(const std::st
 std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) {
   std::ostringstream oss;
 
-  oss << info.path << "\n\n";
+  oss << info.path << "\r\n\r\n";
 
   // Type information
   oss << "Type: " << info.type;
   if (!info.allowed_values.empty()) {
     oss << " (enum)";
   }
-  oss << "\n";
+  oss << "\r\n";
 
   // Default value
   if (info.default_value.has_value()) {
-    oss << "Default: " << info.default_value.value() << "\n";
+    oss << "Default: " << info.default_value.value() << "\r\n";
   }
 
   // Range for numbers
@@ -452,7 +454,7 @@ std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) {
     } else {
       oss << "+∞";
     }
-    oss << "\n";
+    oss << "\r\n";
   } else if (info.minimum_number.has_value() || info.maximum_number.has_value()) {
     oss << "Range: ";
     if (info.minimum_number.has_value()) {
@@ -466,25 +468,25 @@ std::string ConfigSchemaExplorer::FormatHelp(const ConfigHelpInfo& info) {
     } else {
       oss << "+∞";
     }
-    oss << "\n";
+    oss << "\r\n";
   }
 
   // Allowed values for enums
   if (!info.allowed_values.empty()) {
-    oss << "Allowed values:\n";
+    oss << "Allowed values:\r\n";
     for (const auto& value : info.allowed_values) {
-      oss << "  - " << value << "\n";
+      oss << "  - " << value << "\r\n";
     }
   }
 
   // Required flag
   if (info.required) {
-    oss << "Required: yes\n";
+    oss << "Required: yes\r\n";
   }
 
-  // Description
+  // Description (last item, no trailing newline - SendResponse adds CRLF)
   if (!info.description.empty()) {
-    oss << "Description: " << info.description << "\n";
+    oss << "Description: " << info.description;
   }
 
   return oss.str();
@@ -495,9 +497,9 @@ std::string ConfigSchemaExplorer::FormatPathList(const std::map<std::string, std
   std::ostringstream oss;
 
   if (parent_path.empty()) {
-    oss << "Available configuration sections:\n";
+    oss << "Available configuration sections:\r\n";
   } else {
-    oss << "Available paths under '" << parent_path << "':\n";
+    oss << "Available paths under '" << parent_path << "':\r\n";
   }
 
   // Find maximum key length for alignment
@@ -515,13 +517,13 @@ std::string ConfigSchemaExplorer::FormatPathList(const std::map<std::string, std
       }
       oss << "- " << description;
     }
-    oss << "\n";
+    oss << "\r\n";
   }
 
   if (!parent_path.empty()) {
-    oss << "\nUse \"CONFIG HELP " << parent_path << ".<path>\" for detailed information.\n";
+    oss << "\r\nUse \"CONFIG HELP " << parent_path << ".<path>\" for detailed information.";
   } else {
-    oss << "\nUse \"CONFIG HELP <section>\" for detailed information.\n";
+    oss << "\r\nUse \"CONFIG HELP <section>\" for detailed information.";
   }
 
   return oss.str();

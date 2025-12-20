@@ -51,7 +51,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
       // Show top-level sections
       auto paths = explorer.ListPaths("");
       std::string result = config::ConfigSchemaExplorer::FormatPathList(paths, "");
-      return "+OK\n" + result;
+      return "+OK\r\n" + result;
     }
 
     // Show help for specific path
@@ -61,7 +61,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     }
 
     std::string result = config::ConfigSchemaExplorer::FormatHelp(help_info.value());
-    return "+OK\n" + result;
+    return "+OK\r\n" + result;
 
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
@@ -85,7 +85,11 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
     }
 
     std::string result = config::FormatConfigForDisplay(*ctx_.full_config, path);
-    return "+OK\n" + result;
+    // Strip trailing CRLF if present (SendResponse will add CRLF)
+    while (result.size() >= 2 && result[result.size() - 2] == '\r' && result[result.size() - 1] == '\n') {
+      result.erase(result.size() - 2);
+    }
+    return "+OK\r\n" + result;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -110,7 +114,7 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
         .Field("filepath", filepath)
         .Field("error", config_result.error().to_string())
         .Error();
-    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\n  ") +
+    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\r\n  ") +
                                           config_result.error().message());
   }
 
@@ -118,7 +122,7 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
 
   // Build summary information
   std::ostringstream summary;
-  summary << "Configuration is valid\n";
+  summary << "Configuration is valid\r\n";
   summary << "  Tables: " << test_config.tables.size();
   if (!test_config.tables.empty()) {
     summary << " (";
@@ -130,10 +134,10 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     }
     summary << ")";
   }
-  summary << "\n";
+  summary << "\r\n";
   summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port;
 
-  return "+OK\n" + summary.str();
+  return "+OK\r\n" + summary.str();
 }
 
 }  // namespace mygramdb::server

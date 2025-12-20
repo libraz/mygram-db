@@ -417,6 +417,90 @@ TEST_F(MygramClientTest, SendCommand) {
 }
 
 /**
+ * @brief Test C API mygramclient_send_command
+ */
+TEST_F(MygramClientTest, CApiSendCommand) {
+  AddTestDocuments();
+
+  // Create C API client
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  // Connect
+  int connect_result = mygramclient_connect(c_client);
+  ASSERT_EQ(connect_result, 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  // Test send_command with COUNT
+  char* response = nullptr;
+  int result = mygramclient_send_command(c_client, "COUNT test hello", &response);
+  ASSERT_EQ(result, 0) << "SendCommand error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK COUNT 2") != std::string::npos);
+  mygramclient_free_string(response);
+
+  // Test send_command with INFO
+  response = nullptr;
+  result = mygramclient_send_command(c_client, "INFO", &response);
+  ASSERT_EQ(result, 0) << "SendCommand error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK INFO") != std::string::npos);
+  mygramclient_free_string(response);
+
+  // Test send_command with invalid command
+  response = nullptr;
+  result = mygramclient_send_command(c_client, "INVALID_COMMAND", &response);
+  ASSERT_EQ(result, 0);  // Command sent successfully, but response is ERROR
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("ERROR") != std::string::npos);
+  mygramclient_free_string(response);
+
+  // Cleanup
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
+/**
+ * @brief Test C API mygramclient_send_command - error cases
+ */
+TEST_F(MygramClientTest, CApiSendCommandErrors) {
+  // Test with NULL client
+  char* response = nullptr;
+  int result = mygramclient_send_command(nullptr, "INFO", &response);
+  EXPECT_EQ(result, -1);
+
+  // Create C API client but don't connect
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  // Test send_command without connection
+  response = nullptr;
+  result = mygramclient_send_command(c_client, "INFO", &response);
+  EXPECT_EQ(result, -1);  // Should fail - not connected
+  EXPECT_EQ(response, nullptr);
+
+  // Test with NULL command
+  result = mygramclient_send_command(c_client, nullptr, &response);
+  EXPECT_EQ(result, -1);
+
+  // Test with NULL response pointer
+  result = mygramclient_send_command(c_client, "INFO", nullptr);
+  EXPECT_EQ(result, -1);
+
+  mygramclient_destroy(c_client);
+}
+
+/**
  * @brief Test move semantics
  */
 TEST_F(MygramClientTest, MoveSemantics) {

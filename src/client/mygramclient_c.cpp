@@ -425,6 +425,21 @@ int mygramclient_debug_off(MygramClient_C* client) {
   return 0;
 }
 
+int mygramclient_send_command(MygramClient_C* client, const char* command, char** response) {
+  if (client == nullptr || client->client == nullptr || command == nullptr || response == nullptr) {
+    return -1;
+  }
+
+  auto result = client->client->SendCommand(command);
+  if (!result) {
+    client->last_error = result.error().to_string();
+    return -1;
+  }
+
+  *response = strdup_safe(*result);
+  return 0;
+}
+
 const char* mygramclient_get_last_error(const MygramClient_C* client) {
   if (client == nullptr) {
     return "Invalid client handle";

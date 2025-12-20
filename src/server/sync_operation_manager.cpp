@@ -153,7 +153,7 @@ std::string SyncOperationManager::GetSyncStatus() {
       oss << " error=\"" << state.error_message << "\"";
     }
 
-    oss << "\n";
+    oss << "\r\n";
   }
 
   if (!any_active) {
@@ -161,8 +161,9 @@ std::string SyncOperationManager::GetSyncStatus() {
   }
 
   std::string result = oss.str();
-  if (!result.empty() && result.back() == '\n') {
-    result.pop_back();
+  // Strip trailing CRLF if present (SendResponse will add CRLF)
+  while (result.size() >= 2 && result[result.size() - 2] == '\r' && result[result.size() - 1] == '\n') {
+    result.erase(result.size() - 2);
   }
   return result;
 }

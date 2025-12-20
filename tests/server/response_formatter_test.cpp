@@ -363,3 +363,31 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   EXPECT_TRUE(response.find("#") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_") != std::string::npos || response.find("mygram_") != std::string::npos);
 }
+
+// Line ending tests for TCP protocol compatibility
+
+/**
+ * @brief Test FormatConfigResponse uses CRLF line endings
+ */
+TEST_F(ResponseFormatterTest, FormatConfigResponseUsesCRLFLineEndings) {
+  config::Config test_config;
+  test_config.api.tcp.port = 9999;
+  test_config.mysql.host = "127.0.0.1";
+  test_config.mysql.port = 3306;
+
+  std::string response = ResponseFormatter::FormatConfigResponse(&test_config, 5, 100, false, 3600);
+
+  // Verify response uses CRLF line endings
+  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
+
+  // Verify no bare LF (LF not preceded by CR) - prevents mixed line ending issues
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      FAIL() << "Found bare LF at position " << i;
+    }
+  }
+
+  // Verify response does not end with trailing CRLF (SendResponse adds it)
+  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should not end with CRLF (SendResponse adds it)";
+}

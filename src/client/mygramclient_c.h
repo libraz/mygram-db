@@ -262,6 +262,20 @@ int mygramclient_debug_on(MygramClient_C* client);
 int mygramclient_debug_off(MygramClient_C* client);
 
 /**
+ * @brief Send a raw command to the server
+ *
+ * This is a generic function that allows sending any command to the server
+ * and receiving the raw response. Useful for custom commands or future
+ * protocol extensions.
+ *
+ * @param client Client handle
+ * @param command Command string (without \\r\\n terminator)
+ * @param response Output response string (caller must free with mygramclient_free_string)
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_send_command(MygramClient_C* client, const char* command, char** response);
+
+/**
  * @brief Get last error message
  *
  * @param client Client handle

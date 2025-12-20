@@ -462,61 +462,61 @@ std::string ResponseFormatter::FormatReplicationStartResponse() {
 std::string ResponseFormatter::FormatConfigResponse(const config::Config* full_config, size_t connection_count,
                                                     int max_connections, bool read_only, uint64_t uptime_seconds) {
   std::ostringstream oss;
-  oss << "OK CONFIG\n";
+  oss << "OK CONFIG\r\n";
 
   if (full_config == nullptr) {
-    oss << "  [Configuration not available]\n";
+    oss << "  [Configuration not available]";
     return oss.str();
   }
 
   // MySQL configuration
-  oss << "  mysql:\n";
-  oss << "    host: " << full_config->mysql.host << "\n";
-  oss << "    port: " << full_config->mysql.port << "\n";
-  oss << "    user: " << full_config->mysql.user << "\n";
-  oss << "    database: " << full_config->mysql.database << "\n";
-  oss << "    use_gtid: " << (full_config->mysql.use_gtid ? "true" : "false") << "\n";
+  oss << "  mysql:\r\n";
+  oss << "    host: " << full_config->mysql.host << "\r\n";
+  oss << "    port: " << full_config->mysql.port << "\r\n";
+  oss << "    user: " << full_config->mysql.user << "\r\n";
+  oss << "    database: " << full_config->mysql.database << "\r\n";
+  oss << "    use_gtid: " << (full_config->mysql.use_gtid ? "true" : "false") << "\r\n";
 
   // Tables configuration
-  oss << "  tables: " << full_config->tables.size() << "\n";
+  oss << "  tables: " << full_config->tables.size() << "\r\n";
   for (const auto& table : full_config->tables) {
-    oss << "    - name: " << table.name << "\n";
-    oss << "      primary_key: " << table.primary_key << "\n";
-    oss << "      ngram_size: " << table.ngram_size << "\n";
-    oss << "      filters: " << table.filters.size() << "\n";
+    oss << "    - name: " << table.name << "\r\n";
+    oss << "      primary_key: " << table.primary_key << "\r\n";
+    oss << "      ngram_size: " << table.ngram_size << "\r\n";
+    oss << "      filters: " << table.filters.size() << "\r\n";
   }
 
   // API configuration
-  oss << "  api:\n";
-  oss << "    tcp.bind: " << full_config->api.tcp.bind << "\n";
-  oss << "    tcp.port: " << full_config->api.tcp.port << "\n";
+  oss << "  api:\r\n";
+  oss << "    tcp.bind: " << full_config->api.tcp.bind << "\r\n";
+  oss << "    tcp.port: " << full_config->api.tcp.port << "\r\n";
 
   // Replication configuration
-  oss << "  replication:\n";
-  oss << "    enable: " << (full_config->replication.enable ? "true" : "false") << "\n";
-  oss << "    server_id: " << full_config->replication.server_id << "\n";
-  oss << "    start_from: " << full_config->replication.start_from << "\n";
+  oss << "  replication:\r\n";
+  oss << "    enable: " << (full_config->replication.enable ? "true" : "false") << "\r\n";
+  oss << "    server_id: " << full_config->replication.server_id << "\r\n";
+  oss << "    start_from: " << full_config->replication.start_from << "\r\n";
 
   // Memory configuration
-  oss << "  memory:\n";
-  oss << "    hard_limit_mb: " << full_config->memory.hard_limit_mb << "\n";
-  oss << "    soft_target_mb: " << full_config->memory.soft_target_mb << "\n";
-  oss << "    roaring_threshold: " << full_config->memory.roaring_threshold << "\n";
+  oss << "  memory:\r\n";
+  oss << "    hard_limit_mb: " << full_config->memory.hard_limit_mb << "\r\n";
+  oss << "    soft_target_mb: " << full_config->memory.soft_target_mb << "\r\n";
+  oss << "    roaring_threshold: " << full_config->memory.roaring_threshold << "\r\n";
 
   // Dump configuration
-  oss << "  dump:\n";
-  oss << "    dir: " << full_config->dump.dir << "\n";
+  oss << "  dump:\r\n";
+  oss << "    dir: " << full_config->dump.dir << "\r\n";
 
   // Logging configuration
-  oss << "  logging:\n";
-  oss << "    level: " << full_config->logging.level << "\n";
+  oss << "  logging:\r\n";
+  oss << "    level: " << full_config->logging.level << "\r\n";
 
   // Runtime status
-  oss << "  runtime:\n";
-  oss << "    connections: " << connection_count << "\n";
-  oss << "    max_connections: " << max_connections << "\n";
-  oss << "    read_only: " << (read_only ? "true" : "false") << "\n";
-  oss << "    uptime: " << uptime_seconds << "s\n";
+  oss << "  runtime:\r\n";
+  oss << "    connections: " << connection_count << "\r\n";
+  oss << "    max_connections: " << max_connections << "\r\n";
+  oss << "    read_only: " << (read_only ? "true" : "false") << "\r\n";
+  oss << "    uptime: " << uptime_seconds << "s";
 
   return oss.str();
 }

@@ -297,4 +297,105 @@ TEST_F(ConfigHandlerTest, QueryParserConfigInvalidSubcommand) {
   EXPECT_FALSE(query.error().message().empty());
 }
 
+// Line ending tests for TCP protocol compatibility
+
+TEST_F(ConfigHandlerTest, ConfigHelpUsesCRLFLineEndings) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_HELP;
+  query.filepath = "";  // Root help
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // Verify response uses CRLF line endings
+  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
+
+  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      size_t start = (i > 20) ? i - 20 : 0;
+      size_t end = std::min(i + 20, response.size());
+      std::string context;
+      for (size_t j = start; j < end; ++j) {
+        unsigned char c = response[j];
+        if (c == '\r') {
+          context += "\\r";
+        } else if (c == '\n') {
+          context += "\\n";
+        } else if (c >= 32 && c < 127) {
+          context += static_cast<char>(c);
+        } else {
+          context += "?";
+        }
+      }
+      FAIL() << "Found bare LF (not preceded by CR) at position " << i << ". Context: [" << context << "]";
+    }
+  }
+
+  // Verify response does not end with trailing CRLF (SendResponse adds it)
+  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should not end with CRLF (SendResponse adds it)";
+}
+
+TEST_F(ConfigHandlerTest, ConfigShowUsesCRLFLineEndings) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_SHOW;
+  query.filepath = "";  // Entire config
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // Verify response uses CRLF line endings
+  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
+
+  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      FAIL() << "Found bare LF at position " << i;
+    }
+  }
+
+  // Verify response does not end with trailing CRLF (SendResponse adds it)
+  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should not end with CRLF (SendResponse adds it)";
+}
+
+TEST_F(ConfigHandlerTest, ConfigHelpSpecificPathUsesCRLFLineEndings) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_HELP;
+  query.filepath = "mysql.port";  // Specific property
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // Verify response uses CRLF line endings
+  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
+
+  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      FAIL() << "Found bare LF at position " << i;
+    }
+  }
+}
+
+TEST_F(ConfigHandlerTest, ConfigShowSpecificSectionUsesCRLFLineEndings) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_SHOW;
+  query.filepath = "mysql";  // MySQL section
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // Verify response uses CRLF line endings
+  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
+
+  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      FAIL() << "Found bare LF at position " << i;
+    }
+  }
+
+  // Verify response does not end with trailing CRLF (SendResponse adds it)
+  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should not end with CRLF (SendResponse adds it)";
+}
+
 }  // namespace mygramdb::server
