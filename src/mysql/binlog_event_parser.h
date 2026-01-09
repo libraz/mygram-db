@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
@@ -24,7 +25,7 @@ namespace mygramdb::mysql {
 class BinlogEventParser {
  public:
   /**
-   * @brief Parse binlog event buffer and create BinlogEvent
+   * @brief Parse binlog event buffer and create BinlogEvent(s)
    * @param buffer Raw binlog event data
    * @param length Length of the buffer
    * @param current_gtid Current GTID for this event
@@ -33,9 +34,9 @@ class BinlogEventParser {
    * @param table_config Single table config (single-table mode, can be nullptr)
    * @param multi_table_mode Whether operating in multi-table mode
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
-   * @return BinlogEvent if successfully parsed, nullopt otherwise
+   * @return Vector of BinlogEvents (empty if no events parsed, multiple for batch operations)
    */
-  static std::optional<BinlogEvent> ParseBinlogEvent(
+  static std::vector<BinlogEvent> ParseBinlogEvent(
       const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
       TableMetadataCache& table_metadata_cache,
       const std::unordered_map<std::string, server::TableContext*>& table_contexts,

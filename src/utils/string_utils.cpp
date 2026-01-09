@@ -51,6 +51,29 @@ constexpr uint32_t kUnicodeMaxTwoByte = 0x7FF;
 constexpr uint32_t kUnicodeMaxThreeByte = 0xFFFF;
 constexpr uint32_t kUnicodeMaxCodepoint = 0x10FFFF;
 
+// UTF-16 surrogate pair range (invalid in UTF-8)
+constexpr uint32_t kSurrogateStart = 0xD800;
+constexpr uint32_t kSurrogateEnd = 0xDFFF;
+
+// Minimum codepoint values for each UTF-8 encoding length (to detect overlong encoding)
+constexpr uint32_t kMinTwoByteCodepoint = 0x80;
+constexpr uint32_t kMinThreeByteCodepoint = 0x800;
+constexpr uint32_t kMinFourByteCodepoint = 0x10000;
+
+/**
+ * @brief Check if a byte is a valid UTF-8 continuation byte (10xxxxxx)
+ */
+inline bool IsValidContinuationByte(unsigned char byte) {
+  return (byte & 0xC0) == kUtf8ContinuationPattern;
+}
+
+/**
+ * @brief Check if codepoint is in UTF-16 surrogate range (invalid in UTF-8)
+ */
+inline bool IsSurrogateCodepoint(uint32_t codepoint) {
+  return codepoint >= kSurrogateStart && codepoint <= kSurrogateEnd;
+}
+
 // CJK Ideograph ranges (Kanji)
 constexpr uint32_t kCjkMainStart = 0x4E00;
 constexpr uint32_t kCjkMainEnd = 0x9FFF;
@@ -106,25 +129,69 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
     }
 
     uint32_t codepoint = 0;
+    bool valid = true;
 
     if (char_len == 1) {
       codepoint = first_byte;
     } else if (char_len == 2) {
-      codepoint = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) |
-                  (static_cast<unsigned char>(text[i + 1]) & kUtf8ContinuationMask);
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      // Validate continuation byte
+      if (!IsValidContinuationByte(byte1)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) | (byte1 & kUtf8ContinuationMask);
+        // Check for overlong encoding
+        if (codepoint < kMinTwoByteCodepoint) {
+          valid = false;
+        }
+      }
     } else if (char_len == 3) {
-      codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
-                  ((static_cast<unsigned char>(text[i + 1]) & kUtf8ContinuationMask) << kUtf8Shift6) |
-                  (static_cast<unsigned char>(text[i + 2]) & kUtf8ContinuationMask);
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      auto byte2 = static_cast<unsigned char>(text[i + 2]);
+      // Validate continuation bytes
+      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
+                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte2 & kUtf8ContinuationMask);
+        // Check for overlong encoding
+        if (codepoint < kMinThreeByteCodepoint) {
+          valid = false;
+        }
+        // Check for UTF-16 surrogate (invalid in UTF-8)
+        if (IsSurrogateCodepoint(codepoint)) {
+          valid = false;
+        }
+      }
     } else if (char_len == 4) {
-      codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
-                  ((static_cast<unsigned char>(text[i + 1]) & kUtf8ContinuationMask) << kUtf8Shift12) |
-                  ((static_cast<unsigned char>(text[i + 2]) & kUtf8ContinuationMask) << kUtf8Shift6) |
-                  (static_cast<unsigned char>(text[i + 3]) & kUtf8ContinuationMask);
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      auto byte2 = static_cast<unsigned char>(text[i + 2]);
+      auto byte3 = static_cast<unsigned char>(text[i + 3]);
+      // Validate continuation bytes
+      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2) || !IsValidContinuationByte(byte3)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
+                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift12) |
+                    ((byte2 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte3 & kUtf8ContinuationMask);
+        // Check for overlong encoding
+        if (codepoint < kMinFourByteCodepoint) {
+          valid = false;
+        }
+        // Check for codepoint beyond Unicode maximum
+        if (codepoint > kUnicodeMaxCodepoint) {
+          valid = false;
+        }
+      }
     }
 
-    codepoints.push_back(codepoint);
-    i += char_len;
+    if (valid) {
+      codepoints.push_back(codepoint);
+      i += char_len;
+    } else {
+      // Invalid sequence, skip one byte and try again (replacement strategy)
+      ++i;
+    }
   }
 
   return codepoints;
@@ -135,6 +202,11 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
   result.reserve(codepoints.size() * 3);  // Estimate
 
   for (uint32_t codepoint : codepoints) {
+    // Skip invalid codepoints: surrogates and beyond Unicode max
+    if (IsSurrogateCodepoint(codepoint) || codepoint > kUnicodeMaxCodepoint) {
+      continue;
+    }
+
     if (codepoint <= kUnicodeMaxOneByte) {
       result += static_cast<char>(codepoint);
     } else if (codepoint <= kUnicodeMaxTwoByte) {
@@ -144,7 +216,7 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
       result += static_cast<char>(kUtf8ThreeBytePattern | (codepoint >> kUtf8Shift12));
       result += static_cast<char>(kUtf8ContinuationPattern | ((codepoint >> kUtf8Shift6) & kUtf8ContinuationMask));
       result += static_cast<char>(kUtf8ContinuationPattern | (codepoint & kUtf8ContinuationMask));
-    } else if (codepoint <= kUnicodeMaxCodepoint) {
+    } else {
       result += static_cast<char>(kUtf8FourBytePattern | (codepoint >> kUtf8Shift18));
       result += static_cast<char>(kUtf8ContinuationPattern | ((codepoint >> kUtf8Shift12) & kUtf8ContinuationMask));
       result += static_cast<char>(kUtf8ContinuationPattern | ((codepoint >> kUtf8Shift6) & kUtf8ContinuationMask));
@@ -371,6 +443,188 @@ std::string FormatBytes(size_t bytes) {
   // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)
 
   return oss.str();
+}
+
+bool IsValidUtf8(std::string_view text) {
+  size_t i = 0;
+  while (i < text.size()) {
+    auto first_byte = static_cast<unsigned char>(text[i]);
+
+    if ((first_byte & kUtf8OneByteMask) == 0) {
+      // ASCII (0xxxxxxx)
+      ++i;
+    } else if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
+      // 2-byte sequence (110xxxxx 10xxxxxx)
+      if (i + 2 > text.size()) {
+        return false;
+      }
+      // Check for overlong encoding (C0, C1 are invalid)
+      if (first_byte < 0xC2) {
+        return false;
+      }
+      // Verify continuation byte
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      if ((second & 0xC0) != kUtf8ContinuationPattern) {
+        return false;
+      }
+      i += 2;
+    } else if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
+      // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
+      if (i + 3 > text.size()) {
+        return false;
+      }
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      auto third = static_cast<unsigned char>(text[i + 2]);
+      // Verify continuation bytes
+      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern) {
+        return false;
+      }
+      // Check for overlong encoding and surrogate pairs
+      uint32_t codepoint = ((first_byte & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F);
+      if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+        return false;
+      }
+      i += 3;
+    } else if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
+      // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+      if (i + 4 > text.size()) {
+        return false;
+      }
+      // Check for invalid start bytes (F5-FF)
+      if (first_byte > 0xF4) {
+        return false;
+      }
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      auto third = static_cast<unsigned char>(text[i + 2]);
+      auto fourth = static_cast<unsigned char>(text[i + 3]);
+      // Verify continuation bytes
+      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern ||
+          (fourth & 0xC0) != kUtf8ContinuationPattern) {
+        return false;
+      }
+      // Check for overlong encoding and out-of-range codepoints
+      uint32_t codepoint =
+          ((first_byte & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F);
+      if (codepoint < 0x10000 || codepoint > kUnicodeMaxCodepoint) {
+        return false;
+      }
+      i += 4;
+    } else {
+      // Invalid start byte
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string SanitizeUtf8(std::string_view text) {
+  // U+FFFD replacement character in UTF-8
+  constexpr char kReplacementChar[] = "\xEF\xBF\xBD";
+
+  std::string result;
+  result.reserve(text.size());
+
+  size_t i = 0;
+  while (i < text.size()) {
+    auto first_byte = static_cast<unsigned char>(text[i]);
+
+    if ((first_byte & kUtf8OneByteMask) == 0) {
+      // Valid ASCII (0xxxxxxx)
+      result += text[i];
+      ++i;
+    } else if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
+      // Potential 2-byte sequence
+      if (first_byte < 0xC2) {
+        // Invalid overlong encoding
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      if (i + 2 > text.size()) {
+        // Incomplete sequence
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      if ((second & 0xC0) != kUtf8ContinuationPattern) {
+        // Invalid continuation byte
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      // Valid 2-byte sequence
+      result += text[i];
+      result += text[i + 1];
+      i += 2;
+    } else if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
+      // Potential 3-byte sequence
+      if (i + 3 > text.size()) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      auto third = static_cast<unsigned char>(text[i + 2]);
+      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      // Check for overlong encoding and surrogate pairs
+      uint32_t codepoint = ((first_byte & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F);
+      if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      // Valid 3-byte sequence
+      result += text[i];
+      result += text[i + 1];
+      result += text[i + 2];
+      i += 3;
+    } else if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
+      // Potential 4-byte sequence
+      if (first_byte > 0xF4) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      if (i + 4 > text.size()) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      auto second = static_cast<unsigned char>(text[i + 1]);
+      auto third = static_cast<unsigned char>(text[i + 2]);
+      auto fourth = static_cast<unsigned char>(text[i + 3]);
+      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern ||
+          (fourth & 0xC0) != kUtf8ContinuationPattern) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      uint32_t codepoint =
+          ((first_byte & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F);
+      if (codepoint < 0x10000 || codepoint > kUnicodeMaxCodepoint) {
+        result += kReplacementChar;
+        ++i;
+        continue;
+      }
+      // Valid 4-byte sequence
+      result += text[i];
+      result += text[i + 1];
+      result += text[i + 2];
+      result += text[i + 3];
+      i += 4;
+    } else {
+      // Invalid start byte (continuation byte or 0xFF/0xFE)
+      result += kReplacementChar;
+      ++i;
+    }
+  }
+
+  return result;
 }
 
 }  // namespace mygramdb::utils

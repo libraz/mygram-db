@@ -94,31 +94,80 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Start transaction with consistent snapshot for GTID consistency
-  mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
-  if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
-    std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
-    mygram::utils::StructuredLog()
-        .Event("loader_error")
-        .Field("operation", "initial_load")
-        .Field("type", "transaction_start_failed")
-        .Field("error", error_msg)
-        .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  // To ensure GTID matches the snapshot, we capture GTID before and after
+  // transaction start. If they differ, another transaction committed in between,
+  // so we retry to get a consistent state.
+  constexpr int kMaxRetries = 3;
+  int retry_count = 0;
+
+  while (retry_count < kMaxRetries) {
+    // Capture GTID before starting transaction
+    std::string gtid_before;
+    auto gtid_before_exp = connection_.Execute("SELECT @@global.gtid_executed");
+    if (gtid_before_exp) {
+      MYSQL_ROW row = mysql_fetch_row(gtid_before_exp->get());
+      if (row != nullptr && row[0] != nullptr) {
+        gtid_before = std::string(row[0]);
+        gtid_before.erase(std::remove_if(gtid_before.begin(), gtid_before.end(),
+                                         [](unsigned char c) { return std::isspace(c); }),
+                          gtid_before.end());
+      }
+    }
+
+    mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Field("attempt", static_cast<int64_t>(retry_count + 1)).Info();
+    if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
+      std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "transaction_start_failed")
+          .Field("error", error_msg)
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
+
+    // Capture GTID after starting transaction
+    std::string gtid_after;
+    auto gtid_after_exp = connection_.Execute("SELECT @@global.gtid_executed");
+    if (gtid_after_exp) {
+      MYSQL_ROW row = mysql_fetch_row(gtid_after_exp->get());
+      if (row != nullptr && row[0] != nullptr) {
+        gtid_after = std::string(row[0]);
+        gtid_after.erase(std::remove_if(gtid_after.begin(), gtid_after.end(),
+                                        [](unsigned char c) { return std::isspace(c); }),
+                         gtid_after.end());
+      }
+    }
+
+    // If GTID changed between before and after, another transaction committed
+    // Rollback and retry to get a consistent snapshot
+    if (gtid_before != gtid_after) {
+      mygram::utils::StructuredLog()
+          .Event("consistent_snapshot_retry")
+          .Field("reason", "gtid_changed_during_snapshot")
+          .Field("gtid_before", gtid_before)
+          .Field("gtid_after", gtid_after)
+          .Field("attempt", static_cast<int64_t>(retry_count + 1))
+          .Warn();
+      connection_.ExecuteUpdate("ROLLBACK");
+      retry_count++;
+      continue;
+    }
+
+    // GTID is consistent - use this value
+    start_gtid_ = gtid_after;
+    break;
   }
 
-  // Capture GTID at this point (represents load state)
-  auto gtid_result_exp = connection_.Execute("SELECT @@global.gtid_executed");
-  if (gtid_result_exp) {
-    MYSQL_ROW row = mysql_fetch_row(gtid_result_exp->get());
-    if (row != nullptr && row[0] != nullptr) {
-      start_gtid_ = std::string(row[0]);
-      // Remove all whitespace (newlines, spaces, tabs) from GTID string
-      // MySQL may return GTID with newlines when it's long
-      start_gtid_.erase(std::remove_if(start_gtid_.begin(), start_gtid_.end(),
-                                       [](unsigned char character) { return std::isspace(character); }),
-                        start_gtid_.end());
-    }
-    // gtid_result_exp automatically freed by MySQLResult destructor
+  if (retry_count >= kMaxRetries) {
+    // After max retries, use the last captured GTID and proceed
+    // This is acceptable as duplicates will be handled during replication
+    mygram::utils::StructuredLog()
+        .Event("consistent_snapshot_warning")
+        .Field("type", "max_retries_exceeded")
+        .Field("message", "Could not capture consistent GTID after retries, proceeding with last value")
+        .Field("gtid", start_gtid_)
+        .Warn();
   }
 
   // GTID must not be empty for replication to work
@@ -223,12 +272,42 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
+      // Verify batch sizes match (defensive check)
+      if (doc_batch.size() != index_batch.size()) {
+        std::string error_msg = "Internal error: doc_batch and index_batch size mismatch (" +
+                                std::to_string(doc_batch.size()) + " vs " + std::to_string(index_batch.size()) + ")";
+        mygram::utils::StructuredLog()
+            .Event("loader_error")
+            .Field("operation", "initial_load")
+            .Field("type", "batch_size_mismatch")
+            .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
+            .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+            .Error();
+        connection_.ExecuteUpdate("ROLLBACK");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+      }
+
       // Add documents to document store
       auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
       if (!doc_ids_result) {
         return MakeUnexpected(doc_ids_result.error());
       }
       std::vector<storage::DocId> doc_ids = *doc_ids_result;
+
+      // Verify doc_ids size matches index_batch size (defensive check)
+      if (doc_ids.size() != index_batch.size()) {
+        std::string error_msg = "Internal error: doc_ids and index_batch size mismatch (" +
+                                std::to_string(doc_ids.size()) + " vs " + std::to_string(index_batch.size()) + ")";
+        mygram::utils::StructuredLog()
+            .Event("loader_error")
+            .Field("operation", "initial_load")
+            .Field("type", "doc_ids_size_mismatch")
+            .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
+            .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+            .Error();
+        connection_.ExecuteUpdate("ROLLBACK");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+      }
 
       // Update index_batch with assigned doc_ids
       for (size_t i = 0; i < doc_ids.size(); ++i) {
@@ -261,13 +340,45 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Process remaining rows in batch
-  if (!doc_batch.empty() && !cancelled_) {
+  // Note: doc_batch and index_batch are always added/cleared together,
+  // so they should have the same size
+  if (!doc_batch.empty() && !index_batch.empty() && !cancelled_) {
+    // Verify batch sizes match (defensive check)
+    if (doc_batch.size() != index_batch.size()) {
+      std::string error_msg = "Internal error: doc_batch and index_batch size mismatch (" +
+                              std::to_string(doc_batch.size()) + " vs " + std::to_string(index_batch.size()) + ")";
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "batch_size_mismatch")
+          .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
+          .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+          .Error();
+      connection_.ExecuteUpdate("ROLLBACK");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
+
     // Add documents to document store
     auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
     if (!doc_ids_result) {
       return MakeUnexpected(doc_ids_result.error());
     }
     std::vector<storage::DocId> doc_ids = *doc_ids_result;
+
+    // Verify doc_ids size matches index_batch size (defensive check)
+    if (doc_ids.size() != index_batch.size()) {
+      std::string error_msg = "Internal error: doc_ids and index_batch size mismatch (" +
+                              std::to_string(doc_ids.size()) + " vs " + std::to_string(index_batch.size()) + ")";
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "doc_ids_size_mismatch")
+          .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
+          .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+          .Error();
+      connection_.ExecuteUpdate("ROLLBACK");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
 
     // Update index_batch with assigned doc_ids
     for (size_t i = 0; i < doc_ids.size(); ++i) {

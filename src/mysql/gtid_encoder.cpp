@@ -50,7 +50,14 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
     std::istringstream interval_ss(intervals_str);
     std::string interval_str;
     while (std::getline(interval_ss, interval_str, ':')) {
-      sid.intervals.push_back(ParseInterval(interval_str));
+      if (!interval_str.empty()) {
+        sid.intervals.push_back(ParseInterval(interval_str));
+      }
+    }
+
+    // Validate: SID must have at least one interval
+    if (sid.intervals.empty()) {
+      throw std::invalid_argument("Invalid GTID set: UUID without intervals: " + uuid_str);
     }
 
     sids.push_back(sid);
@@ -134,6 +141,10 @@ GtidEncoder::Interval GtidEncoder::ParseInterval(const std::string& interval_str
   if (dash_pos == std::string::npos) {
     // Single transaction number (e.g., "5")
     interval.start = std::stoll(trimmed);
+    // Check for overflow before adding 1
+    if (interval.start == INT64_MAX) {
+      throw std::overflow_error("Transaction ID overflow: cannot add 1 to INT64_MAX");
+    }
     interval.end = interval.start + 1;  // exclusive end
   } else {
     // Range (e.g., "1-3" means transactions 1,2,3)
@@ -141,6 +152,10 @@ GtidEncoder::Interval GtidEncoder::ParseInterval(const std::string& interval_str
     std::string end_str = trimmed.substr(dash_pos + 1);
     interval.start = std::stoll(start_str);
     int64_t end_inclusive = std::stoll(end_str);
+    // Check for overflow before adding 1
+    if (end_inclusive == INT64_MAX) {
+      throw std::overflow_error("Transaction ID overflow: cannot add 1 to INT64_MAX");
+    }
     interval.end = end_inclusive + 1;  // convert to exclusive
   }
 

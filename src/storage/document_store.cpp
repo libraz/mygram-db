@@ -375,26 +375,34 @@ size_t DocumentStore::MemoryUsage() const {
   std::shared_lock lock(mutex_);
   size_t total = 0;
 
-  // doc_id_to_pk_
+  // Include bucket overhead (each bucket is typically a pointer)
+  constexpr size_t kPointerSize = sizeof(void*);
+  total += doc_id_to_pk_.bucket_count() * kPointerSize;
+  total += pk_to_doc_id_.bucket_count() * kPointerSize;
+  total += doc_filters_.bucket_count() * kPointerSize;
+
+  // doc_id_to_pk_ - data size
   for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
-    total += sizeof(DocId) + primary_key_str.size();
+    total += sizeof(DocId) + primary_key_str.size() + primary_key_str.capacity();
   }
 
-  // pk_to_doc_id_
+  // pk_to_doc_id_ - data size
   for (const auto& [primary_key_str, doc_id] : pk_to_doc_id_) {
-    total += primary_key_str.size() + sizeof(DocId);
+    total += primary_key_str.size() + primary_key_str.capacity() + sizeof(DocId);
   }
 
   // doc_filters_ (approximate)
   for (const auto& [doc_id, filters] : doc_filters_) {
     total += sizeof(DocId);
+    // Include inner map bucket overhead
+    total += filters.bucket_count() * kPointerSize;
     for (const auto& [name, value] : filters) {
-      total += name.size();
+      total += name.size() + name.capacity();
       total += std::visit(
           [](const auto& filter_value) -> size_t {
             using T = std::decay_t<decltype(filter_value)>;
             if constexpr (std::is_same_v<T, std::string>) {
-              return filter_value.size();
+              return filter_value.size() + filter_value.capacity();
             } else {
               return sizeof(T);
             }
@@ -408,11 +416,34 @@ size_t DocumentStore::MemoryUsage() const {
 
 void DocumentStore::Clear() {
   std::unique_lock lock(mutex_);
-  doc_id_to_pk_.clear();
-  pk_to_doc_id_.clear();
-  doc_filters_.clear();
+
+  // Swap with empty maps to release memory (clear() doesn't shrink capacity)
+  std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
+  std::unordered_map<std::string, DocId>().swap(pk_to_doc_id_);
+  std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
+
   next_doc_id_ = 1;
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
+}
+
+void DocumentStore::Compact() {
+  std::unique_lock lock(mutex_);
+
+  // Rehash maps to reduce bucket count to match current size
+  // This releases excess memory from previous larger sizes
+  doc_id_to_pk_.rehash(doc_id_to_pk_.size());
+  pk_to_doc_id_.rehash(pk_to_doc_id_.size());
+  doc_filters_.rehash(doc_filters_.size());
+
+  // Also compact inner filter maps
+  for (auto& [doc_id, filters] : doc_filters_) {
+    filters.rehash(filters.size());
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("document_store_compacted")
+      .Field("doc_count", static_cast<uint64_t>(doc_id_to_pk_.size()))
+      .Debug();
 }
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
@@ -623,6 +654,10 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
       std::string primary_key_str(pk_len, '\0');
       ifs.read(primary_key_str.data(), pk_len);
+      if (!ifs.good()) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                        "Failed to read primary key data at document " + std::to_string(i), filepath));
+      }
 
       new_doc_id_to_pk[doc_id] = primary_key_str;
       new_pk_to_doc_id[primary_key_str] = doc_id;
@@ -653,6 +688,11 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
           std::string name(name_len, '\0');
           ifs.read(name.data(), name_len);
+          if (!ifs.good()) {
+            return MakeUnexpected(
+                MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                          "Failed to read filter name data at document " + std::to_string(i), filepath));
+          }
 
           // Read filter type
           uint8_t type_idx = 0;
@@ -737,6 +777,11 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
               }
               std::string string_value(str_len, '\0');
               ifs.read(string_value.data(), str_len);
+              if (!ifs.good()) {
+                return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                                "Failed to read filter string data at document " + std::to_string(i),
+                                                filepath));
+              }
               value = string_value;
               break;
             }

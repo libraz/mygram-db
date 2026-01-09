@@ -281,14 +281,9 @@ TEST_F(GtidEncoderTest, InvalidIntervalStartEqualsEnd) {
 
 TEST_F(GtidEncoderTest, InvalidIntervalEmptyString) {
   std::string gtid = "00000000-0000-0000-0000-000000000001:";  // Empty interval
-  // Empty interval results in 0 intervals, which is technically valid
-  auto result = GtidEncoder::Encode(gtid);
-
-  int64_t n_sids = ReadInt64LE(result, 0);
-  EXPECT_EQ(n_sids, 1);
-
-  int64_t n_intervals = ReadInt64LE(result, 24);
-  EXPECT_EQ(n_intervals, 0);  // No intervals
+  // Empty interval is invalid - a UUID entry MUST have at least one interval
+  // Bug #57 fix: throw exception for empty intervals
+  EXPECT_THROW(GtidEncoder::Encode(gtid), std::invalid_argument);
 }
 
 // ===========================================================================

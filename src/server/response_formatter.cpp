@@ -15,6 +15,7 @@
 #include "server/tcp_server.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 #include "version.h"
 
 #ifdef USE_MYSQL
@@ -55,11 +56,27 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   response += std::to_string(total_results);
 
   // Append primary keys (already in correct order)
-  for (const auto& primary_key : primary_keys) {
+  // Track missing doc_ids for debugging index/store inconsistencies
+  size_t missing_count = 0;
+  for (size_t i = 0; i < primary_keys.size(); ++i) {
+    const auto& primary_key = primary_keys[i];
     if (!primary_key.empty()) {
       response += ' ';
       response += primary_key;
+    } else {
+      // Doc ID exists in index but not in document store - data inconsistency
+      missing_count++;
     }
+  }
+
+  // Log warning if there's a mismatch between index and document store
+  if (missing_count > 0) {
+    mygram::utils::StructuredLog()
+        .Event("response_formatter_warning")
+        .Field("type", "missing_documents")
+        .Field("missing_count", static_cast<uint64_t>(missing_count))
+        .Field("total_requested", static_cast<uint64_t>(primary_keys.size()))
+        .Warn();
   }
 
   // Add debug information if provided (debug path uses ostringstream for convenience)

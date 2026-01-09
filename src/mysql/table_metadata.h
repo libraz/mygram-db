@@ -84,7 +84,25 @@ struct TableMetadata {
 class TableMetadataCache {
  public:
   /**
-   * @brief Add table metadata
+   * @brief Result of adding or updating table metadata
+   */
+  enum class AddResult {
+    kAdded,         // New entry added
+    kUpdated,       // Existing entry updated (no schema change)
+    kSchemaChanged  // Existing entry updated (schema changed)
+  };
+
+  /**
+   * @brief Add or update table metadata with schema change detection
+   *
+   * @param table_id Table ID from TABLE_MAP event
+   * @param metadata New metadata
+   * @return AddResult indicating what happened
+   */
+  AddResult AddOrUpdate(uint64_t table_id, const TableMetadata& metadata);
+
+  /**
+   * @brief Add table metadata (legacy, calls AddOrUpdate internally)
    */
   void Add(uint64_t table_id, const TableMetadata& metadata);
 
@@ -103,7 +121,19 @@ class TableMetadataCache {
    */
   void Clear();
 
+  /**
+   * @brief Check if a table exists in cache
+   */
+  [[nodiscard]] bool Contains(uint64_t table_id) const;
+
  private:
+  /**
+   * @brief Compare two metadata entries for schema equality
+   *
+   * Checks column count, types, and names for differences
+   */
+  [[nodiscard]] bool SchemaEquals(const TableMetadata& a, const TableMetadata& b) const;
+
   std::map<uint64_t, TableMetadata> cache_;
 };
 

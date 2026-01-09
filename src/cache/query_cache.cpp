@@ -455,6 +455,13 @@ void QueryCache::ClearTable(const std::string& table) {
   for (const auto& key : to_erase) {
     auto iter = cache_map_.find(key);
     if (iter != cache_map_.end()) {
+      // Notify eviction callback BEFORE deletion
+      // This allows the callback to access entry data if needed
+      if (eviction_callback_) {
+        eviction_callback_(key);
+      }
+
+      // Remove entry (after callback has been notified)
       lru_list_.erase(iter->second.second);
       const size_t entry_memory = iter->second.first.MemoryUsage();
       total_memory_bytes_ -= entry_memory;
@@ -490,15 +497,16 @@ bool QueryCache::EvictForSpace(size_t required_bytes) {
       continue;
     }
 
-    // Remove entry
-    const size_t entry_memory = iter->second.first.MemoryUsage();
-    lru_list_.pop_back();
-    cache_map_.erase(iter);
-
-    // Notify eviction callback (for InvalidationManager cleanup)
+    // Notify eviction callback BEFORE deletion
+    // This allows the callback to access entry data if needed
     if (eviction_callback_) {
       eviction_callback_(lru_key);
     }
+
+    // Remove entry (after callback has been notified)
+    const size_t entry_memory = iter->second.first.MemoryUsage();
+    lru_list_.pop_back();
+    cache_map_.erase(iter);
 
     // Update memory tracking
     total_memory_bytes_ -= entry_memory;

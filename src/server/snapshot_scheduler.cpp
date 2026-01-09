@@ -45,6 +45,27 @@ class FlagGuard {
  private:
   std::atomic<bool>& flag_;
 };
+
+/**
+ * @brief RAII guard for resetting atomic boolean flags (does NOT set on construction)
+ *
+ * Use after successfully acquiring the flag via compare_exchange_strong.
+ * Only resets the flag on destruction.
+ */
+class FlagResetGuard {
+ public:
+  explicit FlagResetGuard(std::atomic<bool>& flag) : flag_(flag) {}
+  ~FlagResetGuard() { flag_ = false; }
+
+  // Non-copyable and non-movable
+  FlagResetGuard(const FlagResetGuard&) = delete;
+  FlagResetGuard& operator=(const FlagResetGuard&) = delete;
+  FlagResetGuard(FlagResetGuard&&) = delete;
+  FlagResetGuard& operator=(FlagResetGuard&&) = delete;
+
+ private:
+  std::atomic<bool>& flag_;
+};
 }  // namespace
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
@@ -144,18 +165,20 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
-    // Check if manual DUMP SAVE is in progress (mutual exclusion)
-    if (dump_save_in_progress_.load()) {
+    // Atomically try to acquire the dump_save_in_progress flag
+    // This prevents TOCTOU race between checking and setting the flag
+    bool expected = false;
+    if (!dump_save_in_progress_.compare_exchange_strong(expected, true)) {
+      // Another dump operation (manual or auto) is already in progress
       mygram::utils::StructuredLog()
           .Event("auto_snapshot_skipped")
-          .Field("reason", "manual DUMP SAVE is in progress")
+          .Field("reason", "another DUMP operation is in progress")
           .Info();
       return;
     }
 
-    // Set dump_save_in_progress flag (RAII guard ensures it's cleared even on exceptions)
-    // This prevents manual DUMP SAVE from running during auto-dump
-    FlagGuard dump_save_guard(dump_save_in_progress_);
+    // Flag successfully acquired, use RAII guard to ensure it's reset on exit
+    FlagResetGuard dump_save_guard(dump_save_in_progress_);
 
     // Generate timestamp-based filename
     auto timestamp = std::time(nullptr);

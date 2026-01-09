@@ -48,7 +48,23 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           storage::DocId doc_id = *doc_id_result;
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-          index.AddDocument(doc_id, normalized);
+
+          // Atomic operation: if index fails, rollback document store
+          try {
+            index.AddDocument(doc_id, normalized);
+          } catch (const std::exception& e) {
+            // Rollback: remove from document store to maintain consistency
+            doc_store.RemoveDocument(doc_id);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "index_add_failed")
+                .Field("event_type", "insert")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Field("error", e.what())
+                .Error();
+            return false;
+          }
 
           mygram::utils::StructuredLog()
               .Event("binlog_insert")
@@ -82,7 +98,19 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Extract text to remove from index
           if (!event.text.empty()) {
             std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-            index.RemoveDocument(doc_id, normalized);
+            try {
+              index.RemoveDocument(doc_id, normalized);
+            } catch (const std::exception& e) {
+              mygram::utils::StructuredLog()
+                  .Event("mysql_binlog_error")
+                  .Field("type", "index_remove_failed")
+                  .Field("event_type", "update_remove")
+                  .Field("primary_key", event.primary_key)
+                  .Field("doc_id", static_cast<uint64_t>(doc_id))
+                  .Field("error", e.what())
+                  .Error();
+              return false;
+            }
           }
 
           doc_store.RemoveDocument(doc_id);
@@ -112,7 +140,23 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           storage::DocId doc_id = *doc_id_result;
 
           std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-          index.AddDocument(doc_id, normalized);
+
+          // Atomic operation: if index fails, rollback document store
+          try {
+            index.AddDocument(doc_id, normalized);
+          } catch (const std::exception& e) {
+            // Rollback: remove from document store to maintain consistency
+            doc_store.RemoveDocument(doc_id);
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "index_add_failed")
+                .Field("event_type", "update")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Field("error", e.what())
+                .Error();
+            return false;
+          }
 
           mygram::utils::StructuredLog()
               .Event("binlog_update_added")
@@ -128,24 +172,49 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Still matches conditions -> UPDATE
           storage::DocId doc_id = doc_id_opt.value();
 
-          // Update document store filters
-          doc_store.UpdateDocument(doc_id, event.filters);
+          // Update document store filters (check return value for race condition)
+          if (!doc_store.UpdateDocument(doc_id, event.filters)) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "update_document_not_found")
+                .Field("event_type", "update")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Warn();
+            // Continue with index update since the document may have been removed concurrently
+          }
 
           // Update full-text index if text has changed
           bool text_changed = false;
           if (!event.old_text.empty() || !event.text.empty()) {
-            // Remove old text from index if available
-            if (!event.old_text.empty()) {
-              std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
-              index.RemoveDocument(doc_id, old_normalized);
-              text_changed = true;
-            }
-
-            // Add new text to index if available
-            if (!event.text.empty()) {
-              std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
-              index.AddDocument(doc_id, new_normalized);
-              text_changed = true;
+            try {
+              // Use Index::UpdateDocument for atomic update when both texts are available
+              if (!event.old_text.empty() && !event.text.empty()) {
+                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
+                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                index.UpdateDocument(doc_id, old_normalized, new_normalized);
+                text_changed = true;
+              } else if (!event.old_text.empty()) {
+                // Only old text available - remove from index
+                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
+                index.RemoveDocument(doc_id, old_normalized);
+                text_changed = true;
+              } else if (!event.text.empty()) {
+                // Only new text available - add to index
+                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                index.AddDocument(doc_id, new_normalized);
+                text_changed = true;
+              }
+            } catch (const std::exception& e) {
+              mygram::utils::StructuredLog()
+                  .Event("mysql_binlog_error")
+                  .Field("type", "index_update_failed")
+                  .Field("event_type", "update")
+                  .Field("primary_key", event.primary_key)
+                  .Field("doc_id", static_cast<uint64_t>(doc_id))
+                  .Field("error", e.what())
+                  .Error();
+              return false;
             }
           }
 
@@ -182,7 +251,19 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // The rows_parser provides the deleted row data including text column
           if (!event.text.empty()) {
             std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
-            index.RemoveDocument(doc_id, normalized);
+            try {
+              index.RemoveDocument(doc_id, normalized);
+            } catch (const std::exception& e) {
+              mygram::utils::StructuredLog()
+                  .Event("mysql_binlog_error")
+                  .Field("type", "index_remove_failed")
+                  .Field("event_type", "delete")
+                  .Field("primary_key", event.primary_key)
+                  .Field("doc_id", static_cast<uint64_t>(doc_id))
+                  .Field("error", e.what())
+                  .Error();
+              return false;
+            }
           }
 
           // Remove from document store

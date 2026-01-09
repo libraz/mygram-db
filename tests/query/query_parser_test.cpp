@@ -1586,3 +1586,121 @@ TEST(QueryParserTest, ParsePerformanceWithOptimization) {
   std::cout << "Parse performance: " << iterations << " iterations in " << duration.count() << " microseconds ("
             << (duration.count() / static_cast<double>(iterations)) << " μs/parse)" << std::endl;
 }
+
+// =============================================================================
+// Bug #27: SET command boundary check tests
+// =============================================================================
+
+/**
+ * @test Bug #27: Valid SET command should parse correctly
+ */
+TEST(QueryParserTest, Bug27_SetCommandValid) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var = value");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SET);
+  ASSERT_EQ(query->variable_assignments.size(), 1);
+  EXPECT_EQ(query->variable_assignments[0].first, "var");
+  EXPECT_EQ(query->variable_assignments[0].second, "value");
+}
+
+/**
+ * @test Bug #27: Multiple SET assignments should parse correctly
+ */
+TEST(QueryParserTest, Bug27_SetCommandMultiple) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var1 = value1, var2 = value2");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SET);
+  ASSERT_EQ(query->variable_assignments.size(), 2);
+  EXPECT_EQ(query->variable_assignments[0].first, "var1");
+  EXPECT_EQ(query->variable_assignments[0].second, "value1");
+  EXPECT_EQ(query->variable_assignments[1].first, "var2");
+  EXPECT_EQ(query->variable_assignments[1].second, "value2");
+}
+
+/**
+ * @test Bug #27: Empty SET should return error (not crash)
+ */
+TEST(QueryParserTest, Bug27_SetCommandEmpty) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}
+
+/**
+ * @test Bug #27: SET with only variable name should return error (not crash)
+ */
+TEST(QueryParserTest, Bug27_SetCommandOnlyVariable) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}
+
+/**
+ * @test Bug #27: SET with variable and equals only should return error (not crash)
+ */
+TEST(QueryParserTest, Bug27_SetCommandNoValue) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var =");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}
+
+/**
+ * @test Bug #27: SET with trailing comma should handle gracefully
+ */
+TEST(QueryParserTest, Bug27_SetCommandTrailingComma) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var = value,");
+  // Either error or ignore trailing comma - but should NOT crash
+  // Current implementation might allow this - just verify no crash
+  SUCCEED();
+}
+
+/**
+ * @test Bug #27: SET with comma but no second assignment should return error
+ */
+TEST(QueryParserTest, Bug27_SetCommandIncompleteSecond) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var1 = value1, var2");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}
+
+/**
+ * @test Bug #27: SET with comma and partial second assignment
+ */
+TEST(QueryParserTest, Bug27_SetCommandPartialSecond) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var1 = value1, var2 =");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}
+
+/**
+ * @test Bug #27: SET with three assignments should parse correctly
+ */
+TEST(QueryParserTest, Bug27_SetCommandThreeAssignments) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET a = 1, b = 2, c = 3");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SET);
+  ASSERT_EQ(query->variable_assignments.size(), 3);
+}
+
+/**
+ * @test Bug #27: SET missing equals sign should return error
+ */
+TEST(QueryParserTest, Bug27_SetCommandMissingEquals) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET var value");
+  EXPECT_FALSE(query);  // Should be error, not crash
+}

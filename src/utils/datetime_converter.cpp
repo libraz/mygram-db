@@ -66,6 +66,39 @@ constexpr int kMaxSecond = 59;  // Maximum second value (same as kMaxMinute)
 constexpr int kTmEpochYear = 1900;  // std::tm year offset (years since 1900)
 
 // ============================================================================
+// Calendar validation helpers
+// ============================================================================
+
+// Check if a year is a leap year
+inline bool IsLeapYear(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+// Get the number of days in a month for a given year
+inline int DaysInMonth(int year, int month) {
+  // Days in each month (1-indexed, index 0 unused)
+  static constexpr int kDaysInMonth[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+  if (month < 1 || month > 12) {
+    return 0;
+  }
+
+  if (month == 2 && IsLeapYear(year)) {
+    return 29;  // February in leap year
+  }
+
+  return kDaysInMonth[month];
+}
+
+// Validate if a date is a valid calendar date
+inline bool IsValidCalendarDate(int year, int month, int day) {
+  if (month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  return day <= DaysInMonth(year, month);
+}
+
+// ============================================================================
 // TimezoneOffset implementation
 // ============================================================================
 
@@ -390,9 +423,14 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
     second = second * kDecimalBase + (datetime_str[i] - '0');
   }
 
-  // Validate ranges
+  // Validate basic ranges
   if (month < kMinMonth || month > kMaxMonth || day < kMinDay || day > kMaxDay || hour < 0 || hour > kMaxHour ||
       minute < 0 || minute > kMaxMinute || second < 0 || second > kMaxSecond) {
+    return std::nullopt;
+  }
+
+  // Validate calendar correctness (e.g., Feb 30 is invalid)
+  if (!IsValidCalendarDate(year, month, day)) {
     return std::nullopt;
   }
 

@@ -169,3 +169,18 @@ else()
       TIMEOUT 120
   )
 endif()
+
+# Index bug fix tests (TDD)
+add_executable(index_bug_fixes_test
+  index_bug_fixes_test.cpp
+)
+
+target_link_libraries(index_bug_fixes_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(index_bug_fixes_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

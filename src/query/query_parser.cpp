@@ -465,13 +465,26 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
 
+      // Handle comma at end of value (e.g., "value1," -> "value1" with more to come)
+      bool has_trailing_comma = !value.empty() && value.back() == ',';
+      if (has_trailing_comma) {
+        value.pop_back();  // Remove trailing comma
+      }
+
       query.variable_assignments.emplace_back(variable_name, value);
       pos += 3;
 
-      // Check for comma (more assignments)
+      // Check for more assignments
+      if (has_trailing_comma) {
+        // We already consumed the comma attached to the value
+        // Continue to next assignment
+        continue;
+      }
+
+      // Check for comma as separate token (more assignments)
       if (pos < tokens.size()) {
         if (tokens[pos] == ",") {
-          pos++;  // Skip comma
+          pos++;  // Skip comma token
         } else {
           SetError("SET: Expected ',' or end of query");
           return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
@@ -1326,6 +1339,12 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
       // Inside quotes, add everything including spaces
       token += character;
     }
+  }
+
+  // Check for unterminated escape sequence at EOF
+  if (escape_next) {
+    SetError("Unterminated escape sequence at end of input");
+    return {};  // Return empty vector on error
   }
 
   // Check for unclosed quotes

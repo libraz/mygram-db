@@ -1048,3 +1048,141 @@ TEST(DocumentStoreTest, ConcurrentFilterOperations) {
   // Most filter queries should succeed
   EXPECT_GT(filter_queries.load(), num_threads * operations_per_thread * 0.9);
 }
+
+// =============================================================================
+// Bug #20: DocumentStore filter map buckets not reclaimed
+// =============================================================================
+// After many insertions and deletions, the unordered_map bucket count doesn't
+// shrink, causing memory waste. The Compact() method should reduce memory usage.
+// =============================================================================
+
+/**
+ * @test Bug #20: Memory should be reclaimed after Compact()
+ *
+ * After adding and removing many documents, calling Compact() should
+ * reduce memory usage by rehashing the internal hash maps.
+ */
+TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
+  DocumentStore store;
+
+  // Add many documents
+  const int num_docs = 10000;
+  for (int i = 0; i < num_docs; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["category"] = static_cast<int64_t>(i % 100);
+    filters["status"] = std::string("active");
+    store.AddDocument(pk, filters);
+  }
+
+  // Remove most documents (keep only 100)
+  for (int i = 100; i < num_docs; ++i) {
+    store.RemoveDocument(static_cast<DocId>(i + 1));  // DocId starts at 1
+  }
+
+  // Verify only 100 documents remain
+  EXPECT_EQ(100, store.Size());
+
+  // Get memory usage before compact
+  size_t memory_before = store.MemoryUsage();
+
+  // Compact the store
+  store.Compact();
+
+  // Get memory usage after compact
+  size_t memory_after = store.MemoryUsage();
+
+  // Bug #20: Before fix, memory_after would be similar to memory_before
+  // After fix: memory_after should be significantly less than memory_before
+  EXPECT_LT(memory_after, memory_before)
+      << "Bug #20: Compact() should reduce memory usage. "
+      << "Before: " << memory_before << " bytes, After: " << memory_after << " bytes";
+
+  // Memory should be reduced by at least 50% (we removed 99% of documents)
+  EXPECT_LT(memory_after, memory_before * 0.5)
+      << "Bug #20: Memory should be reduced significantly after Compact()";
+}
+
+/**
+ * @test Bug #20: Clear() should also reclaim memory
+ */
+TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
+  DocumentStore store;
+
+  // Add many documents
+  for (int i = 0; i < 5000; ++i) {
+    std::string pk = "pk" + std::to_string(i);
+    std::unordered_map<std::string, FilterValue> filters;
+    filters["value"] = static_cast<int64_t>(i);
+    store.AddDocument(pk, filters);
+  }
+
+  // Memory should be significant
+  size_t memory_after_add = store.MemoryUsage();
+  EXPECT_GT(memory_after_add, 0);
+
+  // Clear all documents
+  store.Clear();
+
+  // Memory should be minimal after clear
+  size_t memory_after_clear = store.MemoryUsage();
+
+  // Bug #20: After fix, Clear() should release most memory
+  EXPECT_LT(memory_after_clear, memory_after_add * 0.1)
+      << "Bug #20: Clear() should release most memory";
+}
+
+/**
+ * @test Bug #36: Stream error checking during LoadFromFile
+ *
+ * This test verifies that stream read operations during snapshot loading
+ * have proper error checking to detect corrupted or truncated files.
+ * The fix adds ifs.good() checks after ifs.read() operations.
+ *
+ * Note: Direct testing of stream errors requires creating corrupted files,
+ * which is complex in unit tests. This test verifies basic load functionality
+ * still works correctly after the fix.
+ */
+TEST(DocumentStoreTest, Bug36_LoadFromFileBasicValidation) {
+  DocumentStore store;
+
+  // Add documents with various filter types to exercise all read paths
+  std::unordered_map<std::string, FilterValue> filters1;
+  filters1["status"] = static_cast<int32_t>(1);
+  filters1["name"] = std::string("test document with long name");
+  filters1["score"] = 95.5;
+  store.AddDocument("pk1", filters1);
+
+  std::unordered_map<std::string, FilterValue> filters2;
+  filters2["status"] = static_cast<int64_t>(2);
+  filters2["is_active"] = true;
+  store.AddDocument("pk2", filters2);
+
+  // Save to file
+  std::string filepath = "/tmp/bug36_test_snapshot.bin";
+  auto save_result = store.SaveToFile(filepath);
+  ASSERT_TRUE(save_result.has_value()) << "Save should succeed";
+
+  // Load into a new store
+  DocumentStore store2;
+  auto load_result = store2.LoadFromFile(filepath);
+  ASSERT_TRUE(load_result.has_value()) << "Load should succeed for valid file";
+
+  // Verify loaded data
+  EXPECT_EQ(store2.Size(), 2);
+  EXPECT_TRUE(store2.GetDocId("pk1").has_value());
+  EXPECT_TRUE(store2.GetDocId("pk2").has_value());
+
+  // Verify filters are loaded correctly
+  auto doc1 = store2.GetDocId("pk1");
+  auto status = store2.GetFilterValue(*doc1, "status");
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(std::get<int32_t>(*status), 1);
+
+  auto name = store2.GetFilterValue(*doc1, "name");
+  ASSERT_TRUE(name.has_value());
+  EXPECT_EQ(std::get<std::string>(*name), "test document with long name");
+
+  // Clean up
+  std::remove(filepath.c_str());
+}

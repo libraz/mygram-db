@@ -35,6 +35,7 @@
 
 #include "mysql/binlog_util.h"
 #include "utils/datetime_converter.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -53,37 +54,102 @@ namespace mygramdb::mysql {
  * @return String representation of the value
  */
 static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null,
-                                    const unsigned char* end) {
+                                    const unsigned char* end, bool is_unsigned = false) {
   constexpr uint32_t kMaxFieldLength = 256 * 1024 * 1024;  // 256MB max for any field
   if (is_null) {
     return "";  // NULL values represented as empty string
   }
 
   switch (col_type) {
-    // Integer types
+    // Integer types - handle UNSIGNED vs SIGNED correctly
     case 1: {  // MYSQL_TYPE_TINY
+      if (is_unsigned) {
+        auto val = static_cast<uint8_t>(*data);
+        return std::to_string(val);
+      }
       auto val = static_cast<int8_t>(*data);
       return std::to_string(val);
     }
     case 2: {  // MYSQL_TYPE_SHORT
+      if (is_unsigned) {
+        auto val = binlog_util::uint2korr(data);
+        return std::to_string(val);
+      }
       auto val = static_cast<int16_t>(binlog_util::uint2korr(data));
       return std::to_string(val);
     }
     case 3: {  // MYSQL_TYPE_LONG
+      if (is_unsigned) {
+        auto val = binlog_util::uint4korr(data);
+        return std::to_string(val);
+      }
       auto val = static_cast<int32_t>(binlog_util::uint4korr(data));
       return std::to_string(val);
     }
     case 8: {  // MYSQL_TYPE_LONGLONG
+      if (is_unsigned) {
+        auto val = binlog_util::uint8korr(data);
+        return std::to_string(val);
+      }
       auto val = static_cast<int64_t>(binlog_util::uint8korr(data));
       return std::to_string(val);
     }
     case 9: {  // MYSQL_TYPE_INT24
-      // 3-byte signed integer
       uint32_t val = binlog_util::uint3korr(data);
-      if ((val & 0x800000) != 0U) {
-        val |= 0xFF000000;  // Sign extend
+      if (!is_unsigned && (val & 0x800000) != 0U) {
+        val |= 0xFF000000;  // Sign extend for signed values only
+      }
+      if (is_unsigned) {
+        return std::to_string(val);
       }
       return std::to_string(static_cast<int32_t>(val));
+    }
+
+    // Floating point types
+    case 4: {  // MYSQL_TYPE_FLOAT
+      if (data + 4 > end) {
+        return "[TRUNCATED]";
+      }
+      float val = 0;
+      memcpy(&val, data, sizeof(float));
+      return std::to_string(val);
+    }
+    case 5: {  // MYSQL_TYPE_DOUBLE
+      if (data + 8 > end) {
+        return "[TRUNCATED]";
+      }
+      double val = 0;
+      memcpy(&val, data, sizeof(double));
+      return std::to_string(val);
+    }
+
+    // YEAR type
+    case 13: {  // MYSQL_TYPE_YEAR
+      // 1 byte: 0 means 0000, 1-255 means year 1901-2155 (value + 1900)
+      uint8_t year_byte = *data;
+      if (year_byte == 0) {
+        return "0000";
+      }
+      int year = static_cast<int>(year_byte) + 1900;
+      return std::to_string(year);
+    }
+
+    // BIT type
+    case 16: {  // MYSQL_TYPE_BIT
+      // metadata: (bytes << 8) | bits
+      // Total bytes = bytes + (bits > 0 ? 1 : 0)
+      unsigned int full_bytes = (metadata >> 8) & 0xFF;
+      unsigned int extra_bits = metadata & 0xFF;
+      unsigned int total_bytes = full_bytes + (extra_bits > 0 ? 1 : 0);
+      if (data + total_bytes > end) {
+        return "[TRUNCATED]";
+      }
+      // Read bytes as big-endian unsigned integer
+      uint64_t val = 0;
+      for (unsigned int i = 0; i < total_bytes; i++) {
+        val = (val << 8) | data[i];
+      }
+      return std::to_string(val);
     }
 
     // String types
@@ -111,7 +177,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return {reinterpret_cast<const char*>(str_data), str_len};
+      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT, MEDIUMTEXT, LONGTEXT)
@@ -146,6 +212,14 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           blob_len = binlog_util::uint4korr(data);
           blob_data = data + 4;
           break;
+        default:
+          // Invalid metadata - log warning and return error marker
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "invalid_blob_metadata")
+              .Field("metadata", static_cast<int64_t>(metadata))
+              .Error();
+          return "[INVALID_BLOB_METADATA]";
       }
       if (blob_len > kMaxFieldLength || blob_data + blob_len > end) {
         mygram::utils::StructuredLog()
@@ -155,7 +229,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return {reinterpret_cast<const char*>(blob_data), blob_len};
+      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
     }
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
@@ -190,7 +264,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return {reinterpret_cast<const char*>(str_data), str_len};
+      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     // JSON type
@@ -237,7 +311,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return {reinterpret_cast<const char*>(json_data), json_len};
+      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
     }
 
     // Date/Time types (simple representation as strings)
@@ -681,7 +755,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         }
 
         // Decode field value
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
 
         // Store in row data
         row.columns[col_meta.name] = value;
@@ -1044,7 +1118,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;  // Exit both loops cleanly
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
@@ -1166,7 +1240,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
@@ -1412,7 +1486,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           return std::nullopt;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {

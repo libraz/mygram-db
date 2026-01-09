@@ -259,7 +259,31 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::StartFromGtid(
 }
 
 void BinlogReader::Stop() {
-  if (!running_) {
+  // Use compare_exchange to ensure Stop() logic runs only once
+  // This prevents race conditions when Stop() is called from multiple threads
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
+    // running_ was not true, which means either:
+    // 1. Reader was never started (running_ was always false)
+    // 2. Another Stop() call already set running_ to false
+    //
+    // In case 2, we should wait for the other Stop() to complete.
+    // In case 1, we should just return immediately.
+    //
+    // We can distinguish these cases: if should_stop_ is true and we didn't set it,
+    // another Stop() is in progress. But if should_stop_ was set externally (e.g., by tests),
+    // we shouldn't wait forever.
+    //
+    // The safest approach: only wait if should_stop_ is true AND there was a previous
+    // successful Stop() that is still in progress. We use a short timeout to avoid deadlocks.
+    if (should_stop_.load()) {
+      // Wait with timeout to avoid infinite loop if should_stop_ was set externally
+      for (int i = 0; i < 100 && should_stop_.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      // Reset should_stop_ if it's still true (was set externally, not by another Stop())
+      should_stop_ = false;
+    }
     return;
   }
 
@@ -292,8 +316,7 @@ void BinlogReader::Stop() {
     binlog_connection_.reset();
   }
 
-  running_ = false;
-  should_stop_ = false;  // Reset for next Start()
+  should_stop_ = false;  // Reset for next Start(), signals that Stop() is complete
   mygram::utils::StructuredLog()
       .Event("binlog_reader_stopped")
       .Field("events_processed", static_cast<int64_t>(processed_events_.load()))
@@ -419,26 +442,29 @@ void BinlogReader::ReaderThreadFunc() {
     std::string current_gtid = GetCurrentGTID();
 
     // Encode GTID set to binary format if we have one
+    // Use local variable to avoid race condition - gtid_encoded_data_ must persist
+    // during mysql_binlog_open() call which accesses it via callback
+    std::vector<uint8_t> local_gtid_encoded;
     if (!current_gtid.empty()) {
-      // Protect gtid_encoded_data_ access with mutex to prevent race conditions
-      // if Start() is called concurrently (though compare_exchange_strong should prevent this)
+      // Encode GTID set using our encoder
+      local_gtid_encoded = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+
+      // Also update member variable under lock for consistency with other readers
       {
         std::lock_guard<std::mutex> lock(gtid_mutex_);
-        // Encode GTID set using our encoder and store in member variable
-        // (must persist during mysql_binlog_open call)
-        gtid_encoded_data_ = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+        gtid_encoded_data_ = local_gtid_encoded;
       }
 
       // Use callback approach: MySQL will call our callback to encode the GTID into the packet
-      rpl.gtid_set_encoded_size = gtid_encoded_data_.size();
-      rpl.gtid_set_arg = &gtid_encoded_data_;                // Pass pointer to our encoded data
+      rpl.gtid_set_encoded_size = local_gtid_encoded.size();
+      rpl.gtid_set_arg = &local_gtid_encoded;                // Pass pointer to local data
       rpl.fix_gtid_set = &BinlogReader::FixGtidSetCallback;  // Static callback function
 
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "using_gtid_set")
           .Field("gtid", current_gtid)
-          .Field("encoded_bytes", static_cast<uint64_t>(gtid_encoded_data_.size()))
+          .Field("encoded_bytes", static_cast<uint64_t>(local_gtid_encoded.size()))
           .Debug();
     } else {
       // Empty GTID set: receive all events from current binlog position
@@ -448,7 +474,7 @@ void BinlogReader::ReaderThreadFunc() {
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "using_empty_gtid_set").Debug();
     }
 
-    // Open binlog stream
+    // Open binlog stream (local_gtid_encoded must be alive during this call)
     if (mysql_binlog_open(binlog_connection_->GetHandle(), &rpl) != 0) {
       unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
       last_error_ = "Failed to open binlog stream: " + binlog_connection_->GetLastError();
@@ -781,10 +807,22 @@ void BinlogReader::ReaderThreadFunc() {
                   .Debug();
             }
 
-            table_metadata_cache_.Add(metadata_opt->table_id, metadata_opt.value());
+            auto add_result = table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
+
+            if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
+              mygram::utils::StructuredLog()
+                  .Event("binlog_schema_change")
+                  .Field("database", metadata_opt->database_name)
+                  .Field("table", metadata_opt->table_name)
+                  .Field("table_id", metadata_opt->table_id)
+                  .Field("gtid", GetCurrentGTID())
+                  .Message("Schema change detected for table")
+                  .Warn();
+            }
+
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
-                .Field("action", "cached_table_map")
+                .Field("action", add_result == TableMetadataCache::AddResult::kAdded ? "cached_table_map" : "updated_table_map")
                 .Field("database", metadata_opt->database_name)
                 .Field("table", metadata_opt->table_name)
                 .Field("table_id", metadata_opt->table_id)
@@ -795,39 +833,42 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       // Parse the binlog event using BinlogEventParser
-      auto event_opt = BinlogEventParser::ParseBinlogEvent(
+      // Returns vector of events (empty if none, multiple for batch operations)
+      auto events = BinlogEventParser::ParseBinlogEvent(
           event_buffer, event_length, current_gtid_, table_metadata_cache_, table_contexts_,
           multi_table_mode_ ? nullptr : &table_config_, multi_table_mode_, mysql_config_.datetime_timezone);
 
-      if (event_opt) {
+      if (!events.empty()) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
-            .Field("action", "parsed_event")
-            .Field("type", static_cast<int64_t>(event_opt->type))
-            .Field("table", event_opt->table_name)
+            .Field("action", "parsed_events")
+            .Field("count", static_cast<int64_t>(events.size()))
             .Debug();
 
-        // Log data events at debug level (can be high volume in production)
-        if (event_opt->type == BinlogEventType::INSERT || event_opt->type == BinlogEventType::UPDATE ||
-            event_opt->type == BinlogEventType::DELETE) {
-          const char* event_type_str = "UNKNOWN";
-          if (event_opt->type == BinlogEventType::INSERT) {
-            event_type_str = "INSERT";
-          } else if (event_opt->type == BinlogEventType::UPDATE) {
-            event_type_str = "UPDATE";
-          } else if (event_opt->type == BinlogEventType::DELETE) {
-            event_type_str = "DELETE";
+        // Process ALL events in the batch (multi-row support)
+        for (auto& event : events) {
+          // Log data events at debug level (can be high volume in production)
+          if (event.type == BinlogEventType::INSERT || event.type == BinlogEventType::UPDATE ||
+              event.type == BinlogEventType::DELETE) {
+            const char* event_type_str = "UNKNOWN";
+            if (event.type == BinlogEventType::INSERT) {
+              event_type_str = "INSERT";
+            } else if (event.type == BinlogEventType::UPDATE) {
+              event_type_str = "UPDATE";
+            } else if (event.type == BinlogEventType::DELETE) {
+              event_type_str = "DELETE";
+            }
+            mygram::utils::StructuredLog()
+                .Event("binlog_debug")
+                .Field("action", "binlog_data_event")
+                .Field("event_type", event_type_str)
+                .Field("table", event.table_name)
+                .Field("pk", event.primary_key)
+                .Debug();
           }
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "binlog_data_event")
-              .Field("event_type", event_type_str)
-              .Field("table", event_opt->table_name)
-              .Field("pk", event_opt->primary_key)
-              .Debug();
-        }
 
-        PushEvent(std::make_unique<BinlogEvent>(std::move(event_opt.value())));
+          PushEvent(std::make_unique<BinlogEvent>(std::move(event)));
+        }
       } else {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();
       }
@@ -838,10 +879,12 @@ void BinlogReader::ReaderThreadFunc() {
       mysql_binlog_close(binlog_connection_->GetHandle(), &rpl);
     }
 
-    // If not reconnecting, exit the loop
-    if (!connection_lost || should_stop_) {
+    // Only exit on explicit stop request
+    if (should_stop_) {
       break;
     }
+    // If connection_lost is false (normal idle), continue loop to wait for events
+    // If connection_lost is true (connection failure), continue loop for reconnect
   }
 
   mygram::utils::StructuredLog().Event("binlog_reader_thread_stopped").Info();
@@ -854,13 +897,21 @@ void BinlogReader::ReaderThreadFunc() {
 void BinlogReader::WorkerThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_worker_thread_started").Info();
 
-  while (!should_stop_) {
+  // Process events until PopEvent returns nullptr
+  // PopEvent returns nullptr only when: should_stop_ is true AND queue is empty
+  // This ensures all pending events are processed during graceful shutdown
+  while (true) {
     auto event = PopEvent();
     if (!event) {
-      continue;
+      // Exit only when shutdown requested AND queue is empty
+      break;
     }
 
-    if (!ProcessEvent(*event)) {
+    // Only update GTID and counter on successful processing
+    if (ProcessEvent(*event)) {
+      processed_events_++;
+      UpdateCurrentGTID(event->gtid);
+    } else {
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "event_processing_failed")
@@ -868,10 +919,8 @@ void BinlogReader::WorkerThreadFunc() {
           .Field("primary_key", event->primary_key)
           .Field("gtid", event->gtid)
           .Error();
+      // GTID is not updated on failure so event can be retried on reconnect
     }
-
-    processed_events_++;
-    UpdateCurrentGTID(event->gtid);
   }
 
   mygram::utils::StructuredLog().Event("binlog_worker_thread_stopped").Info();

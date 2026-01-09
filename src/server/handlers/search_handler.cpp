@@ -46,51 +46,72 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       if (!error.empty() || current_doc_store == nullptr) {
         // Table context not available, fall through to normal execution
       } else {
-        auto cache_lookup_end = std::chrono::high_resolution_clock::now();
-        double cache_lookup_time_ms =
-            std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
-
-        // Apply pagination to cached results
-        // Cache stores full results (before pagination) to allow different OFFSET/LIMIT on same query
+        // TOCTOU mitigation: Validate a sample of cached DocIds
+        // If any are stale (document deleted since cache population), invalidate and fall through
         auto full_results = cached_lookup.value().results;
-        size_t total_results = full_results.size();
 
-        // Get primary key column name from table config
-        std::string primary_key_column = "id";  // default
-        auto table_it = ctx_.table_contexts.find(query.table);
-        if (table_it != ctx_.table_contexts.end()) {
-          primary_key_column = table_it->second->config.primary_key;
+        // Validate sample of cached results (check up to 10 random positions)
+        constexpr size_t kValidationSampleSize = 10;
+        bool cache_stale = false;
+        if (!full_results.empty()) {
+          size_t step = std::max(size_t{1}, full_results.size() / kValidationSampleSize);
+          for (size_t i = 0; i < full_results.size() && i / step < kValidationSampleSize; i += step) {
+            if (!current_doc_store->GetPrimaryKey(full_results[i]).has_value()) {
+              cache_stale = true;
+              break;
+            }
+          }
         }
 
-        auto paginated_result =
-            query::ResultSorter::SortAndPaginate(full_results, *current_doc_store, query, primary_key_column);
+        if (cache_stale) {
+          // Cache contains stale DocIds (documents deleted since cache population)
+          // Fall through to normal execution - cache entry will be replaced on next insert
+        } else {
+          auto cache_lookup_end = std::chrono::high_resolution_clock::now();
+          double cache_lookup_time_ms =
+              std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
 
-        if (!paginated_result.has_value()) {
-          return paginated_result.error();
-        }
+          // Apply pagination to cached results
+          // Cache stores full results (before pagination) to allow different OFFSET/LIMIT on same query
+          size_t total_results = full_results.size();
 
-        auto paginated_results = std::move(paginated_result.value());
+          // Get primary key column name from table config
+          std::string primary_key_column = "id";  // default
+          auto table_it = ctx_.table_contexts.find(query.table);
+          if (table_it != ctx_.table_contexts.end()) {
+            primary_key_column = table_it->second->config.primary_key;
+          }
 
-        if (conn_ctx.debug_mode) {
-          query::DebugInfo debug_info;
-          debug_info.query_time_ms = cache_lookup_time_ms;
-          debug_info.final_results = paginated_results.size();
+          auto paginated_result =
+              query::ResultSorter::SortAndPaginate(full_results, *current_doc_store, query, primary_key_column);
 
-          // Cache hit debug info with actual metadata
-          auto now = std::chrono::steady_clock::now();
-          debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
-          debug_info.cache_info.cache_age_ms =
-              std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
-          debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
+          if (!paginated_result.has_value()) {
+            return paginated_result.error();
+          }
 
-          return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store,
-                                                         &debug_info);
-        }
+          auto paginated_results = std::move(paginated_result.value());
 
-        return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store);
-      }
-    }
-  }
+          if (conn_ctx.debug_mode) {
+            query::DebugInfo debug_info;
+            debug_info.query_time_ms = cache_lookup_time_ms;
+            debug_info.final_results = paginated_results.size();
+
+            // Cache hit debug info with actual metadata
+            auto now = std::chrono::steady_clock::now();
+            debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
+            debug_info.cache_info.cache_age_ms =
+                std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
+            debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
+
+            return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store,
+                                                           &debug_info);
+          }
+
+          return ResponseFormatter::FormatSearchResponse(paginated_results, total_results, current_doc_store);
+        }  // else (cache not stale)
+      }  // else (table context available)
+    }  // if (cached_lookup.has_value())
+  }  // if (cache enabled)
 
   // Get table context
   index::Index* current_index = nullptr;
@@ -197,34 +218,45 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     auto all_results = current_index->SearchAnd(term_infos[0].ngrams);
     total_results = all_results.size();
 
-    // Heuristic: reuse fetched results if offset+limit is close to total_results
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    constexpr double kReuseThreshold = 0.5;  // Reuse if fetching >50% of results
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    size_t index_limit = query.offset + query.limit;
-    bool should_reuse = (static_cast<double>(index_limit) / static_cast<double>(total_results)) > kReuseThreshold;
-
-    if (should_reuse) {
-      // Reuse the already-fetched results
-      results = std::move(all_results);
-      can_optimize = false;  // Use standard sort+paginate path
+    // Check for empty results before division to avoid division by zero
+    if (total_results == 0) {
+      can_optimize = false;
+      results = std::move(all_results);  // Empty vector
       if (conn_ctx.debug_mode) {
-        debug_info.total_candidates = results.size();
-        debug_info.after_intersection = results.size();
-        debug_info.optimization_used = "reuse-fetch (small result set)";
+        debug_info.total_candidates = 0;
+        debug_info.after_intersection = 0;
+        debug_info.optimization_used = "no results (optimization skipped)";
       }
     } else {
-      // Result set is large: use GetTopN optimization
-      bool reverse = (order_by.order == query::SortOrder::DESC);
-      results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
-      if (conn_ctx.debug_mode) {
-        debug_info.total_candidates = results.size();
-        debug_info.after_intersection = results.size();
-        std::string direction = reverse ? "DESC" : "ASC";
-        if (term_infos[0].ngrams.size() == 1) {
-          debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
-        } else {
-          debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
+      // Heuristic: reuse fetched results if offset+limit is close to total_results
+      // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      constexpr double kReuseThreshold = 0.5;  // Reuse if fetching >50% of results
+      // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      size_t index_limit = query.offset + query.limit;
+      bool should_reuse = (static_cast<double>(index_limit) / static_cast<double>(total_results)) > kReuseThreshold;
+
+      if (should_reuse) {
+        // Reuse the already-fetched results
+        results = std::move(all_results);
+        can_optimize = false;  // Use standard sort+paginate path
+        if (conn_ctx.debug_mode) {
+          debug_info.total_candidates = results.size();
+          debug_info.after_intersection = results.size();
+          debug_info.optimization_used = "reuse-fetch (small result set)";
+        }
+      } else {
+        // Result set is large: use GetTopN optimization
+        bool reverse = (order_by.order == query::SortOrder::DESC);
+        results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, reverse);
+        if (conn_ctx.debug_mode) {
+          debug_info.total_candidates = results.size();
+          debug_info.after_intersection = results.size();
+          std::string direction = reverse ? "DESC" : "ASC";
+          if (term_infos[0].ngrams.size() == 1) {
+            debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+          } else {
+            debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
+          }
         }
       }
     }
@@ -272,9 +304,9 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Sort and paginate results
-  if (!can_optimize) {
-    total_results = results.size();
-  }
+  // Always update total_results to reflect the actual count after all filters
+  // (NOT filters and filter conditions) have been applied
+  total_results = results.size();
 
   auto sorted_result = query::ResultSorter::SortAndPaginate(results, *current_doc_store, query, primary_key_column);
 

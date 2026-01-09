@@ -114,9 +114,17 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove doc from n-grams that are no longer present
+  size_t empty_lists_removed = 0;
   for (const auto& ngram : to_remove) {
-    auto* posting = GetOrCreatePostingList(ngram);
-    posting->Remove(doc_id);
+    auto it = term_postings_.find(ngram);
+    if (it != term_postings_.end()) {
+      it->second->Remove(doc_id);
+      // Remove empty posting lists to prevent memory leak
+      if (it->second->Size() == 0) {
+        term_postings_.erase(it);
+        empty_lists_removed++;
+      }
+    }
   }
 
   // Add doc to new n-grams
@@ -130,6 +138,7 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
       .Field("doc_id", static_cast<uint64_t>(doc_id))
       .Field("ngrams_removed", static_cast<uint64_t>(to_remove.size()))
       .Field("ngrams_added", static_cast<uint64_t>(to_add.size()))
+      .Field("empty_lists_removed", static_cast<uint64_t>(empty_lists_removed))
       .Debug();
 }
 
@@ -145,15 +154,24 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
   // Remove document from posting list for each n-gram
+  size_t empty_lists_removed = 0;
   for (const auto& ngram : ngrams) {
-    auto* posting = GetOrCreatePostingList(ngram);
-    posting->Remove(doc_id);
+    auto it = term_postings_.find(ngram);
+    if (it != term_postings_.end()) {
+      it->second->Remove(doc_id);
+      // Remove empty posting lists to prevent memory leak
+      if (it->second->Size() == 0) {
+        term_postings_.erase(it);
+        empty_lists_removed++;
+      }
+    }
   }
 
   mygram::utils::StructuredLog()
       .Event("document_removed")
       .Field("doc_id", static_cast<uint64_t>(doc_id))
       .Field("ngrams_removed", static_cast<uint64_t>(ngrams.size()))
+      .Field("empty_lists_removed", static_cast<uint64_t>(empty_lists_removed))
       .Debug();
 }
 
@@ -229,118 +247,41 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
     if (use_streaming) {
-      // Merge join optimization (DESC order)
-      // Algorithm: Simultaneously walk backwards through all sorted posting lists
-      // This is a classic merge join algorithm adapted for reverse iteration
+      // Optimized intersection using PostingList::Intersect() chain
+      // This avoids materializing all documents by:
+      // 1. Using Roaring bitmap's native AND operation (memory efficient)
+      // 2. Only materializing the top N results at the end via GetTopN()
       //
-      // Performance: O(M) where M = size of posting lists
-      // Much faster than binary_search approach: O(M + K*N*log(M))
-      //
-      // Example with 2 lists (DESC order):
-      //   list1: [800K, 799K, ..., 3, 2, 1]
-      //   list2: [800K, 799K, ..., 3, 2, 1]
-      //   Walk both from end, when values match -> add to result
+      // Previous implementation called GetAll() on all posting lists,
+      // which would allocate 100MB+ per query for large datasets.
 
-      // Get all posting lists (sorted ASC)
-      std::vector<std::vector<DocId>> all_postings;
-      all_postings.reserve(term_info.size());
-      for (const auto& [size, posting] : term_info) {
-        all_postings.push_back(posting->GetAll());
-      }
+      // Start with the smallest posting list and chain intersections
+      // Sort by size (smallest first) for optimal intersection order
+      std::vector<std::pair<size_t, const PostingList*>> sorted_info = term_info;
+      std::sort(sorted_info.begin(), sorted_info.end(),
+                [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
 
-      std::vector<DocId> result;
-      result.reserve(limit);
+      // Chain intersections: result = P1 ∩ P2 ∩ P3 ∩ ...
+      std::unique_ptr<PostingList> intersected = sorted_info[0].second->Intersect(*sorted_info[1].second);
 
-      if (term_info.size() == 2) {
-        // Optimized 2-way merge join
-        const auto& list1 = all_postings[0];
-        const auto& list2 = all_postings[1];
-
-        auto it1 = list1.rbegin();
-        auto it2 = list2.rbegin();
-
-        while (result.size() < limit && it1 != list1.rend() && it2 != list2.rend()) {
-          if (*it1 == *it2) {
-            // Match found
-            result.push_back(*it1);
-            ++it1;
-            ++it2;
-          } else if (*it1 > *it2) {
-            // it1 is ahead, advance it
-            ++it1;
-          } else {
-            // it2 is ahead, advance it
-            ++it2;
-          }
-        }
-      } else {
-        // N-way merge join (for 3+ terms)
-        // Use iterators for each list
-        std::vector<std::vector<DocId>::const_reverse_iterator> iters;
-        std::vector<std::vector<DocId>::const_reverse_iterator> ends;
-        iters.reserve(all_postings.size());
-        ends.reserve(all_postings.size());
-
-        for (const auto& list : all_postings) {
-          iters.push_back(list.rbegin());
-          ends.push_back(list.rend());
-        }
-
-        while (result.size() < limit) {
-          // Check if any iterator is exhausted
-          bool any_exhausted = false;
-          for (size_t idx = 0; idx < iters.size(); ++idx) {
-            if (iters[idx] == ends[idx]) {
-              any_exhausted = true;
-              break;
-            }
-          }
-          if (any_exhausted) {
-            break;
-          }
-
-          // Find maximum value among current positions
-          DocId max_val = *iters[0];
-          for (size_t idx = 1; idx < iters.size(); ++idx) {
-            if (*iters[idx] > max_val) {
-              max_val = *iters[idx];
-            }
-          }
-
-          // Check if all iterators point to max_val
-          bool all_match = true;
-          for (const auto& iter : iters) {
-            if (*iter != max_val) {
-              all_match = false;
-              break;
-            }
-          }
-
-          if (all_match) {
-            // All match - add to result
-            result.push_back(max_val);
-            // Advance all iterators
-            for (auto& iter : iters) {
-              ++iter;
-            }
-          } else {
-            // Not all match - advance iterators pointing to max_val
-            for (auto& iter : iters) {
-              if (*iter == max_val) {
-                ++iter;
-              }
-            }
-          }
+      for (size_t i = 2; i < sorted_info.size(); ++i) {
+        intersected = intersected->Intersect(*sorted_info[i].second);
+        // Early termination if intersection becomes empty
+        if (intersected->Size() == 0) {
+          break;
         }
       }
 
-      // Merge join always produces exact results (or all available)
+      // Get only the top N results (reverse order for DESC)
+      auto result = intersected->GetTopN(limit, true);
+
       mygram::utils::StructuredLog()
-          .Event("merge_join_search")
+          .Event("intersect_chain_search")
           .Field("terms", static_cast<uint64_t>(terms.size()))
           .Field("selectivity", selectivity)
           .Field("min_size", static_cast<uint64_t>(min_size))
           .Field("max_size", static_cast<uint64_t>(max_size))
+          .Field("intersected_size", static_cast<uint64_t>(intersected->Size()))
           .Field("found", static_cast<uint64_t>(result.size()))
           .Debug();
       return result;

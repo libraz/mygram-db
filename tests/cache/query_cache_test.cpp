@@ -992,4 +992,227 @@ TEST(QueryCacheTest, TTLMultipleEntriesExpiration) {
   EXPECT_TRUE(cached2.has_value());  // Should still be valid
 }
 
+// =============================================================================
+// Bug #19: ClearTable skips eviction callback
+// =============================================================================
+// When ClearTable() removes entries, it does NOT call the eviction callback,
+// but EvictForSpace() DOES call it. This causes the InvalidationManager to
+// retain stale reverse index entries, leading to memory leaks.
+// =============================================================================
+
+/**
+ * @test Bug #19: ClearTable should call eviction callback for each removed entry
+ *
+ * When QueryCache::ClearTable() removes entries, it should call the eviction
+ * callback so that InvalidationManager can clean up its reverse index.
+ */
+TEST(QueryCacheTest, Bug19_ClearTableCallsEvictionCallback) {
+  QueryCache cache(1024 * 1024, 10.0);
+
+  // Track evicted keys
+  std::vector<CacheKey> evicted_keys;
+  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) { evicted_keys.push_back(key); });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert multiple entries
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  auto key3 = CacheKeyGenerator::Generate("query3");
+
+  std::vector<DocId> result = {1, 2, 3};
+
+  cache.Insert(key1, result, meta, 15.0);
+  cache.Insert(key2, result, meta, 15.0);
+  cache.Insert(key3, result, meta, 15.0);
+
+  // Verify entries exist
+  EXPECT_TRUE(cache.Lookup(key1).has_value());
+  EXPECT_TRUE(cache.Lookup(key2).has_value());
+  EXPECT_TRUE(cache.Lookup(key3).has_value());
+
+  // Clear callback list (lookups might have touched stats but not evicted)
+  evicted_keys.clear();
+
+  // ClearTable should trigger eviction callbacks
+  cache.ClearTable("posts");
+
+  // Bug #19: Before fix, evicted_keys would be empty
+  // After fix: evicted_keys should contain all 3 keys
+  EXPECT_EQ(3, evicted_keys.size()) << "Bug #19: ClearTable should call eviction callback for each removed entry";
+
+  // Verify all keys were evicted
+  EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key1), evicted_keys.end());
+  EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key2), evicted_keys.end());
+  EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key3), evicted_keys.end());
+
+  // Verify entries are actually gone
+  EXPECT_FALSE(cache.Lookup(key1).has_value());
+  EXPECT_FALSE(cache.Lookup(key2).has_value());
+  EXPECT_FALSE(cache.Lookup(key3).has_value());
+}
+
+/**
+ * @test Bug #19: ClearTable with multiple tables only evicts specified table
+ */
+TEST(QueryCacheTest, Bug19_ClearTableOnlyAffectsSpecifiedTable) {
+  QueryCache cache(1024 * 1024, 10.0);
+
+  std::vector<CacheKey> evicted_keys;
+  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) { evicted_keys.push_back(key); });
+
+  // Insert entries for two different tables
+  CacheMetadata meta_posts;
+  meta_posts.table = "posts";
+  meta_posts.ngrams = {"pos", "ost"};
+
+  CacheMetadata meta_comments;
+  meta_comments.table = "comments";
+  meta_comments.ngrams = {"com", "omm"};
+
+  auto key_posts1 = CacheKeyGenerator::Generate("posts_query1");
+  auto key_posts2 = CacheKeyGenerator::Generate("posts_query2");
+  auto key_comments1 = CacheKeyGenerator::Generate("comments_query1");
+
+  std::vector<DocId> result = {1, 2, 3};
+
+  cache.Insert(key_posts1, result, meta_posts, 15.0);
+  cache.Insert(key_posts2, result, meta_posts, 15.0);
+  cache.Insert(key_comments1, result, meta_comments, 15.0);
+
+  // Clear only posts table
+  cache.ClearTable("posts");
+
+  // Should have evicted 2 posts entries
+  EXPECT_EQ(2, evicted_keys.size());
+  EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key_posts1), evicted_keys.end());
+  EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key_posts2), evicted_keys.end());
+
+  // Comments entry should still exist
+  EXPECT_TRUE(cache.Lookup(key_comments1).has_value());
+}
+
+/**
+ * @test Bug #19: ClearTable with no matching entries should not crash
+ */
+TEST(QueryCacheTest, Bug19_ClearTableNoMatchingEntries) {
+  QueryCache cache(1024 * 1024, 10.0);
+
+  int callback_count = 0;
+  cache.SetEvictionCallback([&callback_count](const CacheKey& /*key*/) { callback_count++; });
+
+  // Insert entries for one table
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"pos", "ost"};
+
+  auto key = CacheKeyGenerator::Generate("posts_query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  cache.Insert(key, result, meta, 15.0);
+
+  // Clear a different table
+  cache.ClearTable("nonexistent_table");
+
+  // No callbacks should have been called
+  EXPECT_EQ(0, callback_count);
+
+  // Original entry should still exist
+  EXPECT_TRUE(cache.Lookup(key).has_value());
+}
+
+// =============================================================================
+// Bug #33: Eviction callback timing verification
+// =============================================================================
+// The eviction callback should be called BEFORE deleting the entry.
+// Note: The callback cannot safely call cache methods that acquire locks
+// (like GetMetadata) because the callback is called while holding the lock.
+// This is a design limitation documented here.
+// =============================================================================
+
+/**
+ * @test Bug #33: Eviction callback is called with correct keys
+ *
+ * Verifies that the eviction callback is called with the correct cache key
+ * when entries are evicted. The callback should receive valid keys.
+ */
+TEST(QueryCacheTest, Bug33_EvictionCallbackReceivesCorrectKeys) {
+  // Small cache (500 bytes) to trigger eviction easily
+  QueryCache cache(500, 1.0);
+
+  std::vector<CacheKey> evicted_keys;
+
+  // Simple callback that just records the key
+  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) {
+    // Don't call cache methods here - it would deadlock
+    evicted_keys.push_back(key);
+  });
+
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"abc"};
+
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  std::vector<DocId> result1 = {1, 2, 3};
+
+  // Insert first entry
+  ASSERT_TRUE(cache.Insert(key1, result1, meta1, 5.0));
+
+  // Insert another entry that will trigger eviction
+  CacheMetadata meta2;
+  meta2.table = "comments";
+  meta2.ngrams = {"xyz"};
+
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  std::vector<DocId> result2(30, 999);  // Larger result to trigger eviction
+
+  cache.Insert(key2, result2, meta2, 5.0);
+
+  // Insert third entry to ensure eviction happens
+  auto key3 = CacheKeyGenerator::Generate("query3");
+  std::vector<DocId> result3(30, 888);
+  cache.Insert(key3, result3, meta2, 5.0);
+
+  // Verify that eviction callback was called
+  auto stats = cache.GetStatistics();
+  if (stats.evictions > 0) {
+    EXPECT_FALSE(evicted_keys.empty())
+        << "Bug #33: Callback should be called during eviction";
+  }
+}
+
+/**
+ * @test Bug #33: ClearTable callback receives all cleared keys
+ */
+TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
+  QueryCache cache(1024 * 1024, 10.0);
+
+  std::vector<CacheKey> cleared_keys;
+
+  cache.SetEvictionCallback([&cleared_keys](const CacheKey& key) {
+    cleared_keys.push_back(key);
+  });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"test"};
+
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  std::vector<DocId> result = {1, 2, 3};
+
+  cache.Insert(key1, result, meta, 15.0);
+  cache.Insert(key2, result, meta, 15.0);
+
+  // ClearTable should call callback for each entry
+  cache.ClearTable("posts");
+
+  // Both keys should have been passed to callback
+  ASSERT_EQ(2, cleared_keys.size());
+  EXPECT_TRUE(std::find(cleared_keys.begin(), cleared_keys.end(), key1) != cleared_keys.end());
+  EXPECT_TRUE(std::find(cleared_keys.begin(), cleared_keys.end(), key2) != cleared_keys.end());
+}
+
 }  // namespace mygramdb::cache

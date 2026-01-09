@@ -148,14 +148,14 @@ bool MatchTableName(const std::string& str, size_t& pos, const std::string& tabl
 
 }  // namespace
 
-std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
+std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
     TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
     const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone) {
   if ((buffer == nullptr) || length < 19) {
     // Minimum event size is 19 bytes (binlog header)
-    return std::nullopt;
+    return {};
   }
 
   // binlog_reader already skipped OK byte, buffer points to event data.
@@ -177,11 +177,11 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
   switch (event_type) {
     case MySQLBinlogEventType::GTID_LOG_EVENT:
       // GTID events are handled by caller (UpdateCurrentGTID)
-      return std::nullopt;
+      return {};
 
     case MySQLBinlogEventType::TABLE_MAP_EVENT:
       // TABLE_MAP events are cached by caller
-      return std::nullopt;
+      return {};
 
     case MySQLBinlogEventType::WRITE_ROWS_EVENT: {
       // Parse INSERT operations
@@ -202,7 +202,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             .Field("action", "unknown_table_id_write")
             .Field("table_id", table_id)
             .Debug();
-        return std::nullopt;
+        return {};
       }
 
       // Determine text column and primary key from config
@@ -215,18 +215,22 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
               .Field("action", "table_not_monitored_write")
               .Field("table", table_meta->table_name)
               .Debug();
-          return std::nullopt;
+          return {};
         }
         current_config = &table_iter->second->config;
       } else {
         current_config = table_config;
       }
 
+      // Determine text column(s) - use first column for initial parsing
+      // If concat is configured, we'll extract and concatenate later
       std::string text_column;
+      bool use_concat = false;
       if (!current_config->text_source.column.empty()) {
         text_column = current_config->text_source.column;
       } else if (!current_config->text_source.concat.empty()) {
-        text_column = current_config->text_source.concat[0];
+        text_column = current_config->text_source.concat[0];  // Use first for initial parse
+        use_concat = true;  // Flag to concatenate later
       } else {
         text_column = "";
       }
@@ -234,23 +238,10 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto rows_opt = ParseWriteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
-        return std::nullopt;
+        return {};
       }
 
-      // Create event from first row (for now, handle multi-row events later)
-      const auto& row = rows_opt->front();
-      BinlogEvent event;
-      event.type = BinlogEventType::INSERT;
-      event.table_name = table_meta->table_name;
-      event.primary_key = row.primary_key;
-      event.text = row.text;
-      event.gtid = current_gtid;
-
-      // Extract all filters (required + optional) from row data
-      // Note: Filter extraction is done by caller (BinlogFilterEvaluator)
-      event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
-
-      // Also extract required_filters as FilterConfig format
+      // Prepare required_filters config for filter extraction
       std::vector<config::FilterConfig> required_as_filters;
       for (const auto& req_filter : current_config->required_filters) {
         config::FilterConfig filter_config;
@@ -260,18 +251,51 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
-      event.filters.insert(required_filters.begin(), required_filters.end());
+
+      // Create events for ALL rows (multi-row event support)
+      std::vector<BinlogEvent> events;
+      events.reserve(rows_opt->size());
+
+      for (const auto& row : *rows_opt) {
+        BinlogEvent event;
+        event.type = BinlogEventType::INSERT;
+        event.table_name = table_meta->table_name;
+        event.primary_key = row.primary_key;
+
+        // Handle text extraction: concatenate all columns if concat is configured
+        if (use_concat && !current_config->text_source.concat.empty()) {
+          std::string concatenated_text;
+          for (const auto& col_name : current_config->text_source.concat) {
+            auto it = row.columns.find(col_name);
+            if (it != row.columns.end() && !it->second.empty()) {
+              if (!concatenated_text.empty()) {
+                concatenated_text += " ";  // Space separator between columns
+              }
+              concatenated_text += it->second;
+            }
+          }
+          event.text = concatenated_text;
+        } else {
+          event.text = row.text;  // Use single column text from parser
+        }
+
+        event.gtid = current_gtid;
+
+        // Extract all filters (required + optional) from row data
+        event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
+        event.filters.insert(required_filters.begin(), required_filters.end());
+
+        events.push_back(std::move(event));
+      }
 
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "parsed_write_rows")
-          .Field("pk", event.primary_key)
-          .Field("text_len", static_cast<uint64_t>(event.text.length()))
-          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Field("row_count", static_cast<uint64_t>(events.size()))
           .Debug();
 
-      return event;
+      return events;
     }
 
     case MySQLBinlogEventType::UPDATE_ROWS_EVENT: {
@@ -293,7 +317,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             .Field("action", "unknown_table_id_update")
             .Field("table_id", table_id)
             .Debug();
-        return std::nullopt;
+        return {};
       }
 
       // Determine text column and primary key from config
@@ -306,18 +330,21 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
               .Field("action", "table_not_monitored_update")
               .Field("table", table_meta->table_name)
               .Debug();
-          return std::nullopt;
+          return {};
         }
         current_config = &table_iter->second->config;
       } else {
         current_config = table_config;
       }
 
+      // Determine text column(s) - use first column for initial parsing
       std::string text_column;
+      bool use_concat = false;
       if (!current_config->text_source.column.empty()) {
         text_column = current_config->text_source.column;
       } else if (!current_config->text_source.concat.empty()) {
         text_column = current_config->text_source.concat[0];
+        use_concat = true;
       } else {
         text_column = "";
       }
@@ -326,26 +353,10 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!row_pairs_opt || row_pairs_opt->empty()) {
-        return std::nullopt;
+        return {};
       }
 
-      // Create event from first row pair (for now)
-      const auto& row_pair = row_pairs_opt->front();
-      const auto& before_row = row_pair.first;  // Before image
-      const auto& after_row = row_pair.second;  // After image
-
-      BinlogEvent event;
-      event.type = BinlogEventType::UPDATE;
-      event.table_name = table_meta->table_name;
-      event.primary_key = after_row.primary_key;
-      event.text = after_row.text;       // New text (after image)
-      event.old_text = before_row.text;  // Old text (before image) for index update
-      event.gtid = current_gtid;
-
-      // Extract all filters from after image
-      event.filters = ExtractFilters(after_row, current_config->filters, datetime_timezone);
-
-      // Also extract required_filters
+      // Prepare required_filters config for filter extraction
       std::vector<config::FilterConfig> required_as_filters;
       for (const auto& req_filter : current_config->required_filters) {
         config::FilterConfig filter_config;
@@ -355,18 +366,56 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(after_row, required_as_filters, datetime_timezone);
-      event.filters.insert(required_filters.begin(), required_filters.end());
+
+      // Helper lambda to concatenate text from multiple columns
+      auto concat_text = [&](const RowData& row) -> std::string {
+        if (!use_concat || current_config->text_source.concat.empty()) {
+          return row.text;
+        }
+        std::string result;
+        for (const auto& col_name : current_config->text_source.concat) {
+          auto it = row.columns.find(col_name);
+          if (it != row.columns.end() && !it->second.empty()) {
+            if (!result.empty()) {
+              result += " ";
+            }
+            result += it->second;
+          }
+        }
+        return result;
+      };
+
+      // Create events for ALL row pairs (multi-row event support)
+      std::vector<BinlogEvent> events;
+      events.reserve(row_pairs_opt->size());
+
+      for (const auto& row_pair : *row_pairs_opt) {
+        const auto& before_row = row_pair.first;   // Before image
+        const auto& after_row = row_pair.second;   // After image
+
+        BinlogEvent event;
+        event.type = BinlogEventType::UPDATE;
+        event.table_name = table_meta->table_name;
+        event.primary_key = after_row.primary_key;
+        event.text = concat_text(after_row);       // New text (after image)
+        event.old_text = concat_text(before_row);  // Old text (before image) for index update
+        event.gtid = current_gtid;
+
+        // Extract all filters from after image
+        event.filters = ExtractFilters(after_row, current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(after_row, required_as_filters, datetime_timezone);
+        event.filters.insert(required_filters.begin(), required_filters.end());
+
+        events.push_back(std::move(event));
+      }
 
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "parsed_update_rows")
-          .Field("pk", event.primary_key)
-          .Field("text_len", static_cast<uint64_t>(event.text.length()))
-          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Field("row_count", static_cast<uint64_t>(events.size()))
           .Debug();
 
-      return event;
+      return events;
     }
 
     case MySQLBinlogEventType::DELETE_ROWS_EVENT: {
@@ -388,7 +437,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             .Field("action", "unknown_table_id_delete")
             .Field("table_id", table_id)
             .Debug();
-        return std::nullopt;
+        return {};
       }
 
       // Determine text column and primary key from config
@@ -401,18 +450,21 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
               .Field("action", "table_not_monitored_delete")
               .Field("table", table_meta->table_name)
               .Debug();
-          return std::nullopt;
+          return {};
         }
         current_config = &table_iter->second->config;
       } else {
         current_config = table_config;
       }
 
+      // Determine text column(s) - use first column for initial parsing
       std::string text_column;
+      bool use_concat = false;
       if (!current_config->text_source.column.empty()) {
         text_column = current_config->text_source.column;
       } else if (!current_config->text_source.concat.empty()) {
         text_column = current_config->text_source.concat[0];
+        use_concat = true;
       } else {
         text_column = "";
       }
@@ -421,22 +473,10 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       auto rows_opt = ParseDeleteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
 
       if (!rows_opt || rows_opt->empty()) {
-        return std::nullopt;
+        return {};
       }
 
-      // Create event from first row (for now)
-      const auto& row = rows_opt->front();
-      BinlogEvent event;
-      event.type = BinlogEventType::DELETE;
-      event.table_name = table_meta->table_name;
-      event.primary_key = row.primary_key;
-      event.text = row.text;
-      event.gtid = current_gtid;
-
-      // Extract all filters from row data (before image for DELETE)
-      event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
-
-      // Also extract required_filters
+      // Prepare required_filters config for filter extraction
       std::vector<config::FilterConfig> required_as_filters;
       for (const auto& req_filter : current_config->required_filters) {
         config::FilterConfig filter_config;
@@ -446,25 +486,58 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         filter_config.bitmap_index = req_filter.bitmap_index;
         required_as_filters.push_back(filter_config);
       }
-      auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
-      event.filters.insert(required_filters.begin(), required_filters.end());
+
+      // Create events for ALL rows (multi-row event support)
+      std::vector<BinlogEvent> events;
+      events.reserve(rows_opt->size());
+
+      for (const auto& row : *rows_opt) {
+        BinlogEvent event;
+        event.type = BinlogEventType::DELETE;
+        event.table_name = table_meta->table_name;
+        event.primary_key = row.primary_key;
+
+        // Handle text extraction: concatenate all columns if concat is configured
+        if (use_concat && !current_config->text_source.concat.empty()) {
+          std::string concatenated_text;
+          for (const auto& col_name : current_config->text_source.concat) {
+            auto it = row.columns.find(col_name);
+            if (it != row.columns.end() && !it->second.empty()) {
+              if (!concatenated_text.empty()) {
+                concatenated_text += " ";
+              }
+              concatenated_text += it->second;
+            }
+          }
+          event.text = concatenated_text;
+        } else {
+          event.text = row.text;
+        }
+
+        event.gtid = current_gtid;
+
+        // Extract all filters from row data (before image for DELETE)
+        event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
+        event.filters.insert(required_filters.begin(), required_filters.end());
+
+        events.push_back(std::move(event));
+      }
 
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "parsed_delete_rows")
-          .Field("pk", event.primary_key)
-          .Field("text_len", static_cast<uint64_t>(event.text.length()))
-          .Field("filters", static_cast<uint64_t>(event.filters.size()))
+          .Field("row_count", static_cast<uint64_t>(events.size()))
           .Debug();
 
-      return event;
+      return events;
     }
 
     case MySQLBinlogEventType::QUERY_EVENT: {
       // DDL statements (CREATE, ALTER, DROP, TRUNCATE, etc.)
       auto query_opt = ExtractQueryString(buffer, length);
       if (!query_opt) {
-        return std::nullopt;
+        return {};
       }
 
       std::string query = query_opt.value();
@@ -479,7 +552,7 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             event.type = BinlogEventType::DDL;
             event.table_name = table_name;
             event.text = query;  // Store the DDL query
-            return event;
+            return {event};  // Return as vector with single element
           }
         }
       } else {
@@ -489,27 +562,27 @@ std::optional<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           event.type = BinlogEventType::DDL;
           event.table_name = table_config->name;
           event.text = query;  // Store the DDL query
-          return event;
+          return {event};  // Return as vector with single element
         }
       }
 
-      return std::nullopt;
+      return {};
     }
 
     case MySQLBinlogEventType::XID_EVENT:
       // Transaction commit marker
-      return std::nullopt;
+      return {};
 
     default:
       // Ignore other event types
-      return std::nullopt;
+      return {};
   }
 }
 
 std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 42) {
     // GTID event minimum size
-    return std::nullopt;
+    return {};
   }
 
   // GTID event format (after 19-byte header):
@@ -553,7 +626,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("reason", "buffer_null_or_too_short")
         .Field("length", static_cast<uint64_t>(length))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   TableMetadata metadata;
@@ -579,7 +652,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("reason", "insufficient_after_header")
         .Field("remaining", static_cast<uint64_t>(remaining))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   // Parse table_id (6 bytes)
@@ -608,7 +681,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("reason", "no_space_for_db_len")
         .Field("remaining", static_cast<uint64_t>(remaining))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   // Parse database name (1 byte length + null-terminated string)
@@ -630,7 +703,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("remaining", static_cast<uint64_t>(remaining))
         .Field("db_len", static_cast<uint64_t>(db_len))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   metadata.database_name = std::string(reinterpret_cast<const char*>(ptr), db_len);
@@ -651,7 +724,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("reason", "no_space_for_table_len")
         .Field("remaining", static_cast<uint64_t>(remaining))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   // Parse table name (1 byte length + null-terminated string)
@@ -673,7 +746,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("remaining", static_cast<uint64_t>(remaining))
         .Field("table_len", static_cast<uint64_t>(table_len))
         .Error();
-    return std::nullopt;
+    return {};
   }
 
   metadata.table_name = std::string(reinterpret_cast<const char*>(ptr), table_len);
@@ -688,7 +761,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
       .Debug();
 
   if (remaining < 1) {
-    return std::nullopt;
+    return {};
   }
 
   // Parse column count (packed integer)
@@ -698,7 +771,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   // SECURITY: Update remaining bytes after reading packed integer
   size_t packed_int_size = ptr - ptr_before_packed;
   if (remaining < packed_int_size) {
-    return std::nullopt;
+    return {};
   }
   remaining -= packed_int_size;
 
@@ -711,18 +784,18 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         .Field("column_count", column_count)
         .Field("max_columns", MAX_COLUMNS)
         .Warn();
-    return std::nullopt;
+    return {};
   }
 
   if (remaining < column_count) {
-    return std::nullopt;
+    return {};
   }
 
   // Parse column types (1 byte per column)
   metadata.columns.reserve(column_count);
   for (uint64_t i = 0; i < column_count; i++) {
     if (remaining < 1) {
-      return std::nullopt;
+      return {};
     }
     ColumnMetadata col;
     col.type = static_cast<ColumnType>(*ptr++);
@@ -744,12 +817,12 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
 
     // SECURITY: Update remaining and validate metadata length
     if (remaining < meta_len_size) {
-      return std::nullopt;
+      return {};
     }
     remaining -= meta_len_size;
 
     if (remaining < metadata_len) {
-      return std::nullopt;
+      return {};
     }
 
     const unsigned char* metadata_start = ptr;
@@ -888,7 +961,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
 std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < 19) {
     // Minimum: 19 bytes header
-    return std::nullopt;
+    return {};
   }
 
   // QUERY_EVENT format (after 19-byte common header):
@@ -905,7 +978,7 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   size_t remaining = length - 19;
 
   if (remaining < 13) {  // Minimum: 4+4+1+2+2
-    return std::nullopt;
+    return {};
   }
 
   // Skip thread_id (4 bytes)
@@ -932,21 +1005,21 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
 
   // Skip status_vars
   if (remaining < status_vars_len) {
-    return std::nullopt;
+    return {};
   }
   pos += status_vars_len;
   remaining -= status_vars_len;
 
   // Skip db_name (null-terminated)
   if (remaining < static_cast<size_t>(db_len) + 1) {  // +1 for null terminator
-    return std::nullopt;
+    return {};
   }
   pos += db_len + 1;
   remaining -= (db_len + 1);
 
   // Extract query string
   if (remaining == 0) {
-    return std::nullopt;
+    return {};
   }
 
   std::string query(reinterpret_cast<const char*>(pos), remaining);

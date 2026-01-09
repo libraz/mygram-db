@@ -371,8 +371,11 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& 
     int current_port = 0;
     {
       std::shared_lock lock(mutex_);
-      auto port_str = runtime_values_.at("mysql.port");
-      auto port_result = ParseInt(port_str);
+      auto it = runtime_values_.find("mysql.port");
+      if (it == runtime_values_.end()) {
+        return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.port not found in runtime values"));
+      }
+      auto port_result = ParseInt(it->second);
       if (!port_result) {
         return MakeUnexpected(port_result.error());
       }
@@ -394,7 +397,11 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
     std::string current_host;
     {
       std::shared_lock lock(mutex_);
-      current_host = runtime_values_.at("mysql.host");
+      auto it = runtime_values_.find("mysql.host");
+      if (it == runtime_values_.end()) {
+        return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.host not found in runtime values"));
+      }
+      current_host = it->second;
     }
     return mysql_reconnect_callback_(current_host, value);
   }
@@ -409,8 +416,11 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
                                                                      std::to_string(defaults::kMaxLimit) + ")"));
   }
 
-  // Update base config
-  base_config_.api.default_limit = value;
+  // Update base config (with lock for thread safety)
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.default_limit = value;
+  }
 
   return {};
 }
@@ -420,19 +430,29 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) 
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.max_query_length must be > 0"));
   }
 
-  // Update base config
-  base_config_.api.max_query_length = value;
+  // Update base config (with lock for thread safety)
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.max_query_length = value;
+  }
 
   return {};
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingEnable(bool value) {
-  // Update base config
-  base_config_.api.rate_limiting.enable = value;
+  // Capture values under lock, then call callback outside lock to avoid deadlock
+  size_t capacity = 0;
+  size_t refill_rate = 0;
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.rate_limiting.enable = value;
+    capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
+    refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
+  }
 
   // Notify rate limiter of enable/disable change
   if (rate_limiter_callback_) {
-    rate_limiter_callback_(value, base_config_.api.rate_limiting.capacity, base_config_.api.rate_limiting.refill_rate);
+    rate_limiter_callback_(value, capacity, refill_rate);
   }
 
   return {};
@@ -443,13 +463,19 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingCapacity(int valu
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.rate_limiting.capacity must be > 0"));
   }
 
-  // Update base config
-  base_config_.api.rate_limiting.capacity = value;
+  // Capture values under lock, then call callback outside lock to avoid deadlock
+  bool enabled = false;
+  size_t refill_rate = 0;
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.rate_limiting.capacity = value;
+    enabled = base_config_.api.rate_limiting.enable;
+    refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
+  }
 
   // Apply to rate limiter if callback is set
   if (rate_limiter_callback_) {
-    rate_limiter_callback_(base_config_.api.rate_limiting.enable, static_cast<size_t>(value),
-                           base_config_.api.rate_limiting.refill_rate);
+    rate_limiter_callback_(enabled, static_cast<size_t>(value), refill_rate);
   }
 
   return {};
@@ -460,23 +486,32 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingRefillRate(int va
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.rate_limiting.refill_rate must be > 0"));
   }
 
-  // Update base config
-  base_config_.api.rate_limiting.refill_rate = value;
+  // Capture values under lock, then call callback outside lock to avoid deadlock
+  bool enabled = false;
+  size_t capacity = 0;
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.rate_limiting.refill_rate = value;
+    enabled = base_config_.api.rate_limiting.enable;
+    capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
+  }
 
   // Apply to rate limiter if callback is set
   if (rate_limiter_callback_) {
-    rate_limiter_callback_(base_config_.api.rate_limiting.enable, base_config_.api.rate_limiting.capacity,
-                           static_cast<size_t>(value));
+    rate_limiter_callback_(enabled, capacity, static_cast<size_t>(value));
   }
 
   return {};
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
-  // Update base config
-  base_config_.cache.enabled = value;
+  // Update base config (with lock for thread safety)
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.cache.enabled = value;
+  }
 
-  // Trigger cache toggle callback
+  // Trigger cache toggle callback (outside lock to avoid deadlock)
   if (cache_toggle_callback_) {
     return cache_toggle_callback_(value);
   }
@@ -489,10 +524,13 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheMinQueryCost(double valu
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "cache.min_query_cost_ms must be >= 0"));
   }
 
-  // Update base config
-  base_config_.cache.min_query_cost_ms = value;
+  // Update base config (with lock for thread safety)
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.cache.min_query_cost_ms = value;
+  }
 
-  // Apply to CacheManager if available
+  // Apply to CacheManager if available (outside lock to avoid deadlock)
   if (cache_manager_ != nullptr) {
     cache_manager_->SetMinQueryCost(value);
   }
@@ -505,10 +543,13 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheTtl(int value) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "cache.ttl_seconds must be >= 0"));
   }
 
-  // Update base config
-  base_config_.cache.ttl_seconds = value;
+  // Update base config (with lock for thread safety)
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.cache.ttl_seconds = value;
+  }
 
-  // Apply to CacheManager if available
+  // Apply to CacheManager if available (outside lock to avoid deadlock)
   if (cache_manager_ != nullptr) {
     cache_manager_->SetTtl(value);
   }

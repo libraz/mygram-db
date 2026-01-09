@@ -239,6 +239,15 @@ class DocumentStore {
   void Clear();
 
   /**
+   * @brief Compact internal data structures to reclaim memory
+   *
+   * After many insertions and deletions, the internal hash maps may
+   * have excess bucket capacity. This method rehashes the maps to
+   * reduce memory usage.
+   */
+  void Compact();
+
+  /**
    * @brief Serialize document store to file
    * @param filepath Output file path
    * @param replication_gtid Optional GTID position for replication (empty if not using replication)

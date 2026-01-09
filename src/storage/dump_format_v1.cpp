@@ -38,6 +38,9 @@ namespace mygramdb::storage::dump_v1 {
 
 using namespace mygram::utils;
 
+// Forward declaration for streaming CRC calculation
+uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset);
+
 namespace {
 
 /**
@@ -1154,26 +1157,19 @@ Expected<void, Error> WriteDumpV1(
     }
 
     // Now read the file WITH total_file_size set to calculate CRC
+    // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
       LogStorageError("reopen_file", filepath, "Failed to reopen for CRC calculation");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
-    std::vector<char> file_data(file_size);
-    ifs.read(file_data.data(), static_cast<std::streamsize>(file_size));
-    ifs.close();
-
-    // Calculate CRC32 of entire file (excluding the CRC field itself by zeroing it)
     // CRC field is at offset: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) + total_file_size(8) =
     // 32 bytes
     const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;  // Position of file_crc32 in file
-    // Zero out the CRC field before calculation (CRC excludes itself)
-    if (file_size > crc_offset + 4) {
-      std::memset(&file_data[crc_offset], 0, 4);
-    }
 
-    uint32_t calculated_crc = CalculateCRC32(file_data.data(), file_size);
+    uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+    ifs.close();
 
     // Update header with CRC
     {
@@ -1306,26 +1302,19 @@ Expected<void, Error> ReadDumpV1(
     }
 
     // Verify CRC32 if specified
+    // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
     if (header.file_crc32 != 0) {
       // Save current position
       std::streampos current_pos = ifs.tellg();
 
-      // Read entire file for CRC verification
+      // Get file size
       ifs.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs.tellg());
-      ifs.seekg(0, std::ios::beg);
 
-      std::vector<char> file_data(file_size);
-      ifs.read(file_data.data(), static_cast<std::streamsize>(file_size));
+      // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
+      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
 
-      // Zero out the CRC field before calculation (CRC excludes itself)
-      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;  // magic + version + header_size + flags + timestamp +
-                                                        // total_file_size
-      if (file_size > crc_offset + 4) {
-        std::memset(&file_data[crc_offset], 0, 4);
-      }
-
-      uint32_t calculated_crc = CalculateCRC32(file_data.data(), file_size);
+      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         StructuredLog()
@@ -1523,6 +1512,58 @@ uint32_t CalculateCRC32(const std::string& str) {
   return CalculateCRC32(str.data(), str.size());
 }
 
+/**
+ * @brief Calculate CRC32 of a file using streaming (chunked) reads
+ *
+ * This avoids loading the entire file into memory, preventing OOM for large files.
+ *
+ * @param ifs Input file stream (must be seekable)
+ * @param file_size Total file size to read
+ * @param crc_offset Position of the CRC field to zero out during calculation
+ * @return CRC32 checksum of the file
+ */
+uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset) {
+  constexpr size_t kChunkSize = 1024 * 1024;  // 1MB chunks
+  constexpr size_t kCrcFieldSize = 4;
+
+  ifs.seekg(0, std::ios::beg);
+
+  uint32_t crc = 0;
+  std::vector<char> buffer(kChunkSize);
+  uint64_t bytes_read = 0;
+
+  while (bytes_read < file_size) {
+    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
+    ifs.read(buffer.data(), static_cast<std::streamsize>(to_read));
+    size_t actually_read = static_cast<size_t>(ifs.gcount());
+
+    if (actually_read == 0) {
+      break;  // EOF or error
+    }
+
+    // Zero out the CRC field if it falls within this chunk
+    if (crc_offset >= bytes_read && crc_offset < bytes_read + actually_read) {
+      size_t offset_in_chunk = crc_offset - bytes_read;
+      size_t zero_bytes = std::min(kCrcFieldSize, actually_read - offset_in_chunk);
+      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
+    }
+    // Handle case where CRC field spans chunk boundary
+    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
+      size_t zero_start = 0;
+      size_t zero_end = std::min(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
+      std::memset(&buffer[zero_start], 0, zero_end);
+    }
+
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    crc = static_cast<uint32_t>(
+        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));
+
+    bytes_read += actually_read;
+  }
+
+  return crc;
+}
+
 // ============================================================================
 // Snapshot Integrity Verification
 // ============================================================================
@@ -1588,23 +1629,16 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
     }
 
     // Verify CRC32 if specified
+    // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
     if (header.file_crc32 != 0) {
-      // Read entire file for CRC verification
+      // Get file size
       ifs.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs.tellg());
-      ifs.seekg(0, std::ios::beg);
 
-      std::vector<char> file_data(file_size);
-      ifs.read(file_data.data(), static_cast<std::streamsize>(file_size));
+      // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
+      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
 
-      // Zero out the CRC field before calculation (CRC excludes itself)
-      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;  // magic + version + header_size + flags + timestamp +
-                                                        // total_file_size
-      if (file_size > crc_offset + 4) {
-        std::memset(&file_data[crc_offset], 0, 4);
-      }
-
-      uint32_t calculated_crc = CalculateCRC32(file_data.data(), file_size);
+      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         integrity_error.type = dump_format::CRCErrorType::FileCRC;

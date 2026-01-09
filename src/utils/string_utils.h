@@ -88,4 +88,23 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints);
  */
 std::string FormatBytes(size_t bytes);
 
+/**
+ * @brief Check if a string is valid UTF-8
+ *
+ * @param text String to validate
+ * @return true if valid UTF-8, false otherwise
+ */
+bool IsValidUtf8(std::string_view text);
+
+/**
+ * @brief Sanitize a string by replacing invalid UTF-8 sequences with U+FFFD
+ *
+ * Invalid bytes are replaced with the Unicode replacement character (U+FFFD).
+ * Valid UTF-8 sequences are preserved unchanged.
+ *
+ * @param text String to sanitize
+ * @return Sanitized UTF-8 string
+ */
+std::string SanitizeUtf8(std::string_view text);
+
 }  // namespace mygramdb::utils

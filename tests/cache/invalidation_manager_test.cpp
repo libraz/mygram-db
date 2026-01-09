@@ -400,4 +400,230 @@ TEST(InvalidationManagerTest, ConcurrentClearTableNoDeadlock) {
   EXPECT_EQ(0, mgr.GetTrackedEntryCount());
 }
 
+// =============================================================================
+// Bug #17: InvalidationManager metadata leak when re-registering cache entry
+// =============================================================================
+
+/**
+ * @brief Test that re-registering a cache entry cleans up stale reverse index entries
+ *
+ * Bug #17: When a cache entry is re-registered with different ngrams, the old ngrams
+ * in the reverse index are not cleaned up, causing a memory leak.
+ */
+TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  // Register with ngrams {"aaa", "bbb"}
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"aaa", "bbb"};
+  mgr.RegisterCacheEntry(key, meta1);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts"));  // aaa, bbb
+
+  // Re-register same key with different ngrams {"bbb", "ccc"}
+  // (bbb is shared, aaa is removed, ccc is added)
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"bbb", "ccc"};
+  mgr.RegisterCacheEntry(key, meta2);
+
+  // Entry count should still be 1
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+
+  // Bug #17: Before fix, ngram count would be 3 (aaa still in reverse index)
+  // After fix: ngram count should be 2 (bbb, ccc)
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts"))
+      << "Bug #17: Stale ngram 'aaa' should be removed from reverse index";
+
+  // Verify invalidation works correctly with new ngrams
+  auto invalidated_aaa = mgr.InvalidateAffectedEntries("posts", "", "aaa", 3, 2);
+  EXPECT_EQ(0, invalidated_aaa.size()) << "Should not invalidate on old ngram 'aaa'";
+
+  auto invalidated_ccc = mgr.InvalidateAffectedEntries("posts", "", "ccc", 3, 2);
+  EXPECT_EQ(1, invalidated_ccc.size()) << "Should invalidate on new ngram 'ccc'";
+}
+
+/**
+ * @brief Test re-registration with completely different ngrams
+ */
+TEST(InvalidationManagerTest, Bug17_ReRegisterCompletelyDifferentNgrams) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  // Register with ngrams {"xxx", "yyy", "zzz"}
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"xxx", "yyy", "zzz"};
+  mgr.RegisterCacheEntry(key, meta1);
+
+  EXPECT_EQ(3, mgr.GetTrackedNgramCount("posts"));
+
+  // Re-register with completely different ngrams {"aaa", "bbb"}
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"aaa", "bbb"};
+  mgr.RegisterCacheEntry(key, meta2);
+
+  // Bug #17: Before fix, ngram count would be 5
+  // After fix: ngram count should be 2
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts"))
+      << "Bug #17: All old ngrams should be cleaned up";
+
+  // Verify old ngrams don't cause invalidation
+  auto invalidated_xxx = mgr.InvalidateAffectedEntries("posts", "", "xxx", 3, 2);
+  EXPECT_EQ(0, invalidated_xxx.size()) << "Old ngram 'xxx' should not cause invalidation";
+}
+
+/**
+ * @brief Test re-registration preserves table cleanup
+ */
+TEST(InvalidationManagerTest, Bug17_ReRegisterDifferentTable) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  // Register in table "table1"
+  CacheMetadata meta1;
+  meta1.table = "table1";
+  meta1.ngrams = {"aaa", "bbb"};
+  mgr.RegisterCacheEntry(key, meta1);
+
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("table1"));
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("table2"));
+
+  // Re-register in table "table2"
+  CacheMetadata meta2;
+  meta2.table = "table2";
+  meta2.ngrams = {"ccc", "ddd"};
+  mgr.RegisterCacheEntry(key, meta2);
+
+  // table1 should be empty, table2 should have the new ngrams
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("table1"))
+      << "Bug #17: Old table's ngrams should be cleaned up";
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("table2"));
+}
+
+// =============================================================================
+// Bug #18: Cache invalidation uses symmetric difference
+// =============================================================================
+// The concern is that symmetric difference might miss invalidations where
+// unchanged ngrams are involved. However, analysis shows symmetric difference
+// is correct because:
+// - Unchanged ngrams mean the document still matches those queries
+// - Only changed ngrams affect query result validity
+// =============================================================================
+
+/**
+ * @test Bug #18: Verify symmetric difference handles partial updates correctly
+ *
+ * When text is updated and some ngrams remain unchanged, caches for those
+ * unchanged ngrams should NOT be invalidated (the document still matches).
+ */
+TEST(InvalidationManagerTest, Bug18_PartialUpdateUnchangedNgramsNotInvalidated) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  // Query for "hello" (will be in both old and new text)
+  auto key1 = CacheKeyGenerator::Generate("query_hello");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};  // ngrams for "hello"
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Query for "world" (only in old text)
+  auto key2 = CacheKeyGenerator::Generate("query_world");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"wor", "orl", "rld"};  // ngrams for "world"
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Query for "earth" (only in new text)
+  auto key3 = CacheKeyGenerator::Generate("query_earth");
+  CacheMetadata meta3;
+  meta3.table = "posts";
+  meta3.ngrams = {"ear", "art", "rth"};  // ngrams for "earth"
+  mgr.RegisterCacheEntry(key3, meta3);
+
+  // UPDATE: "hello world" -> "hello earth"
+  // "hello" ngrams unchanged, "world" removed, "earth" added
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello world", "hello earth", 3, 2);
+
+  // key1 (hello) should NOT be invalidated - document still matches
+  EXPECT_EQ(invalidated.find(key1), invalidated.end())
+      << "Bug #18: Unchanged ngrams should not cause invalidation";
+
+  // key2 (world) SHOULD be invalidated - removed from document
+  EXPECT_NE(invalidated.find(key2), invalidated.end())
+      << "Removed ngrams should cause invalidation";
+
+  // key3 (earth) SHOULD be invalidated - new match
+  EXPECT_NE(invalidated.find(key3), invalidated.end())
+      << "Added ngrams should cause invalidation";
+
+  // Exactly 2 invalidations (world and earth, not hello)
+  EXPECT_EQ(2, invalidated.size())
+      << "Should invalidate exactly 2 caches (changed ngrams only)";
+}
+
+/**
+ * @test Bug #18: Verify no invalidation when text is identical
+ *
+ * When old and new text are the same, no caches should be invalidated.
+ */
+TEST(InvalidationManagerTest, Bug18_IdenticalTextNoInvalidation) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"hel", "ell", "llo"};
+  mgr.RegisterCacheEntry(key, meta);
+
+  // UPDATE with identical text (no actual change)
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2);
+
+  // No invalidation should occur
+  EXPECT_EQ(0, invalidated.size())
+      << "Bug #18: Identical text should not cause any invalidation";
+}
+
+/**
+ * @test Bug #18: Verify complete text replacement invalidates correctly
+ */
+TEST(InvalidationManagerTest, Bug18_CompleteTextReplacementInvalidatesAll) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  // Query for "rust"
+  auto key1 = CacheKeyGenerator::Generate("query_rust");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"rus", "ust"};
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Query for "golang"
+  auto key2 = CacheKeyGenerator::Generate("query_golang");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"gol", "ola", "lan", "ang"};
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Complete replacement: "rust" -> "golang" (no overlap)
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "rust", "golang", 3, 2);
+
+  // Both should be invalidated (old text removed, new text added)
+  EXPECT_EQ(2, invalidated.size());
+  EXPECT_NE(invalidated.find(key1), invalidated.end());
+  EXPECT_NE(invalidated.find(key2), invalidated.end());
+}
+
 }  // namespace mygramdb::cache

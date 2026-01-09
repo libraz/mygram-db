@@ -324,12 +324,19 @@ void ConnectionAcceptor::AcceptLoop() {
       });
 
       if (!submitted) {
-        // Queue is full - reject connection to prevent FD leak
+        // Queue is full - send error response and reject connection to prevent FD leak
         mygram::utils::StructuredLog()
             .Event("server_warning")
             .Field("type", "thread_pool_queue_full")
             .Field("client_fd", static_cast<uint64_t>(client_fd))
             .Warn();
+
+        // Send error response to client before closing connection
+        static constexpr std::string_view kBusyResponse = "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
+        // Ignore write errors - we're closing the connection anyway
+        // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
+        write(client_fd, kBusyResponse.data(), kBusyResponse.size());
+
         close(client_fd);
         RemoveConnection(client_fd);
       }

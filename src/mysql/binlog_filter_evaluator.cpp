@@ -189,6 +189,16 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       return val >= target;
     }
 
+    // Unknown operator for double type
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "unsupported_filter_operator")
+        .Field("operator", filter.op)
+        .Field("column_name", filter.name)
+        .Field("column_type", "double")
+        .Warn();
+    return false;  // Fail-closed: reject document on unknown operator
+
   } else if (std::holds_alternative<std::string>(value)) {
     // String comparison
     const auto& val = std::get<std::string>(value);
@@ -212,6 +222,16 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     if (filter.op == ">=") {
       return val >= target;
     }
+
+    // Unknown operator for string type
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "unsupported_filter_operator")
+        .Field("operator", filter.op)
+        .Field("column_name", filter.name)
+        .Field("column_type", "string")
+        .Warn();
+    return false;  // Fail-closed: reject document on unknown operator
 
   } else if (std::holds_alternative<uint64_t>(value)) {
     // Datetime/timestamp (stored as uint64_t epoch)
@@ -251,6 +271,16 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     if (filter.op == ">=") {
       return val >= target;
     }
+
+    // Unknown operator for uint64_t (datetime) type
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "unsupported_filter_operator")
+        .Field("operator", filter.op)
+        .Field("column_name", filter.name)
+        .Field("column_type", "uint64_t")
+        .Warn();
+    return false;  // Fail-closed: reject document on unknown operator
 
   } else if (std::holds_alternative<storage::TimeValue>(value)) {
     // TIME comparison (stored as TimeValue with seconds)
@@ -306,6 +336,16 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     if (filter.op == ">=") {
       return val.seconds >= target;
     }
+
+    // Unknown operator for datetime type
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "unsupported_filter_operator")
+        .Field("operator", filter.op)
+        .Field("column_name", filter.name)
+        .Field("column_type", "datetime")
+        .Warn();
+    return false;  // Fail-closed: reject document on unknown operator
 
   } else if (std::holds_alternative<int32_t>(value) || std::holds_alternative<uint32_t>(value) ||
              std::holds_alternative<int16_t>(value) || std::holds_alternative<uint16_t>(value) ||
@@ -380,9 +420,23 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     if (filter.op == ">=") {
       return val >= target;
     }
+
+    // Unknown operator for integer type
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_warning")
+        .Field("type", "unsupported_filter_operator")
+        .Field("operator", filter.op)
+        .Field("column_name", filter.name)
+        .Field("column_type", "integer")
+        .Warn();
+    return false;  // Fail-closed: reject document on unknown operator
   }
 
-  mygram::utils::StructuredLog().Event("mysql_binlog_warning").Field("type", "unsupported_filter_value_type").Warn();
+  mygram::utils::StructuredLog()
+      .Event("mysql_binlog_warning")
+      .Field("type", "unsupported_filter_value_type")
+      .Field("column_name", filter.name)
+      .Warn();
   return false;
 }
 

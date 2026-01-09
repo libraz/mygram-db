@@ -180,8 +180,33 @@ TEST(DateTimeProcessorTest, DateTimeToEpochInvalid) {
   EXPECT_FALSE(processor.DateTimeToEpoch("2024-01-01 24:00:00").has_value());  // Hour >= 24
   EXPECT_FALSE(processor.DateTimeToEpoch("2024-01-01 10:60:00").has_value());  // Minute >= 60
   EXPECT_FALSE(processor.DateTimeToEpoch("2024-01-01 10:30:60").has_value());  // Second >= 60
+}
 
-  // Note: Implementation does not validate calendar correctness (e.g., Feb 30 is not rejected at parse time)
+TEST(DateTimeProcessorTest, DateTimeToEpochInvalidCalendarDates) {
+  DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
+
+  // Invalid calendar dates (day out of range for given month)
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-02-30 00:00:00").has_value());  // Feb 30 doesn't exist
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-02-31 00:00:00").has_value());  // Feb 31 doesn't exist
+  EXPECT_FALSE(processor.DateTimeToEpoch("2023-02-29 00:00:00").has_value());  // Not a leap year (2023)
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-04-31 00:00:00").has_value());  // April has 30 days
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-06-31 00:00:00").has_value());  // June has 30 days
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-09-31 00:00:00").has_value());  // September has 30 days
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-11-31 00:00:00").has_value());  // November has 30 days
+
+  // Valid edge cases (leap year)
+  EXPECT_TRUE(processor.DateTimeToEpoch("2024-02-29 00:00:00").has_value());  // 2024 is a leap year
+  EXPECT_TRUE(processor.DateTimeToEpoch("2000-02-29 00:00:00").has_value());  // 2000 is a leap year (div by 400)
+
+  // Non-leap years divisible by 100
+  EXPECT_FALSE(processor.DateTimeToEpoch("1900-02-29 00:00:00").has_value());  // 1900 is not a leap year
+  EXPECT_FALSE(processor.DateTimeToEpoch("2100-02-29 00:00:00").has_value());  // 2100 is not a leap year
+
+  // Valid dates at month boundaries
+  EXPECT_TRUE(processor.DateTimeToEpoch("2024-01-31 00:00:00").has_value());  // Jan 31 is valid
+  EXPECT_TRUE(processor.DateTimeToEpoch("2024-03-31 00:00:00").has_value());  // Mar 31 is valid
+  EXPECT_TRUE(processor.DateTimeToEpoch("2024-04-30 00:00:00").has_value());  // Apr 30 is valid
+  EXPECT_TRUE(processor.DateTimeToEpoch("2024-02-28 00:00:00").has_value());  // Feb 28 always valid
 }
 
 // ============================================================================

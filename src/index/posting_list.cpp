@@ -285,31 +285,40 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   if (reverse) {
     // For reverse order: use reverse iterator to get last N elements efficiently
     // CRoaring library requires manual memory management for iterators
+    // Use RAII via unique_ptr with custom deleter for exception safety
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-    auto* iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
-    if (iter != nullptr) {
-      roaring_iterator_init_last(roaring_bitmap_, iter);
+    auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
+    if (raw_iter != nullptr) {
+      // RAII wrapper ensures free() is called even if push_back throws
+      auto deleter = [](roaring_uint32_iterator_t* ptr) {
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+        free(ptr);
+      };
+      std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
+
+      roaring_iterator_init_last(roaring_bitmap_, iter.get());
       size_t count = 0;
       while (count < actual_limit && iter->has_value) {
         result.push_back(iter->current_value);
-        roaring_uint32_iterator_previous(iter);
+        roaring_uint32_iterator_previous(iter.get());
         count++;
       }
-      // CRoaring iterator cleanup requires manual free
-      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-      free(iter);
+      // iter automatically freed by unique_ptr destructor
     }
   } else {
     // For forward order: use iterator to get first N
-    roaring_uint32_iterator_t* iter = roaring_iterator_create(roaring_bitmap_);
+    // Use RAII via unique_ptr with custom deleter for exception safety
+    auto deleter = [](roaring_uint32_iterator_t* ptr) { roaring_uint32_iterator_free(ptr); };
+    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(
+        roaring_iterator_create(roaring_bitmap_), deleter);
     if (iter != nullptr) {
       size_t count = 0;
       while (count < actual_limit && iter->has_value) {
         result.push_back(iter->current_value);
-        roaring_uint32_iterator_advance(iter);
+        roaring_uint32_iterator_advance(iter.get());
         count++;
       }
-      roaring_uint32_iterator_free(iter);
+      // iter automatically freed by unique_ptr destructor
     }
   }
 

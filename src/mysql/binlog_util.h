@@ -222,6 +222,10 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       return 2;
     case 3:  // MYSQL_TYPE_LONG
       return 4;
+    case 4:  // MYSQL_TYPE_FLOAT
+      return 4;
+    case 5:  // MYSQL_TYPE_DOUBLE
+      return 8;
     case 8:  // MYSQL_TYPE_LONGLONG
       return 8;
     case 9:  // MYSQL_TYPE_INT24
@@ -257,6 +261,9 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
         case 4:
           blob_len = uint4korr(master_data);
           break;
+        default:
+          // Invalid metadata - return 0 to indicate error
+          return 0;
       }
       return metadata + blob_len;  // length bytes + actual data
     }

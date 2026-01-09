@@ -17,6 +17,13 @@ InvalidationManager::InvalidationManager(QueryCache* cache) : cache_(cache) {}
 void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMetadata& metadata) {
   std::unique_lock lock(mutex_);
 
+  // If entry already exists, unregister it first to clean up stale reverse index entries
+  // This prevents memory leaks when a cache entry is re-registered with different ngrams
+  auto existing = cache_metadata_.find(key);
+  if (existing != cache_metadata_.end()) {
+    UnregisterCacheEntryUnlocked(key);
+  }
+
   // Store metadata
   cache_metadata_[key] = metadata;
 

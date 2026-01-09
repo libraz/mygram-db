@@ -31,6 +31,30 @@ using nlohmann::json_schema::json_validator;
 constexpr size_t kGtidPrefixLength = 5;  // "gtid="
 
 /**
+ * @brief Validate path for directory traversal attacks
+ * @param path Path to validate
+ * @param field_name Name of the field for error messages
+ * @throws std::runtime_error if path contains traversal sequences
+ */
+void ValidatePathNoTraversal(const std::string& path, const std::string& field_name) {
+  if (path.empty()) {
+    return;  // Empty paths are allowed (will be validated elsewhere if required)
+  }
+
+  // Check for path traversal patterns
+  if (path.find("..") != std::string::npos) {
+    throw std::runtime_error("Path traversal detected in '" + field_name +
+                             "': path contains '..' which is not allowed for security reasons. "
+                             "Use absolute paths or paths relative to the working directory without parent references.");
+  }
+
+  // Check for null bytes (could be used to truncate paths)
+  if (path.find('\0') != std::string::npos) {
+    throw std::runtime_error("Invalid path in '" + field_name + "': path contains null bytes.");
+  }
+}
+
+/**
  * @brief Convert YAML node to JSON object recursively
  */
 json YamlToJson(const YAML::Node& node) {
@@ -110,12 +134,15 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   }
   if (json_obj.contains("ssl_ca")) {
     config.ssl_ca = json_obj["ssl_ca"].get<std::string>();
+    ValidatePathNoTraversal(config.ssl_ca, "mysql.ssl_ca");
   }
   if (json_obj.contains("ssl_cert")) {
     config.ssl_cert = json_obj["ssl_cert"].get<std::string>();
+    ValidatePathNoTraversal(config.ssl_cert, "mysql.ssl_cert");
   }
   if (json_obj.contains("ssl_key")) {
     config.ssl_key = json_obj["ssl_key"].get<std::string>();
+    ValidatePathNoTraversal(config.ssl_key, "mysql.ssl_key");
   }
   if (json_obj.contains("ssl_verify_server_cert")) {
     config.ssl_verify_server_cert = json_obj["ssl_verify_server_cert"].get<bool>();
@@ -133,12 +160,33 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
 RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   RequiredFilterConfig config;
 
-  if (json_obj.contains("name")) {
-    config.name = json_obj["name"].get<std::string>();
+  // Validate required fields: name and type are mandatory
+  if (!json_obj.contains("name") || json_obj["name"].get<std::string>().empty()) {
+    throw std::runtime_error(
+        "Required filter error: 'name' field is required\n"
+        "  Example:\n"
+        "    required_filters:\n"
+        "      - name: status\n"
+        "        type: int\n"
+        "        op: \"=\"\n"
+        "        value: 1");
   }
-  if (json_obj.contains("type")) {
-    config.type = json_obj["type"].get<std::string>();
+  config.name = json_obj["name"].get<std::string>();
+
+  if (!json_obj.contains("type") || json_obj["type"].get<std::string>().empty()) {
+    throw std::runtime_error(
+        "Required filter error: 'type' field is required for filter '" + config.name +
+        "'\n"
+        "  Valid types: int, string, datetime, bool, float\n"
+        "  Example:\n"
+        "    required_filters:\n"
+        "      - name: status\n"
+        "        type: int\n"
+        "        op: \"=\"\n"
+        "        value: 1");
   }
+  config.type = json_obj["type"].get<std::string>();
+
   if (json_obj.contains("op") || json_obj.contains("operator")) {
     // Support both "op" and "operator" as key names
     config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>() : json_obj["operator"].get<std::string>();
@@ -487,6 +535,7 @@ Config ParseConfigFromJson(const json& root) {
     const auto& dmp = root["dump"];
     if (dmp.contains("dir")) {
       config.dump.dir = dmp["dir"].get<std::string>();
+      ValidatePathNoTraversal(config.dump.dir, "dump.dir");
     }
     if (dmp.contains("interval_sec")) {
       config.dump.interval_sec = dmp["interval_sec"].get<int>();
@@ -578,6 +627,7 @@ Config ParseConfigFromJson(const json& root) {
     }
     if (log.contains("file")) {
       config.logging.file = log["file"].get<std::string>();
+      ValidatePathNoTraversal(config.logging.file, "logging.file");
     }
   }
 
@@ -589,7 +639,19 @@ Config ParseConfigFromJson(const json& root) {
     }
     if (cache.contains("max_memory_mb")) {
       constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
-      int max_memory_mb = cache["max_memory_mb"].get<int>();
+      constexpr int64_t kMaxMemoryMB = 1024 * 1024;  // 1TB max (reasonable upper limit)
+      int64_t max_memory_mb = cache["max_memory_mb"].get<int64_t>();
+
+      // Validate to prevent integer overflow
+      if (max_memory_mb < 0) {
+        throw std::runtime_error("Configuration error: cache.max_memory_mb cannot be negative (got " +
+                                 std::to_string(max_memory_mb) + ")");
+      }
+      if (max_memory_mb > kMaxMemoryMB) {
+        throw std::runtime_error("Configuration error: cache.max_memory_mb exceeds maximum allowed value (" +
+                                 std::to_string(kMaxMemoryMB) + " MB). Got: " + std::to_string(max_memory_mb) + " MB");
+      }
+
       config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * kBytesPerMB;
     }
     if (cache.contains("min_query_cost_ms")) {
