@@ -31,6 +31,48 @@ using nlohmann::json_schema::json_validator;
 constexpr size_t kGtidPrefixLength = 5;  // "gtid="
 
 /**
+ * @brief Get value from environment variable
+ *
+ * BUG-0091: Enables reading sensitive configuration from environment variables
+ * instead of storing them in configuration files.
+ *
+ * @param env_var_name Environment variable name
+ * @return Value if environment variable is set, std::nullopt otherwise
+ */
+std::optional<std::string> GetEnvValue(const char* env_var_name) {
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): getenv is safe when not modifying env
+  const char* value = std::getenv(env_var_name);
+  if (value != nullptr && value[0] != '\0') {
+    return std::string(value);
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Get configuration value with environment variable override
+ *
+ * Priority: Environment variable > JSON value > Default
+ *
+ * @param json_value Value from JSON config (optional)
+ * @param env_var_name Environment variable name to check
+ * @param default_value Default value if neither is set
+ * @return Final configuration value
+ */
+std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json_value, const char* env_var_name,
+                                          const std::string& default_value = "") {
+  // Environment variable takes precedence
+  if (auto env_value = GetEnvValue(env_var_name); env_value.has_value()) {
+    return *env_value;
+  }
+  // Fall back to JSON value
+  if (json_value.has_value()) {
+    return *json_value;
+  }
+  // Use default
+  return default_value;
+}
+
+/**
  * @brief Validate path for directory traversal attacks
  * @param path Path to validate
  * @param field_name Name of the field for error messages
@@ -43,9 +85,10 @@ void ValidatePathNoTraversal(const std::string& path, const std::string& field_n
 
   // Check for path traversal patterns
   if (path.find("..") != std::string::npos) {
-    throw std::runtime_error("Path traversal detected in '" + field_name +
-                             "': path contains '..' which is not allowed for security reasons. "
-                             "Use absolute paths or paths relative to the working directory without parent references.");
+    throw std::runtime_error(
+        "Path traversal detected in '" + field_name +
+        "': path contains '..' which is not allowed for security reasons. "
+        "Use absolute paths or paths relative to the working directory without parent references.");
   }
 
   // Check for null bytes (could be used to truncate paths)
@@ -89,24 +132,54 @@ json YamlToJson(const YAML::Node& node) {
 
 /**
  * @brief Parse MySQL configuration from JSON
+ *
+ * BUG-0091: Sensitive values (password, user) can be provided via environment variables:
+ *   - MYGRAM_MYSQL_PASSWORD: MySQL password (takes precedence over config file)
+ *   - MYGRAM_MYSQL_USER: MySQL username (takes precedence over config file)
+ *   - MYGRAM_MYSQL_HOST: MySQL host (takes precedence over config file)
+ *   - MYGRAM_MYSQL_DATABASE: MySQL database (takes precedence over config file)
  */
 MysqlConfig ParseMysqlConfig(const json& json_obj) {
   MysqlConfig config;
 
-  if (json_obj.contains("host")) {
-    config.host = json_obj["host"].get<std::string>();
+  // Host: environment variable takes precedence
+  {
+    std::optional<std::string> json_value;
+    if (json_obj.contains("host")) {
+      json_value = json_obj["host"].get<std::string>();
+    }
+    config.host = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_HOST", config.host);
   }
+
   if (json_obj.contains("port")) {
     config.port = json_obj["port"].get<int>();
   }
-  if (json_obj.contains("user")) {
-    config.user = json_obj["user"].get<std::string>();
+
+  // User: environment variable takes precedence
+  {
+    std::optional<std::string> json_value;
+    if (json_obj.contains("user")) {
+      json_value = json_obj["user"].get<std::string>();
+    }
+    config.user = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_USER", config.user);
   }
-  if (json_obj.contains("password")) {
-    config.password = json_obj["password"].get<std::string>();
+
+  // Password: environment variable takes precedence (security best practice)
+  {
+    std::optional<std::string> json_value;
+    if (json_obj.contains("password")) {
+      json_value = json_obj["password"].get<std::string>();
+    }
+    config.password = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_PASSWORD", config.password);
   }
-  if (json_obj.contains("database")) {
-    config.database = json_obj["database"].get<std::string>();
+
+  // Database: environment variable takes precedence
+  {
+    std::optional<std::string> json_value;
+    if (json_obj.contains("database")) {
+      json_value = json_obj["database"].get<std::string>();
+    }
+    config.database = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_DATABASE", config.database);
   }
   if (json_obj.contains("use_gtid")) {
     config.use_gtid = json_obj["use_gtid"].get<bool>();
@@ -174,16 +247,15 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
   config.name = json_obj["name"].get<std::string>();
 
   if (!json_obj.contains("type") || json_obj["type"].get<std::string>().empty()) {
-    throw std::runtime_error(
-        "Required filter error: 'type' field is required for filter '" + config.name +
-        "'\n"
-        "  Valid types: int, string, datetime, bool, float\n"
-        "  Example:\n"
-        "    required_filters:\n"
-        "      - name: status\n"
-        "        type: int\n"
-        "        op: \"=\"\n"
-        "        value: 1");
+    throw std::runtime_error("Required filter error: 'type' field is required for filter '" + config.name +
+                             "'\n"
+                             "  Valid types: int, string, datetime, bool, float\n"
+                             "  Example:\n"
+                             "    required_filters:\n"
+                             "      - name: status\n"
+                             "        type: int\n"
+                             "        op: \"=\"\n"
+                             "        value: 1");
   }
   config.type = json_obj["type"].get<std::string>();
 
@@ -638,7 +710,7 @@ Config ParseConfigFromJson(const json& root) {
       config.cache.enabled = cache["enabled"].get<bool>();
     }
     if (cache.contains("max_memory_mb")) {
-      constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
+      constexpr size_t kBytesPerMB = 1024 * 1024;    // Bytes in one megabyte
       constexpr int64_t kMaxMemoryMB = 1024 * 1024;  // 1TB max (reasonable upper limit)
       int64_t max_memory_mb = cache["max_memory_mb"].get<int64_t>();
 

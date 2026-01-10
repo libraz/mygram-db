@@ -30,7 +30,63 @@ struct CacheMetadata {
   std::vector<query::FilterCondition> filters;          ///< Filter conditions (for future optimization)
   std::chrono::steady_clock::time_point created_at;     ///< Creation time
   std::chrono::steady_clock::time_point last_accessed;  ///< Last access time
-  uint32_t access_count = 0;                            ///< Number of times accessed
+  std::atomic<uint32_t> access_count{0};                ///< Number of times accessed (atomic for lock-free update)
+  std::atomic<bool> accessed_since_refresh{false};      ///< Dirty flag for background LRU refresh
+
+  // Default constructor
+  CacheMetadata() = default;
+
+  // Copy constructor (atomics must be loaded/stored explicitly)
+  CacheMetadata(const CacheMetadata& other)
+      : key(other.key),
+        table(other.table),
+        ngrams(other.ngrams),
+        filters(other.filters),
+        created_at(other.created_at),
+        last_accessed(other.last_accessed),
+        access_count(other.access_count.load()),
+        accessed_since_refresh(other.accessed_since_refresh.load()) {}
+
+  // Move constructor
+  CacheMetadata(CacheMetadata&& other) noexcept
+      : key(other.key),
+        table(std::move(other.table)),
+        ngrams(std::move(other.ngrams)),
+        filters(std::move(other.filters)),
+        created_at(other.created_at),
+        last_accessed(other.last_accessed),
+        access_count(other.access_count.load()),
+        accessed_since_refresh(other.accessed_since_refresh.load()) {}
+
+  // Copy assignment
+  CacheMetadata& operator=(const CacheMetadata& other) {
+    if (this != &other) {
+      key = other.key;
+      table = other.table;
+      ngrams = other.ngrams;
+      filters = other.filters;
+      created_at = other.created_at;
+      last_accessed = other.last_accessed;
+      access_count.store(other.access_count.load());
+      accessed_since_refresh.store(other.accessed_since_refresh.load());
+    }
+    return *this;
+  }
+
+  // Move assignment
+  CacheMetadata& operator=(CacheMetadata&& other) noexcept {
+    if (this != &other) {
+      key = other.key;
+      table = std::move(other.table);
+      ngrams = std::move(other.ngrams);
+      filters = std::move(other.filters);
+      created_at = other.created_at;
+      last_accessed = other.last_accessed;
+      access_count.store(other.access_count.load());
+      accessed_since_refresh.store(other.accessed_since_refresh.load());
+    }
+    return *this;
+  }
 };
 
 /**

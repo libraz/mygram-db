@@ -64,6 +64,7 @@ constexpr uint32_t kMinFourByteCodepoint = 0x10000;
  * @brief Check if a byte is a valid UTF-8 continuation byte (10xxxxxx)
  */
 inline bool IsValidContinuationByte(unsigned char byte) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   return (byte & 0xC0) == kUtf8ContinuationPattern;
 }
 
@@ -238,10 +239,10 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   // NFKC normalization
   if (nfkc) {
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
-    if (U_SUCCESS(status) != 0) {
+    if (U_SUCCESS(status)) {
       icu::UnicodeString normalized;
       normalizer->normalize(ustr, normalized, status);
-      if (U_SUCCESS(status) != 0) {
+      if (U_SUCCESS(status)) {
         ustr = normalized;
       }
     }
@@ -252,14 +253,14 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
     // Full-width to half-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   }
@@ -445,6 +446,9 @@ std::string FormatBytes(size_t bytes) {
   return oss.str();
 }
 
+// NOLINTBEGIN(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// Suppressing warnings: Short variable name 'i' is idiomatic for byte-level iteration.
+// Magic numbers are standard UTF-8 byte patterns (0xC0, 0xC2, 0x0F, 0x3F, etc.) well-known in UTF-8 processing.
 bool IsValidUtf8(std::string_view text) {
   size_t i = 0;
   while (i < text.size()) {
@@ -516,7 +520,13 @@ bool IsValidUtf8(std::string_view text) {
   }
   return true;
 }
+// NOLINTEND(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
+// NOLINTBEGIN(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+// Suppressing warnings: Short variable name 'i' is idiomatic for byte-level iteration.
+// Magic numbers are standard UTF-8 byte patterns well-known in UTF-8 processing.
+// C-style array for kReplacementChar is used for efficient string appending.
 std::string SanitizeUtf8(std::string_view text) {
   // U+FFFD replacement character in UTF-8
   constexpr char kReplacementChar[] = "\xEF\xBF\xBD";
@@ -626,5 +636,7 @@ std::string SanitizeUtf8(std::string_view text) {
 
   return result;
 }
+// NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+// NOLINTEND(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace mygramdb::utils

@@ -77,6 +77,10 @@ TEST(QueryCacheTest, LRUEviction) {
   // Access key1 to make it recently used
   [[maybe_unused]] auto _ = cache.Lookup(key1);
 
+  // Wait for background LRU refresh to update the LRU list
+  // (Background thread runs every 100ms)
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
   // Insert key4, which should evict key2 (least recently used)
   cache.Insert(key4, result4, meta, 15.0);
 
@@ -1178,8 +1182,7 @@ TEST(QueryCacheTest, Bug33_EvictionCallbackReceivesCorrectKeys) {
   // Verify that eviction callback was called
   auto stats = cache.GetStatistics();
   if (stats.evictions > 0) {
-    EXPECT_FALSE(evicted_keys.empty())
-        << "Bug #33: Callback should be called during eviction";
+    EXPECT_FALSE(evicted_keys.empty()) << "Bug #33: Callback should be called during eviction";
   }
 }
 
@@ -1191,9 +1194,7 @@ TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
 
   std::vector<CacheKey> cleared_keys;
 
-  cache.SetEvictionCallback([&cleared_keys](const CacheKey& key) {
-    cleared_keys.push_back(key);
-  });
+  cache.SetEvictionCallback([&cleared_keys](const CacheKey& key) { cleared_keys.push_back(key); });
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -1213,6 +1214,160 @@ TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
   ASSERT_EQ(2, cleared_keys.size());
   EXPECT_TRUE(std::find(cleared_keys.begin(), cleared_keys.end(), key1) != cleared_keys.end());
   EXPECT_TRUE(std::find(cleared_keys.begin(), cleared_keys.end(), key2) != cleared_keys.end());
+}
+
+// =============================================================================
+// BUG-0070: Lock upgrade performance optimization
+// =============================================================================
+// Lookup() should not require lock upgrade (shared -> exclusive) for LRU update.
+// Instead, use atomic access count and background LRU refresh.
+// =============================================================================
+
+/**
+ * @test BUG-0070: Verify concurrent lookups don't block each other due to lock upgrade
+ *
+ * Before fix: Each cache hit required lock upgrade which serialized readers
+ * After fix: Atomic access count update allows full reader concurrency
+ */
+TEST(QueryCacheTest, Bug0070_ConcurrentLookupsNoLockUpgrade) {
+  QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB
+
+  auto key = CacheKeyGenerator::Generate("concurrent_test");
+  std::vector<DocId> result;
+  for (int i = 0; i < 1000; ++i) {
+    result.push_back(static_cast<DocId>(i));
+  }
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"tes", "est"};
+
+  // Insert entry
+  ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+
+  // High concurrency lookup test
+  const int num_threads = 16;
+  const int lookups_per_thread = 1000;
+  std::atomic<int> successful_lookups{0};
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+
+  for (int t = 0; t < num_threads; ++t) {
+    threads.emplace_back([&]() {
+      // Wait for all threads to be ready
+      while (!start.load()) {
+        std::this_thread::yield();
+      }
+
+      for (int i = 0; i < lookups_per_thread; ++i) {
+        auto cached = cache.Lookup(key);
+        if (cached.has_value() && cached.value().size() == 1000) {
+          successful_lookups++;
+        }
+      }
+    });
+  }
+
+  // Start all threads simultaneously
+  start = true;
+
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  auto end_time = std::chrono::high_resolution_clock::now();
+  auto duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+  // All lookups should succeed
+  EXPECT_EQ(num_threads * lookups_per_thread, successful_lookups.load());
+
+  // Verify timing - with lock upgrade removed, this should complete quickly
+  // 16 threads * 1000 lookups should complete in reasonable time (< 5 seconds)
+  EXPECT_LT(duration_ms, 5000.0) << "Concurrent lookups taking too long, possible lock contention";
+
+  // Statistics should be accurate
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(num_threads * lookups_per_thread, stats.cache_hits);
+}
+
+/**
+ * @test BUG-0070: LRU refresh still works with approximate updates
+ */
+TEST(QueryCacheTest, Bug0070_ApproximateLRUStillEvictsOldEntries) {
+  // Small cache to trigger evictions
+  QueryCache cache(800, 1.0);
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"tes"};
+
+  // Insert 3 entries
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  auto key3 = CacheKeyGenerator::Generate("query3");
+
+  std::vector<DocId> result1 = {1, 2, 3};
+  std::vector<DocId> result2 = {4, 5, 6};
+  std::vector<DocId> result3 = {7, 8, 9};
+
+  cache.Insert(key1, result1, meta, 5.0);
+  cache.Insert(key2, result2, meta, 5.0);
+  cache.Insert(key3, result3, meta, 5.0);
+
+  // Access key1 multiple times to make it "hot"
+  for (int i = 0; i < 10; ++i) {
+    auto cached = cache.Lookup(key1);
+    ASSERT_TRUE(cached.has_value());
+  }
+
+  // Give background refresh time to update LRU if running
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Insert key4 which should evict the least accessed entry
+  auto key4 = CacheKeyGenerator::Generate("query4");
+  std::vector<DocId> result4 = {10, 11, 12};
+  cache.Insert(key4, result4, meta, 5.0);
+
+  // key1 should still be in cache (most accessed)
+  EXPECT_TRUE(cache.Lookup(key1).has_value());
+
+  // key4 should be in cache (just inserted)
+  EXPECT_TRUE(cache.Lookup(key4).has_value());
+}
+
+/**
+ * @test BUG-0070: Access count is properly incremented
+ */
+TEST(QueryCacheTest, Bug0070_AccessCountIncrement) {
+  QueryCache cache(10 * 1024 * 1024, 1.0);
+
+  auto key = CacheKeyGenerator::Generate("access_count_test");
+  std::vector<DocId> result = {1, 2, 3};
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"acc"};
+
+  cache.Insert(key, result, meta, 10.0);
+
+  // Multiple lookups
+  for (int i = 0; i < 100; ++i) {
+    auto cached = cache.Lookup(key);
+    ASSERT_TRUE(cached.has_value());
+  }
+
+  // Give time for background refresh if running
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Get metadata to verify access_count (may be approximate)
+  auto metadata = cache.GetMetadata(key);
+  ASSERT_TRUE(metadata.has_value());
+
+  // Access count should be reasonably close to 100
+  // With approximate LRU, it may not be exact but should be > 0
+  EXPECT_GT(metadata->access_count, 0);
 }
 
 }  // namespace mygramdb::cache

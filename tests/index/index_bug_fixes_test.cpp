@@ -142,8 +142,8 @@ TEST(IndexBugFixesTest, Bug15_UpdateWithMultipleDocuments) {
   Index index(1);  // Unigram index
 
   // Add two documents sharing term 'b'
-  index.AddDocument(1, "ab");  // Terms: a, b
-  index.AddDocument(2, "bc");  // Terms: b, c
+  index.AddDocument(1, "ab");       // Terms: a, b
+  index.AddDocument(2, "bc");       // Terms: b, c
   EXPECT_EQ(index.TermCount(), 3);  // a, b, c
   EXPECT_EQ(index.Count("b"), 2);   // Both docs have 'b'
 
@@ -189,8 +189,8 @@ TEST(IndexBugFixesTest, Bug14_RemoveDocumentPartialCleanup) {
   Index index(1);  // Unigram index
 
   // Add two documents
-  index.AddDocument(1, "ab");  // Terms: a, b
-  index.AddDocument(2, "bc");  // Terms: b, c
+  index.AddDocument(1, "ab");       // Terms: a, b
+  index.AddDocument(2, "bc");       // Terms: b, c
   EXPECT_EQ(index.TermCount(), 3);  // a, b, c
 
   // Remove doc 1
@@ -362,7 +362,6 @@ TEST(IndexBugFixesTest, Bug16_SearchAndLargePostingListsCorrectResults) {
   // The highest DocIds with both are: kNumDocs, kNumDocs-1, ..., kNumDocs-9
   ASSERT_EQ(results.size(), 10);
   for (size_t i = 0; i < 10; ++i) {
-    EXPECT_EQ(results[i], kNumDocs - static_cast<DocId>(i))
-        << "Result[" << i << "] should be " << (kNumDocs - i);
+    EXPECT_EQ(results[i], kNumDocs - static_cast<DocId>(i)) << "Result[" << i << "] should be " << (kNumDocs - i);
   }
 }

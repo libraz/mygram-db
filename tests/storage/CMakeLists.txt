@@ -120,6 +120,41 @@ gtest_discover_tests(dump_security_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# Endian serialization tests (BUG-0076)
+add_executable(endian_serialization_test
+  endian_serialization_test.cpp
+)
+
+target_include_directories(endian_serialization_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(endian_serialization_test
+  GTest::gtest_main
+)
+
+gtest_discover_tests(endian_serialization_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# Atomic write tests (BUG-0077)
+add_executable(atomic_write_test
+  atomic_write_test.cpp
+)
+
+target_link_libraries(atomic_write_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(atomic_write_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
+)
+
 # Dump save/load integration test (MySQL only)
 # NOTE: This is a manual integration test that requires a running MySQL instance.
 # It is not automatically run by CTest because it depends on external MySQL setup.

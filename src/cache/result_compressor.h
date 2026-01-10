@@ -9,10 +9,11 @@
 #include <cstdint>
 #include <vector>
 
+#include "types/doc_id.h"
+
 namespace mygramdb::cache {
 
-// Use DocId from storage namespace
-using DocId = uint32_t;
+// DocId is now defined in types/doc_id.h and re-exported via namespace
 
 /**
  * @brief Compress and decompress search results using LZ4

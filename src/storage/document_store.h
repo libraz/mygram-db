@@ -15,8 +15,11 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "types/doc_id.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/hash_utils.h"
 
 namespace mygramdb::storage {
 
@@ -25,7 +28,7 @@ using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
-using DocId = uint32_t;  // Supports up to 4B documents (aligned with index::DocId)
+// DocId is now defined in types/doc_id.h and re-exported via namespace
 
 /**
  * @brief TIME value representation
@@ -293,7 +296,10 @@ class DocumentStore {
   std::unordered_map<DocId, std::string> doc_id_to_pk_;
 
   // Primary Key -> DocID mapping (reverse index)
-  std::unordered_map<std::string, DocId> pk_to_doc_id_;
+  // Uses absl::flat_hash_map with transparent hash for heterogeneous lookup (BUG-0081)
+  // This allows GetDocId(std::string_view) without creating temporary std::string
+  absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
+      pk_to_doc_id_;
 
   // DocID -> Filter values
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;

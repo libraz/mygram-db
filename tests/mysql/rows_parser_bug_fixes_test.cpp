@@ -6,8 +6,6 @@
  * Tests are written first (TDD), then the implementation is fixed.
  */
 
-#include "mysql/rows_parser.h"
-
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -15,6 +13,7 @@
 #include <vector>
 
 #include "mysql/binlog_util.h"
+#include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 
 #ifdef USE_MYSQL
@@ -734,13 +733,13 @@ TEST_F(RowsParserBugFixesTest, Bug9_ValidUtf8PassThrough) {
 
   // Valid UTF-8 strings to test
   std::vector<std::string> test_strings = {
-      "Hello, World!",                              // ASCII
-      u8"こんにちは",                               // Japanese (Hiragana)
-      u8"日本語テスト",                             // Japanese (Kanji + Katakana)
-      u8"你好世界",                                 // Chinese
-      u8"Привет мир",                               // Russian
-      u8"🎉🚀💻",                                   // Emojis (4-byte UTF-8)
-      u8"Mixed: Hello 日本語 🎉",                   // Mixed content
+      "Hello, World!",             // ASCII
+      u8"こんにちは",              // Japanese (Hiragana)
+      u8"日本語テスト",            // Japanese (Kanji + Katakana)
+      u8"你好世界",                // Chinese
+      u8"Привет мир",              // Russian
+      u8"🎉🚀💻",                  // Emojis (4-byte UTF-8)
+      u8"Mixed: Hello 日本語 🎉",  // Mixed content
   };
 
   for (size_t i = 0; i < test_strings.size(); i++) {
@@ -764,8 +763,7 @@ TEST_F(RowsParserBugFixesTest, Bug9_ValidUtf8PassThrough) {
 
     ASSERT_TRUE(result.has_value()) << "Failed for string: " << test_str;
     ASSERT_EQ(1, result->size());
-    EXPECT_EQ(test_str, result->front().columns.at("content"))
-        << "Mismatch for valid UTF-8 string: " << test_str;
+    EXPECT_EQ(test_str, result->front().columns.at("content")) << "Mismatch for valid UTF-8 string: " << test_str;
   }
 }
 
@@ -850,10 +848,9 @@ TEST_F(RowsParserBugFixesTest, Bug9_InvalidUtf8Sanitized) {
 
     // The result should be valid UTF-8 (can be processed without errors)
     // Check that it contains replacement characters for invalid sequences
-    EXPECT_TRUE(content.find(kReplacementChar) != std::string::npos ||
-                content.find("[") == 0 ||  // Error marker
-                content.empty() ||          // Sanitized to empty
-                content == std::string(tc.input.begin(), tc.input.end()))  // Or ASCII-safe
+    EXPECT_TRUE(content.find(kReplacementChar) != std::string::npos || content.find("[") == 0 ||  // Error marker
+                content.empty() ||                                                                // Sanitized to empty
+                content == std::string(tc.input.begin(), tc.input.end()))                         // Or ASCII-safe
         << "Invalid UTF-8 not handled for: " << tc.description;
   }
 }
@@ -978,10 +975,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedIntLargeValue) {
   // Encode UNSIGNED INT value 4000000000 (> INT_MAX)
   uint32_t unsigned_val = 4000000000U;
   std::vector<unsigned char> row_data = {
-      static_cast<unsigned char>(unsigned_val & 0xFF),
-      static_cast<unsigned char>((unsigned_val >> 8) & 0xFF),
-      static_cast<unsigned char>((unsigned_val >> 16) & 0xFF),
-      static_cast<unsigned char>((unsigned_val >> 24) & 0xFF)};
+      static_cast<unsigned char>(unsigned_val & 0xFF), static_cast<unsigned char>((unsigned_val >> 8) & 0xFF),
+      static_cast<unsigned char>((unsigned_val >> 16) & 0xFF), static_cast<unsigned char>((unsigned_val >> 24) & 0xFF)};
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
@@ -1026,8 +1021,7 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedTinyIntLargeValue) {
 
   // Bug #32: Before fix, this would be "-56" (overflow to negative)
   // After fix, this should be "200"
-  EXPECT_EQ("200", result->front().columns.at("id"))
-      << "Bug #32: UNSIGNED TINYINT should preserve values 128-255";
+  EXPECT_EQ("200", result->front().columns.at("id")) << "Bug #32: UNSIGNED TINYINT should preserve values 128-255";
 }
 
 /**
@@ -1119,10 +1113,9 @@ TEST_F(RowsParserBugFixesTest, Bug32_SignedIntNegativeValue) {
 
   // Encode SIGNED INT value -1000
   int32_t signed_val = -1000;
-  std::vector<unsigned char> row_data = {static_cast<unsigned char>(signed_val & 0xFF),
-                                         static_cast<unsigned char>((signed_val >> 8) & 0xFF),
-                                         static_cast<unsigned char>((signed_val >> 16) & 0xFF),
-                                         static_cast<unsigned char>((signed_val >> 24) & 0xFF)};
+  std::vector<unsigned char> row_data = {
+      static_cast<unsigned char>(signed_val & 0xFF), static_cast<unsigned char>((signed_val >> 8) & 0xFF),
+      static_cast<unsigned char>((signed_val >> 16) & 0xFF), static_cast<unsigned char>((signed_val >> 24) & 0xFF)};
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
@@ -1132,8 +1125,663 @@ TEST_F(RowsParserBugFixesTest, Bug32_SignedIntNegativeValue) {
   ASSERT_EQ(1, result->size());
 
   // Should correctly show negative value
-  EXPECT_EQ("-1000", result->front().columns.at("id"))
-      << "SIGNED INT should still handle negative values correctly";
+  EXPECT_EQ("-1000", result->front().columns.at("id")) << "SIGNED INT should still handle negative values correctly";
+}
+
+// =============================================================================
+// BUG-0072: GEOMETRY type support
+// =============================================================================
+// GEOMETRY type (col_type=255) is not supported, returning [UNSUPPORTED_TYPE:255]
+// which causes parse failures for tables containing geometry columns.
+// =============================================================================
+
+/**
+ * @test BUG-0072: GEOMETRY type should be parsed as WKB hex string
+ *
+ * GEOMETRY columns store data in WKB (Well-Known Binary) format.
+ * The parser should handle this type and return a hex representation.
+ */
+TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeBasic) {
+  TableMetadata table_meta;
+  table_meta.table_id = 400;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "geo_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_geo;
+  col_geo.type = ColumnType::GEOMETRY;  // col_type = 255
+  col_geo.name = "location";
+  col_geo.metadata = 4;  // 4 bytes for length prefix (like BLOB)
+  table_meta.columns.push_back(col_geo);
+
+  // Create row data: id=1, location=simple WKB point
+  std::vector<unsigned char> row_data;
+
+  // id=1 (4 bytes, little-endian)
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // GEOMETRY: 4-byte length prefix + WKB data
+  // Simple WKB POINT: byte order (1) + type (1=Point, 4 bytes) + X (8 bytes) + Y (8 bytes)
+  // Total: 21 bytes
+  std::vector<unsigned char> wkb_point = {
+      0x01,                                            // Little-endian byte order
+      0x01, 0x00, 0x00, 0x00,                          // Type = 1 (Point)
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x59, 0x40,  // X = 100.0
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x40   // Y = 50.0
+  };
+
+  // Length prefix (4 bytes, little-endian)
+  uint32_t geo_len = wkb_point.size();
+  row_data.push_back(geo_len & 0xFF);
+  row_data.push_back((geo_len >> 8) & 0xFF);
+  row_data.push_back((geo_len >> 16) & 0xFF);
+  row_data.push_back((geo_len >> 24) & 0xFF);
+
+  // WKB data
+  row_data.insert(row_data.end(), wkb_point.begin(), wkb_point.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value()) << "BUG-0072: GEOMETRY type should be parsed successfully";
+  ASSERT_EQ(1, result->size());
+
+  // The geometry column should exist and not contain [UNSUPPORTED_TYPE:255]
+  ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
+  std::string geo_value = result->front().columns.at("location");
+  EXPECT_TRUE(geo_value.find("UNSUPPORTED") == std::string::npos)
+      << "BUG-0072: GEOMETRY should not return UNSUPPORTED_TYPE, got: " << geo_value;
+}
+
+// =============================================================================
+// BUG-0087: DECIMAL type precision guarantee
+// =============================================================================
+// The decode_decimal function in binlog_util.h has issues with:
+// 1. Sign bit handling: first byte's 0x80 bit must be XORed out for positive values
+// 2. Negative value restoration: all bytes should be XORed with 0xFF
+// =============================================================================
+
+/**
+ * @brief Helper to create DECIMAL binary representation in MySQL format
+ *
+ * MySQL DECIMAL binary format:
+ * - Sign bit is stored in MSB of first byte (0x80)
+ * - For positive: XOR first byte with 0x80 (sets the bit)
+ * - For negative: XOR all bytes with 0xFF, then XOR first byte with 0x80 (clears it)
+ *
+ * @param value The decimal value as string (e.g., "123.45", "-999.99")
+ * @param precision Total number of digits
+ * @param scale Number of digits after decimal point
+ * @return Binary representation
+ */
+inline std::vector<unsigned char> EncodeDecimalValue(const std::string& value, uint8_t precision, uint8_t scale) {
+  // Parse sign and digits
+  bool is_negative = !value.empty() && value[0] == '-';
+  std::string abs_value = is_negative ? value.substr(1) : value;
+
+  // Remove decimal point and get integer/fractional parts
+  size_t dot_pos = abs_value.find('.');
+  std::string int_part, frac_part;
+  if (dot_pos != std::string::npos) {
+    int_part = abs_value.substr(0, dot_pos);
+    frac_part = abs_value.substr(dot_pos + 1);
+  } else {
+    int_part = abs_value;
+    frac_part = "";
+  }
+
+  // Pad/truncate to correct precision
+  int intg = precision - scale;
+  while (int_part.length() < static_cast<size_t>(intg)) int_part = "0" + int_part;
+  while (frac_part.length() < scale) frac_part += "0";
+
+  static const int dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+
+  int intg0 = intg / 9;
+  int intg_rem = intg % 9;
+  int frac0 = scale / 9;
+  int frac_rem = scale % 9;
+
+  std::vector<unsigned char> result;
+
+  // Encode integer remainder (leading digits)
+  if (intg_rem > 0) {
+    int32_t val = std::stoi(int_part.substr(0, intg_rem));
+    int bytes = dig2bytes[intg_rem];
+    for (int i = bytes - 1; i >= 0; i--) {
+      result.push_back((val >> (i * 8)) & 0xFF);
+    }
+    int_part = int_part.substr(intg_rem);
+  }
+
+  // Encode full 9-digit groups in integer part
+  for (int i = 0; i < intg0; i++) {
+    int32_t val = std::stoi(int_part.substr(i * 9, 9));
+    for (int j = 3; j >= 0; j--) {
+      result.push_back((val >> (j * 8)) & 0xFF);
+    }
+  }
+
+  // Encode full 9-digit groups in fractional part
+  for (int i = 0; i < frac0; i++) {
+    int32_t val = std::stoi(frac_part.substr(i * 9, 9));
+    for (int j = 3; j >= 0; j--) {
+      result.push_back((val >> (j * 8)) & 0xFF);
+    }
+  }
+
+  // Encode fractional remainder
+  if (frac_rem > 0) {
+    int32_t val = std::stoi(frac_part.substr(frac0 * 9, frac_rem));
+    int bytes = dig2bytes[frac_rem];
+    for (int i = bytes - 1; i >= 0; i--) {
+      result.push_back((val >> (i * 8)) & 0xFF);
+    }
+  }
+
+  // Apply sign encoding: XOR with 0x80 for first byte, XOR all with 0xFF if negative
+  if (is_negative) {
+    for (auto& b : result) {
+      b ^= 0xFF;
+    }
+  }
+  if (!result.empty()) {
+    result[0] ^= 0x80;  // Toggle sign bit
+  }
+
+  return result;
+}
+
+/**
+ * @test BUG-0087: DECIMAL positive integer value
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalPositiveInteger) {
+  TableMetadata table_meta;
+  table_meta.table_id = 500;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "amount";
+  // DECIMAL(5,0): precision=5, scale=0, metadata = (5 << 8) | 0 = 1280
+  col_decimal.metadata = (5 << 8) | 0;
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(5,0) value = 12345
+  auto decimal_bytes = EncodeDecimalValue("12345", 5, 0);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("amount");
+  EXPECT_EQ("12345", decimal_value) << "BUG-0087: DECIMAL positive integer should be parsed correctly";
+}
+
+/**
+ * @test BUG-0087: DECIMAL negative integer value
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalNegativeInteger) {
+  TableMetadata table_meta;
+  table_meta.table_id = 501;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "amount";
+  col_decimal.metadata = (5 << 8) | 0;  // DECIMAL(5,0)
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(5,0) value = -12345
+  auto decimal_bytes = EncodeDecimalValue("-12345", 5, 0);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("amount");
+  EXPECT_EQ("-12345", decimal_value) << "BUG-0087: DECIMAL negative integer should be parsed correctly";
+}
+
+/**
+ * @test BUG-0087: DECIMAL with fractional part
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalWithFraction) {
+  TableMetadata table_meta;
+  table_meta.table_id = 502;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "price";
+  col_decimal.metadata = (10 << 8) | 2;  // DECIMAL(10,2)
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(10,2) value = 12345678.90
+  auto decimal_bytes = EncodeDecimalValue("12345678.90", 10, 2);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("price");
+  EXPECT_EQ("12345678.90", decimal_value) << "BUG-0087: DECIMAL with fraction should be parsed correctly";
+}
+
+/**
+ * @test BUG-0087: DECIMAL negative with fractional part
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalNegativeWithFraction) {
+  TableMetadata table_meta;
+  table_meta.table_id = 503;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "balance";
+  col_decimal.metadata = (10 << 8) | 2;  // DECIMAL(10,2)
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(10,2) value = -99999.99
+  auto decimal_bytes = EncodeDecimalValue("-99999.99", 10, 2);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("balance");
+  EXPECT_EQ("-99999.99", decimal_value) << "BUG-0087: DECIMAL negative with fraction should be parsed correctly";
+}
+
+/**
+ * @test BUG-0087: DECIMAL zero value
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalZero) {
+  TableMetadata table_meta;
+  table_meta.table_id = 504;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "amount";
+  col_decimal.metadata = (5 << 8) | 2;  // DECIMAL(5,2)
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(5,2) value = 0.00
+  auto decimal_bytes = EncodeDecimalValue("0.00", 5, 2);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("amount");
+  // Zero should be parsed as "0" or "0.00"
+  EXPECT_TRUE(decimal_value == "0" || decimal_value == "0.00")
+      << "BUG-0087: DECIMAL zero should be parsed correctly, got: " << decimal_value;
+}
+
+/**
+ * @test BUG-0087: DECIMAL small value (less than 1)
+ */
+TEST_F(RowsParserBugFixesTest, Bug0087_DecimalSmallValue) {
+  TableMetadata table_meta;
+  table_meta.table_id = 505;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "decimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_decimal;
+  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.name = "rate";
+  col_decimal.metadata = (5 << 8) | 4;  // DECIMAL(5,4)
+  table_meta.columns.push_back(col_decimal);
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // DECIMAL(5,4) value = 0.1234
+  auto decimal_bytes = EncodeDecimalValue("0.1234", 5, 4);
+  row_data.insert(row_data.end(), decimal_bytes.begin(), decimal_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  std::string decimal_value = result->front().columns.at("rate");
+  EXPECT_EQ("0.1234", decimal_value) << "BUG-0087: DECIMAL small value should be parsed correctly";
+}
+
+// =============================================================================
+// BUG-0085: binlog_row_image=MINIMAL/NOBLOB support
+// =============================================================================
+// When binlog_row_image is set to MINIMAL or NOBLOB, not all columns are
+// present in the row event. The columns_present bitmap indicates which
+// columns are included. The parser must correctly handle missing columns.
+// =============================================================================
+
+/**
+ * @brief Create WRITE_ROWS_EVENT with custom columns_present bitmap
+ *
+ * @param table_meta Table metadata
+ * @param row_data Row data bytes
+ * @param null_bitmap NULL bitmap bytes
+ * @param columns_present Custom columns_present bitmap
+ * @return Event buffer
+ */
+inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(
+    const TableMetadata& table_meta, const std::vector<unsigned char>& row_data,
+    const std::vector<unsigned char>& null_bitmap,
+    const std::vector<unsigned char>& columns_present) {
+  std::vector<unsigned char> buffer;
+
+  // Common header (19 bytes)
+  for (int i = 0; i < 19; i++) {
+    buffer.push_back(0);
+  }
+
+  // Post-header: table_id (6 bytes)
+  uint64_t table_id = table_meta.table_id;
+  for (int i = 0; i < 6; i++) {
+    buffer.push_back((table_id >> (i * 8)) & 0xFF);
+  }
+
+  // Post-header: flags (2 bytes)
+  buffer.push_back(0);
+  buffer.push_back(0);
+
+  // Body: column count (packed integer)
+  uint64_t col_count = table_meta.columns.size();
+  if (col_count < 251) {
+    buffer.push_back(static_cast<unsigned char>(col_count));
+  }
+
+  // Body: columns_present bitmap (from parameter)
+  buffer.insert(buffer.end(), columns_present.begin(), columns_present.end());
+
+  // Row: NULL bitmap + row data
+  buffer.insert(buffer.end(), null_bitmap.begin(), null_bitmap.end());
+  buffer.insert(buffer.end(), row_data.begin(), row_data.end());
+
+  // 4-byte checksum placeholder
+  buffer.push_back(0);
+  buffer.push_back(0);
+  buffer.push_back(0);
+  buffer.push_back(0);
+
+  // Fill in event_size at bytes [9-12]
+  uint32_t event_size = buffer.size();
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
+  return buffer;
+}
+
+/**
+ * @test BUG-0085: MINIMAL mode - only some columns present
+ *
+ * Simulates binlog_row_image=MINIMAL where only the primary key and
+ * modified columns are present in the event.
+ */
+TEST_F(RowsParserBugFixesTest, Bug0085_MinimalModePartialColumns) {
+  TableMetadata table_meta;
+  table_meta.table_id = 600;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "minimal_test";
+
+  // 3 columns: id, name, status
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_name;
+  col_name.type = ColumnType::VAR_STRING;
+  col_name.name = "name";
+  col_name.metadata = 255;  // Max length 255
+  table_meta.columns.push_back(col_name);
+
+  ColumnMetadata col_status;
+  col_status.type = ColumnType::LONG;
+  col_status.name = "status";
+  col_status.metadata = 0;
+  table_meta.columns.push_back(col_status);
+
+  // In MINIMAL mode, only id and status are present (name is not modified)
+  // columns_present bitmap: 0b00000101 = 0x05 (columns 0 and 2)
+  std::vector<unsigned char> columns_present = {0x05};
+
+  // Row data: only id=42 and status=1 (name is skipped)
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(42);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+  auto status_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), status_bytes.begin(), status_bytes.end());
+
+  // NULL bitmap: 1 byte, all present columns are non-NULL
+  std::vector<unsigned char> null_bitmap = {0x00};
+
+  auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value()) << "BUG-0085: Parser should handle MINIMAL mode";
+  ASSERT_EQ(1, result->size());
+
+  // Present columns should be parsed
+  EXPECT_EQ("42", result->front().columns.at("id"));
+  EXPECT_EQ("1", result->front().columns.at("status"));
+
+  // Missing column should not be in the result
+  EXPECT_EQ(result->front().columns.find("name"), result->front().columns.end())
+      << "BUG-0085: Missing column should not appear in result";
+}
+
+/**
+ * @test BUG-0085: MINIMAL mode with only primary key present
+ */
+TEST_F(RowsParserBugFixesTest, Bug0085_MinimalModeOnlyPrimaryKey) {
+  TableMetadata table_meta;
+  table_meta.table_id = 601;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "minimal_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_data;
+  col_data.type = ColumnType::VAR_STRING;
+  col_data.name = "data";
+  col_data.metadata = 255;
+  table_meta.columns.push_back(col_data);
+
+  // Only primary key present (column 0)
+  std::vector<unsigned char> columns_present = {0x01};
+
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(100);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};
+
+  auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  EXPECT_EQ("100", result->front().columns.at("id"));
+  EXPECT_EQ("100", result->front().primary_key);
+  EXPECT_EQ(result->front().columns.find("data"), result->front().columns.end());
+}
+
+/**
+ * @test BUG-0085: All columns missing (edge case - should handle gracefully)
+ */
+TEST_F(RowsParserBugFixesTest, Bug0085_NoColumnsPresent) {
+  TableMetadata table_meta;
+  table_meta.table_id = 602;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "empty_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  // No columns present
+  std::vector<unsigned char> columns_present = {0x00};
+  std::vector<unsigned char> row_data;
+  std::vector<unsigned char> null_bitmap = {0x00};
+
+  auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  // Should return a result with an empty row (no crash)
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+  EXPECT_TRUE(result->front().columns.empty());
+}
+
+/**
+ * @test BUG-0072: Empty GEOMETRY (zero-length) should be handled correctly
+ */
+TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeEmpty) {
+  TableMetadata table_meta;
+  table_meta.table_id = 401;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "geo_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_geo;
+  col_geo.type = ColumnType::GEOMETRY;
+  col_geo.name = "location";
+  col_geo.metadata = 4;
+  table_meta.columns.push_back(col_geo);
+
+  // Create row data: id=1, location=empty geometry (0 length)
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // GEOMETRY with length 0 (4-byte length prefix = 0x00000000)
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+
+  std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  // Empty geometry should result in empty string
+  ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
+  EXPECT_EQ("", result->front().columns.at("location"))
+      << "Empty GEOMETRY should return empty string";
 }
 
 #endif  // USE_MYSQL

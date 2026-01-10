@@ -98,6 +98,12 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
       return "UPDATE_ROWS_EVENT";
     case MySQLBinlogEventType::DELETE_ROWS_EVENT:
       return "DELETE_ROWS_EVENT";
+    case MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1:
+      return "WRITE_ROWS_EVENT_V1";
+    case MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1:
+      return "UPDATE_ROWS_EVENT_V1";
+    case MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1:
+      return "DELETE_ROWS_EVENT_V1";
     case MySQLBinlogEventType::GTID_LOG_EVENT:
       return "GTID_LOG_EVENT";
     case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT:

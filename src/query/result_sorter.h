@@ -12,10 +12,11 @@
 
 #include "query/query_parser.h"
 #include "storage/document_store.h"
+#include "types/doc_id.h"
 
 namespace mygramdb::query {
 
-using DocId = uint32_t;
+// DocId is now defined in types/doc_id.h and re-exported via namespace
 
 /**
  * @brief Sort query results with performance optimization

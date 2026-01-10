@@ -83,6 +83,61 @@ inline std::string ToZeroPaddedString(uint32_t num, int width) {
   return ToZeroPaddedString(static_cast<uint64_t>(num), width);
 }
 
+/**
+ * @brief Convert signed integer to zero-padded string using std::to_chars
+ *
+ * This function adds kSignedOffset to make negative values sortable lexicographically,
+ * then converts to zero-padded string.
+ *
+ * @param num Signed number to convert
+ * @param width Target width (will be zero-padded)
+ * @return Zero-padded string
+ */
+inline std::string ToZeroPaddedSignedString(int64_t num, int width) {
+  // Add offset to make all values positive for sorting
+  uint64_t adjusted = static_cast<uint64_t>(num + kSignedOffset);
+  return ToZeroPaddedString(adjusted, width);
+}
+
+/**
+ * @brief Convert double to zero-padded string using std::to_chars (locale-independent)
+ *
+ * Uses std::to_chars for locale-independent conversion, avoiding locale contention
+ * in multi-threaded environments.
+ *
+ * @param value Double value to convert
+ * @param width Target total width (including decimal point and decimals)
+ * @param precision Number of digits after decimal point
+ * @return Zero-padded string representation
+ */
+inline std::string ToZeroPaddedDoubleString(double value, int width, int precision) {
+  // Buffer large enough for reasonable double representation
+  constexpr size_t kDoubleBufferSize = 64;
+  std::array<char, kDoubleBufferSize> buf{};
+
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value,
+                                  std::chars_format::fixed, precision);
+
+  if (ec != std::errc()) {
+    // Fallback to std::to_string (should rarely happen)
+    return std::to_string(value);
+  }
+
+  auto num_chars = static_cast<size_t>(ptr - buf.data());
+  auto target_width = static_cast<size_t>(width);
+
+  if (num_chars >= target_width) {
+    return {buf.data(), num_chars};
+  }
+
+  // Zero-pad on the left
+  std::string result(target_width, '0');
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  std::copy(buf.data(), ptr, result.data() + (target_width - num_chars));
+  return result;
+}
+
 }  // namespace
 
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
@@ -102,12 +157,8 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
           uint64_t num = std::stoull(pk_str);
           // Convert to zero-padded string (20 digits) for lexicographic comparison
           // This ensures: "00000000000000000001" < "00000000000000000002" < "00000000000000000010"
-          // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          char buf[kNumericBufferSize];
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(num));
-          // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          // Using std::to_chars (locale-independent, no lock contention)
+          return ToZeroPaddedString(num, kNumericWidth);
         } catch (const std::exception&) {
           // Overflow or parse error - fall through to string comparison
         }
@@ -118,12 +169,8 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
     }
     // Fallback: use DocID itself (numeric)
     // Pre-pad to avoid repeated string allocation in comparator
-    // Note: Using C-style buffer and snprintf for optimal performance in hot path
-    // This sorting function is called millions of times, std::format is too slow
-    char buf[kDocIdBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    snprintf(buf, sizeof(buf), "%0*u", kDocIdWidth, doc_id);
-    return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    // Using std::to_chars (locale-independent, no lock contention)
+    return ToZeroPaddedString(doc_id, kDocIdWidth);
   }
 
   // Ordering by filter column
@@ -142,10 +189,8 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
             std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
           try {
             uint64_t num = std::stoull(pk_str);
-            char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            snprintf(buf, sizeof(buf), "%020llu", static_cast<unsigned long long>(num));
-            return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            // Using std::to_chars (locale-independent, no lock contention)
+            return ToZeroPaddedString(num, kNumericWidth);
           } catch (const std::exception&) {
             // Overflow or parse error - fall through to string comparison
           }
@@ -175,29 +220,21 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
         } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
           // TimeValue: sort by seconds (can be negative)
           // Add offset to make all values positive for sorting
-          char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          snprintf(buf, sizeof(buf), "%0*lld", kNumericWidth, arg.seconds + kSignedOffset);
-          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          // Using std::to_chars (locale-independent, no lock contention)
+          return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
         } else {
           // Numeric types: pad with zeros for lexicographic comparison
           // This ensures proper numeric ordering
-          // Note: Using C-style buffer and snprintf for optimal performance
-          // This lambda is called millions of times in sorting, std::format is too slow
-          char buf[kNumericBufferSize];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          // Using std::to_chars (locale-independent, no lock contention in parallel sorting)
           if constexpr (std::is_same_v<T, double>) {
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            snprintf(buf, sizeof(buf), "%0*.*f", kDoubleWidth, kDoublePrecision, arg);
+            return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
           } else if constexpr (std::is_signed_v<T>) {
             // Signed: add offset to make all values positive for sorting
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            snprintf(buf, sizeof(buf), "%0*lld", kNumericWidth, static_cast<long long>(arg) + kSignedOffset);
+            return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
           } else {
             // Unsigned
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            snprintf(buf, sizeof(buf), "%0*llu", kNumericWidth, static_cast<unsigned long long>(arg));
+            return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
           }
-          return {buf};  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
         }
       },
       filter_val.value());

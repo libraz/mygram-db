@@ -45,6 +45,10 @@ enum class BinlogEventType : uint8_t {
 
 /**
  * @brief Binlog event
+ *
+ * Represents a parsed binlog event with validation and factory methods.
+ * Use factory methods (CreateInsert, CreateUpdate, etc.) for type-safe creation,
+ * or direct construction for backward compatibility.
  */
 struct BinlogEvent {
   BinlogEventType type = BinlogEventType::UNKNOWN;
@@ -54,6 +58,112 @@ struct BinlogEvent {
   std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
   std::unordered_map<std::string, storage::FilterValue> filters;
   std::string gtid;  // GTID for this event
+
+  /**
+   * @brief Check if this event satisfies its invariants
+   *
+   * Invariants by event type:
+   * - INSERT: requires table_name, primary_key
+   * - UPDATE: requires table_name, primary_key
+   * - DELETE: requires table_name, primary_key
+   * - DDL: requires table_name
+   * - UNKNOWN: always invalid
+   *
+   * @return true if the event is valid
+   */
+  [[nodiscard]] bool IsValid() const {
+    switch (type) {
+      case BinlogEventType::INSERT:
+      case BinlogEventType::UPDATE:
+      case BinlogEventType::DELETE:
+        return !table_name.empty() && !primary_key.empty();
+      case BinlogEventType::DDL:
+        return !table_name.empty();
+      case BinlogEventType::UNKNOWN:
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * @brief Create an INSERT event
+   *
+   * @param table Table name
+   * @param pk Primary key value
+   * @param txt Text content
+   * @param gtid_val GTID for this event
+   * @return BinlogEvent with INSERT type
+   */
+  static BinlogEvent CreateInsert(const std::string& table, const std::string& pk, const std::string& txt,
+                                  const std::string& gtid_val = "") {
+    BinlogEvent event;
+    event.type = BinlogEventType::INSERT;
+    event.table_name = table;
+    event.primary_key = pk;
+    event.text = txt;
+    event.gtid = gtid_val;
+    return event;
+  }
+
+  /**
+   * @brief Create an UPDATE event
+   *
+   * @param table Table name
+   * @param pk Primary key value
+   * @param new_txt New text content (after image)
+   * @param old_txt Old text content (before image)
+   * @param gtid_val GTID for this event
+   * @return BinlogEvent with UPDATE type
+   */
+  static BinlogEvent CreateUpdate(const std::string& table, const std::string& pk, const std::string& new_txt,
+                                  const std::string& old_txt = "", const std::string& gtid_val = "") {
+    BinlogEvent event;
+    event.type = BinlogEventType::UPDATE;
+    event.table_name = table;
+    event.primary_key = pk;
+    event.text = new_txt;
+    event.old_text = old_txt;
+    event.gtid = gtid_val;
+    return event;
+  }
+
+  /**
+   * @brief Create a DELETE event
+   *
+   * @param table Table name
+   * @param pk Primary key value
+   * @param txt Text content (for index removal)
+   * @param gtid_val GTID for this event
+   * @return BinlogEvent with DELETE type
+   */
+  static BinlogEvent CreateDelete(const std::string& table, const std::string& pk, const std::string& txt = "",
+                                  const std::string& gtid_val = "") {
+    BinlogEvent event;
+    event.type = BinlogEventType::DELETE;
+    event.table_name = table;
+    event.primary_key = pk;
+    event.text = txt;
+    event.gtid = gtid_val;
+    return event;
+  }
+
+  /**
+   * @brief Create a DDL event
+   *
+   * @param table Table name affected by DDL
+   * @param query DDL query text
+   * @param gtid_val GTID for this event
+   * @return BinlogEvent with DDL type
+   */
+  static BinlogEvent CreateDDL(const std::string& table, const std::string& query = "",
+                               const std::string& gtid_val = "") {
+    BinlogEvent event;
+    event.type = BinlogEventType::DDL;
+    event.table_name = table;
+    event.text = query;
+    event.gtid = gtid_val;
+    return event;
+  }
 };
 
 /**

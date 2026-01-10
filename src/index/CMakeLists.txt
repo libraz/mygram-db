@@ -11,4 +11,5 @@ target_link_libraries(mygramdb_index PUBLIC
   mygramdb_utils
   roaring
   spdlog::spdlog
+  absl::flat_hash_map
 )

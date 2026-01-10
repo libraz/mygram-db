@@ -1704,3 +1704,314 @@ TEST(QueryParserTest, Bug27_SetCommandMissingEquals) {
   auto query = parser.Parse("SET var value");
   EXPECT_FALSE(query);  // Should be error, not crash
 }
+
+// =============================================================================
+// LIMIT/OFFSET Boundary Value Tests
+// =============================================================================
+
+/**
+ * @test LIMIT with zero should be rejected
+ *
+ * LIMIT 0 is invalid - requesting 0 results doesn't make sense.
+ */
+TEST(QueryParserTest, LimitZeroRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 0");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("positive"), std::string::npos);
+}
+
+/**
+ * @test LIMIT with negative value should be rejected
+ */
+TEST(QueryParserTest, LimitNegativeRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT -1");
+  EXPECT_FALSE(query);
+  // Parser returns error for invalid LIMIT value
+}
+
+/**
+ * @test OFFSET with negative value should be rejected
+ */
+TEST(QueryParserTest, OffsetNegativeRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET -1");
+  EXPECT_FALSE(query);
+  // Parser returns error for negative OFFSET
+}
+
+/**
+ * @test OFFSET with zero should be accepted
+ *
+ * OFFSET 0 is valid and equivalent to no offset.
+ */
+TEST(QueryParserTest, OffsetZeroAccepted) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 0");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 0);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test Large OFFSET should be accepted
+ *
+ * Large offsets are valid, though may return empty results.
+ */
+TEST(QueryParserTest, LargOffsetAccepted) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 1000000");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 1000000);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test LIMIT offset,count format - both valid
+ */
+TEST(QueryParserTest, LimitOffsetCountFormatValid) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,50");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 10);
+  EXPECT_EQ(query->limit, 50);
+  EXPECT_TRUE(query->offset_explicit);
+  EXPECT_TRUE(query->limit_explicit);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test LIMIT offset,count format - zero offset valid
+ */
+TEST(QueryParserTest, LimitOffsetCountFormatZeroOffset) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 0,100");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 0);
+  EXPECT_EQ(query->limit, 100);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test LIMIT offset,count format - zero count rejected
+ */
+TEST(QueryParserTest, LimitOffsetCountFormatZeroCount) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,0");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("positive"), std::string::npos);
+}
+
+/**
+ * @test LIMIT offset,count format - negative offset rejected
+ */
+TEST(QueryParserTest, LimitOffsetCountFormatNegativeOffset) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT -10,50");
+  EXPECT_FALSE(query);
+  // Invalid format or negative offset
+}
+
+/**
+ * @test LIMIT offset,count format - count exceeds maximum
+ */
+TEST(QueryParserTest, LimitOffsetCountFormatExceedsMax) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,1001");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("maximum"), std::string::npos);
+}
+
+/**
+ * @test LIMIT without value should be rejected
+ */
+TEST(QueryParserTest, LimitWithoutValueRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("requires"), std::string::npos);
+}
+
+/**
+ * @test OFFSET without value should be rejected
+ */
+TEST(QueryParserTest, OffsetWithoutValueRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("requires"), std::string::npos);
+}
+
+/**
+ * @test LIMIT with non-numeric value should be rejected
+ */
+TEST(QueryParserTest, LimitNonNumericRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT abc");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("Invalid LIMIT"), std::string::npos);
+}
+
+/**
+ * @test OFFSET with non-numeric value should be rejected
+ */
+TEST(QueryParserTest, OffsetNonNumericRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET xyz");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("Invalid OFFSET"), std::string::npos);
+}
+
+/**
+ * @test LIMIT 1 is minimum valid value
+ */
+TEST(QueryParserTest, LimitOneAccepted) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 1");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->limit, 1);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test LIMIT at maximum (1000) is accepted
+ */
+TEST(QueryParserTest, LimitMaxAccepted) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 1000");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->limit, 1000);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test LIMIT just above maximum (1001) is rejected
+ */
+TEST(QueryParserTest, LimitJustAboveMaxRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 1001");
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("maximum"), std::string::npos);
+}
+
+/**
+ * @test OFFSET order - OFFSET before LIMIT should work
+ */
+TEST(QueryParserTest, OffsetBeforeLimitAccepted) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 20 LIMIT 10");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 20);
+  EXPECT_EQ(query->limit, 10);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test Duplicate LIMIT should use last value
+ */
+TEST(QueryParserTest, DuplicateLimitUsesLast) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 50 LIMIT 100");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->limit, 100);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test Duplicate OFFSET should use last value
+ */
+TEST(QueryParserTest, DuplicateOffsetUsesLast) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 10 OFFSET 20");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 20);
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test Very large OFFSET that could overflow 32-bit integer
+ */
+TEST(QueryParserTest, OverflowOffsetHandled) {
+  QueryParser parser;
+
+  // std::stoi will throw for overflow values
+  auto query = parser.Parse("SEARCH articles hello OFFSET 9999999999");
+  EXPECT_FALSE(query);
+  // Should return error for invalid value, not crash
+}
+
+/**
+ * @test Very large LIMIT that could overflow 32-bit integer
+ */
+TEST(QueryParserTest, OverflowLimitHandled) {
+  QueryParser parser;
+
+  // std::stoi will throw for overflow values
+  auto query = parser.Parse("SEARCH articles hello LIMIT 9999999999");
+  EXPECT_FALSE(query);
+  // Should return error for invalid value, not crash
+}
+
+/**
+ * @test LIMIT with floating point value truncates to integer
+ *
+ * std::stoi parses "10.5" as "10" (stops at non-digit character).
+ * This is current behavior - floating point values are truncated.
+ */
+TEST(QueryParserTest, LimitFloatingPointTruncated) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10.5");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->limit, 10);  // Truncated to integer
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test OFFSET with floating point value truncates to integer
+ *
+ * std::stoi parses "10.5" as "10" (stops at non-digit character).
+ * This is current behavior - floating point values are truncated.
+ */
+TEST(QueryParserTest, OffsetFloatingPointTruncated) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 10.5");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 10);  // Truncated to integer
+  EXPECT_TRUE(query->IsValid());
+}
+
+/**
+ * @test Combined large OFFSET and LIMIT within bounds
+ */
+TEST(QueryParserTest, LargeOffsetWithMaxLimit) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 100000 LIMIT 1000");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 100000);
+  EXPECT_EQ(query->limit, 1000);
+  EXPECT_TRUE(query->IsValid());
+}

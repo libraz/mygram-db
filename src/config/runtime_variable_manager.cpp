@@ -371,11 +371,11 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& 
     int current_port = 0;
     {
       std::shared_lock lock(mutex_);
-      auto it = runtime_values_.find("mysql.port");
-      if (it == runtime_values_.end()) {
+      auto port_iter = runtime_values_.find("mysql.port");
+      if (port_iter == runtime_values_.end()) {
         return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.port not found in runtime values"));
       }
-      auto port_result = ParseInt(it->second);
+      auto port_result = ParseInt(port_iter->second);
       if (!port_result) {
         return MakeUnexpected(port_result.error());
       }
@@ -397,11 +397,11 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
     std::string current_host;
     {
       std::shared_lock lock(mutex_);
-      auto it = runtime_values_.find("mysql.host");
-      if (it == runtime_values_.end()) {
+      auto host_iter = runtime_values_.find("mysql.host");
+      if (host_iter == runtime_values_.end()) {
         return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.host not found in runtime values"));
       }
-      current_host = it->second;
+      current_host = host_iter->second;
     }
     return mysql_reconnect_callback_(current_host, value);
   }

@@ -51,29 +51,29 @@ bool TableMetadataCache::Contains(uint64_t table_id) const {
   return cache_.find(table_id) != cache_.end();
 }
 
-bool TableMetadataCache::SchemaEquals(const TableMetadata& a, const TableMetadata& b) const {
+bool TableMetadataCache::SchemaEquals(const TableMetadata& lhs, const TableMetadata& rhs) {
   // Different column count means schema changed
-  if (a.columns.size() != b.columns.size()) {
+  if (lhs.columns.size() != rhs.columns.size()) {
     return false;
   }
 
   // Check each column
-  for (size_t i = 0; i < a.columns.size(); ++i) {
-    const auto& col_a = a.columns[i];
-    const auto& col_b = b.columns[i];
+  for (size_t idx = 0; idx < lhs.columns.size(); ++idx) {
+    const auto& col_lhs = lhs.columns[idx];
+    const auto& col_rhs = rhs.columns[idx];
 
     // Check type
-    if (col_a.type != col_b.type) {
+    if (col_lhs.type != col_rhs.type) {
       return false;
     }
 
     // Check metadata (affects parsing)
-    if (col_a.metadata != col_b.metadata) {
+    if (col_lhs.metadata != col_rhs.metadata) {
       return false;
     }
 
     // Check name (might change after ALTER TABLE)
-    if (col_a.name != col_b.name) {
+    if (col_lhs.name != col_rhs.name) {
       return false;
     }
   }

@@ -12,6 +12,12 @@
 #include <cstring>
 #include <fstream>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+#include "utils/endian_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::storage {
@@ -42,16 +48,13 @@ constexpr uint8_t kTypeIndexString = 11;
 constexpr uint8_t kTypeIndexDouble = 12;
 
 /**
- * @brief Helper to write binary data to output stream
+ * @brief Helper to write binary data to output stream in little-endian format
  *
  * std::ofstream::write() requires const char* but we work with typed data.
- * This helper encapsulates the required type conversion.
+ * This helper encapsulates the required type conversion and endian handling.
  *
- * Why reinterpret_cast is necessary:
- * - std::ofstream::write() signature: write(const char*, streamsize)
- * - We need to write binary representations of typed objects (uint32_t, etc.)
- * - reinterpret_cast to const char* is the standard pattern for binary I/O
- * - This is type-safe as we're writing the exact binary representation
+ * All multi-byte integers are stored in little-endian format for
+ * cross-platform compatibility (BUG-0076 fix).
  *
  * @tparam T Type of data to write
  * @param output_stream Output stream
@@ -59,22 +62,29 @@ constexpr uint8_t kTypeIndexDouble = 12;
  */
 template <typename T>
 inline void WriteBinary(std::ostream& output_stream, const T& data) {
-  // Suppressing clang-tidy warning for standard binary I/O pattern
-  output_stream.write(reinterpret_cast<const char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-                      sizeof(T));
+  if constexpr (std::is_same_v<T, double>) {
+    double le_value = mygram::utils::ToLittleEndianDouble(data);
+    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
+  } else if constexpr (std::is_integral_v<T>) {
+    T le_value = mygram::utils::ToLittleEndian(data);
+    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
+  } else {
+    // For non-integral types, write as-is
+    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&data), sizeof(T));
+  }
 }
 
 /**
- * @brief Helper to read binary data from input stream
+ * @brief Helper to read binary data from input stream in little-endian format
  *
  * std::ifstream::read() requires char* but we work with typed data.
- * This helper encapsulates the required type conversion.
+ * This helper encapsulates the required type conversion and endian handling.
  *
- * Why reinterpret_cast is necessary:
- * - std::ifstream::read() signature: read(char*, streamsize)
- * - We need to read binary data into typed objects (uint32_t, etc.)
- * - reinterpret_cast to char* is the standard pattern for binary I/O
- * - This is type-safe as we're reading the exact binary representation
+ * All multi-byte integers are stored in little-endian format for
+ * cross-platform compatibility (BUG-0076 fix).
  *
  * @tparam T Type of data to read
  * @param input_stream Input stream
@@ -82,9 +92,17 @@ inline void WriteBinary(std::ostream& output_stream, const T& data) {
  */
 template <typename T>
 inline void ReadBinary(std::istream& input_stream, T& data) {
-  // Suppressing clang-tidy warning for standard binary I/O pattern
-  input_stream.read(reinterpret_cast<char*>(&data),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-                    sizeof(T));
+  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  input_stream.read(reinterpret_cast<char*>(&data), sizeof(T));
+
+  if (input_stream.good()) {
+    if constexpr (std::is_same_v<T, double>) {
+      data = mygram::utils::FromLittleEndianDouble(data);
+    } else if constexpr (std::is_integral_v<T>) {
+      data = mygram::utils::FromLittleEndian(data);
+    }
+    // For non-integral types, keep as-is
+  }
 }
 
 }  // namespace
@@ -273,8 +291,9 @@ std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
 
 std::optional<DocId> DocumentStore::GetDocId(std::string_view primary_key) const {
   std::shared_lock lock(mutex_);
-  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
-  auto iterator = pk_to_doc_id_.find(std::string(primary_key));
+  // BUG-0081: absl::flat_hash_map with TransparentStringHash enables heterogeneous lookup
+  // No temporary std::string allocation required
+  auto iterator = pk_to_doc_id_.find(primary_key);
   if (iterator == pk_to_doc_id_.end()) {
     return std::nullopt;
   }
@@ -419,7 +438,7 @@ void DocumentStore::Clear() {
 
   // Swap with empty maps to release memory (clear() doesn't shrink capacity)
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
-  std::unordered_map<std::string, DocId>().swap(pk_to_doc_id_);
+  decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
 
   next_doc_id_ = 1;
@@ -542,6 +561,23 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
     }
 
     ofs.close();
+
+    // Ensure data is flushed to disk to prevent data loss on OS crash
+#ifndef _WIN32
+    int fd = open(filepath.c_str(), O_RDONLY);
+    if (fd >= 0) {
+      if (fsync(fd) != 0) {
+        mygram::utils::StructuredLog()
+            .Event("storage_warning")
+            .Field("operation", "fsync")
+            .Field("filepath", filepath)
+            .Field("errno", static_cast<int64_t>(errno))
+            .Warn();
+      }
+      close(fd);
+    }
+#endif
+
     mygram::utils::StructuredLog()
         .Event("document_store_saved")
         .Field("path", filepath)
@@ -628,7 +664,9 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
-    std::unordered_map<std::string, DocId> new_pk_to_doc_id;
+    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash,
+                        mygram::utils::TransparentStringEqual>
+        new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
 
     // Read doc_id -> pk mappings and filters
@@ -689,9 +727,9 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
           std::string name(name_len, '\0');
           ifs.read(name.data(), name_len);
           if (!ifs.good()) {
-            return MakeUnexpected(
-                MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
-                          "Failed to read filter name data at document " + std::to_string(i), filepath));
+            return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                            "Failed to read filter name data at document " + std::to_string(i),
+                                            filepath));
           }
 
           // Read filter type
@@ -992,7 +1030,9 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
-    std::unordered_map<std::string, DocId> new_pk_to_doc_id;
+    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash,
+                        mygram::utils::TransparentStringEqual>
+        new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
 
     // Read doc_id -> pk mappings and filters

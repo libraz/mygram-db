@@ -86,7 +86,7 @@ class TableMetadataCache {
   /**
    * @brief Result of adding or updating table metadata
    */
-  enum class AddResult {
+  enum class AddResult : std::uint8_t {
     kAdded,         // New entry added
     kUpdated,       // Existing entry updated (no schema change)
     kSchemaChanged  // Existing entry updated (schema changed)
@@ -132,7 +132,7 @@ class TableMetadataCache {
    *
    * Checks column count, types, and names for differences
    */
-  [[nodiscard]] bool SchemaEquals(const TableMetadata& a, const TableMetadata& b) const;
+  [[nodiscard]] static bool SchemaEquals(const TableMetadata& lhs, const TableMetadata& rhs);
 
   std::map<uint64_t, TableMetadata> cache_;
 };

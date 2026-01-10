@@ -158,7 +158,8 @@ TEST_F(BinlogEventProcessorTest, StoreAndIndexStayInSync) {
     event.text = "document number " + std::to_string(i);
     event.table_name = "test_table";
 
-    bool result = BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
+    bool result =
+        BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
     ASSERT_TRUE(result);
   }
 
@@ -290,7 +291,8 @@ TEST_F(BinlogEventProcessorTest, Bug34_UpdateHandlesStoreUpdateFailure) {
   insert_event.text = "test text";
   insert_event.table_name = "test_table";
 
-  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   // Update with only filter changes (no text change)
   BinlogEvent update_event;
@@ -321,7 +323,8 @@ TEST_F(BinlogEventProcessorTest, Bug34_DeleteWithEmptyText) {
   insert_event.text = "test document";
   insert_event.table_name = "test_table";
 
-  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   // Delete with empty text (edge case - index removal skipped)
   BinlogEvent delete_event;
@@ -364,7 +367,8 @@ TEST_F(BinlogEventProcessorTest, Bug34_UpdateTransitionOutOfRequired) {
   insert_event.filters["status"] = static_cast<int32_t>(1);
   insert_event.table_name = "test_table";
 
-  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   // Verify document is indexed
   auto doc_id_opt = doc_store_->GetDocId("pk1");
@@ -378,7 +382,7 @@ TEST_F(BinlogEventProcessorTest, Bug34_UpdateTransitionOutOfRequired) {
   BinlogEvent update_event;
   update_event.type = BinlogEventType::UPDATE;
   update_event.primary_key = "pk1";
-  update_event.text = "document text";  // Same text for removal
+  update_event.text = "document text";                       // Same text for removal
   update_event.filters["status"] = static_cast<int32_t>(0);  // No longer matches required
   update_event.table_name = "test_table";
 

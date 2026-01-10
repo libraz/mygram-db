@@ -58,8 +58,7 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   // Append primary keys (already in correct order)
   // Track missing doc_ids for debugging index/store inconsistencies
   size_t missing_count = 0;
-  for (size_t i = 0; i < primary_keys.size(); ++i) {
-    const auto& primary_key = primary_keys[i];
+  for (const auto& primary_key : primary_keys) {
     if (!primary_key.empty()) {
       response += ' ';
       response += primary_key;
@@ -155,39 +154,40 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
 }
 
 std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {
+  // Fast path for non-debug responses
+  if (debug_info == nullptr) {
+    return "OK COUNT " + std::to_string(count);
+  }
+
+  // Debug path: use ostringstream for convenience
   std::ostringstream oss;
   oss << "OK COUNT " << count;
+  oss << "\r\n\r\n# DEBUG\r\n";
+  oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
+  oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
+  oss << "terms: " << debug_info->search_terms.size() << "\r\n";
+  oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
 
-  // Add debug information if provided
-  if (debug_info != nullptr) {
-    oss << "\r\n\r\n# DEBUG\r\n";
-    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
-    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
-    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
-    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
-
-    // Cache debug information
-    switch (debug_info->cache_info.status) {
-      case query::CacheDebugInfo::Status::HIT:
-        oss << "cache: hit\r\n";
-        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
-        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
-            << "\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
-        oss << "cache: miss (not found)\r\n";
-        oss << "query_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
-            << "\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
-        oss << "cache: miss (invalidated)\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_DISABLED:
-        oss << "cache: disabled\r\n";
-        break;
-      default:
-        break;
-    }
+  // Cache debug information
+  switch (debug_info->cache_info.status) {
+    case query::CacheDebugInfo::Status::HIT:
+      oss << "cache: hit\r\n";
+      oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
+      oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
+          << "\r\n";
+      break;
+    case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+      oss << "cache: miss (not found)\r\n";
+      oss << "query_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms << "\r\n";
+      break;
+    case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+      oss << "cache: miss (invalidated)\r\n";
+      break;
+    case query::CacheDebugInfo::Status::MISS_DISABLED:
+      oss << "cache: disabled\r\n";
+      break;
+    default:
+      break;
   }
 
   return oss.str();

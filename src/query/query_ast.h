@@ -10,12 +10,14 @@
 #include <string>
 #include <vector>
 
+#include "types/doc_id.h"
+
 namespace mygramdb {
 
 // Forward declarations
 namespace index {
 class Index;
-using DocId = uint32_t;
+// DocId is now defined in types/doc_id.h and re-exported via namespace
 }  // namespace index
 
 namespace storage {

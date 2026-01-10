@@ -61,9 +61,8 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
 
   // Add 7 items (batch_size=5, so first batch of 5, then final batch of 2)
   std::vector<std::pair<std::string, std::string>> test_data = {
-      {"pk1", "text one"},   {"pk2", "text two"},   {"pk3", "text three"},
-      {"pk4", "text four"},  {"pk5", "text five"},  {"pk6", "text six"},
-      {"pk7", "text seven"},
+      {"pk1", "text one"},  {"pk2", "text two"}, {"pk3", "text three"}, {"pk4", "text four"},
+      {"pk5", "text five"}, {"pk6", "text six"}, {"pk7", "text seven"},
   };
 
   size_t processed = 0;
@@ -77,8 +76,7 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
       ASSERT_TRUE(doc_ids_result.has_value());
       auto doc_ids = *doc_ids_result;
 
-      ASSERT_EQ(doc_ids.size(), index_batch.size())
-          << "doc_ids and index_batch size mismatch in regular batch";
+      ASSERT_EQ(doc_ids.size(), index_batch.size()) << "doc_ids and index_batch size mismatch in regular batch";
 
       for (size_t i = 0; i < doc_ids.size(); ++i) {
         index_batch[i].doc_id = doc_ids[i];
@@ -94,15 +92,13 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
   // Process final batch (Bug #4: this should work correctly)
   ASSERT_FALSE(doc_batch.empty()) << "Final batch should not be empty";
   ASSERT_EQ(doc_batch.size(), 2) << "Final batch should have 2 items";
-  ASSERT_EQ(doc_batch.size(), index_batch.size())
-      << "doc_batch and index_batch should have same size in final batch";
+  ASSERT_EQ(doc_batch.size(), index_batch.size()) << "doc_batch and index_batch should have same size in final batch";
 
   auto doc_ids_result = doc_store_->AddDocumentBatch(doc_batch);
   ASSERT_TRUE(doc_ids_result.has_value());
   auto doc_ids = *doc_ids_result;
 
-  ASSERT_EQ(doc_ids.size(), index_batch.size())
-      << "doc_ids and index_batch size mismatch in final batch";
+  ASSERT_EQ(doc_ids.size(), index_batch.size()) << "doc_ids and index_batch size mismatch in final batch";
 
   for (size_t i = 0; i < doc_ids.size(); ++i) {
     index_batch[i].doc_id = doc_ids[i];

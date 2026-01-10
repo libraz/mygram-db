@@ -65,34 +65,44 @@ constexpr int kMaxSecond = 59;  // Maximum second value (same as kMaxMinute)
 // std::tm epoch constants
 constexpr int kTmEpochYear = 1900;  // std::tm year offset (years since 1900)
 
+// Leap year calculation constants
+constexpr int kLeapYearDivisor4 = 4;       // Divisible by 4
+constexpr int kLeapYearDivisor100 = 100;   // Not divisible by 100 (unless 400)
+constexpr int kLeapYearDivisor400 = 400;   // Divisible by 400
+constexpr int kFebruaryMonth = 2;          // February month number
+constexpr int kFebruaryLeapDays = 29;      // Days in February in leap year
+
 // ============================================================================
 // Calendar validation helpers
 // ============================================================================
 
 // Check if a year is a leap year
 inline bool IsLeapYear(int year) {
-  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+  return (year % kLeapYearDivisor4 == 0 && year % kLeapYearDivisor100 != 0) || (year % kLeapYearDivisor400 == 0);
 }
 
 // Get the number of days in a month for a given year
 inline int DaysInMonth(int year, int month) {
   // Days in each month (1-indexed, index 0 unused)
+  // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   static constexpr int kDaysInMonth[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
-  if (month < 1 || month > 12) {
+  if (month < kMinMonth || month > kMaxMonth) {
     return 0;
   }
 
-  if (month == 2 && IsLeapYear(year)) {
-    return 29;  // February in leap year
+  if (month == kFebruaryMonth && IsLeapYear(year)) {
+    return kFebruaryLeapDays;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
   return kDaysInMonth[month];
 }
 
 // Validate if a date is a valid calendar date
 inline bool IsValidCalendarDate(int year, int month, int day) {
-  if (month < 1 || month > 12 || day < 1) {
+  if (month < kMinMonth || month > kMaxMonth || day < kMinDay) {
     return false;
   }
   return day <= DaysInMonth(year, month);

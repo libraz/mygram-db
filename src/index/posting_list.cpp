@@ -309,8 +309,8 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
     // For forward order: use iterator to get first N
     // Use RAII via unique_ptr with custom deleter for exception safety
     auto deleter = [](roaring_uint32_iterator_t* ptr) { roaring_uint32_iterator_free(ptr); };
-    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(
-        roaring_iterator_create(roaring_bitmap_), deleter);
+    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(roaring_iterator_create(roaring_bitmap_),
+                                                                       deleter);
     if (iter != nullptr) {
       size_t count = 0;
       while (count < actual_limit && iter->has_value) {

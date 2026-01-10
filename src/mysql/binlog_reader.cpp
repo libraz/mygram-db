@@ -608,8 +608,9 @@ void BinlogReader::ReaderThreadFunc() {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
           }
           idle_timeout_reconnect = true;  // Mark this as an idle timeout reconnect
-          connection_lost = true;         // This will cause us to re-enter the outer loop
-          break;                          // Exit inner loop to retry from outer loop
+          // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
+          connection_lost = true;
+          break;  // Exit inner loop to retry from outer loop
         }
 
         // Check if this is a real connection loss (server gone away)
@@ -620,6 +621,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("fetch_result", static_cast<int64_t>(result))
               .Field("gtid", GetCurrentGTID())
               .Warn();
+          // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
           connection_lost = true;
 
           // Close current binlog stream
@@ -822,7 +824,8 @@ void BinlogReader::ReaderThreadFunc() {
 
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
-                .Field("action", add_result == TableMetadataCache::AddResult::kAdded ? "cached_table_map" : "updated_table_map")
+                .Field("action",
+                       add_result == TableMetadataCache::AddResult::kAdded ? "cached_table_map" : "updated_table_map")
                 .Field("database", metadata_opt->database_name)
                 .Field("table", metadata_opt->table_name)
                 .Field("table_id", metadata_opt->table_id)

@@ -579,6 +579,42 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       return binlog_util::decode_decimal(data, precision, scale);
     }
 
+    case 255: {  // MYSQL_TYPE_GEOMETRY
+      // GEOMETRY is stored like BLOB: length prefix (1-4 bytes based on metadata) + WKB data
+      // metadata indicates the number of bytes used for length prefix (1, 2, 3, or 4)
+      size_t geo_len = 0;
+      const unsigned char* geo_data = nullptr;
+
+      switch (metadata) {
+        case 1:
+          geo_len = data[0];
+          geo_data = data + 1;
+          break;
+        case 2:
+          geo_len = data[0] | (data[1] << 8);
+          geo_data = data + 2;
+          break;
+        case 3:
+          geo_len = data[0] | (data[1] << 8) | (data[2] << 16);
+          geo_data = data + 3;
+          break;
+        case 4:
+          geo_len = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+          geo_data = data + 4;
+          break;
+        default:
+          return "[GEOMETRY:INVALID_METADATA]";
+      }
+
+      // Return WKB data as hex string
+      std::ostringstream oss;
+      oss << std::hex << std::setfill('0');
+      for (size_t i = 0; i < geo_len && geo_data != nullptr; ++i) {
+        oss << std::setw(2) << static_cast<int>(geo_data[i]);
+      }
+      return oss.str();
+    }
+
     default:
       return "[UNSUPPORTED_TYPE:" + std::to_string(col_type) + "]";
   }
@@ -755,7 +791,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         }
 
         // Decode field value
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
+                                             col_meta.is_unsigned);
 
         // Store in row data
         row.columns[col_meta.name] = value;
@@ -1118,7 +1155,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;  // Exit both loops cleanly
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
+                                             col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
@@ -1240,7 +1278,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           goto end_of_rows;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
+                                             col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {
@@ -1486,7 +1525,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           return std::nullopt;
         }
 
-        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end, col_meta.is_unsigned);
+        std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
+                                             col_meta.is_unsigned);
 
         // Check for truncation marker
         if (value == "[TRUNCATED]") {

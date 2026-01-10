@@ -30,6 +30,61 @@ namespace mygramdb::mysql {
 namespace {
 
 /**
+ * @brief Strip SQL comments from a query string
+ *
+ * Removes:
+ * - Block comments: / * ... * / (without spaces)
+ * - Line comments: -- ... (to end of line)
+ *
+ * @param query SQL query string
+ * @return Query with comments stripped
+ */
+std::string StripSQLComments(const std::string& query) {
+  std::string result;
+  result.reserve(query.length());
+
+  size_t i = 0;
+  while (i < query.length()) {
+    // Check for block comment start
+    if (i + 1 < query.length() && query[i] == '/' && query[i + 1] == '*') {
+      // Skip until end of block comment
+      i += 2;
+      while (i + 1 < query.length()) {
+        if (query[i] == '*' && query[i + 1] == '/') {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+      // Add a space to preserve word boundaries
+      if (!result.empty() && result.back() != ' ') {
+        result += ' ';
+      }
+      continue;
+    }
+
+    // Check for line comment start
+    if (i + 1 < query.length() && query[i] == '-' && query[i + 1] == '-') {
+      // Skip until end of line
+      i += 2;
+      while (i < query.length() && query[i] != '\n' && query[i] != '\r') {
+        i++;
+      }
+      // Skip the newline if present
+      if (i < query.length()) {
+        i++;
+      }
+      continue;
+    }
+
+    result += query[i];
+    i++;
+  }
+
+  return result;
+}
+
+/**
  * @brief Normalize whitespace in a string by replacing consecutive spaces with a single space
  * @param str Input string
  * @return Normalized string
@@ -183,8 +238,12 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // TABLE_MAP events are cached by caller
       return {};
 
+    case MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1:
+      // V1 format (MySQL 5.1-5.5) - fallthrough to V2 handler
+      // V1 and V2 share the same post-header structure; V2 may have extra_row_info based on flags
+      [[fallthrough]];
     case MySQLBinlogEventType::WRITE_ROWS_EVENT: {
-      // Parse INSERT operations
+      // Parse INSERT operations (V1 and V2)
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "write_rows_detected").Debug();
 
       // Extract table_id from post-header (skip common header 19 bytes)
@@ -230,7 +289,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         text_column = current_config->text_source.column;
       } else if (!current_config->text_source.concat.empty()) {
         text_column = current_config->text_source.concat[0];  // Use first for initial parse
-        use_concat = true;  // Flag to concatenate later
+        use_concat = true;                                    // Flag to concatenate later
       } else {
         text_column = "";
       }
@@ -266,12 +325,12 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         if (use_concat && !current_config->text_source.concat.empty()) {
           std::string concatenated_text;
           for (const auto& col_name : current_config->text_source.concat) {
-            auto it = row.columns.find(col_name);
-            if (it != row.columns.end() && !it->second.empty()) {
+            auto col_iter = row.columns.find(col_name);
+            if (col_iter != row.columns.end() && !col_iter->second.empty()) {
               if (!concatenated_text.empty()) {
                 concatenated_text += " ";  // Space separator between columns
               }
-              concatenated_text += it->second;
+              concatenated_text += col_iter->second;
             }
           }
           event.text = concatenated_text;
@@ -298,8 +357,11 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       return events;
     }
 
+    case MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1:
+      // V1 format (MySQL 5.1-5.5) - fallthrough to V2 handler
+      [[fallthrough]];
     case MySQLBinlogEventType::UPDATE_ROWS_EVENT: {
-      // Parse UPDATE operations
+      // Parse UPDATE operations (V1 and V2)
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "update_rows_detected").Debug();
 
       // Extract table_id from post-header
@@ -374,12 +436,12 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         }
         std::string result;
         for (const auto& col_name : current_config->text_source.concat) {
-          auto it = row.columns.find(col_name);
-          if (it != row.columns.end() && !it->second.empty()) {
+          auto col_iter = row.columns.find(col_name);
+          if (col_iter != row.columns.end() && !col_iter->second.empty()) {
             if (!result.empty()) {
               result += " ";
             }
-            result += it->second;
+            result += col_iter->second;
           }
         }
         return result;
@@ -390,8 +452,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       events.reserve(row_pairs_opt->size());
 
       for (const auto& row_pair : *row_pairs_opt) {
-        const auto& before_row = row_pair.first;   // Before image
-        const auto& after_row = row_pair.second;   // After image
+        const auto& before_row = row_pair.first;  // Before image
+        const auto& after_row = row_pair.second;  // After image
 
         BinlogEvent event;
         event.type = BinlogEventType::UPDATE;
@@ -418,6 +480,9 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       return events;
     }
 
+    case MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1:
+      // V1 format (MySQL 5.1-5.5) - fallthrough to V2 handler
+      [[fallthrough]];
     case MySQLBinlogEventType::DELETE_ROWS_EVENT: {
       // Parse DELETE operations
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "delete_rows_detected").Debug();
@@ -501,12 +566,12 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         if (use_concat && !current_config->text_source.concat.empty()) {
           std::string concatenated_text;
           for (const auto& col_name : current_config->text_source.concat) {
-            auto it = row.columns.find(col_name);
-            if (it != row.columns.end() && !it->second.empty()) {
+            auto col_iter = row.columns.find(col_name);
+            if (col_iter != row.columns.end() && !col_iter->second.empty()) {
               if (!concatenated_text.empty()) {
                 concatenated_text += " ";
               }
-              concatenated_text += it->second;
+              concatenated_text += col_iter->second;
             }
           }
           event.text = concatenated_text;
@@ -552,7 +617,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             event.type = BinlogEventType::DDL;
             event.table_name = table_name;
             event.text = query;  // Store the DDL query
-            return {event};  // Return as vector with single element
+            return {event};      // Return as vector with single element
           }
         }
       } else {
@@ -562,12 +627,23 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           event.type = BinlogEventType::DDL;
           event.table_name = table_config->name;
           event.text = query;  // Store the DDL query
-          return {event};  // Return as vector with single element
+          return {event};      // Return as vector with single element
         }
       }
 
       return {};
     }
+
+    case MySQLBinlogEventType::ROTATE_EVENT:
+      // Binlog file rotation - indicates switch to a new binlog file
+      // No action needed, handled by binlog_reader at connection level
+      return {};
+
+    case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT:
+    case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT_V2:
+      // Replication heartbeat - keepalive signal from master
+      // No action needed
+      return {};
 
     case MySQLBinlogEventType::XID_EVENT:
       // Transaction commit marker
@@ -1026,9 +1102,74 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   return query;
 }
 
+/**
+ * @brief Check if a single DDL statement affects a specific table
+ *
+ * @param query_upper Uppercase normalized query (single statement)
+ * @param table_upper Uppercase table name
+ * @return true if the statement affects the table
+ */
+bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::string& table_upper) {
+  size_t pos = 0;
+
+  // Skip leading whitespace
+  if (!SkipWhitespace(query_upper, pos) && query_upper.empty()) {
+    return false;
+  }
+
+  // Check for TRUNCATE TABLE
+  size_t saved_start = pos;
+  if (MatchKeyword(query_upper, pos, "TRUNCATE")) {
+    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+      if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+        return true;
+      }
+    }
+  }
+
+  // Reset position and check for DROP TABLE [IF EXISTS]
+  pos = saved_start;
+  if (MatchKeyword(query_upper, pos, "DROP")) {
+    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+      if (SkipWhitespace(query_upper, pos)) {
+        // Check for optional "IF EXISTS"
+        size_t saved_pos = pos;
+        if (MatchKeyword(query_upper, pos, "IF")) {
+          if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "EXISTS")) {
+            SkipWhitespace(query_upper, pos);
+          } else {
+            // "IF" without "EXISTS" - restore position
+            pos = saved_pos;
+          }
+        }
+
+        // Match table name
+        if (MatchTableName(query_upper, pos, table_upper)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // Reset position and check for ALTER TABLE
+  pos = saved_start;
+  if (MatchKeyword(query_upper, pos, "ALTER")) {
+    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
+      if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {
+  // Strip SQL comments first
+  std::string stripped_query = StripSQLComments(query);
+
   // Convert to uppercase for case-insensitive matching
-  std::string query_upper = query;
+  std::string query_upper = stripped_query;
   std::string table_upper = table_name;
   std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
   std::transform(table_upper.begin(), table_upper.end(), table_upper.begin(), ::toupper);
@@ -1036,57 +1177,29 @@ bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std:
   // Normalize whitespace (replace consecutive spaces with single space)
   query_upper = NormalizeWhitespace(query_upper);
 
-  // Try to match DDL statements at each position in the query
-  // We need to search for patterns anywhere in the query string
-  for (size_t i = 0; i < query_upper.length(); ++i) {
-    size_t pos = i;
+  // Split by semicolon and check each statement
+  size_t start = 0;
+  size_t end = query_upper.find(';');
 
-    // Check for TRUNCATE TABLE
-    if (MatchKeyword(query_upper, pos, "TRUNCATE")) {
-      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-        if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
-          return true;
-        }
-      }
+  while (start < query_upper.length()) {
+    std::string statement;
+    if (end == std::string::npos) {
+      statement = query_upper.substr(start);
+    } else {
+      statement = query_upper.substr(start, end - start);
     }
 
-    // Reset position for next pattern
-    pos = i;
-
-    // Check for DROP TABLE [IF EXISTS]
-    if (MatchKeyword(query_upper, pos, "DROP")) {
-      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-        if (SkipWhitespace(query_upper, pos)) {
-          // Check for optional "IF EXISTS"
-          size_t saved_pos = pos;
-          if (MatchKeyword(query_upper, pos, "IF")) {
-            if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "EXISTS")) {
-              SkipWhitespace(query_upper, pos);
-            } else {
-              // "IF" without "EXISTS" - restore position
-              pos = saved_pos;
-            }
-          }
-
-          // Match table name
-          if (MatchTableName(query_upper, pos, table_upper)) {
-            return true;
-          }
-        }
-      }
+    // Check if this statement affects the table
+    if (IsSingleStatementAffectingTable(statement, table_upper)) {
+      return true;
     }
 
-    // Reset position for next pattern
-    pos = i;
-
-    // Check for ALTER TABLE
-    if (MatchKeyword(query_upper, pos, "ALTER")) {
-      if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-        if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
-          return true;
-        }
-      }
+    // Move to next statement
+    if (end == std::string::npos) {
+      break;
     }
+    start = end + 1;
+    end = query_upper.find(';', start);
   }
 
   return false;

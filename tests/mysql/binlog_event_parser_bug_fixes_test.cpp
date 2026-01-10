@@ -217,6 +217,174 @@ TEST(BinlogEventParserBugFixTest, Bug2_EmptyConcatFallback) {
   EXPECT_TRUE(text_column.empty()) << "Empty config should result in empty text column";
 }
 
+// =============================================================================
+// Transaction control statements should NOT be treated as DDL
+// =============================================================================
+// When binlog contains QUERY_EVENT with transaction control statements
+// (BEGIN, COMMIT, ROLLBACK, XA COMMIT, XA ROLLBACK, etc.), these should
+// be correctly ignored and NOT treated as DDL affecting tables.
+// =============================================================================
+
+/**
+ * @brief Test that ROLLBACK statement is not treated as DDL
+ *
+ * ROLLBACK statements appear in binlog QUERY_EVENT for statement-based
+ * replication or XA transactions. They should be ignored.
+ */
+TEST(BinlogEventParserBugFixTest, RollbackStatementNotTreatedAsDDL) {
+  // Test various ROLLBACK statement forms
+  std::vector<std::string> rollback_statements = {
+      "ROLLBACK",
+      "rollback",
+      "ROLLBACK;",
+      "  ROLLBACK  ",
+      "ROLLBACK TO SAVEPOINT sp1",
+      "ROLLBACK TO sp1",
+  };
+
+  for (const auto& stmt : rollback_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "ROLLBACK statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that BEGIN statement is not treated as DDL
+ *
+ * BEGIN/START TRANSACTION statements mark transaction start.
+ * They should be ignored.
+ */
+TEST(BinlogEventParserBugFixTest, BeginStatementNotTreatedAsDDL) {
+  std::vector<std::string> begin_statements = {
+      "BEGIN",
+      "begin",
+      "BEGIN;",
+      "  BEGIN  ",
+      "START TRANSACTION",
+      "START TRANSACTION READ ONLY",
+      "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+  };
+
+  for (const auto& stmt : begin_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "BEGIN statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that COMMIT statement is not treated as DDL
+ */
+TEST(BinlogEventParserBugFixTest, CommitStatementNotTreatedAsDDL) {
+  std::vector<std::string> commit_statements = {
+      "COMMIT",
+      "commit",
+      "COMMIT;",
+      "  COMMIT  ",
+      "COMMIT WORK",
+  };
+
+  for (const auto& stmt : commit_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "COMMIT statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that XA transaction statements are not treated as DDL
+ *
+ * XA transactions are used for distributed transactions. The binlog
+ * may contain XA START, XA END, XA PREPARE, XA COMMIT, XA ROLLBACK.
+ */
+TEST(BinlogEventParserBugFixTest, XAStatementsNotTreatedAsDDL) {
+  std::vector<std::string> xa_statements = {
+      "XA START 'xid1'",
+      "XA END 'xid1'",
+      "XA PREPARE 'xid1'",
+      "XA COMMIT 'xid1'",
+      "XA ROLLBACK 'xid1'",
+      "XA RECOVER",
+      "xa commit 'xid1'",
+      "xa rollback 'xid1'",
+  };
+
+  for (const auto& stmt : xa_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "XA statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that SAVEPOINT statements are not treated as DDL
+ */
+TEST(BinlogEventParserBugFixTest, SavepointStatementsNotTreatedAsDDL) {
+  std::vector<std::string> savepoint_statements = {
+      "SAVEPOINT sp1",
+      "RELEASE SAVEPOINT sp1",
+      "savepoint my_savepoint",
+  };
+
+  for (const auto& stmt : savepoint_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "SAVEPOINT statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that SET statements are not treated as DDL
+ *
+ * SET statements for session variables appear in binlog but should
+ * not be treated as DDL.
+ */
+TEST(BinlogEventParserBugFixTest, SetStatementsNotTreatedAsDDL) {
+  std::vector<std::string> set_statements = {
+      "SET autocommit=0",
+      "SET @var = 1",
+      "SET NAMES utf8mb4",
+      "SET SESSION sql_mode = ''",
+      "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  };
+
+  for (const auto& stmt : set_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "SET statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Test that actual DDL statements are still correctly detected
+ *
+ * Ensure the transaction control exclusions don't break DDL detection.
+ */
+TEST(BinlogEventParserBugFixTest, DDLStatementsStillDetected) {
+  // These should be detected as DDL
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE IF EXISTS articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles ADD COLUMN foo INT", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE articles", "articles"));
+
+  // These should NOT be detected as DDL (different table)
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE other_table", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE other_table ADD COLUMN foo INT", "articles"));
+}
+
+/**
+ * @brief Test edge case: table name that looks like transaction keyword
+ *
+ * A table named "rollback" or "commit" should still be detected in DDL.
+ */
+TEST(BinlogEventParserBugFixTest, TableNameLooksLikeTransactionKeyword) {
+  // Table named "rollback" - DROP should be detected
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE rollback", "rollback"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE rollback ADD COLUMN x INT", "rollback"));
+
+  // But standalone ROLLBACK should not affect table "rollback"
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ROLLBACK", "rollback"));
+
+  // Table named "begin" - DDL should be detected
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE begin", "begin"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("BEGIN", "begin"));
+}
+
 }  // namespace
 
 #endif  // USE_MYSQL

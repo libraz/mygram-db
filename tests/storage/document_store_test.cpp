@@ -1094,13 +1094,12 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
 
   // Bug #20: Before fix, memory_after would be similar to memory_before
   // After fix: memory_after should be significantly less than memory_before
-  EXPECT_LT(memory_after, memory_before)
-      << "Bug #20: Compact() should reduce memory usage. "
-      << "Before: " << memory_before << " bytes, After: " << memory_after << " bytes";
+  EXPECT_LT(memory_after, memory_before) << "Bug #20: Compact() should reduce memory usage. "
+                                         << "Before: " << memory_before << " bytes, After: " << memory_after
+                                         << " bytes";
 
   // Memory should be reduced by at least 50% (we removed 99% of documents)
-  EXPECT_LT(memory_after, memory_before * 0.5)
-      << "Bug #20: Memory should be reduced significantly after Compact()";
+  EXPECT_LT(memory_after, memory_before * 0.5) << "Bug #20: Memory should be reduced significantly after Compact()";
 }
 
 /**
@@ -1128,8 +1127,7 @@ TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
   size_t memory_after_clear = store.MemoryUsage();
 
   // Bug #20: After fix, Clear() should release most memory
-  EXPECT_LT(memory_after_clear, memory_after_add * 0.1)
-      << "Bug #20: Clear() should release most memory";
+  EXPECT_LT(memory_after_clear, memory_after_add * 0.1) << "Bug #20: Clear() should release most memory";
 }
 
 /**

@@ -9,7 +9,7 @@
   "properties": {
     "mysql": {
       "type": "object",
-      "description": "MySQL connection settings",
+      "description": "MySQL connection settings. Values can be overridden via environment variables: MYGRAM_MYSQL_USER, MYGRAM_MYSQL_PASSWORD, MYGRAM_MYSQL_HOST, MYGRAM_MYSQL_DATABASE (env vars take precedence over config file values)",
       "required": ["user", "database"],
       "additionalProperties": false,
       "properties": {

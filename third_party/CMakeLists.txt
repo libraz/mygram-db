@@ -169,5 +169,16 @@ if(TARGET httplib)
   endif()
 endif()
 
+# Abseil for absl::flat_hash_map (heterogeneous lookup in C++17)
+FetchContent_Declare(
+  abseil
+  GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+  GIT_TAG 20240722.0
+)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(abseil)
+
 # Note: libmysqlclient should be installed on the system
 # find_package(MySQL REQUIRED) will be called in src/mysql/CMakeLists.txt

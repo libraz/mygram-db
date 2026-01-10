@@ -233,8 +233,7 @@ TEST_F(BinlogReaderBugFixTest, Bug3_GTIDNotUpdatedOnProcessEventFailure) {
 
   // If ProcessEvent failed, GTID should remain at original value
   if (!result) {
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100")
-        << "Bug #3: GTID was updated despite ProcessEvent failure";
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100") << "Bug #3: GTID was updated despite ProcessEvent failure";
   }
 }
 
@@ -288,8 +287,7 @@ TEST_F(BinlogReaderBugFixTest, Bug3_WorkerThreadGTIDUpdateLogic) {
   } else {
     // Should NOT update GTID - this is where the bug manifests
     // The fix ensures GTID stays at original value
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50")
-        << "Bug #3: GTID should not be updated on ProcessEvent failure";
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << "Bug #3: GTID should not be updated on ProcessEvent failure";
     EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed)
         << "Bug #3: processed_events should not be incremented on failure";
   }
@@ -539,8 +537,9 @@ TEST_F(TableMetadataCacheTest, Bug12_AddOrUpdateDetectsColumnCountChange) {
   cache_.AddOrUpdate(100, meta1);
 
   // Add a new column (ALTER TABLE ADD COLUMN)
-  auto meta2 = CreateMetadata(100, "test_db", "users",
-                              {{"id", ColumnType::LONG}, {"name", ColumnType::VARCHAR}, {"email", ColumnType::VARCHAR}});
+  auto meta2 =
+      CreateMetadata(100, "test_db", "users",
+                     {{"id", ColumnType::LONG}, {"name", ColumnType::VARCHAR}, {"email", ColumnType::VARCHAR}});
 
   auto result = cache_.AddOrUpdate(100, meta2);
   EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);

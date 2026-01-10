@@ -13,6 +13,8 @@
 #include <shared_mutex>
 #include <vector>
 
+#include "types/doc_id.h"
+
 namespace mygramdb::index {
 
 /**
@@ -20,10 +22,7 @@ namespace mygramdb::index {
  */
 constexpr double kDefaultRoaringThreshold = 0.18;
 
-/**
- * @brief Document ID type (32-bit, supports up to 4B documents)
- */
-using DocId = uint32_t;
+// DocId is now defined in types/doc_id.h and re-exported via namespace
 
 /**
  * @brief Posting list storage strategies

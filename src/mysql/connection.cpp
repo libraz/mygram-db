@@ -99,10 +99,28 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
-  // Set connection timeouts
-  mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout);
-  mysql_options(mysql_, MYSQL_OPT_READ_TIMEOUT, &config_.read_timeout);
-  mysql_options(mysql_, MYSQL_OPT_WRITE_TIMEOUT, &config_.write_timeout);
+  // Set connection timeouts (with error checking)
+  if (mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout) != 0) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_options_warning")
+        .Field("option", "MYSQL_OPT_CONNECT_TIMEOUT")
+        .Field("value", static_cast<uint64_t>(config_.connect_timeout))
+        .Warn();
+  }
+  if (mysql_options(mysql_, MYSQL_OPT_READ_TIMEOUT, &config_.read_timeout) != 0) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_options_warning")
+        .Field("option", "MYSQL_OPT_READ_TIMEOUT")
+        .Field("value", static_cast<uint64_t>(config_.read_timeout))
+        .Warn();
+  }
+  if (mysql_options(mysql_, MYSQL_OPT_WRITE_TIMEOUT, &config_.write_timeout) != 0) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_options_warning")
+        .Field("option", "MYSQL_OPT_WRITE_TIMEOUT")
+        .Field("value", static_cast<uint64_t>(config_.write_timeout))
+        .Warn();
+  }
 
   // Note: MYSQL_OPT_RECONNECT is deprecated and removed
   // Manual reconnection is handled via Reconnect() method when needed
@@ -114,17 +132,41 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     if (config_.ssl_verify_server_cert) {
       ssl_mode = SSL_MODE_VERIFY_CA;  // Verify CA certificate
     }
-    mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode);
+    if (mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode) != 0) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_options_warning")
+          .Field("option", "MYSQL_OPT_SSL_MODE")
+          .Field("value", static_cast<uint64_t>(ssl_mode))
+          .Warn();
+    }
 
-    // Set SSL certificate paths if provided
+    // Set SSL certificate paths if provided (with error checking)
     if (!config_.ssl_ca.empty()) {
-      mysql_options(mysql_, MYSQL_OPT_SSL_CA, config_.ssl_ca.c_str());
+      if (mysql_options(mysql_, MYSQL_OPT_SSL_CA, config_.ssl_ca.c_str()) != 0) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_options_warning")
+            .Field("option", "MYSQL_OPT_SSL_CA")
+            .Field("path", config_.ssl_ca)
+            .Warn();
+      }
     }
     if (!config_.ssl_cert.empty()) {
-      mysql_options(mysql_, MYSQL_OPT_SSL_CERT, config_.ssl_cert.c_str());
+      if (mysql_options(mysql_, MYSQL_OPT_SSL_CERT, config_.ssl_cert.c_str()) != 0) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_options_warning")
+            .Field("option", "MYSQL_OPT_SSL_CERT")
+            .Field("path", config_.ssl_cert)
+            .Warn();
+      }
     }
     if (!config_.ssl_key.empty()) {
-      mysql_options(mysql_, MYSQL_OPT_SSL_KEY, config_.ssl_key.c_str());
+      if (mysql_options(mysql_, MYSQL_OPT_SSL_KEY, config_.ssl_key.c_str()) != 0) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_options_warning")
+            .Field("option", "MYSQL_OPT_SSL_KEY")
+            .Field("path", config_.ssl_key)
+            .Warn();
+      }
     }
 
     mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "ssl_enabled").Debug();
@@ -145,6 +187,24 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         .Error();
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLConnectionFailed, last_error_, config_.host + ":" + std::to_string(config_.port)));
+  }
+
+  // Set character set to utf8mb4 for full Unicode support (including emoji)
+  // This is critical for proper handling of multi-byte characters in binlog parsing
+  if (mysql_set_character_set(mysql_, "utf8mb4") != 0) {
+    SetMySQLError();
+    mygram::utils::StructuredLog()
+        .Event("mysql_charset_error")
+        .Field("charset", "utf8mb4")
+        .Field("error", last_error_)
+        .Warn();
+    // Continue anyway - most ASCII-based operations will still work
+  } else {
+    mygram::utils::StructuredLog()
+        .Event("mysql_debug")
+        .Field("action", "charset_set")
+        .Field("charset", "utf8mb4")
+        .Debug();
   }
 
   // Set session timeout to prevent disconnection during long-running operations

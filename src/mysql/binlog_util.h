@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
 
@@ -108,7 +109,18 @@ inline bool bitmap_is_set(const unsigned char* bitmap, size_t bit_index) {
 /**
  * @brief Decode MySQL DECIMAL/NEWDECIMAL binary format
  *
- * Based on MySQL's decimal2string() function
+ * Based on MySQL's bin2decimal() function from strings/decimal.c
+ *
+ * MySQL DECIMAL binary format:
+ * - Sign bit is stored in MSB of first byte (0x80)
+ * - For storage: positive values have MSB set, negative values have MSB clear
+ * - Positive encoding: XOR first byte with 0x80
+ * - Negative encoding: XOR all bytes with 0xFF, then XOR first byte with 0x80
+ *
+ * Decoding:
+ * - Check MSB: if set (>= 0x80) -> positive, if clear (< 0x80) -> negative
+ * - For positive: XOR first byte with 0x80 to restore
+ * - For negative: XOR all bytes with 0xFF to restore (includes undoing the 0x80)
  *
  * @param data Pointer to binary decimal data
  * @param precision Total number of digits
@@ -126,40 +138,61 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   int frac0 = scale / 9;         // Full 4-byte groups in fractional part
   int frac_rem = scale % 9;      // Remaining digits in fractional part
 
-  // Digits per byte mapping
+  // Digits per byte mapping: how many bytes to store n digits (1-9)
   static const int dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
 
-  const unsigned char* ptr = data;
+  // Calculate total size
+  int total_size = dig2bytes[intg_rem] + intg0 * 4 + frac0 * 4 + dig2bytes[frac_rem];
+  if (total_size == 0) {
+    return "0";
+  }
+
+  // Make a copy and apply sign-based transformation
+  std::vector<unsigned char> buf(data, data + total_size);
+
+  // Check sign bit (MSB of first byte): 0x80 set = positive, 0x80 clear = negative
+  bool is_negative = (buf[0] & 0x80) == 0;
+
+  // Apply transformation to restore original values
+  // MySQL encoding:
+  // - Positive: XOR first byte with 0x80
+  // - Negative: XOR all bytes with 0xFF, then XOR first byte with 0x80
+  // To decode, we reverse this:
+  // - Positive: XOR first byte with 0x80
+  // - Negative: XOR first byte with 0x80, then XOR all bytes with 0xFF
+  buf[0] ^= 0x80;  // Reverse sign bit toggle for both positive and negative
+  if (is_negative) {
+    // For negative: also XOR all bytes with 0xFF to get original magnitude
+    for (auto& b : buf) {
+      b ^= 0xFF;
+    }
+  }
+
+  const unsigned char* ptr = buf.data();
   std::string result;
 
-  // Check sign bit (MSB of first byte)
-  bool is_negative = ((*ptr & 0x80) == 0);
-
-  // Process integer part
+  // Process integer remainder (leading digits that don't fill a 4-byte group)
   if (intg_rem > 0) {
     int bytes = dig2bytes[intg_rem];
     int32_t val = 0;
     for (int i = 0; i < bytes; i++) {
-      val = (val << 8) | (is_negative ? ~(*ptr) : *ptr);
-      ptr++;
+      val = (val << 8) | *ptr++;
     }
-    if (intg_rem > 0) {
-      result += std::to_string(val);
-    }
+    result += std::to_string(val);
   }
 
+  // Process full 4-byte groups in integer part
   for (int i = 0; i < intg0; i++) {
     int32_t val = 0;
     for (int j = 0; j < 4; j++) {
-      val = (val << 8) | (is_negative ? ~(*ptr) : *ptr);
-      ptr++;
+      val = (val << 8) | *ptr++;
     }
     if (result.empty()) {
       result += std::to_string(val);
     } else {
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%09d", val);
-      result += buf;
+      char buf_fmt[16];
+      snprintf(buf_fmt, sizeof(buf_fmt), "%09d", val);
+      result += buf_fmt;
     }
   }
 
@@ -171,30 +204,31 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   if (scale > 0) {
     result += ".";
 
+    // Process full 4-byte groups in fractional part
     for (int i = 0; i < frac0; i++) {
       int32_t val = 0;
       for (int j = 0; j < 4; j++) {
-        val = (val << 8) | (is_negative ? ~(*ptr) : *ptr);
-        ptr++;
+        val = (val << 8) | *ptr++;
       }
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%09d", val);
-      result += buf;
+      char buf_fmt[16];
+      snprintf(buf_fmt, sizeof(buf_fmt), "%09d", val);
+      result += buf_fmt;
     }
 
+    // Process fractional remainder
     if (frac_rem > 0) {
       int bytes = dig2bytes[frac_rem];
       int32_t val = 0;
       for (int i = 0; i < bytes; i++) {
-        val = (val << 8) | (is_negative ? ~(*ptr) : *ptr);
-        ptr++;
+        val = (val << 8) | *ptr++;
       }
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%0*d", frac_rem, val);
-      result += buf;
+      char buf_fmt[16];
+      snprintf(buf_fmt, sizeof(buf_fmt), "%0*d", frac_rem, val);
+      result += buf_fmt;
     }
   }
 
+  // Add negative sign if needed
   if (is_negative) {
     result = "-" + result;
   }
@@ -365,6 +399,31 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       unsigned int bytes = (metadata >> 8) & 0xFF;
       unsigned int bits = metadata & 0xFF;
       return bytes + (bits > 0 ? 1 : 0);
+    }
+
+    // GEOMETRY type
+    case 255: {  // MYSQL_TYPE_GEOMETRY
+      // GEOMETRY is stored like BLOB: length prefix (1-4 bytes based on metadata) + WKB data
+      // metadata indicates the number of bytes used for length prefix
+      uint32_t geo_len = 0;
+      switch (metadata) {
+        case 1:
+          geo_len = *master_data;
+          break;
+        case 2:
+          geo_len = uint2korr(master_data);
+          break;
+        case 3:
+          geo_len = uint3korr(master_data);
+          break;
+        case 4:
+          geo_len = uint4korr(master_data);
+          break;
+        default:
+          // Invalid metadata - return 0 to indicate error
+          return 0;
+      }
+      return metadata + geo_len;  // length bytes + WKB data
     }
 
     // For unsupported types, return 0 (will need to be handled specially)

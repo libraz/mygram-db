@@ -287,24 +287,27 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     storage::TimeValue val = std::get<storage::TimeValue>(value);
 
     // Parse target value: support both seconds (numeric) and HH:MM:SS format
-    // For simplicity, try to parse as integer first, then try TimeToSeconds
     int64_t target = 0;
     try {
       size_t pos = 0;
       target = std::stoll(filter.value, &pos);
       // If entire string was consumed, it's a valid integer
       if (pos != filter.value.length()) {
-        // Not a pure integer, might be HH:MM:SS format
-        // TODO: Use DateTimeProcessor::TimeToSeconds when available
-        // For now, reject non-integer formats
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "invalid_time_filter")
-            .Field("reason", "unsupported_format")
-            .Field("value", filter.value)
-            .Field("column_name", filter.name)
-            .Warn();
-        return false;  // Fail-closed: reject document on invalid filter
+        // Not a pure integer, try HH:MM:SS format using DateTimeProcessor
+        // TimeToSeconds is a static method that doesn't require timezone
+        auto seconds_result = utils::DateTimeProcessor::TimeToSeconds(filter.value);
+        if (seconds_result) {
+          target = *seconds_result;
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "invalid_time_filter")
+              .Field("reason", "unsupported_format")
+              .Field("value", filter.value)
+              .Field("column_name", filter.name)
+              .Warn();
+          return false;  // Fail-closed: reject document on invalid filter
+        }
       }
     } catch (const std::exception& e) {
       mygram::utils::StructuredLog()

@@ -332,7 +332,8 @@ void ConnectionAcceptor::AcceptLoop() {
             .Warn();
 
         // Send error response to client before closing connection
-        static constexpr std::string_view kBusyResponse = "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
+        static constexpr std::string_view kBusyResponse =
+            "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
         // Ignore write errors - we're closing the connection anyway
         // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
         write(client_fd, kBusyResponse.data(), kBusyResponse.size());

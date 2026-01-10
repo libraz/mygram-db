@@ -11,7 +11,18 @@
 namespace mygramdb::cache {
 
 QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds)
-    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms), ttl_seconds_(ttl_seconds) {}
+    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms), ttl_seconds_(ttl_seconds) {
+  // Start background LRU refresh thread
+  lru_refresh_thread_ = std::thread(&QueryCache::RefreshLRUWorker, this);
+}
+
+QueryCache::~QueryCache() {
+  // Stop background LRU refresh thread
+  should_stop_.store(true);
+  if (lru_refresh_thread_.joinable()) {
+    lru_refresh_thread_.join();
+  }
+}
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Start timing
@@ -99,109 +110,21 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     return std::nullopt;
   }
 
-  // Copy query_cost_ms and entry address before releasing lock to avoid use-after-free
+  // Copy query_cost_ms before releasing lock to avoid use-after-free
   const double query_cost_ms = entry.query_cost_ms;
-  // Use entry address to verify it's the same entry (ABA problem mitigation)
-  const void* entry_address = &entry;
 
-  // TECHNICAL DEBT: Lock upgrade creates contention bottleneck under high load
-  //
-  // PROBLEM: Every cache hit requires lock upgrade (shared → exclusive) to update LRU
-  //   - Line 86-87: shared_lock unlock → unique_lock acquisition blocks ALL readers
-  //   - Under high load (8+ threads, 80% hit rate), this creates serialization point
-  //   - Impact: 20-30% throughput degradation, p99 latency spikes due to lock queueing
-  //
-  // ROOT CAUSE:
-  //   - LRU list (std::list) requires exclusive access for mutation (Touch())
-  //   - Metadata writes (last_accessed, access_count) require exclusive lock
-  //   - No true "lock upgrade" in C++ - must release shared_lock and reacquire unique_lock
-  //
-  // PERFORMANCE IMPACT (measured at 100 QPS, 80% hit rate, 8 cores):
-  //   - 80 cache hits/sec × ~10μs exclusive lock = ~0.8ms/sec total reader blockage
-  //   - Each thread experiences ~6.4ms/sec of stalls (0.8ms × 8 threads)
-  //   - Expected improvement if fixed: 20-30% throughput increase
-  //
-  // FUTURE OPTIMIZATION (detailed design available in performance-optimizer agent analysis):
-  //
-  //   **Phase 1: Lock-Free Access Tracking + Background LRU Refresh**
-  //
-  //   1. Modify CacheMetadata (src/cache/cache_entry.h):
-  //      ```cpp
-  //      struct CacheMetadata {
-  //        // ... existing fields ...
-  //        std::atomic<uint32_t> access_count{0};           // Lock-free increment
-  //        std::atomic<bool> accessed_since_refresh{false}; // Dirty flag
-  //        std::chrono::steady_clock::time_point last_accessed;  // Updated by background task
-  //      };
-  //      ```
-  //
-  //   2. Eliminate lock upgrade in Lookup() (this file):
-  //      ```cpp
-  //      // While holding shared_lock (no upgrade needed):
-  //      entry.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  //      entry.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
-  //      lock.unlock();  // Release shared_lock, return immediately
-  //      return result;
-  //      ```
-  //
-  //   3. Add background task for periodic LRU refresh (src/cache/query_cache.h/cpp):
-  //      ```cpp
-  //      void RefreshLRUWorker() {
-  //        while (!should_stop_) {
-  //          std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 10 Hz
-  //          RefreshLRU();
-  //        }
-  //      }
-  //
-  //      void RefreshLRU() {
-  //        std::unique_lock lock(mutex_);  // Low-frequency exclusive lock (10/sec vs 1000/sec)
-  //        auto now = std::chrono::steady_clock::now();
-  //        for (auto& [key, entry_pair] : cache_map_) {
-  //          if (entry_pair.first.metadata.accessed_since_refresh.exchange(false)) {
-  //            Touch(key);  // Batch LRU updates
-  //            entry_pair.first.metadata.last_accessed = now;
-  //          }
-  //        }
-  //      }
-  //      ```
-  //
-  //   **Trade-offs**:
-  //   - ✅ Eliminates lock upgrade, enables full reader concurrency
-  //   - ✅ Amortizes lock overhead (10 Hz vs 1000 Hz)
-  //   - ✅ 20-30% throughput improvement, 50-70% p99 latency reduction
-  //   - ⚠️  LRU becomes approximate (stale by up to 100ms)
-  //   - ⚠️  Background task overhead: 10ms-100ms/sec exclusive lock time
-  //   - ✅ Staleness is negligible for cache with minutes-hours lifetime
-  //
-  //   **Implementation complexity**: Medium (requires thread lifecycle management, atomic fields)
-  //   **Risk**: Low (localized change, no API changes, fallback strategy available)
-  //
-  //   **Alternative optimizations (if background task is undesirable)**:
-  //   - Read-Copy-Update (RCU) pattern for LRU list
-  //   - Skip-list based LRU (lock-free traversal)
-  //   - Approximate LRU with CLOCK algorithm (no list mutation)
-  //
-  // For full design details, consult: `.claude/agents/performance-optimizer.md`
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
 
-  // Update access time (need to upgrade to unique lock)
-  lock.unlock();
-  std::unique_lock write_lock(mutex_);
-
-  // Re-check existence and verify it's the same entry by address (not just metadata)
-  iter = cache_map_.find(key);
-  if (iter != cache_map_.end() && &iter->second.first == entry_address) {
-    Touch(key);
-    iter->second.first.metadata.last_accessed = std::chrono::steady_clock::now();
-    iter->second.first.metadata.access_count++;
-
-    // Record hit latency and saved time
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    {
-      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_cache_hit_time_ms += hit_time_ms;
-      stats_.total_query_saved_time_ms += query_cost_ms;
-    }
+  // Record hit latency and saved time
+  auto end_time = std::chrono::high_resolution_clock::now();
+  double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+  {
+    std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+    stats_.total_cache_hit_time_ms += hit_time_ms;
+    stats_.total_query_saved_time_ms += query_cost_ms;
   }
 
   return result;
@@ -293,31 +216,22 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     return std::nullopt;
   }
 
-  // Copy metadata and entry address before releasing lock to avoid use-after-free
+  // Copy metadata before releasing lock to avoid use-after-free
   metadata.query_cost_ms = entry.query_cost_ms;
   metadata.created_at = entry.metadata.created_at;
-  // Use entry address to verify it's the same entry (ABA problem mitigation)
-  const void* entry_address = &entry;
 
-  // Update access time (need to upgrade to unique lock)
-  lock.unlock();
-  std::unique_lock write_lock(mutex_);
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
 
-  // Re-check existence and verify it's the same entry by address (not just metadata)
-  iter = cache_map_.find(key);
-  if (iter != cache_map_.end() && &iter->second.first == entry_address) {
-    Touch(key);
-    iter->second.first.metadata.last_accessed = std::chrono::steady_clock::now();
-    iter->second.first.metadata.access_count++;
-
-    // Record hit latency and saved time
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    {
-      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_cache_hit_time_ms += hit_time_ms;
-      stats_.total_query_saved_time_ms += metadata.query_cost_ms;  // Time saved by not re-executing
-    }
+  // Record hit latency and saved time
+  auto end_time = std::chrono::high_resolution_clock::now();
+  double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+  {
+    std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+    stats_.total_cache_hit_time_ms += hit_time_ms;
+    stats_.total_query_saved_time_ms += metadata.query_cost_ms;  // Time saved by not re-executing
   }
 
   return result;
@@ -530,6 +444,34 @@ void QueryCache::Touch(const CacheKey& key) {
   lru_list_.erase(iter->second.second);
   lru_list_.push_front(key);
   iter->second.second = lru_list_.begin();
+}
+
+void QueryCache::RefreshLRUWorker() {
+  while (!should_stop_.load()) {
+    // Sleep for 100ms between refresh cycles (10 Hz)
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    if (should_stop_.load()) {
+      break;
+    }
+
+    RefreshLRU();
+  }
+}
+
+void QueryCache::RefreshLRU() {
+  std::unique_lock lock(mutex_);
+
+  auto now = std::chrono::steady_clock::now();
+
+  // Update LRU for entries that were accessed since last refresh
+  for (auto& [key, entry_pair] : cache_map_) {
+    if (entry_pair.first.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
+      // Entry was accessed, move to front of LRU list
+      Touch(key);
+      entry_pair.first.metadata.last_accessed = now;
+    }
+  }
 }
 
 }  // namespace mygramdb::cache

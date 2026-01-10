@@ -13,12 +13,17 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "index/posting_list.h"
+#include "utils/hash_utils.h"
 
 namespace mygramdb::index {
+
+// Import transparent hash utilities from common header
+using mygram::utils::TransparentStringEqual;
+using mygram::utils::TransparentStringHash;
 
 // Default n-gram sizes for different character types
 constexpr int kDefaultNgramSize = 2;       // Bigrams for ASCII/alphanumeric
@@ -241,7 +246,10 @@ class Index {
   // Term -> Posting list mapping
   // Note: Using shared_ptr instead of unique_ptr to safely handle concurrent access
   // during optimization (Optimize() creates snapshots that need reference counting)
-  std::unordered_map<std::string, std::shared_ptr<PostingList>> term_postings_;
+  // Using absl::flat_hash_map with TransparentStringHash for heterogeneous lookup
+  // to avoid std::string allocation on every lookup (C++17 compatible)
+  absl::flat_hash_map<std::string, std::shared_ptr<PostingList>, TransparentStringHash, TransparentStringEqual>
+      term_postings_;
 
   // Shared mutex for read/write protection
   // - Readers (Search): shared_lock (multiple concurrent readers allowed)

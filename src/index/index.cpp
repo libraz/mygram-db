@@ -13,6 +13,11 @@
 #include <cstring>
 #include <fstream>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -116,12 +121,12 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
   // Remove doc from n-grams that are no longer present
   size_t empty_lists_removed = 0;
   for (const auto& ngram : to_remove) {
-    auto it = term_postings_.find(ngram);
-    if (it != term_postings_.end()) {
-      it->second->Remove(doc_id);
+    auto posting_iter = term_postings_.find(ngram);
+    if (posting_iter != term_postings_.end()) {
+      posting_iter->second->Remove(doc_id);
       // Remove empty posting lists to prevent memory leak
-      if (it->second->Size() == 0) {
-        term_postings_.erase(it);
+      if (posting_iter->second->Size() == 0) {
+        term_postings_.erase(posting_iter);
         empty_lists_removed++;
       }
     }
@@ -156,12 +161,12 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Remove document from posting list for each n-gram
   size_t empty_lists_removed = 0;
   for (const auto& ngram : ngrams) {
-    auto it = term_postings_.find(ngram);
-    if (it != term_postings_.end()) {
-      it->second->Remove(doc_id);
+    auto posting_iter = term_postings_.find(ngram);
+    if (posting_iter != term_postings_.end()) {
+      posting_iter->second->Remove(doc_id);
       // Remove empty posting lists to prevent memory leak
-      if (it->second->Size() == 0) {
-        term_postings_.erase(it);
+      if (posting_iter->second->Size() == 0) {
+        term_postings_.erase(posting_iter);
         empty_lists_removed++;
       }
     }
@@ -281,7 +286,7 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
           .Field("selectivity", selectivity)
           .Field("min_size", static_cast<uint64_t>(min_size))
           .Field("max_size", static_cast<uint64_t>(max_size))
-          .Field("intersected_size", static_cast<uint64_t>(intersected->Size()))
+          .Field("intersected_size", intersected->Size())
           .Field("found", static_cast<uint64_t>(result.size()))
           .Debug();
       return result;
@@ -747,18 +752,9 @@ const PostingList* Index::GetPostingList(std::string_view term) const {
   //   - Called 2-10 times per query (multi-term searches)
   //   - At 1000 QPS: 2,000-10,000 allocations/second
   //
-  // FUTURE OPTIMIZATION (when upgrading to C++20):
-  //   1. Add TransparentStringHash and TransparentStringEqual functors with is_transparent tag
-  //   2. Change term_postings_ type to:
-  //      std::unordered_map<std::string, std::shared_ptr<PostingList>,
-  //                         TransparentStringHash, TransparentStringEqual>
-  //   3. Remove std::string(term) conversion below
-  //   Expected improvement: 5-10% latency reduction for multi-term searches
-  //
-  // ALTERNATIVE (if C++20 upgrade is not feasible):
-  //   - Use absl::flat_hash_map (requires external dependency)
-  //   - Switch to std::map + std::less<> (zero-copy but O(log N) lookup)
-  auto iterator = term_postings_.find(std::string(term));
+  // Using absl::flat_hash_map with TransparentStringHash enables heterogeneous lookup
+  // No std::string allocation needed - find() accepts string_view directly
+  auto iterator = term_postings_.find(term);
   return iterator != term_postings_.end() ? iterator->second.get() : nullptr;
 }
 
@@ -786,7 +782,7 @@ std::vector<std::shared_ptr<PostingList>> Index::TakePostingSnapshots(const std:
 std::shared_ptr<PostingList> Index::TakePostingSnapshot(std::string_view term) const {
   // RCU pattern: Take short lock to copy shared_ptr, then release
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-  auto iter = term_postings_.find(std::string(term));
+  auto iter = term_postings_.find(term);
   return (iter != term_postings_.end()) ? iter->second : nullptr;
 }
 
@@ -852,6 +848,23 @@ bool Index::SaveToFile(const std::string& filepath) const {
     }
 
     ofs.close();
+
+    // Ensure data is flushed to disk to prevent data loss on OS crash
+#ifndef _WIN32
+    int fd = open(filepath.c_str(), O_RDONLY);
+    if (fd >= 0) {
+      if (fsync(fd) != 0) {
+        mygram::utils::StructuredLog()
+            .Event("storage_warning")
+            .Field("operation", "fsync")
+            .Field("filepath", filepath)
+            .Field("errno", static_cast<int64_t>(errno))
+            .Warn();
+      }
+      close(fd);
+    }
+#endif
+
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 1024: Standard conversion factor for bytes to KB to MB
     mygram::utils::StructuredLog()
@@ -1007,7 +1020,8 @@ bool Index::LoadFromFile(const std::string& filepath) {
     ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Load into a new map to minimize lock time
-    std::unordered_map<std::string, std::shared_ptr<PostingList>> new_postings;
+    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>, TransparentStringHash, TransparentStringEqual>
+        new_postings;
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
@@ -1122,7 +1136,8 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     input_stream.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
 
     // Load into a new map to minimize lock time
-    std::unordered_map<std::string, std::shared_ptr<PostingList>> new_postings;
+    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>, TransparentStringHash, TransparentStringEqual>
+        new_postings;
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {

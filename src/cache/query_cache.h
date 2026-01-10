@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 
 #include "cache/cache_entry.h"
@@ -129,9 +130,9 @@ class QueryCache {
   explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0);
 
   /**
-   * @brief Destructor
+   * @brief Destructor - stops background LRU refresh thread
    */
-  ~QueryCache() = default;
+  ~QueryCache();
 
   // Non-copyable, non-movable
   QueryCache(const QueryCache&) = delete;
@@ -294,6 +295,10 @@ class QueryCache {
   // Eviction callback
   EvictionCallback eviction_callback_;
 
+  // Background LRU refresh thread
+  std::atomic<bool> should_stop_{false};
+  std::thread lru_refresh_thread_;
+
   /**
    * @brief Evict entries to make room for new entry
    * @param required_bytes Bytes needed for new entry
@@ -305,6 +310,22 @@ class QueryCache {
    * @brief Move key to front of LRU list (most recently used)
    */
   void Touch(const CacheKey& key);
+
+  /**
+   * @brief Background worker for LRU refresh
+   *
+   * Periodically updates LRU list based on accessed_since_refresh flags.
+   * This allows Lookup() to avoid lock upgrade, improving read concurrency.
+   */
+  void RefreshLRUWorker();
+
+  /**
+   * @brief Refresh LRU list based on access flags
+   *
+   * Moves entries with accessed_since_refresh=true to front of LRU list.
+   * Called by RefreshLRUWorker() while holding exclusive lock.
+   */
+  void RefreshLRU();
 };
 
 }  // namespace mygramdb::cache

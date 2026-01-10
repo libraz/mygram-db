@@ -220,6 +220,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
     // Check for empty results before division to avoid division by zero
     if (total_results == 0) {
+      // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents that optimization is skipped
       can_optimize = false;
       results = std::move(all_results);  // Empty vector
       if (conn_ctx.debug_mode) {
@@ -238,7 +239,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       if (should_reuse) {
         // Reuse the already-fetched results
         results = std::move(all_results);
-        can_optimize = false;  // Use standard sort+paginate path
+        // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents use of standard sort+paginate path
+        can_optimize = false;
         if (conn_ctx.debug_mode) {
           debug_info.total_candidates = results.size();
           debug_info.after_intersection = results.size();
@@ -569,16 +571,73 @@ std::vector<storage::DocId> SearchHandler::ApplyNotFilter(const std::vector<stor
   return current_index->SearchNot(results, not_ngrams);
 }
 
+namespace {
+
+// Pre-parsed filter values to avoid repeated string parsing in the inner loop
+struct ParsedFilterValue {
+  double double_val = 0.0;
+  int64_t int64_val = 0;
+  uint64_t uint64_val = 0;
+  bool bool_val = false;
+  bool double_valid = false;
+  bool int64_valid = false;
+  bool uint64_valid = false;
+};
+
+inline ParsedFilterValue ParseFilterValue(const std::string& value) {
+  ParsedFilterValue pv;
+
+  // Parse as bool
+  pv.bool_val = (value == "1" || value == "true");
+
+  // Parse as double
+  try {
+    pv.double_val = std::stod(value);
+    pv.double_valid = true;
+  } catch (const std::exception&) {
+    // Invalid double
+  }
+
+  // Parse as int64_t
+  try {
+    pv.int64_val = std::stoll(value);
+    pv.int64_valid = true;
+  } catch (const std::exception&) {
+    // Invalid int64
+  }
+
+  // Parse as uint64_t
+  try {
+    pv.uint64_val = std::stoull(value);
+    pv.uint64_valid = true;
+  } catch (const std::exception&) {
+    // Invalid uint64
+  }
+
+  return pv;
+}
+
+}  // namespace
+
 std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storage::DocId>& results,
                                                         const std::vector<query::FilterCondition>& filters,
                                                         storage::DocumentStore* doc_store) {
   std::vector<storage::DocId> filtered_results;
   filtered_results.reserve(results.size());
 
+  // Pre-parse all filter values once before the main loop
+  std::vector<ParsedFilterValue> parsed_values;
+  parsed_values.reserve(filters.size());
+  for (const auto& filter_cond : filters) {
+    parsed_values.push_back(ParseFilterValue(filter_cond.value));
+  }
+
   for (const auto& doc_id : results) {
     bool matches_all_filters = true;
 
-    for (const auto& filter_cond : filters) {
+    for (size_t i = 0; i < filters.size(); ++i) {
+      const auto& filter_cond = filters[i];
+      const auto& pv = parsed_values[i];
       auto stored_value = doc_store->GetFilterValue(doc_id, filter_cond.column);
 
       // NULL values: only match for NE operator
@@ -617,116 +676,103 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
                   return false;
               }
             } else if constexpr (std::is_same_v<T, bool>) {
-              // Boolean: convert filter value to bool
-              bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
+              // Boolean: use pre-parsed bool value
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
-                  return val == bool_filter;
+                  return val == pv.bool_val;
                 case query::FilterOp::NE:
-                  return val != bool_filter;
+                  return val != pv.bool_val;
                 default:
                   return false;  // GT/GTE/LT/LTE not meaningful for bools
               }
             } else if constexpr (std::is_same_v<T, double>) {
-              // Floating-point comparison
-              double filter_val = 0.0;
-              try {
-                filter_val = std::stod(filter_cond.value);
-              } catch (const std::exception&) {
+              // Floating-point comparison using pre-parsed value
+              if (!pv.double_valid) {
                 return false;  // Invalid number
               }
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
                   // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
-                  return val == filter_val;
+                  return val == pv.double_val;
                   // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
                 case query::FilterOp::NE:
                   // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
-                  return val != filter_val;
+                  return val != pv.double_val;
                   // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
                 case query::FilterOp::GT:
-                  return val > filter_val;
+                  return val > pv.double_val;
                 case query::FilterOp::GTE:
-                  return val >= filter_val;
+                  return val >= pv.double_val;
                 case query::FilterOp::LT:
-                  return val < filter_val;
+                  return val < pv.double_val;
                 case query::FilterOp::LTE:
-                  return val <= filter_val;
+                  return val <= pv.double_val;
                 default:
                   return false;
               }
             } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-              // TIME value comparison: treat as signed integer (seconds)
-              int64_t filter_val = 0;
-              try {
-                filter_val = std::stoll(filter_cond.value);
-              } catch (const std::exception&) {
+              // TIME value comparison using pre-parsed int64 value
+              if (!pv.int64_valid) {
                 return false;  // Invalid number
               }
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
-                  return val.seconds == filter_val;
+                  return val.seconds == pv.int64_val;
                 case query::FilterOp::NE:
-                  return val.seconds != filter_val;
+                  return val.seconds != pv.int64_val;
                 case query::FilterOp::GT:
-                  return val.seconds > filter_val;
+                  return val.seconds > pv.int64_val;
                 case query::FilterOp::GTE:
-                  return val.seconds >= filter_val;
+                  return val.seconds >= pv.int64_val;
                 case query::FilterOp::LT:
-                  return val.seconds < filter_val;
+                  return val.seconds < pv.int64_val;
                 case query::FilterOp::LTE:
-                  return val.seconds <= filter_val;
+                  return val.seconds <= pv.int64_val;
                 default:
                   return false;
               }
             } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
                                  std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
-              // Unsigned integer comparison - use unsigned parsing to handle large values
-              uint64_t filter_val = 0;
-              try {
-                filter_val = std::stoull(filter_cond.value);
-              } catch (const std::exception&) {
+              // Unsigned integer comparison using pre-parsed uint64 value
+              if (!pv.uint64_valid) {
                 return false;  // Invalid number
               }
               auto unsigned_val = static_cast<uint64_t>(val);
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
-                  return unsigned_val == filter_val;
+                  return unsigned_val == pv.uint64_val;
                 case query::FilterOp::NE:
-                  return unsigned_val != filter_val;
+                  return unsigned_val != pv.uint64_val;
                 case query::FilterOp::GT:
-                  return unsigned_val > filter_val;
+                  return unsigned_val > pv.uint64_val;
                 case query::FilterOp::GTE:
-                  return unsigned_val >= filter_val;
+                  return unsigned_val >= pv.uint64_val;
                 case query::FilterOp::LT:
-                  return unsigned_val < filter_val;
+                  return unsigned_val < pv.uint64_val;
                 case query::FilterOp::LTE:
-                  return unsigned_val <= filter_val;
+                  return unsigned_val <= pv.uint64_val;
                 default:
                   return false;
               }
             } else {
-              // Signed integer comparison (int8_t, int16_t, int32_t, int64_t)
-              int64_t filter_val = 0;
-              try {
-                filter_val = std::stoll(filter_cond.value);
-              } catch (const std::exception&) {
+              // Signed integer comparison using pre-parsed int64 value
+              if (!pv.int64_valid) {
                 return false;  // Invalid number
               }
               auto signed_val = static_cast<int64_t>(val);
               switch (filter_cond.op) {
                 case query::FilterOp::EQ:
-                  return signed_val == filter_val;
+                  return signed_val == pv.int64_val;
                 case query::FilterOp::NE:
-                  return signed_val != filter_val;
+                  return signed_val != pv.int64_val;
                 case query::FilterOp::GT:
-                  return signed_val > filter_val;
+                  return signed_val > pv.int64_val;
                 case query::FilterOp::GTE:
-                  return signed_val >= filter_val;
+                  return signed_val >= pv.int64_val;
                 case query::FilterOp::LT:
-                  return signed_val < filter_val;
+                  return signed_val < pv.int64_val;
                 case query::FilterOp::LTE:
-                  return signed_val <= filter_val;
+                  return signed_val <= pv.int64_val;
                 default:
                   return false;
               }

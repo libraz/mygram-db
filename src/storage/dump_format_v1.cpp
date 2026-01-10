@@ -15,6 +15,7 @@
 #include <sstream>
 #include <vector>
 
+#include "utils/endian_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef _WIN32
@@ -44,23 +45,51 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
 namespace {
 
 /**
- * @brief Write binary data to stream
+ * @brief Write binary data to stream in little-endian format
+ *
+ * All multi-byte integers are stored in little-endian format for
+ * cross-platform compatibility, as specified in dump_format_v1.h.
  */
 template <typename T>
 bool WriteBinary(std::ostream& output_stream, const T& value) {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  output_stream.write(reinterpret_cast<const char*>(&value), sizeof(T));
+  if constexpr (std::is_same_v<T, double>) {
+    double le_value = mygram::utils::ToLittleEndianDouble(value);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
+  } else if constexpr (std::is_integral_v<T>) {
+    T le_value = mygram::utils::ToLittleEndian(value);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
+  } else {
+    // For non-integral types (e.g., structs), write as-is
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    output_stream.write(reinterpret_cast<const char*>(&value), sizeof(T));
+  }
   return output_stream.good();
 }
 
 /**
- * @brief Read binary data from stream
+ * @brief Read binary data from stream in little-endian format
+ *
+ * All multi-byte integers are stored in little-endian format for
+ * cross-platform compatibility, as specified in dump_format_v1.h.
  */
 template <typename T>
 bool ReadBinary(std::istream& input_stream, T& value) {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
   input_stream.read(reinterpret_cast<char*>(&value), sizeof(T));
-  return input_stream.good();
+  if (!input_stream.good()) {
+    return false;
+  }
+
+  if constexpr (std::is_same_v<T, double>) {
+    value = mygram::utils::FromLittleEndianDouble(value);
+  } else if constexpr (std::is_integral_v<T>) {
+    value = mygram::utils::FromLittleEndian(value);
+  }
+  // For non-integral types (e.g., structs), keep as-is
+
+  return true;
 }
 
 /**
@@ -879,6 +908,14 @@ Expected<void, Error> WriteDumpV1(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats) {
+  // Atomic write strategy (BUG-0077):
+  // 1. Write to temporary file (.tmp suffix)
+  // 2. fsync the temporary file
+  // 3. Atomically rename to final path
+  // This ensures the original file is never corrupted during write failures.
+
+  std::string temp_filepath = filepath + ".tmp";
+
   try {
     // Ensure parent directory exists
     std::filesystem::path file_path(filepath);
@@ -908,46 +945,25 @@ Expected<void, Error> WriteDumpV1(
       }
     }
 
-    // SECURITY: Check if file path is a symlink before opening
+    // SECURITY: Check if final path is a symlink before opening
     std::error_code error_code;
     if (std::filesystem::exists(filepath, error_code) && std::filesystem::is_symlink(filepath)) {
       StructuredLog().Event("storage_security_error").Field("type", "symlink_file").Field("filepath", filepath).Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
-    // SECURITY: Open file with O_NOFOLLOW to prevent symlink attacks (TOCTOU protection)
+    // Remove any existing temp file
+    std::filesystem::remove(temp_filepath, error_code);
+
+    // SECURITY: Open temp file with O_NOFOLLOW to prevent symlink attacks (TOCTOU protection)
     // O_CREAT | O_EXCL: Fail if file already exists (atomic creation)
     // O_NOFOLLOW: Fail if the file is a symbolic link
     // S_IRUSR | S_IWUSR: Set permissions to 600 (rw-------)
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
-    int file_descriptor = open(filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    int file_descriptor = open(temp_filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
     if (file_descriptor < 0) {
-      if (errno == EEXIST) {
-        // File already exists - check if it's a symlink before removing
-        if (std::filesystem::is_symlink(filepath)) {
-          StructuredLog()
-              .Event("storage_security_error")
-              .Field("type", "symlink_existing_file")
-              .Field("filepath", filepath)
-              .Error();
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-        }
-        // File exists and is not a symlink - try to remove and recreate
-        StructuredLog()
-            .Event("storage_warning")
-            .Field("type", "file_exists")
-            .Field("operation", "dump_save")
-            .Field("filepath", filepath)
-            .Warn();
-        if (std::filesystem::remove(filepath)) {
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
-          file_descriptor = open(filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-        }
-      }
-      if (file_descriptor < 0) {
-        LogStorageError("create_file", filepath, std::strerror(errno));
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
+      LogStorageError("create_temp_file", temp_filepath, std::strerror(errno));
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
     // Verify ownership (file must be owned by current process user)
@@ -958,9 +974,9 @@ Expected<void, Error> WriteDumpV1(
       StructuredLog()
           .Event("storage_security_error")
           .Field("type", "ownership_verification_failed")
-          .Field("filepath", filepath)
+          .Field("filepath", temp_filepath)
           .Error();
-      std::filesystem::remove(filepath);  // Clean up potentially compromised file
+      std::filesystem::remove(temp_filepath);  // Clean up potentially compromised file
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
@@ -969,16 +985,20 @@ Expected<void, Error> WriteDumpV1(
     // For simplicity, we'll close file_descriptor and reopen with ofstream since ownership is verified
     close(file_descriptor);
 
-    std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc | std::ios::out);
+    std::ofstream ofs(temp_filepath, std::ios::binary | std::ios::trunc | std::ios::out);
     if (!ofs) {
-      LogStorageError("open_file", filepath, "Failed to open for writing");
+      LogStorageError("open_temp_file", temp_filepath, "Failed to open for writing");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 #else
     // Windows: Use standard file opening (symlink attacks less common on Windows)
-    std::ofstream ofs(filepath, std::ios::binary | std::ios::trunc);
+    // Remove any existing temp file
+    std::error_code error_code;
+    std::filesystem::remove(temp_filepath, error_code);
+
+    std::ofstream ofs(temp_filepath, std::ios::binary | std::ios::trunc);
     if (!ofs) {
-      LogStorageError("open_file", filepath, "Failed to open for writing");
+      LogStorageError("open_temp_file", temp_filepath, "Failed to open for writing");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 #endif
@@ -987,6 +1007,7 @@ Expected<void, Error> WriteDumpV1(
     ofs.write(dump_format::kMagicNumber.data(), 4);
     auto version = static_cast<uint32_t>(dump_format::FormatVersion::V1);
     if (!WriteBinary(ofs, version)) {
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
@@ -1002,19 +1023,22 @@ Expected<void, Error> WriteDumpV1(
 
     // Write V1 header
     if (auto result = WriteHeaderV1(ofs, header); !result) {
-      LogStorageError("write_header", filepath, result.error().message());
+      LogStorageError("write_header", temp_filepath, result.error().message());
+      std::filesystem::remove(temp_filepath);
       return result;
     }
 
     // Write config section
     std::ostringstream config_stream;
     if (auto result = SerializeConfig(config_stream, config); !result) {
-      LogStorageError("serialize_config", filepath, result.error().message());
+      LogStorageError("serialize_config", temp_filepath, result.error().message());
+      std::filesystem::remove(temp_filepath);
       return result;
     }
     std::string config_data = config_stream.str();
     auto config_len = static_cast<uint32_t>(config_data.size());
     if (!WriteBinary(ofs, config_len)) {
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
     ofs.write(config_data.data(), static_cast<std::streamsize>(config_len));
@@ -1023,18 +1047,21 @@ Expected<void, Error> WriteDumpV1(
     if (stats != nullptr) {
       std::ostringstream stats_stream;
       if (auto result = SerializeStatistics(stats_stream, *stats); !result) {
-        LogStorageError("serialize_statistics", filepath, result.error().message());
+        LogStorageError("serialize_statistics", temp_filepath, result.error().message());
+        std::filesystem::remove(temp_filepath);
         return result;
       }
       std::string stats_data = stats_stream.str();
       auto stats_len = static_cast<uint32_t>(stats_data.size());
       if (!WriteBinary(ofs, stats_len)) {
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       ofs.write(stats_data.data(), static_cast<std::streamsize>(stats_len));
     } else {
       uint32_t stats_len = 0;
       if (!WriteBinary(ofs, stats_len)) {
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
     }
@@ -1042,6 +1069,7 @@ Expected<void, Error> WriteDumpV1(
     // Write table data section
     auto table_count = static_cast<uint32_t>(table_contexts.size());
     if (!WriteBinary(ofs, table_count)) {
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
@@ -1051,6 +1079,7 @@ Expected<void, Error> WriteDumpV1(
 
       // Write table name
       if (!WriteString(ofs, table_name)) {
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
@@ -1061,21 +1090,24 @@ Expected<void, Error> WriteDumpV1(
           StructuredLog()
               .Event("storage_error")
               .Field("operation", "serialize_table_statistics")
-              .Field("filepath", filepath)
+              .Field("filepath", temp_filepath)
               .Field("table", table_name)
               .Field("error", result.error().message())
               .Error();
+          std::filesystem::remove(temp_filepath);
           return result;
         }
         std::string table_stats_data = table_stats_stream.str();
         auto table_stats_len = static_cast<uint32_t>(table_stats_data.size());
         if (!WriteBinary(ofs, table_stats_len)) {
+          std::filesystem::remove(temp_filepath);
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
         ofs.write(table_stats_data.data(), static_cast<std::streamsize>(table_stats_len));
       } else {
         uint32_t table_stats_len = 0;
         if (!WriteBinary(ofs, table_stats_len)) {
+          std::filesystem::remove(temp_filepath);
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
       }
@@ -1086,16 +1118,18 @@ Expected<void, Error> WriteDumpV1(
         StructuredLog()
             .Event("storage_error")
             .Field("operation", "save_index")
-            .Field("filepath", filepath)
+            .Field("filepath", temp_filepath)
             .Field("table", table_name)
             .Field("error", "SaveToStream failed")
             .Error();
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
       std::string index_data = index_stream.str();
       auto index_len = static_cast<uint64_t>(index_data.size());
       if (!WriteBinary(ofs, index_len)) {
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       ofs.write(index_data.data(), static_cast<std::streamsize>(index_len));
@@ -1106,43 +1140,48 @@ Expected<void, Error> WriteDumpV1(
         StructuredLog()
             .Event("storage_error")
             .Field("operation", "save_documents")
-            .Field("filepath", filepath)
+            .Field("filepath", temp_filepath)
             .Field("table", table_name)
             .Field("error", result.error().message())
             .Error();
+        std::filesystem::remove(temp_filepath);
         return result;
       }
 
       std::string doc_data = doc_stream.str();
       auto doc_len = static_cast<uint64_t>(doc_data.size());
       if (!WriteBinary(ofs, doc_len)) {
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       ofs.write(doc_data.data(), static_cast<std::streamsize>(doc_len));
 
-      StructuredLog().Event("dump_table_saved").Field("table", table_name).Info();
+      StructuredLog().Event("dump_table_saved").Field("table", table_name).Debug();
     }
 
     ofs.close();
     if (!ofs.good()) {
-      LogStorageError("write_dump", filepath, "Stream error during write");
+      LogStorageError("write_dump", temp_filepath, "Stream error during write");
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
     // Calculate file size
-    std::ifstream ifs_size(filepath, std::ios::binary | std::ios::ate);
+    std::ifstream ifs_size(temp_filepath, std::ios::binary | std::ios::ate);
     if (!ifs_size) {
-      LogStorageError("reopen_file", filepath, "Failed to reopen for size calculation");
+      LogStorageError("reopen_file", temp_filepath, "Failed to reopen for size calculation");
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
     uint64_t file_size = static_cast<uint64_t>(ifs_size.tellg());
     ifs_size.close();
 
-    // First, update total_file_size in the header (but keep CRC as 0)
+    // Update total_file_size in the header
     {
-      std::fstream update_stream1(filepath, std::ios::in | std::ios::out | std::ios::binary);
+      std::fstream update_stream1(temp_filepath, std::ios::in | std::ios::out | std::ios::binary);
       if (!update_stream1) {
-        LogStorageError("open_file", filepath, "Failed to open for header update");
+        LogStorageError("open_file", temp_filepath, "Failed to open for header update");
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
@@ -1150,32 +1189,33 @@ Expected<void, Error> WriteDumpV1(
       const std::streamoff file_size_offset = 4 + 4 + 4 + 4 + 8;
       update_stream1.seekp(file_size_offset);
       if (!WriteBinary(update_stream1, file_size)) {
-        LogStorageError("write_header_field", filepath, "Failed to write total_file_size");
+        LogStorageError("write_header_field", temp_filepath, "Failed to write total_file_size");
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       update_stream1.close();
     }
 
-    // Now read the file WITH total_file_size set to calculate CRC
-    // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
-    std::ifstream ifs(filepath, std::ios::binary);
+    // Calculate CRC32 of the file
+    std::ifstream ifs(temp_filepath, std::ios::binary);
     if (!ifs) {
-      LogStorageError("reopen_file", filepath, "Failed to reopen for CRC calculation");
+      LogStorageError("reopen_file", temp_filepath, "Failed to reopen for CRC calculation");
+      std::filesystem::remove(temp_filepath);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
-    // CRC field is at offset: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) + total_file_size(8) =
-    // 32 bytes
-    const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;  // Position of file_crc32 in file
+    // CRC field is at offset: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) + total_file_size(8)
+    const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
 
     uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
     ifs.close();
 
     // Update header with CRC
     {
-      std::fstream update_stream2(filepath, std::ios::in | std::ios::out | std::ios::binary);
+      std::fstream update_stream2(temp_filepath, std::ios::in | std::ios::out | std::ios::binary);
       if (!update_stream2) {
-        LogStorageError("open_file", filepath, "Failed to open for CRC update");
+        LogStorageError("open_file", temp_filepath, "Failed to open for CRC update");
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
@@ -1184,26 +1224,75 @@ Expected<void, Error> WriteDumpV1(
       const std::streamoff crc_file_offset = file_size_offset + 8;
       update_stream2.seekp(crc_file_offset);
       if (!WriteBinary(update_stream2, calculated_crc)) {
-        LogStorageError("write_header_field", filepath, "Failed to write file_crc32");
+        LogStorageError("write_header_field", temp_filepath, "Failed to write file_crc32");
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
       update_stream2.close();
       if (!update_stream2.good()) {
-        LogStorageError("update_header", filepath, "Stream error during header update");
+        LogStorageError("update_header", temp_filepath, "Stream error during header update");
+        std::filesystem::remove(temp_filepath);
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
     }
 
+    // Ensure temp file data is flushed to disk BEFORE rename
+    // This is critical for atomicity - ensures data is durable before the rename
+#ifndef _WIN32
+    int fd = open(temp_filepath.c_str(), O_RDONLY);
+    if (fd >= 0) {
+      if (fsync(fd) != 0) {
+        StructuredLog()
+            .Event("storage_warning")
+            .Field("operation", "fsync_temp_file")
+            .Field("filepath", temp_filepath)
+            .Field("errno", static_cast<int64_t>(errno))
+            .Warn();
+      }
+      close(fd);
+    }
+#endif
+
+    // Atomic rename: temp file -> final path
+    // On POSIX systems, rename() is atomic within the same filesystem
+    std::error_code rename_error;
+    std::filesystem::rename(temp_filepath, filepath, rename_error);
+    if (rename_error) {
+      LogStorageError("atomic_rename", filepath, rename_error.message());
+      std::filesystem::remove(temp_filepath);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+    }
+
+    // Sync the directory to ensure the rename is durable
+#ifndef _WIN32
+    int dir_fd = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dir_fd >= 0) {
+      if (fsync(dir_fd) != 0) {
+        StructuredLog()
+            .Event("storage_warning")
+            .Field("operation", "fsync_directory")
+            .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
+            .Field("errno", static_cast<int64_t>(errno))
+            .Warn();
+      }
+      close(dir_fd);
+    }
+#endif
+
     StructuredLog()
-        .Event("dump_crc_calculated")
+        .Event("dump_saved_atomically")
+        .Field("filepath", filepath)
         .Field("crc32", static_cast<uint64_t>(calculated_crc))
         .Field("file_size", file_size)
-        .Debug();
+        .Info();
 
     return {};
 
   } catch (const std::exception& e) {
+    // Clean up temp file on any exception
+    std::error_code cleanup_error;
+    std::filesystem::remove(temp_filepath, cleanup_error);
     LogStorageError("write_dump_exception", filepath, e.what());
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
   }
@@ -1535,7 +1624,7 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
   while (bytes_read < file_size) {
     size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
     ifs.read(buffer.data(), static_cast<std::streamsize>(to_read));
-    size_t actually_read = static_cast<size_t>(ifs.gcount());
+    auto actually_read = static_cast<size_t>(ifs.gcount());
 
     if (actually_read == 0) {
       break;  // EOF or error

@@ -108,13 +108,17 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       MYSQL_ROW row = mysql_fetch_row(gtid_before_exp->get());
       if (row != nullptr && row[0] != nullptr) {
         gtid_before = std::string(row[0]);
-        gtid_before.erase(std::remove_if(gtid_before.begin(), gtid_before.end(),
-                                         [](unsigned char c) { return std::isspace(c); }),
-                          gtid_before.end());
+        gtid_before.erase(
+            std::remove_if(gtid_before.begin(), gtid_before.end(),
+                           [](unsigned char chr) { return std::isspace(chr); }),
+            gtid_before.end());
       }
     }
 
-    mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Field("attempt", static_cast<int64_t>(retry_count + 1)).Info();
+    mygram::utils::StructuredLog()
+        .Event("consistent_snapshot_starting")
+        .Field("attempt", static_cast<int64_t>(retry_count + 1))
+        .Info();
     if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
       std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
       mygram::utils::StructuredLog()
@@ -133,9 +137,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       MYSQL_ROW row = mysql_fetch_row(gtid_after_exp->get());
       if (row != nullptr && row[0] != nullptr) {
         gtid_after = std::string(row[0]);
-        gtid_after.erase(std::remove_if(gtid_after.begin(), gtid_after.end(),
-                                        [](unsigned char c) { return std::isspace(c); }),
-                         gtid_after.end());
+        gtid_after.erase(
+            std::remove_if(gtid_after.begin(), gtid_after.end(),
+                           [](unsigned char chr) { return std::isspace(chr); }),
+            gtid_after.end());
       }
     }
 
