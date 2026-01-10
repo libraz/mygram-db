@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <spdlog/spdlog.h>
 
+#include <charconv>
 #include <optional>
 #include <sstream>
 
@@ -54,12 +55,11 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
     return std::nullopt;
   }
 
-  // Parse prefix length part
-  std::string prefix_str = cidr_str.substr(slash_pos + 1);
+  // Parse prefix length part using std::from_chars (no exceptions)
+  std::string_view prefix_str(cidr_str.data() + slash_pos + 1, cidr_str.size() - slash_pos - 1);
   int prefix_length = 0;
-  try {
-    prefix_length = std::stoi(prefix_str);
-  } catch (...) {
+  auto [ptr, ec] = std::from_chars(prefix_str.data(), prefix_str.data() + prefix_str.size(), prefix_length);
+  if (ec != std::errc() || ptr != prefix_str.data() + prefix_str.size()) {
     return std::nullopt;
   }
 

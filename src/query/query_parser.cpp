@@ -90,42 +90,41 @@ bool Query::IsValid() const {
   }
 
   // Check if this query type requires a table name
-  auto requires_table = [this]() -> bool {
-    switch (type) {
-      // Commands that do NOT require a table
-      case QueryType::INFO:
-      case QueryType::SAVE:
-      case QueryType::LOAD:
-      case QueryType::DUMP_SAVE:
-      case QueryType::DUMP_LOAD:
-      case QueryType::DUMP_VERIFY:
-      case QueryType::DUMP_INFO:
-      case QueryType::DUMP_STATUS:
-      case QueryType::REPLICATION_STATUS:
-      case QueryType::REPLICATION_STOP:
-      case QueryType::REPLICATION_START:
-      case QueryType::SYNC_STATUS:
-      case QueryType::SYNC_STOP:
-      case QueryType::CONFIG_HELP:
-      case QueryType::CONFIG_SHOW:
-      case QueryType::CONFIG_VERIFY:
-      case QueryType::OPTIMIZE:
-      case QueryType::DEBUG_ON:
-      case QueryType::DEBUG_OFF:
-      case QueryType::CACHE_CLEAR:
-      case QueryType::CACHE_STATS:
-      case QueryType::CACHE_ENABLE:
-      case QueryType::CACHE_DISABLE:
-      case QueryType::SET:
-      case QueryType::SHOW_VARIABLES:
-        return false;
-      // All other commands require a table
-      default:
-        return true;
-    }
-  };
+  // Commands that do NOT require a table are listed; all others require one
+  bool requires_table = true;
+  switch (type) {
+    case QueryType::INFO:
+    case QueryType::SAVE:
+    case QueryType::LOAD:
+    case QueryType::DUMP_SAVE:
+    case QueryType::DUMP_LOAD:
+    case QueryType::DUMP_VERIFY:
+    case QueryType::DUMP_INFO:
+    case QueryType::DUMP_STATUS:
+    case QueryType::REPLICATION_STATUS:
+    case QueryType::REPLICATION_STOP:
+    case QueryType::REPLICATION_START:
+    case QueryType::SYNC_STATUS:
+    case QueryType::SYNC_STOP:
+    case QueryType::CONFIG_HELP:
+    case QueryType::CONFIG_SHOW:
+    case QueryType::CONFIG_VERIFY:
+    case QueryType::OPTIMIZE:
+    case QueryType::DEBUG_ON:
+    case QueryType::DEBUG_OFF:
+    case QueryType::CACHE_CLEAR:
+    case QueryType::CACHE_STATS:
+    case QueryType::CACHE_ENABLE:
+    case QueryType::CACHE_DISABLE:
+    case QueryType::SET:
+    case QueryType::SHOW_VARIABLES:
+      requires_table = false;
+      break;
+    default:
+      break;
+  }
 
-  if (requires_table() && table.empty()) {
+  if (requires_table && table.empty()) {
     return false;
   }
 

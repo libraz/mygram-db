@@ -11,6 +11,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include "utils/constants.h"
+
 #ifdef USE_ICU
 #include <unicode/brkiter.h>
 #include <unicode/normalizer2.h>
@@ -89,8 +91,8 @@ constexpr uint32_t kCjkExtDEnd = 0x2B81F;
 constexpr uint32_t kCjkCompatStart = 0xF900;
 constexpr uint32_t kCjkCompatEnd = 0xFAFF;
 
-// Byte formatting constants
-constexpr double kBytesPerKilobyte = 1024.0;
+// Byte formatting constants - use shared kBytesPerKilobyteDouble from constants.h
+using mygram::constants::kBytesPerKilobyteDouble;
 constexpr double kLargeUnitThreshold = 100.0;
 constexpr double kMediumUnitThreshold = 10.0;
 
@@ -426,8 +428,8 @@ std::string FormatBytes(size_t bytes) {
   size_t unit_index = 0;
   auto size = static_cast<double>(bytes);
 
-  while (size >= kBytesPerKilobyte && unit_index < kUnits.size() - 1) {
-    size /= kBytesPerKilobyte;
+  while (size >= kBytesPerKilobyteDouble && unit_index < kUnits.size() - 1) {
+    size /= kBytesPerKilobyteDouble;
     unit_index++;
   }
 

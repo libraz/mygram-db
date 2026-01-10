@@ -17,7 +17,8 @@
 #include <unistd.h>
 #endif
 
-#include "utils/endian_utils.h"
+#include "utils/binary_io.h"
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::storage {
@@ -26,9 +27,8 @@ using mygram::utils::ErrorCode;
 
 namespace {
 
-// Binary I/O constants
-constexpr size_t kBytesPerKilobyte = 1024;
-constexpr size_t kBytesPerMegabyte = kBytesPerKilobyte * 1024;
+// Use shared byte unit constants from utils/constants.h
+using mygram::constants::kBytesPerMegabyte;
 
 // FilterValue type indices for serialization
 // These map to std::variant<std::monostate, bool, int8_t, uint8_t, int16_t, uint16_t, int32_t,
@@ -48,13 +48,11 @@ constexpr uint8_t kTypeIndexString = 11;
 constexpr uint8_t kTypeIndexDouble = 12;
 
 /**
- * @brief Helper to write binary data to output stream in little-endian format
+ * @brief Void-returning wrapper for WriteBinary (maintains API compatibility)
  *
- * std::ofstream::write() requires const char* but we work with typed data.
- * This helper encapsulates the required type conversion and endian handling.
- *
- * All multi-byte integers are stored in little-endian format for
- * cross-platform compatibility (BUG-0076 fix).
+ * Delegates to mygram::utils::WriteBinary from binary_io.h.
+ * This wrapper maintains the original void return type for compatibility
+ * with existing code that doesn't check return values.
  *
  * @tparam T Type of data to write
  * @param output_stream Output stream
@@ -62,29 +60,15 @@ constexpr uint8_t kTypeIndexDouble = 12;
  */
 template <typename T>
 inline void WriteBinary(std::ostream& output_stream, const T& data) {
-  if constexpr (std::is_same_v<T, double>) {
-    double le_value = mygram::utils::ToLittleEndianDouble(data);
-    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
-  } else if constexpr (std::is_integral_v<T>) {
-    T le_value = mygram::utils::ToLittleEndian(data);
-    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
-  } else {
-    // For non-integral types, write as-is
-    // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&data), sizeof(T));
-  }
+  (void)mygram::utils::WriteBinary(output_stream, data);
 }
 
 /**
- * @brief Helper to read binary data from input stream in little-endian format
+ * @brief Void-returning wrapper for ReadBinary (maintains API compatibility)
  *
- * std::ifstream::read() requires char* but we work with typed data.
- * This helper encapsulates the required type conversion and endian handling.
- *
- * All multi-byte integers are stored in little-endian format for
- * cross-platform compatibility (BUG-0076 fix).
+ * Delegates to mygram::utils::ReadBinary from binary_io.h.
+ * This wrapper maintains the original void return type for compatibility
+ * with existing code that doesn't check return values.
  *
  * @tparam T Type of data to read
  * @param input_stream Input stream
@@ -92,17 +76,7 @@ inline void WriteBinary(std::ostream& output_stream, const T& data) {
  */
 template <typename T>
 inline void ReadBinary(std::istream& input_stream, T& data) {
-  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-  input_stream.read(reinterpret_cast<char*>(&data), sizeof(T));
-
-  if (input_stream.good()) {
-    if constexpr (std::is_same_v<T, double>) {
-      data = mygram::utils::FromLittleEndianDouble(data);
-    } else if constexpr (std::is_integral_v<T>) {
-      data = mygram::utils::FromLittleEndian(data);
-    }
-    // For non-integral types, keep as-is
-  }
+  (void)mygram::utils::ReadBinary(input_stream, data);
 }
 
 }  // namespace

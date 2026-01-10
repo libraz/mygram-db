@@ -292,43 +292,12 @@ Expected<uint64_t, Error> DateTimeProcessor::ParseDateTimeValue(std::string_view
 // ============================================================================
 
 std::optional<int32_t> ParseTimezoneOffset(std::string_view timezone_str) {
-  // Expected format: [+-]HH:MM (e.g., "+09:00", "-05:30")
-  if (timezone_str.size() != kTimezoneOffsetLength) {
+  // Delegate to TimezoneOffset::Parse() to avoid code duplication
+  auto result = TimezoneOffset::Parse(timezone_str);
+  if (!result) {
     return std::nullopt;
   }
-
-  char sign = timezone_str[0];
-  if (sign != '+' && sign != '-') {
-    return std::nullopt;
-  }
-
-  // Parse hours
-  if (timezone_str[1] < '0' || timezone_str[1] > '2' || timezone_str[2] < '0' || timezone_str[2] > '9') {
-    return std::nullopt;
-  }
-  int hours = (timezone_str[1] - '0') * kDecimalBase + (timezone_str[2] - '0');
-  if (hours > kMaxHour) {
-    return std::nullopt;
-  }
-
-  // Check colon separator
-  if (timezone_str[3] != ':') {
-    return std::nullopt;
-  }
-
-  // Parse minutes
-  if (timezone_str[kMinuteFirstDigitPos] < '0' ||
-      timezone_str[kMinuteFirstDigitPos] > static_cast<char>('0' + kMinutesFirstDigitMax) ||
-      timezone_str[kMinuteSecondDigitPos] < '0' || timezone_str[kMinuteSecondDigitPos] > '9') {
-    return std::nullopt;
-  }
-  int minutes = (timezone_str[kMinuteFirstDigitPos] - '0') * kDecimalBase + (timezone_str[kMinuteSecondDigitPos] - '0');
-  if (minutes > kMaxMinute) {
-    return std::nullopt;
-  }
-
-  int32_t offset_seconds = hours * kSecondsPerHour + minutes * kSecondsPerMinute;
-  return (sign == '+') ? offset_seconds : -offset_seconds;
+  return result->GetOffsetSeconds();
 }
 
 bool IsNumericString(std::string_view str) {
@@ -491,18 +460,18 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
   // Fallback: Calculate epoch manually (simplified, assumes Gregorian calendar)
   // This is less accurate but portable
   // Days since epoch calculation
-  auto is_leap_year = [](int y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
+  // Note: Uses IsLeapYear() function defined at the top of this file
   constexpr int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
   int days_since_epoch = 0;
   // Count years
   for (int y = 1970; y < year; ++y) {
-    days_since_epoch += is_leap_year(y) ? 366 : 365;
+    days_since_epoch += IsLeapYear(y) ? 366 : 365;
   }
   // Count months
   for (int m = 1; m < month; ++m) {
     days_since_epoch += days_in_month[m - 1];
-    if (m == 2 && is_leap_year(year)) {
+    if (m == 2 && IsLeapYear(year)) {
       days_since_epoch += 1;  // Leap year February
     }
   }
@@ -529,7 +498,9 @@ std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::stri
   if (IsNumericString(value_str)) {
     try {
       return std::stoull(std::string(value_str));
-    } catch (...) {
+    } catch (const std::invalid_argument&) {
+      return std::nullopt;
+    } catch (const std::out_of_range&) {
       return std::nullopt;
     }
   }

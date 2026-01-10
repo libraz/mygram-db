@@ -29,6 +29,152 @@ namespace mygramdb::mysql {
 
 namespace {
 
+// ============================================================================
+// ROWS_EVENT common helper structures and functions
+// ============================================================================
+
+/**
+ * @brief Context for processing ROWS events (INSERT/UPDATE/DELETE)
+ *
+ * Contains all the common data needed to process a rows event,
+ * extracted from buffer and configuration.
+ */
+struct RowsEventContext {
+  uint64_t table_id = 0;
+  const TableMetadata* table_meta = nullptr;
+  const config::TableConfig* current_config = nullptr;
+  std::string text_column;
+  bool use_concat = false;
+  std::vector<config::FilterConfig> required_as_filters;
+};
+
+/**
+ * @brief Extract table_id from binlog event post-header
+ * @param buffer Event buffer (must point to beginning of event)
+ * @return Table ID (6-byte little-endian value)
+ */
+inline uint64_t ExtractTableId(const unsigned char* buffer) {
+  const unsigned char* post_header = buffer + 19;  // Skip common header
+  uint64_t table_id = 0;
+  for (int i = 0; i < 6; i++) {
+    table_id |= static_cast<uint64_t>(post_header[i]) << (i * 8);
+  }
+  return table_id;
+}
+
+/**
+ * @brief Initialize RowsEventContext with common data for ROWS events
+ *
+ * Extracts table metadata, configuration, text column settings, and
+ * required filters from the event buffer and configuration.
+ *
+ * @param buffer Event buffer
+ * @param table_metadata_cache Cache of table metadata
+ * @param table_contexts Map of table contexts (multi-table mode)
+ * @param table_config Single table config (single-table mode)
+ * @param multi_table_mode Whether multi-table mode is enabled
+ * @param event_type_name Name of event type for logging (e.g., "write", "update", "delete")
+ * @return Optional context, nullopt if table not found or not monitored
+ */
+std::optional<RowsEventContext> InitRowsEventContext(
+    const unsigned char* buffer, TableMetadataCache& table_metadata_cache,
+    const std::unordered_map<std::string, server::TableContext*>& table_contexts,
+    const config::TableConfig* table_config, bool multi_table_mode, const std::string& event_type_name) {
+  RowsEventContext ctx;
+
+  // Extract table_id from post-header
+  ctx.table_id = ExtractTableId(buffer);
+
+  // Get table metadata from cache
+  ctx.table_meta = table_metadata_cache.Get(ctx.table_id);
+  if (ctx.table_meta == nullptr) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "unknown_table_id_" + event_type_name)
+        .Field("table_id", ctx.table_id)
+        .Debug();
+    return std::nullopt;
+  }
+
+  // Determine config based on mode
+  if (multi_table_mode) {
+    auto table_iter = table_contexts.find(ctx.table_meta->table_name);
+    if (table_iter == table_contexts.end()) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "table_not_monitored_" + event_type_name)
+          .Field("table", ctx.table_meta->table_name)
+          .Debug();
+      return std::nullopt;
+    }
+    ctx.current_config = &table_iter->second->config;
+  } else {
+    ctx.current_config = table_config;
+  }
+
+  // Determine text column(s)
+  if (!ctx.current_config->text_source.column.empty()) {
+    ctx.text_column = ctx.current_config->text_source.column;
+  } else if (!ctx.current_config->text_source.concat.empty()) {
+    ctx.text_column = ctx.current_config->text_source.concat[0];  // Use first for initial parse
+    ctx.use_concat = true;
+  } else {
+    ctx.text_column = "";
+  }
+
+  // Prepare required_filters config
+  ctx.required_as_filters.reserve(ctx.current_config->required_filters.size());
+  for (const auto& req_filter : ctx.current_config->required_filters) {
+    config::FilterConfig filter_config;
+    filter_config.name = req_filter.name;
+    filter_config.type = req_filter.type;
+    filter_config.dict_compress = false;
+    filter_config.bitmap_index = req_filter.bitmap_index;
+    ctx.required_as_filters.push_back(filter_config);
+  }
+
+  return ctx;
+}
+
+/**
+ * @brief Concatenate text from multiple columns in a row
+ *
+ * @param row Row data containing columns
+ * @param concat_columns List of column names to concatenate
+ * @return Concatenated text with space separators
+ */
+std::string ConcatenateTextColumns(const RowData& row, const std::vector<std::string>& concat_columns) {
+  std::string result;
+  for (const auto& col_name : concat_columns) {
+    auto col_iter = row.columns.find(col_name);
+    if (col_iter != row.columns.end() && !col_iter->second.empty()) {
+      if (!result.empty()) {
+        result += " ";  // Space separator between columns
+      }
+      result += col_iter->second;
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Get text value from row, handling concat mode
+ *
+ * @param row Row data
+ * @param ctx Rows event context
+ * @return Text value (concatenated if use_concat is true)
+ */
+inline std::string GetRowText(const RowData& row, const RowsEventContext& ctx) {
+  if (ctx.use_concat && !ctx.current_config->text_source.concat.empty()) {
+    return ConcatenateTextColumns(row, ctx.current_config->text_source.concat);
+  }
+  return row.text;
+}
+
+// ============================================================================
+// SQL parsing helper functions
+// ============================================================================
+
 /**
  * @brief Strip SQL comments from a query string
  *
@@ -246,69 +392,19 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Parse INSERT operations (V1 and V2)
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "write_rows_detected").Debug();
 
-      // Extract table_id from post-header (skip common header 19 bytes)
-      const unsigned char* post_header = buffer + 19;
-      uint64_t table_id = 0;
-      for (int i = 0; i < 6; i++) {
-        table_id |= (uint64_t)post_header[i] << (i * 8);
-      }
-
-      // Get table metadata from cache
-      const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
-      if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "unknown_table_id_write")
-            .Field("table_id", table_id)
-            .Debug();
+      // Initialize context with common data
+      auto ctx_opt =
+          InitRowsEventContext(buffer, table_metadata_cache, table_contexts, table_config, multi_table_mode, "write");
+      if (!ctx_opt) {
         return {};
       }
+      const auto& ctx = *ctx_opt;
 
-      // Determine text column and primary key from config
-      const config::TableConfig* current_config = nullptr;
-      if (multi_table_mode) {
-        auto table_iter = table_contexts.find(table_meta->table_name);
-        if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "table_not_monitored_write")
-              .Field("table", table_meta->table_name)
-              .Debug();
-          return {};
-        }
-        current_config = &table_iter->second->config;
-      } else {
-        current_config = table_config;
-      }
-
-      // Determine text column(s) - use first column for initial parsing
-      // If concat is configured, we'll extract and concatenate later
-      std::string text_column;
-      bool use_concat = false;
-      if (!current_config->text_source.column.empty()) {
-        text_column = current_config->text_source.column;
-      } else if (!current_config->text_source.concat.empty()) {
-        text_column = current_config->text_source.concat[0];  // Use first for initial parse
-        use_concat = true;                                    // Flag to concatenate later
-      } else {
-        text_column = "";
-      }
-
-      auto rows_opt = ParseWriteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
+      auto rows_opt =
+          ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return {};
-      }
-
-      // Prepare required_filters config for filter extraction
-      std::vector<config::FilterConfig> required_as_filters;
-      for (const auto& req_filter : current_config->required_filters) {
-        config::FilterConfig filter_config;
-        filter_config.name = req_filter.name;
-        filter_config.type = req_filter.type;
-        filter_config.dict_compress = false;
-        filter_config.bitmap_index = req_filter.bitmap_index;
-        required_as_filters.push_back(filter_config);
       }
 
       // Create events for ALL rows (multi-row event support)
@@ -318,31 +414,14 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       for (const auto& row : *rows_opt) {
         BinlogEvent event;
         event.type = BinlogEventType::INSERT;
-        event.table_name = table_meta->table_name;
+        event.table_name = ctx.table_meta->table_name;
         event.primary_key = row.primary_key;
-
-        // Handle text extraction: concatenate all columns if concat is configured
-        if (use_concat && !current_config->text_source.concat.empty()) {
-          std::string concatenated_text;
-          for (const auto& col_name : current_config->text_source.concat) {
-            auto col_iter = row.columns.find(col_name);
-            if (col_iter != row.columns.end() && !col_iter->second.empty()) {
-              if (!concatenated_text.empty()) {
-                concatenated_text += " ";  // Space separator between columns
-              }
-              concatenated_text += col_iter->second;
-            }
-          }
-          event.text = concatenated_text;
-        } else {
-          event.text = row.text;  // Use single column text from parser
-        }
-
+        event.text = GetRowText(row, ctx);
         event.gtid = current_gtid;
 
         // Extract all filters (required + optional) from row data
-        event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
+        event.filters = ExtractFilters(row, ctx.current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(row, ctx.required_as_filters, datetime_timezone);
         event.filters.insert(required_filters.begin(), required_filters.end());
 
         events.push_back(std::move(event));
@@ -364,88 +443,21 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Parse UPDATE operations (V1 and V2)
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "update_rows_detected").Debug();
 
-      // Extract table_id from post-header
-      const unsigned char* post_header = buffer + 19;
-      uint64_t table_id = 0;
-      for (int i = 0; i < 6; i++) {
-        table_id |= (uint64_t)post_header[i] << (i * 8);
-      }
-
-      // Get table metadata from cache
-      const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
-      if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "unknown_table_id_update")
-            .Field("table_id", table_id)
-            .Debug();
+      // Initialize context with common data
+      auto ctx_opt =
+          InitRowsEventContext(buffer, table_metadata_cache, table_contexts, table_config, multi_table_mode, "update");
+      if (!ctx_opt) {
         return {};
       }
-
-      // Determine text column and primary key from config
-      const config::TableConfig* current_config = nullptr;
-      if (multi_table_mode) {
-        auto table_iter = table_contexts.find(table_meta->table_name);
-        if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "table_not_monitored_update")
-              .Field("table", table_meta->table_name)
-              .Debug();
-          return {};
-        }
-        current_config = &table_iter->second->config;
-      } else {
-        current_config = table_config;
-      }
-
-      // Determine text column(s) - use first column for initial parsing
-      std::string text_column;
-      bool use_concat = false;
-      if (!current_config->text_source.column.empty()) {
-        text_column = current_config->text_source.column;
-      } else if (!current_config->text_source.concat.empty()) {
-        text_column = current_config->text_source.concat[0];
-        use_concat = true;
-      } else {
-        text_column = "";
-      }
+      const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
+      auto row_pairs_opt =
+          ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
 
       if (!row_pairs_opt || row_pairs_opt->empty()) {
         return {};
       }
-
-      // Prepare required_filters config for filter extraction
-      std::vector<config::FilterConfig> required_as_filters;
-      for (const auto& req_filter : current_config->required_filters) {
-        config::FilterConfig filter_config;
-        filter_config.name = req_filter.name;
-        filter_config.type = req_filter.type;
-        filter_config.dict_compress = false;
-        filter_config.bitmap_index = req_filter.bitmap_index;
-        required_as_filters.push_back(filter_config);
-      }
-
-      // Helper lambda to concatenate text from multiple columns
-      auto concat_text = [&](const RowData& row) -> std::string {
-        if (!use_concat || current_config->text_source.concat.empty()) {
-          return row.text;
-        }
-        std::string result;
-        for (const auto& col_name : current_config->text_source.concat) {
-          auto col_iter = row.columns.find(col_name);
-          if (col_iter != row.columns.end() && !col_iter->second.empty()) {
-            if (!result.empty()) {
-              result += " ";
-            }
-            result += col_iter->second;
-          }
-        }
-        return result;
-      };
 
       // Create events for ALL row pairs (multi-row event support)
       std::vector<BinlogEvent> events;
@@ -457,15 +469,15 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
         BinlogEvent event;
         event.type = BinlogEventType::UPDATE;
-        event.table_name = table_meta->table_name;
+        event.table_name = ctx.table_meta->table_name;
         event.primary_key = after_row.primary_key;
-        event.text = concat_text(after_row);       // New text (after image)
-        event.old_text = concat_text(before_row);  // Old text (before image) for index update
+        event.text = GetRowText(after_row, ctx);       // New text (after image)
+        event.old_text = GetRowText(before_row, ctx);  // Old text (before image) for index update
         event.gtid = current_gtid;
 
         // Extract all filters from after image
-        event.filters = ExtractFilters(after_row, current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(after_row, required_as_filters, datetime_timezone);
+        event.filters = ExtractFilters(after_row, ctx.current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(after_row, ctx.required_as_filters, datetime_timezone);
         event.filters.insert(required_filters.begin(), required_filters.end());
 
         events.push_back(std::move(event));
@@ -487,69 +499,20 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Parse DELETE operations
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "delete_rows_detected").Debug();
 
-      // Extract table_id from post-header
-      const unsigned char* post_header = buffer + 19;
-      uint64_t table_id = 0;
-      for (int i = 0; i < 6; i++) {
-        table_id |= (uint64_t)post_header[i] << (i * 8);
-      }
-
-      // Get table metadata from cache
-      const TableMetadata* table_meta = table_metadata_cache.Get(table_id);
-      if (table_meta == nullptr) {
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "unknown_table_id_delete")
-            .Field("table_id", table_id)
-            .Debug();
+      // Initialize context with common data
+      auto ctx_opt =
+          InitRowsEventContext(buffer, table_metadata_cache, table_contexts, table_config, multi_table_mode, "delete");
+      if (!ctx_opt) {
         return {};
       }
-
-      // Determine text column and primary key from config
-      const config::TableConfig* current_config = nullptr;
-      if (multi_table_mode) {
-        auto table_iter = table_contexts.find(table_meta->table_name);
-        if (table_iter == table_contexts.end()) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "table_not_monitored_delete")
-              .Field("table", table_meta->table_name)
-              .Debug();
-          return {};
-        }
-        current_config = &table_iter->second->config;
-      } else {
-        current_config = table_config;
-      }
-
-      // Determine text column(s) - use first column for initial parsing
-      std::string text_column;
-      bool use_concat = false;
-      if (!current_config->text_source.column.empty()) {
-        text_column = current_config->text_source.column;
-      } else if (!current_config->text_source.concat.empty()) {
-        text_column = current_config->text_source.concat[0];
-        use_concat = true;
-      } else {
-        text_column = "";
-      }
+      const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto rows_opt = ParseDeleteRowsEvent(buffer, length, table_meta, current_config->primary_key, text_column);
+      auto rows_opt =
+          ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
 
       if (!rows_opt || rows_opt->empty()) {
         return {};
-      }
-
-      // Prepare required_filters config for filter extraction
-      std::vector<config::FilterConfig> required_as_filters;
-      for (const auto& req_filter : current_config->required_filters) {
-        config::FilterConfig filter_config;
-        filter_config.name = req_filter.name;
-        filter_config.type = req_filter.type;
-        filter_config.dict_compress = false;
-        filter_config.bitmap_index = req_filter.bitmap_index;
-        required_as_filters.push_back(filter_config);
       }
 
       // Create events for ALL rows (multi-row event support)
@@ -559,31 +522,14 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       for (const auto& row : *rows_opt) {
         BinlogEvent event;
         event.type = BinlogEventType::DELETE;
-        event.table_name = table_meta->table_name;
+        event.table_name = ctx.table_meta->table_name;
         event.primary_key = row.primary_key;
-
-        // Handle text extraction: concatenate all columns if concat is configured
-        if (use_concat && !current_config->text_source.concat.empty()) {
-          std::string concatenated_text;
-          for (const auto& col_name : current_config->text_source.concat) {
-            auto col_iter = row.columns.find(col_name);
-            if (col_iter != row.columns.end() && !col_iter->second.empty()) {
-              if (!concatenated_text.empty()) {
-                concatenated_text += " ";
-              }
-              concatenated_text += col_iter->second;
-            }
-          }
-          event.text = concatenated_text;
-        } else {
-          event.text = row.text;
-        }
-
+        event.text = GetRowText(row, ctx);
         event.gtid = current_gtid;
 
         // Extract all filters from row data (before image for DELETE)
-        event.filters = ExtractFilters(row, current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(row, required_as_filters, datetime_timezone);
+        event.filters = ExtractFilters(row, ctx.current_config->filters, datetime_timezone);
+        auto required_filters = ExtractFilters(row, ctx.required_as_filters, datetime_timezone);
         event.filters.insert(required_filters.begin(), required_filters.end());
 
         events.push_back(std::move(event));

@@ -107,7 +107,8 @@ json YamlToJson(const YAML::Node& node) {
     case YAML::NodeType::Scalar: {
       try {
         return json::parse(node.as<std::string>());
-      } catch (...) {
+      } catch (const json::parse_error&) {
+        // Not valid JSON, return as plain string
         return node.as<std::string>();
       }
     }

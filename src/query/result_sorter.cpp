@@ -406,8 +406,10 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
           uint64_t num_lhs = std::stoull(str_lhs);
           uint64_t num_rhs = std::stoull(str_rhs);
           return ascending_ ? (num_lhs < num_rhs) : (num_lhs > num_rhs);
-        } catch (...) {
+        } catch (const std::out_of_range&) {
           // Overflow, fall through to string comparison
+        } catch (const std::invalid_argument&) {
+          // Should not happen since we check isdigit, but be safe
         }
       }
 

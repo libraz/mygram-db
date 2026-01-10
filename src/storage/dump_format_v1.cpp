@@ -12,10 +12,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
+#include <thread>
 #include <vector>
 
-#include "utils/endian_utils.h"
+#include "utils/binary_io.h"
 #include "utils/structured_log.h"
 
 #ifdef _WIN32
@@ -44,56 +46,15 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
 
 namespace {
 
-/**
- * @brief Write binary data to stream in little-endian format
- *
- * All multi-byte integers are stored in little-endian format for
- * cross-platform compatibility, as specified in dump_format_v1.h.
- */
-template <typename T>
-bool WriteBinary(std::ostream& output_stream, const T& value) {
-  if constexpr (std::is_same_v<T, double>) {
-    double le_value = mygram::utils::ToLittleEndianDouble(value);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
-  } else if constexpr (std::is_integral_v<T>) {
-    T le_value = mygram::utils::ToLittleEndian(value);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&le_value), sizeof(T));
-  } else {
-    // For non-integral types (e.g., structs), write as-is
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    output_stream.write(reinterpret_cast<const char*>(&value), sizeof(T));
-  }
-  return output_stream.good();
-}
-
-/**
- * @brief Read binary data from stream in little-endian format
- *
- * All multi-byte integers are stored in little-endian format for
- * cross-platform compatibility, as specified in dump_format_v1.h.
- */
-template <typename T>
-bool ReadBinary(std::istream& input_stream, T& value) {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  input_stream.read(reinterpret_cast<char*>(&value), sizeof(T));
-  if (!input_stream.good()) {
-    return false;
-  }
-
-  if constexpr (std::is_same_v<T, double>) {
-    value = mygram::utils::FromLittleEndianDouble(value);
-  } else if constexpr (std::is_integral_v<T>) {
-    value = mygram::utils::FromLittleEndian(value);
-  }
-  // For non-integral types (e.g., structs), keep as-is
-
-  return true;
-}
+// Use shared WriteBinary/ReadBinary from utils/binary_io.h
+using mygram::utils::ReadBinary;
+using mygram::utils::WriteBinary;
 
 /**
  * @brief Write string to stream (length-prefixed)
+ *
+ * Note: Uses local implementation instead of shared WriteString for consistency
+ * with ReadString which has security validation.
  */
 bool WriteString(std::ostream& output_stream, const std::string& str) {
   auto len = static_cast<uint32_t>(str.size());
@@ -909,12 +870,18 @@ Expected<void, Error> WriteDumpV1(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats) {
   // Atomic write strategy (BUG-0077):
-  // 1. Write to temporary file (.tmp suffix)
+  // 1. Write to temporary file with unique suffix to avoid concurrent write collisions
   // 2. fsync the temporary file
   // 3. Atomically rename to final path
   // This ensures the original file is never corrupted during write failures.
 
-  std::string temp_filepath = filepath + ".tmp";
+  // Generate unique temp filename to avoid collisions with concurrent writes
+  // Uses PID + random number for cross-process and cross-thread uniqueness
+  static thread_local std::mt19937 rng(std::random_device{}());
+  std::uniform_int_distribution<uint32_t> dist(0, UINT32_MAX);
+  std::ostringstream oss;
+  oss << filepath << ".tmp." << getpid() << "." << dist(rng);
+  std::string temp_filepath = oss.str();
 
   try {
     // Ensure parent directory exists
@@ -947,7 +914,9 @@ Expected<void, Error> WriteDumpV1(
 
     // SECURITY: Check if final path is a symlink before opening
     std::error_code error_code;
-    if (std::filesystem::exists(filepath, error_code) && std::filesystem::is_symlink(filepath)) {
+    // SECURITY: Reject symlinks regardless of whether target exists (prevent TOCTOU attacks)
+    // Note: is_symlink() uses symlink_status() which checks the link itself, not the target
+    if (std::filesystem::is_symlink(filepath, error_code)) {
       StructuredLog().Event("storage_security_error").Field("type", "symlink_file").Field("filepath", filepath).Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
