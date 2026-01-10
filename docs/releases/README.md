@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.3.8](v1.3.8.md) - Latest release (2025-12-21) - TCP Protocol CRLF Fix & C API Enhancement
+- [v1.3.9](v1.3.9.md) - Latest release (2026-01-10) - Critical Bug Fixes, Performance & MySQL Compatibility
+- [v1.3.8](v1.3.8.md) - 2025-12-21 - TCP Protocol CRLF Fix & C API Enhancement
 - [v1.3.7](v1.3.7.md) - 2025-12-02 - Async DUMP SAVE & DUMP STATUS
 - [v1.3.6](v1.3.6.md) - 2025-11-26 - Cache Optimization & Log Cleanup
 - [v1.3.5](v1.3.5.md) - 2025-11-26 - Parallel Query Performance (QPS 372)
