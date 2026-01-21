@@ -444,8 +444,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("message", "Partial data discarded due to cancellation")
           .Warn();
 
-      ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
-      ctx->doc_store = std::make_unique<storage::DocumentStore>();
+      // Use Clear() instead of creating new instances to preserve pointers
+      // that BinlogReader holds through TableContext (BUG: instance replacement
+      // causes replication to use different doc_store than SYNC populated)
+      ctx->index->Clear();
+      ctx->doc_store->Clear();
 
       std::string cancel_msg = shutdown_requested_ ? "Server shutdown requested" : "Cancelled by user (SYNC STOP)";
       update_state([&cancel_msg](SyncState& state) {
@@ -581,8 +584,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("message", "Partial data discarded to maintain consistency")
           .Warn();
 
-      ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
-      ctx->doc_store = std::make_unique<storage::DocumentStore>();
+      // Use Clear() instead of creating new instances to preserve pointers
+      // that BinlogReader holds through TableContext (BUG: instance replacement
+      // causes replication to use different doc_store than SYNC populated)
+      ctx->index->Clear();
+      ctx->doc_store->Clear();
 
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
@@ -612,8 +618,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             .Field("message", "Partial data discarded due to exception")
             .Warn();
 
-        ctx->index = std::make_unique<index::Index>(ctx->config.ngram_size);
-        ctx->doc_store = std::make_unique<storage::DocumentStore>();
+        // Use Clear() instead of creating new instances to preserve pointers
+        // that BinlogReader holds through TableContext (BUG: instance replacement
+        // causes replication to use different doc_store than SYNC populated)
+        ctx->index->Clear();
+        ctx->doc_store->Clear();
       }
     }
 

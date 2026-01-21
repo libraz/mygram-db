@@ -557,3 +557,20 @@ gtest_discover_tests(search_handler_bug_fixes_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# SyncInstancePreservation tests (Bug fix: replication events not reflected in search)
+
+add_executable(sync_instance_preservation_test
+  sync_instance_preservation_test.cpp
+)
+
+target_link_libraries(sync_instance_preservation_test
+  mygramdb_index
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(sync_instance_preservation_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+

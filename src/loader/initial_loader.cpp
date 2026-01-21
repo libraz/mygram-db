@@ -53,6 +53,15 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  // Debug: log doc_store instance address to verify same instance is used by replication
+  // This helps diagnose BUG where replication uses different instance than SYNC populated
+  mygram::utils::StructuredLog()
+      .Event("initial_loader_start")
+      .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store_))
+      .Field("doc_store_size", static_cast<uint64_t>(doc_store_.Size()))
+      .Field("table", table_config_.name)
+      .Info();
+
   if (!connection_.IsConnected()) {
     std::string error_msg = "MySQL connection not established";
     mygram::utils::StructuredLog()
@@ -423,6 +432,8 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       .Field("rows", processed_rows_)
       .Field("elapsed_sec", total_elapsed)
       .Field("rows_per_sec", rows_per_second)
+      .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store_))
+      .Field("doc_store_size", static_cast<uint64_t>(doc_store_.Size()))
       .Info();
 
   return {};  // Success

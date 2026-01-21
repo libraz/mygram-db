@@ -1608,7 +1608,7 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
     // Handle case where CRC field spans chunk boundary
     if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
       size_t zero_start = 0;
-      size_t zero_end = std::min(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
+      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
       std::memset(&buffer[zero_start], 0, zero_end);
     }
 
