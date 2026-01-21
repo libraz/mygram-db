@@ -72,12 +72,22 @@ endif()
 # Compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  # Architecture flags: use -march=x86-64 for CI compatibility, -march=native for local builds
-  # CI sets MYGRAMDB_PORTABLE_BUILD=ON to avoid "Illegal instruction" on different CPUs
+  # Architecture flags: use baseline arch for portable builds, -march=native for local builds
+  # CI/RPM sets MYGRAMDB_PORTABLE_BUILD=ON to avoid "Illegal instruction" on different CPUs
   if(MYGRAMDB_PORTABLE_BUILD)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=x86-64")
+    # Detect architecture and use appropriate baseline
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+      # ARM64: use baseline ARMv8-A for maximum compatibility
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a")
+      message(STATUS "Portable build: using -march=armv8-a for ARM64")
+    else()
+      # x86_64: use baseline x86-64 for maximum compatibility
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=x86-64")
+      message(STATUS "Portable build: using -march=x86-64 for x86_64")
+    endif()
   else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    message(STATUS "Local build: using -march=native")
   endif()
   set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fno-omit-frame-pointer")
   set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")

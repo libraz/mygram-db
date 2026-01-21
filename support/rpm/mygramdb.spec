@@ -41,7 +41,8 @@ export MYGRAMDB_VERSION=%{mygramdb_version}
        -DBUILD_TESTS=OFF \
        -DUSE_ICU=ON \
        -DUSE_MYSQL=ON \
-       -DBUILD_SHARED_LIBS=OFF
+       -DBUILD_SHARED_LIBS=OFF \
+       -DMYGRAMDB_PORTABLE_BUILD=ON
 %cmake_build
 
 %install
@@ -136,19 +137,19 @@ fi
 # Static build - no devel package needed
 
 %changelog
-* Tue Nov 19 2025 libraz <libraz@libraz.net> - 1.2.0-1
+* Wed Nov 19 2025 libraz <libraz@libraz.net> - 1.2.0-1
 - Network ACL deny-by-default security enhancement
 - Configuration hot reload via SIGHUP
 - MySQL failover detection with server UUID tracking
 - Rate limiting and connection limits
 - See CHANGELOG.md for full details
 
-* Sun Nov 17 2025 libraz <libraz@libraz.net> - 1.1.0-1
+* Mon Nov 17 2025 libraz <libraz@libraz.net> - 1.1.0-1
 - Query result caching with n-gram invalidation
 - Network ACL with CIDR filtering
 - Prometheus metrics endpoint
 - MySQL SSL/TLS support
 - See docs/releases/v1.1.0.md for details
 
-* Wed Nov 13 2025 libraz <libraz@libraz.net> - 1.0.0-1
+* Thu Nov 13 2025 libraz <libraz@libraz.net> - 1.0.0-1
 - Initial RPM release

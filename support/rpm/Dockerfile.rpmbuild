@@ -38,10 +38,12 @@ RUN rpmdev-setuptree
 
 WORKDIR /workspace
 
-# Copy source files
-COPY . /workspace/
+# Copy spec file only (tarball will be mounted at runtime)
+COPY support/rpm/mygramdb.spec /root/rpmbuild/SPECS/
 
 # Create build script
+# NOTE: The source tarball must be pre-created and mounted at /rpmsources/
+# This avoids QEMU emulation issues with tar operations inside containers
 RUN cat > /build-rpm.sh << 'EOF' && chmod +x /build-rpm.sh \
 && echo "Build script created successfully"
 #!/bin/bash
@@ -62,21 +64,17 @@ NAME="mygramdb"
 echo -e "${YELLOW}Building ${NAME}-${VERSION}${NC}"
 echo -e "${YELLOW}Architecture: $(uname -m)${NC}"
 
-# Create source tarball
-echo -e "${YELLOW}Creating source tarball...${NC}"
+# Expect tarball to be mounted at /rpmsources/
 TARBALL="${NAME}-${VERSION}.tar.gz"
-cd /workspace
-# Create tarball from workspace (excluding build artifacts)
-tar --exclude='./build' \
-    --exclude='./dist' \
-    --exclude='./.git' \
-    --exclude='*.o' \
-    --exclude='*.a' \
-    --transform "s,^\.,${NAME}-${VERSION}," \
-    -czf "/root/rpmbuild/SOURCES/${TARBALL}" .
+if [ ! -f "/rpmsources/${TARBALL}" ]; then
+    echo -e "${RED}Error: Source tarball not found at /rpmsources/${TARBALL}${NC}"
+    echo -e "${RED}The tarball must be pre-created and mounted into the container.${NC}"
+    exit 1
+fi
 
-# Copy spec file
-cp support/rpm/mygramdb.spec /root/rpmbuild/SPECS/
+# Copy tarball to RPM SOURCES directory
+echo -e "${YELLOW}Copying source tarball to RPM build directory...${NC}"
+cp "/rpmsources/${TARBALL}" "/root/rpmbuild/SOURCES/${TARBALL}"
 
 # Build RPM
 echo -e "${YELLOW}Building RPM package...${NC}"

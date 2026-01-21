@@ -11,10 +11,18 @@ permissions:
 jobs:
   build-rpm:
     name: Build RPM Package (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    # Use native runners for each architecture to avoid QEMU emulation issues
+    # QEMU has known problems with tar operations that cause rpmbuild to fail
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            docker_platform: linux/amd64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            docker_platform: linux/arm64
       fail-fast: false
 
     steps:
@@ -22,11 +30,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Fetch all history for git describe
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,21 +41,10 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION for architecture: ${{ matrix.arch }}"
 
-      - name: Set architecture-specific variables
-        id: arch
-        run: |
-          if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            echo "docker_platform=linux/amd64" >> $GITHUB_OUTPUT
-            echo "docker_arch=amd64" >> $GITHUB_OUTPUT
-          else
-            echo "docker_platform=linux/arm64" >> $GITHUB_OUTPUT
-            echo "docker_arch=arm64" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build RPM builder Docker image
         run: |
           docker buildx build \
-            --platform ${{ steps.arch.outputs.docker_platform }} \
+            --platform ${{ matrix.docker_platform }} \
             --load \
             --cache-from type=gha,scope=rpmbuild-${{ matrix.arch }} \
             --cache-to type=gha,mode=max,scope=rpmbuild-${{ matrix.arch }} \
@@ -60,15 +52,31 @@ jobs:
             -t mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }} \
             .
 
+      - name: Create source tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NAME="mygramdb"
+          TARBALL="${NAME}-${VERSION}.tar.gz"
+
+          mkdir -p "$GITHUB_WORKSPACE/rpmsources"
+
+          # Create tarball using git archive for clean reproducible builds
+          git archive --format=tar.gz --prefix="${NAME}-${VERSION}/" HEAD \
+            > "$GITHUB_WORKSPACE/rpmsources/${TARBALL}"
+
+          echo "Created source tarball:"
+          ls -lh "$GITHUB_WORKSPACE/rpmsources/${TARBALL}"
+
       - name: Build RPM packages
         run: |
           # Create output directory in workspace
           mkdir -p "$GITHUB_WORKSPACE/dist/rpm"
 
-          # Run RPM build with absolute paths
+          # Run RPM build with pre-created tarball mounted
           docker run --rm \
-            --platform ${{ steps.arch.outputs.docker_platform }} \
+            --platform ${{ matrix.docker_platform }} \
             -e MYGRAMDB_VERSION="${{ steps.version.outputs.version }}" \
+            -v "$GITHUB_WORKSPACE/rpmsources:/rpmsources:ro" \
             -v "$GITHUB_WORKSPACE/dist:/workspace/dist" \
             mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }}
 
@@ -99,7 +107,7 @@ jobs:
           echo "Testing RPM: $MAIN_RPM"
 
           docker run --rm \
-            --platform ${{ steps.arch.outputs.docker_platform }} \
+            --platform ${{ matrix.docker_platform }} \
             -v "$GITHUB_WORKSPACE/dist:/dist" \
             almalinux:9 bash -c "
             set -e
