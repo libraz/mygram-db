@@ -57,6 +57,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // This helps diagnose BUG where replication uses different instance than SYNC populated
   mygram::utils::StructuredLog()
       .Event("initial_loader_start")
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for debug address logging
       .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store_))
       .Field("doc_store_size", static_cast<uint64_t>(doc_store_.Size()))
       .Field("table", table_config_.name)
@@ -118,8 +119,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       if (row != nullptr && row[0] != nullptr) {
         gtid_before = std::string(row[0]);
         gtid_before.erase(
-            std::remove_if(gtid_before.begin(), gtid_before.end(),
-                           [](unsigned char chr) { return std::isspace(chr); }),
+            std::remove_if(gtid_before.begin(), gtid_before.end(), [](unsigned char chr) { return std::isspace(chr); }),
             gtid_before.end());
       }
     }
@@ -147,8 +147,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       if (row != nullptr && row[0] != nullptr) {
         gtid_after = std::string(row[0]);
         gtid_after.erase(
-            std::remove_if(gtid_after.begin(), gtid_after.end(),
-                           [](unsigned char chr) { return std::isspace(chr); }),
+            std::remove_if(gtid_after.begin(), gtid_after.end(), [](unsigned char chr) { return std::isspace(chr); }),
             gtid_after.end());
       }
     }
@@ -432,6 +431,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       .Field("rows", processed_rows_)
       .Field("elapsed_sec", total_elapsed)
       .Field("rows_per_sec", rows_per_second)
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for debug address logging
       .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store_))
       .Field("doc_store_size", static_cast<uint64_t>(doc_store_.Size()))
       .Info();

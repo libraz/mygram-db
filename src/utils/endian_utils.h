@@ -25,9 +25,11 @@ namespace detail {
 constexpr bool IsLittleEndian() {
   // Use a known pattern that differs between big and little endian
   constexpr uint32_t test_value = 0x01020304;
-  constexpr uint8_t first_byte = static_cast<uint8_t>(test_value & 0xFF);
+  constexpr auto first_byte = static_cast<uint8_t>(test_value & 0xFF);
   return first_byte == 0x04;  // Little-endian stores LSB first
 }
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers) - Bit manipulation constants
 
 /**
  * @brief Swap bytes for 16-bit integer
@@ -54,11 +56,14 @@ inline uint64_t ByteSwap64(uint64_t value) {
          ((value & 0x000000000000FF00ULL) << 40) | ((value & 0x00000000000000FFULL) << 56);
 }
 
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
 }  // namespace detail
 
 /**
  * @brief Convert native value to little-endian for storage
  */
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers) - Type size comparisons
 template <typename T>
 inline T ToLittleEndian(T value) {
   static_assert(std::is_integral_v<T> || std::is_same_v<T, bool>, "ToLittleEndian requires integral type");
@@ -87,6 +92,7 @@ inline T ToLittleEndian(T value) {
     }
   }
 }
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 /**
  * @brief Convert little-endian value from storage to native
@@ -106,10 +112,10 @@ inline double ToLittleEndianDouble(double value) {
   if constexpr (detail::IsLittleEndian()) {
     return value;
   } else {
-    uint64_t bits;
+    uint64_t bits = 0;
     std::memcpy(&bits, &value, sizeof(double));
     bits = detail::ByteSwap64(bits);
-    double result;
+    double result = 0.0;
     std::memcpy(&result, &bits, sizeof(double));
     return result;
   }

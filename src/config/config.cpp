@@ -42,6 +42,7 @@ constexpr size_t kGtidPrefixLength = 5;  // "gtid="
 std::optional<std::string> GetEnvValue(const char* env_var_name) {
   // NOLINTNEXTLINE(concurrency-mt-unsafe): getenv is safe when not modifying env
   const char* value = std::getenv(env_var_name);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for null-terminator check
   if (value != nullptr && value[0] != '\0') {
     return std::string(value);
   }

@@ -189,18 +189,18 @@ std::string StripSQLComments(const std::string& query) {
   std::string result;
   result.reserve(query.length());
 
-  size_t i = 0;
-  while (i < query.length()) {
+  size_t pos = 0;
+  while (pos < query.length()) {
     // Check for block comment start
-    if (i + 1 < query.length() && query[i] == '/' && query[i + 1] == '*') {
+    if (pos + 1 < query.length() && query[pos] == '/' && query[pos + 1] == '*') {
       // Skip until end of block comment
-      i += 2;
-      while (i + 1 < query.length()) {
-        if (query[i] == '*' && query[i + 1] == '/') {
-          i += 2;
+      pos += 2;
+      while (pos + 1 < query.length()) {
+        if (query[pos] == '*' && query[pos + 1] == '/') {
+          pos += 2;
           break;
         }
-        i++;
+        pos++;
       }
       // Add a space to preserve word boundaries
       if (!result.empty() && result.back() != ' ') {
@@ -210,21 +210,21 @@ std::string StripSQLComments(const std::string& query) {
     }
 
     // Check for line comment start
-    if (i + 1 < query.length() && query[i] == '-' && query[i + 1] == '-') {
+    if (pos + 1 < query.length() && query[pos] == '-' && query[pos + 1] == '-') {
       // Skip until end of line
-      i += 2;
-      while (i < query.length() && query[i] != '\n' && query[i] != '\r') {
-        i++;
+      pos += 2;
+      while (pos < query.length() && query[pos] != '\n' && query[pos] != '\r') {
+        pos++;
       }
       // Skip the newline if present
-      if (i < query.length()) {
-        i++;
+      if (pos < query.length()) {
+        pos++;
       }
       continue;
     }
 
-    result += query[i];
-    i++;
+    result += query[pos];
+    pos++;
   }
 
   return result;

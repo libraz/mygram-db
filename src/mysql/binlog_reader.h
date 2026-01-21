@@ -89,17 +89,17 @@ struct BinlogEvent {
    * @brief Create an INSERT event
    *
    * @param table Table name
-   * @param pk Primary key value
+   * @param primary_key_val Primary key value
    * @param txt Text content
    * @param gtid_val GTID for this event
    * @return BinlogEvent with INSERT type
    */
-  static BinlogEvent CreateInsert(const std::string& table, const std::string& pk, const std::string& txt,
+  static BinlogEvent CreateInsert(const std::string& table, const std::string& primary_key_val, const std::string& txt,
                                   const std::string& gtid_val = "") {
     BinlogEvent event;
     event.type = BinlogEventType::INSERT;
     event.table_name = table;
-    event.primary_key = pk;
+    event.primary_key = primary_key_val;
     event.text = txt;
     event.gtid = gtid_val;
     return event;
@@ -109,18 +109,19 @@ struct BinlogEvent {
    * @brief Create an UPDATE event
    *
    * @param table Table name
-   * @param pk Primary key value
+   * @param primary_key_val Primary key value
    * @param new_txt New text content (after image)
    * @param old_txt Old text content (before image)
    * @param gtid_val GTID for this event
    * @return BinlogEvent with UPDATE type
    */
-  static BinlogEvent CreateUpdate(const std::string& table, const std::string& pk, const std::string& new_txt,
-                                  const std::string& old_txt = "", const std::string& gtid_val = "") {
+  static BinlogEvent CreateUpdate(const std::string& table, const std::string& primary_key_val,
+                                  const std::string& new_txt, const std::string& old_txt = "",
+                                  const std::string& gtid_val = "") {
     BinlogEvent event;
     event.type = BinlogEventType::UPDATE;
     event.table_name = table;
-    event.primary_key = pk;
+    event.primary_key = primary_key_val;
     event.text = new_txt;
     event.old_text = old_txt;
     event.gtid = gtid_val;
@@ -131,17 +132,17 @@ struct BinlogEvent {
    * @brief Create a DELETE event
    *
    * @param table Table name
-   * @param pk Primary key value
+   * @param primary_key_val Primary key value
    * @param txt Text content (for index removal)
    * @param gtid_val GTID for this event
    * @return BinlogEvent with DELETE type
    */
-  static BinlogEvent CreateDelete(const std::string& table, const std::string& pk, const std::string& txt = "",
-                                  const std::string& gtid_val = "") {
+  static BinlogEvent CreateDelete(const std::string& table, const std::string& primary_key_val,
+                                  const std::string& txt = "", const std::string& gtid_val = "") {
     BinlogEvent event;
     event.type = BinlogEventType::DELETE;
     event.table_name = table;
-    event.primary_key = pk;
+    event.primary_key = primary_key_val;
     event.text = txt;
     event.gtid = gtid_val;
     return event;

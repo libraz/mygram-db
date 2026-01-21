@@ -234,12 +234,7 @@ TEST(BinlogEventParserBugFixTest, Bug2_EmptyConcatFallback) {
 TEST(BinlogEventParserBugFixTest, RollbackStatementNotTreatedAsDDL) {
   // Test various ROLLBACK statement forms
   std::vector<std::string> rollback_statements = {
-      "ROLLBACK",
-      "rollback",
-      "ROLLBACK;",
-      "  ROLLBACK  ",
-      "ROLLBACK TO SAVEPOINT sp1",
-      "ROLLBACK TO sp1",
+      "ROLLBACK", "rollback", "ROLLBACK;", "  ROLLBACK  ", "ROLLBACK TO SAVEPOINT sp1", "ROLLBACK TO sp1",
   };
 
   for (const auto& stmt : rollback_statements) {
@@ -276,11 +271,7 @@ TEST(BinlogEventParserBugFixTest, BeginStatementNotTreatedAsDDL) {
  */
 TEST(BinlogEventParserBugFixTest, CommitStatementNotTreatedAsDDL) {
   std::vector<std::string> commit_statements = {
-      "COMMIT",
-      "commit",
-      "COMMIT;",
-      "  COMMIT  ",
-      "COMMIT WORK",
+      "COMMIT", "commit", "COMMIT;", "  COMMIT  ", "COMMIT WORK",
   };
 
   for (const auto& stmt : commit_statements) {
@@ -297,14 +288,8 @@ TEST(BinlogEventParserBugFixTest, CommitStatementNotTreatedAsDDL) {
  */
 TEST(BinlogEventParserBugFixTest, XAStatementsNotTreatedAsDDL) {
   std::vector<std::string> xa_statements = {
-      "XA START 'xid1'",
-      "XA END 'xid1'",
-      "XA PREPARE 'xid1'",
-      "XA COMMIT 'xid1'",
-      "XA ROLLBACK 'xid1'",
-      "XA RECOVER",
-      "xa commit 'xid1'",
-      "xa rollback 'xid1'",
+      "XA START 'xid1'",    "XA END 'xid1'", "XA PREPARE 'xid1'", "XA COMMIT 'xid1'",
+      "XA ROLLBACK 'xid1'", "XA RECOVER",    "xa commit 'xid1'",  "xa rollback 'xid1'",
   };
 
   for (const auto& stmt : xa_statements) {

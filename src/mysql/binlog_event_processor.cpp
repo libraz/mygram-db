@@ -26,6 +26,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
     // This helps diagnose BUG where replication uses different instance than SYNC populated
     mygram::utils::StructuredLog()
         .Event("binlog_process_event")
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for debug address logging
         .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store))
         .Field("doc_store_size", static_cast<uint64_t>(doc_store.Size()))
         .Field("event_type", static_cast<int64_t>(event.type))

@@ -1239,8 +1239,10 @@ inline std::vector<unsigned char> EncodeDecimalValue(const std::string& value, u
 
   // Pad/truncate to correct precision
   int intg = precision - scale;
-  while (int_part.length() < static_cast<size_t>(intg)) int_part = "0" + int_part;
-  while (frac_part.length() < scale) frac_part += "0";
+  while (int_part.length() < static_cast<size_t>(intg))
+    int_part = "0" + int_part;
+  while (frac_part.length() < scale)
+    frac_part += "0";
 
   static const int dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
 
@@ -1559,10 +1561,10 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalSmallValue) {
  * @param columns_present Custom columns_present bitmap
  * @return Event buffer
  */
-inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(
-    const TableMetadata& table_meta, const std::vector<unsigned char>& row_data,
-    const std::vector<unsigned char>& null_bitmap,
-    const std::vector<unsigned char>& columns_present) {
+inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(const TableMetadata& table_meta,
+                                                                 const std::vector<unsigned char>& row_data,
+                                                                 const std::vector<unsigned char>& null_bitmap,
+                                                                 const std::vector<unsigned char>& columns_present) {
   std::vector<unsigned char> buffer;
 
   // Common header (19 bytes)
@@ -1780,8 +1782,7 @@ TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeEmpty) {
 
   // Empty geometry should result in empty string
   ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
-  EXPECT_EQ("", result->front().columns.at("location"))
-      << "Empty GEOMETRY should return empty string";
+  EXPECT_EQ("", result->front().columns.at("location")) << "Empty GEOMETRY should return empty string";
 }
 
 #endif  // USE_MYSQL

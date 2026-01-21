@@ -66,11 +66,11 @@ constexpr int kMaxSecond = 59;  // Maximum second value (same as kMaxMinute)
 constexpr int kTmEpochYear = 1900;  // std::tm year offset (years since 1900)
 
 // Leap year calculation constants
-constexpr int kLeapYearDivisor4 = 4;       // Divisible by 4
-constexpr int kLeapYearDivisor100 = 100;   // Not divisible by 100 (unless 400)
-constexpr int kLeapYearDivisor400 = 400;   // Divisible by 400
-constexpr int kFebruaryMonth = 2;          // February month number
-constexpr int kFebruaryLeapDays = 29;      // Days in February in leap year
+constexpr int kLeapYearDivisor4 = 4;      // Divisible by 4
+constexpr int kLeapYearDivisor100 = 100;  // Not divisible by 100 (unless 400)
+constexpr int kLeapYearDivisor400 = 400;  // Divisible by 400
+constexpr int kFebruaryMonth = 2;         // February month number
+constexpr int kFebruaryLeapDays = 29;     // Days in February in leap year
 
 // ============================================================================
 // Calendar validation helpers

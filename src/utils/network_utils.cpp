@@ -56,6 +56,7 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
   }
 
   // Parse prefix length part using std::from_chars (no exceptions)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for string_view construction
   std::string_view prefix_str(cidr_str.data() + slash_pos + 1, cidr_str.size() - slash_pos - 1);
   int prefix_length = 0;
   auto [ptr, ec] = std::from_chars(prefix_str.data(), prefix_str.data() + prefix_str.size(), prefix_length);

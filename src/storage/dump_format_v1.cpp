@@ -1209,9 +1209,10 @@ Expected<void, Error> WriteDumpV1(
     // Ensure temp file data is flushed to disk BEFORE rename
     // This is critical for atomicity - ensures data is durable before the rename
 #ifndef _WIN32
-    int fd = open(temp_filepath.c_str(), O_RDONLY);
-    if (fd >= 0) {
-      if (fsync(fd) != 0) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+    int file_desc = open(temp_filepath.c_str(), O_RDONLY);
+    if (file_desc >= 0) {
+      if (fsync(file_desc) != 0) {
         StructuredLog()
             .Event("storage_warning")
             .Field("operation", "fsync_temp_file")
@@ -1219,7 +1220,7 @@ Expected<void, Error> WriteDumpV1(
             .Field("errno", static_cast<int64_t>(errno))
             .Warn();
       }
-      close(fd);
+      close(file_desc);
     }
 #endif
 
@@ -1235,9 +1236,10 @@ Expected<void, Error> WriteDumpV1(
 
     // Sync the directory to ensure the rename is durable
 #ifndef _WIN32
-    int dir_fd = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (dir_fd >= 0) {
-      if (fsync(dir_fd) != 0) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+    int dir_file_desc = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dir_file_desc >= 0) {
+      if (fsync(dir_file_desc) != 0) {
         StructuredLog()
             .Event("storage_warning")
             .Field("operation", "fsync_directory")
@@ -1245,7 +1247,7 @@ Expected<void, Error> WriteDumpV1(
             .Field("errno", static_cast<int64_t>(errno))
             .Warn();
       }
-      close(dir_fd);
+      close(dir_file_desc);
     }
 #endif
 
@@ -1612,9 +1614,9 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
       std::memset(&buffer[zero_start], 0, zero_end);
     }
 
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
     crc = static_cast<uint32_t>(
-        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));
+        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));  // NOLINT
 
     bytes_read += actually_read;
   }

@@ -36,6 +36,9 @@ struct CacheMetadata {
   // Default constructor
   CacheMetadata() = default;
 
+  // Destructor
+  ~CacheMetadata() = default;
+
   // Copy constructor (atomics must be loaded/stored explicitly)
   CacheMetadata(const CacheMetadata& other)
       : key(other.key),

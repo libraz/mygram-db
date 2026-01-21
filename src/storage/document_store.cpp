@@ -538,9 +538,10 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
 
     // Ensure data is flushed to disk to prevent data loss on OS crash
 #ifndef _WIN32
-    int fd = open(filepath.c_str(), O_RDONLY);
-    if (fd >= 0) {
-      if (fsync(fd) != 0) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+    int file_desc = open(filepath.c_str(), O_RDONLY);
+    if (file_desc >= 0) {
+      if (fsync(file_desc) != 0) {
         mygram::utils::StructuredLog()
             .Event("storage_warning")
             .Field("operation", "fsync")
@@ -548,7 +549,7 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
             .Field("errno", static_cast<int64_t>(errno))
             .Warn();
       }
-      close(fd);
+      close(file_desc);
     }
 #endif
 
@@ -638,8 +639,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
-    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash,
-                        mygram::utils::TransparentStringEqual>
+    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
 
@@ -1004,8 +1004,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
 
     // Load into new maps to minimize lock time
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
-    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash,
-                        mygram::utils::TransparentStringEqual>
+    absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
 

@@ -163,8 +163,8 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   buf[0] ^= 0x80;  // Reverse sign bit toggle for both positive and negative
   if (is_negative) {
     // For negative: also XOR all bytes with 0xFF to get original magnitude
-    for (auto& b : buf) {
-      b ^= 0xFF;
+    for (auto& byte : buf) {
+      byte ^= 0xFF;
     }
   }
 

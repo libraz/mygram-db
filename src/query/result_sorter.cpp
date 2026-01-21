@@ -95,7 +95,7 @@ inline std::string ToZeroPaddedString(uint32_t num, int width) {
  */
 inline std::string ToZeroPaddedSignedString(int64_t num, int width) {
   // Add offset to make all values positive for sorting
-  uint64_t adjusted = static_cast<uint64_t>(num + kSignedOffset);
+  auto adjusted = static_cast<uint64_t>(num + kSignedOffset);
   return ToZeroPaddedString(adjusted, width);
 }
 
@@ -116,8 +116,7 @@ inline std::string ToZeroPaddedDoubleString(double value, int width, int precisi
   std::array<char, kDoubleBufferSize> buf{};
 
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value,
-                                  std::chars_format::fixed, precision);
+  auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::fixed, precision);
 
   if (ec != std::errc()) {
     // Fallback to std::to_string (should rarely happen)

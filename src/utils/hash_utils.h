@@ -30,9 +30,9 @@ namespace mygram::utils {
 struct TransparentStringHash {
   using is_transparent = void;
 
-  size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
-  size_t operator()(const std::string& s) const { return std::hash<std::string_view>{}(s); }
-  size_t operator()(const char* s) const { return std::hash<std::string_view>{}(s); }
+  size_t operator()(std::string_view str_view) const { return std::hash<std::string_view>{}(str_view); }
+  size_t operator()(const std::string& str) const { return std::hash<std::string_view>{}(str); }
+  size_t operator()(const char* str) const { return std::hash<std::string_view>{}(str); }
 };
 
 /**

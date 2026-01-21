@@ -52,7 +52,9 @@ constexpr DocId kMaxValidDocId = kInvalidDocId - 1;
  * @param doc_id The DocId to check
  * @return true if valid, false otherwise
  */
-inline bool IsValidDocId(DocId doc_id) { return doc_id != kInvalidDocId; }
+inline bool IsValidDocId(DocId doc_id) {
+  return doc_id != kInvalidDocId;
+}
 
 }  // namespace mygramdb
 

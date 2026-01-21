@@ -449,6 +449,7 @@ void QueryCache::Touch(const CacheKey& key) {
 void QueryCache::RefreshLRUWorker() {
   while (!should_stop_.load()) {
     // Sleep for 100ms between refresh cycles (10 Hz)
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers) - Sleep interval
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     if (should_stop_.load()) {
