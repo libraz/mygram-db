@@ -1,5 +1,6 @@
 #include "gtid_encoder.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <sstream>
@@ -10,7 +11,12 @@
 
 namespace mygramdb::mysql {
 
-std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
+
+mygram::utils::Expected<std::vector<uint8_t>, Error> GtidEncoder::Encode(const std::string& gtid_set) {
   if (gtid_set.empty()) {
     // Empty GTID set: just return 8 bytes of zeros
     std::vector<uint8_t> result(8, 0);
@@ -26,8 +32,8 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
   // Note: MySQL GTID sets can have multiple UUIDs separated by commas
   while (std::getline(input_stream, sid_part, ',')) {
     // Trim whitespace
-    size_t start = sid_part.find_first_not_of(" \t");
-    size_t end = sid_part.find_last_not_of(" \t");
+    size_t start = sid_part.find_first_not_of(" \t\n\r");
+    size_t end = sid_part.find_last_not_of(" \t\n\r");
     if (start == std::string::npos) {
       continue;
     }
@@ -36,7 +42,7 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
     // Find the colon that separates UUID from intervals
     size_t colon_pos = sid_part.find(':');
     if (colon_pos == std::string::npos) {
-      throw std::invalid_argument("Invalid GTID format: missing colon");
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: missing colon"));
     }
 
     Sid sid;
@@ -44,20 +50,47 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
     std::string intervals_str = sid_part.substr(colon_pos + 1);
 
     // Parse UUID
-    ParseUuid(uuid_str, sid.uuid.data());
+    auto parse_result = ParseUuid(uuid_str, sid.uuid.data());
+    if (!parse_result) {
+      return MakeUnexpected(parse_result.error());
+    }
 
     // Parse intervals (e.g., "1-3:5-7:9")
     std::istringstream interval_ss(intervals_str);
     std::string interval_str;
     while (std::getline(interval_ss, interval_str, ':')) {
       if (!interval_str.empty()) {
-        sid.intervals.push_back(ParseInterval(interval_str));
+        auto interval_result = ParseInterval(interval_str);
+        if (!interval_result) {
+          return MakeUnexpected(interval_result.error());
+        }
+        sid.intervals.push_back(*interval_result);
       }
     }
 
     // Validate: SID must have at least one interval
     if (sid.intervals.empty()) {
-      throw std::invalid_argument("Invalid GTID set: UUID without intervals: " + uuid_str);
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID set: UUID without intervals: " + uuid_str));
+    }
+
+    // Sort intervals by start position
+    std::sort(sid.intervals.begin(), sid.intervals.end(),
+              [](const Interval& a, const Interval& b) { return a.start < b.start; });
+
+    // Merge overlapping or adjacent intervals
+    if (sid.intervals.size() > 1) {
+      std::vector<Interval> merged;
+      merged.push_back(sid.intervals[0]);
+      for (size_t i = 1; i < sid.intervals.size(); ++i) {
+        if (sid.intervals[i].start <= merged.back().end) {
+          // Overlapping or adjacent: extend the end
+          merged.back().end = std::max(merged.back().end, sid.intervals[i].end);
+        } else {
+          merged.push_back(sid.intervals[i]);
+        }
+      }
+      sid.intervals = std::move(merged);
     }
 
     sids.push_back(sid);
@@ -96,11 +129,11 @@ std::vector<uint8_t> GtidEncoder::Encode(const std::string& gtid_set) {
   return result;
 }
 
-void GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
+mygram::utils::Expected<void, Error> GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
   // Expected format: "61d5b289-bccc-11f0-b921-cabbb4ee51f6"
   // Remove dashes and parse hex digits
   if (uuid_str.length() != 36) {
-    throw std::invalid_argument("Invalid UUID length: " + uuid_str);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid UUID length: " + uuid_str));
   }
 
   std::string hex_str;
@@ -111,7 +144,7 @@ void GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
   }
 
   if (hex_str.length() != 32) {
-    throw std::invalid_argument("Invalid UUID format: " + uuid_str);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid UUID format: " + uuid_str));
   }
 
   // Convert hex string to bytes
@@ -120,47 +153,55 @@ void GtidEncoder::ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes) {
     char* end = nullptr;
     unsigned long byte_val = std::strtoul(byte_str.c_str(), &end, 16);
     if (end != byte_str.c_str() + 2) {
-      throw std::invalid_argument("Invalid UUID hex digits: " + uuid_str);
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid UUID hex digits: " + uuid_str));
     }
     uuid_bytes[i] = static_cast<uint8_t>(byte_val);
   }
+
+  return {};
 }
 
-GtidEncoder::Interval GtidEncoder::ParseInterval(const std::string& interval_str) {
+mygram::utils::Expected<GtidEncoder::Interval, Error> GtidEncoder::ParseInterval(const std::string& interval_str) {
   // Trim whitespace
-  size_t start_pos = interval_str.find_first_not_of(" \t");
-  size_t end_pos = interval_str.find_last_not_of(" \t");
+  size_t start_pos = interval_str.find_first_not_of(" \t\n\r");
+  size_t end_pos = interval_str.find_last_not_of(" \t\n\r");
   if (start_pos == std::string::npos) {
-    throw std::invalid_argument("Invalid interval: empty string");
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval: empty string"));
   }
   std::string trimmed = interval_str.substr(start_pos, end_pos - start_pos + 1);
 
   Interval interval{};
   size_t dash_pos = trimmed.find('-');
 
-  if (dash_pos == std::string::npos) {
-    // Single transaction number (e.g., "5")
-    interval.start = std::stoll(trimmed);
-    // Check for overflow before adding 1
-    if (interval.start == INT64_MAX) {
-      throw std::overflow_error("Transaction ID overflow: cannot add 1 to INT64_MAX");
+  try {
+    if (dash_pos == std::string::npos) {
+      // Single transaction number (e.g., "5")
+      interval.start = std::stoll(trimmed);
+      // Check for overflow before adding 1
+      if (interval.start >= INT64_MAX) {
+        return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+      }
+      interval.end = interval.start + 1;  // exclusive end
+    } else {
+      // Range (e.g., "1-3" means transactions 1,2,3)
+      std::string start_str = trimmed.substr(0, dash_pos);
+      std::string end_str = trimmed.substr(dash_pos + 1);
+      interval.start = std::stoll(start_str);
+      int64_t end_inclusive = std::stoll(end_str);
+      // Check for overflow before adding 1
+      if (end_inclusive >= INT64_MAX) {
+        return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+      }
+      interval.end = end_inclusive + 1;  // convert to exclusive
     }
-    interval.end = interval.start + 1;  // exclusive end
-  } else {
-    // Range (e.g., "1-3" means transactions 1,2,3)
-    std::string start_str = trimmed.substr(0, dash_pos);
-    std::string end_str = trimmed.substr(dash_pos + 1);
-    interval.start = std::stoll(start_str);
-    int64_t end_inclusive = std::stoll(end_str);
-    // Check for overflow before adding 1
-    if (end_inclusive == INT64_MAX) {
-      throw std::overflow_error("Transaction ID overflow: cannot add 1 to INT64_MAX");
-    }
-    interval.end = end_inclusive + 1;  // convert to exclusive
+  } catch (const std::invalid_argument&) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
+  } catch (const std::out_of_range&) {
+    return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Interval number out of range: " + interval_str));
   }
 
   if (interval.start <= 0 || interval.end <= interval.start) {
-    throw std::invalid_argument("Invalid interval range: " + interval_str);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval range: " + interval_str));
   }
 
   return interval;

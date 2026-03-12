@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -391,6 +392,8 @@ std::optional<std::string> Connection::GetExecutedGTID() {
   }
 
   std::string gtid(row[0]);
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\n'), gtid.end());
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\r'), gtid.end());
   // result is automatically freed by MySQLResult destructor
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_executed_gtid").Field("gtid", gtid).Debug();
@@ -409,6 +412,8 @@ std::optional<std::string> Connection::GetPurgedGTID() {
   }
 
   std::string gtid(row[0]);
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\n'), gtid.end());
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\r'), gtid.end());
   // result is automatically freed by MySQLResult destructor
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_purged_gtid").Field("gtid", gtid).Debug();

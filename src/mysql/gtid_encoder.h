@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::mysql {
 
 /**
@@ -32,10 +35,9 @@ class GtidEncoder {
   /**
    * @brief Encodes a GTID set string into binary format
    * @param gtid_set String like "uuid:1-3,5-7" or "uuid1:1-3,uuid2:5-7"
-   * @return Binary encoded GTID set
-   * @throws std::invalid_argument if GTID set format is invalid
+   * @return Expected containing binary encoded GTID set, or Error on invalid input
    */
-  static std::vector<uint8_t> Encode(const std::string& gtid_set);
+  static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Encode(const std::string& gtid_set);
 
  private:
   struct Interval {
@@ -52,17 +54,17 @@ class GtidEncoder {
    * @brief Parses a UUID string into 16 bytes
    * @param uuid_str UUID string like "61d5b289-bccc-11f0-b921-cabbb4ee51f6"
    * @param uuid_bytes Output buffer (16 bytes)
-   * @throws std::invalid_argument if UUID format is invalid
+   * @return Expected containing void on success, or Error on invalid UUID format
    */
-  static void ParseUuid(const std::string& uuid_str, uint8_t* uuid_bytes);
+  static mygram::utils::Expected<void, mygram::utils::Error> ParseUuid(const std::string& uuid_str,
+                                                                       uint8_t* uuid_bytes);
 
   /**
    * @brief Parses an interval string like "1-3" or "5"
    * @param interval_str Interval string
-   * @return Parsed interval
-   * @throws std::invalid_argument if interval format is invalid
+   * @return Expected containing parsed interval, or Error on invalid format
    */
-  static Interval ParseInterval(const std::string& interval_str);
+  static mygram::utils::Expected<Interval, mygram::utils::Error> ParseInterval(const std::string& interval_str);
 
   /**
    * @brief Stores a 64-bit integer in little-endian format

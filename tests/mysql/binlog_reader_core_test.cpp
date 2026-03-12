@@ -587,4 +587,107 @@ TEST(BinlogReaderTest, DestructorCallsStop) {
   SUCCEED();
 }
 
+// ===========================================================================
+// P0: GTID set reconnection tests
+// ===========================================================================
+
+/**
+ * @brief P0: UpdateCurrentGTID with single GTID must NOT overwrite executed_gtid_set_
+ */
+TEST_F(BinlogReaderFixture, UpdateCurrentGtidDoesNotOverwriteExecutedGtidSet) {
+  // Simulate initial GTID set (as if loaded from snapshot or server)
+  reader_->SetCurrentGTID("uuid1:1-100,uuid2:1-50");
+
+  // Verify executed_gtid_set_ is set
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
+  }
+
+  // Simulate receiving a GTID event (single GTID)
+  reader_->UpdateCurrentGTID("uuid1:101");
+
+  // current_gtid_ should be updated to single GTID
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:101");
+
+  // executed_gtid_set_ MUST NOT be overwritten by single GTID
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
+  }
+}
+
+/**
+ * @brief P0: SetCurrentGTID with range format also sets executed_gtid_set_
+ */
+TEST_F(BinlogReaderFixture, SetCurrentGtidWithRangeAlsoSetsExecutedGtidSet) {
+  reader_->SetCurrentGTID("uuid1:1-100");
+
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-100");
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100");
+  }
+}
+
+/**
+ * @brief P0: SetCurrentGTID with single GTID does NOT set executed_gtid_set_
+ */
+TEST_F(BinlogReaderFixture, SetCurrentGtidWithSingleGtidDoesNotSetExecutedGtidSet) {
+  // First set a full GTID set
+  reader_->SetCurrentGTID("uuid1:1-100");
+  // Then simulate single GTID from event
+  reader_->SetCurrentGTID("uuid1:101");
+
+  // current_gtid_ updated
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:101");
+  // executed_gtid_set_ retains the full set
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100");
+  }
+}
+
+/**
+ * @brief P0: Multiple UpdateCurrentGTID calls don't affect executed_gtid_set_
+ */
+TEST_F(BinlogReaderFixture, GetExecutedGtidSetReturnsFullSetForReconnection) {
+  // Simulate startup: set full GTID set
+  reader_->SetCurrentGTID("uuid1:1-100,uuid2:1-50");
+
+  // Simulate processing several events
+  reader_->UpdateCurrentGTID("uuid1:101");
+  reader_->UpdateCurrentGTID("uuid1:102");
+  reader_->UpdateCurrentGTID("uuid1:103");
+
+  // current_gtid_ should be latest single GTID
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:103");
+
+  // executed_gtid_set_ should still be the full set (for reconnection use)
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
+  }
+}
+
+/**
+ * @brief P0: Empty executed_gtid_set_ falls back to current_gtid_
+ */
+TEST_F(BinlogReaderFixture, EmptyExecutedGtidSetFallsBackToCurrentGtid) {
+  // Set only current_gtid_ without range
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    reader_->current_gtid_ = "uuid1:5";
+    reader_->executed_gtid_set_ = "";
+  }
+
+  // The GTID used for reconnection should fall back to current_gtid_
+  std::string gtid_for_reconnect;
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    gtid_for_reconnect = reader_->executed_gtid_set_.empty() ? reader_->current_gtid_ : reader_->executed_gtid_set_;
+  }
+  EXPECT_EQ(gtid_for_reconnect, "uuid1:5");
+}
+
 #endif  // USE_MYSQL

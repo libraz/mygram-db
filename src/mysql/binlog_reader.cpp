@@ -331,6 +331,12 @@ std::string BinlogReader::GetCurrentGTID() const {
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
+  // If the GTID contains a range (e.g., "uuid:1-100" or "uuid1:1-100,uuid2:1-50"),
+  // also update executed_gtid_set_ for reconnection use.
+  // Single GTIDs (e.g., "uuid:101") from event processing should NOT overwrite it.
+  if (gtid.find('-') != std::string::npos || gtid.find(',') != std::string::npos) {
+    executed_gtid_set_ = gtid;
+  }
   mygram::utils::StructuredLog().Event("binlog_gtid_set").Field("gtid", gtid).Info();
 }
 
@@ -406,6 +412,7 @@ void BinlogReader::ReaderThreadFunc() {
           .Event("binlog_debug")
           .Field("action", "reconnected_after_checksum_failure")
           .Debug();
+      RefreshExecutedGtidSet();
 
       // Validate connection after reconnection (detect failover, invalid servers)
       if (!ValidateConnection()) {
@@ -423,6 +430,7 @@ void BinlogReader::ReaderThreadFunc() {
           .Event("binlog_debug")
           .Field("action", "connection_validated_after_reconnect")
           .Debug();
+      RefreshExecutedGtidSet();
 
       // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
       reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -438,8 +446,12 @@ void BinlogReader::ReaderThreadFunc() {
     rpl.server_id = config_.server_id;  // Use configured server ID for replica
     rpl.flags = MYSQL_RPL_GTID;         // Use GTID mode (allow heartbeat events)
 
-    // Use current GTID for replication (updated after each event)
-    std::string current_gtid = GetCurrentGTID();
+    // Use executed_gtid_set_ (full GTID set) for reconnection, falling back to current_gtid_
+    std::string current_gtid;
+    {
+      std::scoped_lock lock(gtid_mutex_);
+      current_gtid = executed_gtid_set_.empty() ? current_gtid_ : executed_gtid_set_;
+    }
 
     // Encode GTID set to binary format if we have one
     // Use local variable to avoid race condition - gtid_encoded_data_ must persist
@@ -447,7 +459,19 @@ void BinlogReader::ReaderThreadFunc() {
     std::vector<uint8_t> local_gtid_encoded;
     if (!current_gtid.empty()) {
       // Encode GTID set using our encoder
-      local_gtid_encoded = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+      auto encode_result = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
+      if (!encode_result) {
+        last_error_ = "Failed to encode GTID set: " + encode_result.error().message();
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "gtid_encode_failed")
+            .Field("gtid", current_gtid)
+            .Field("error", last_error_)
+            .Error();
+        should_stop_ = true;
+        break;
+      }
+      local_gtid_encoded = std::move(*encode_result);
 
       // Also update member variable under lock for consistency with other readers
       {
@@ -536,6 +560,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Field("context", "after_reconnect")
             .Field("gtid", GetCurrentGTID())
             .Debug();
+        RefreshExecutedGtidSet();
 
         // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
         reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -606,6 +631,8 @@ void BinlogReader::ReaderThreadFunc() {
             // Failed to reconnect - log and retry with backoff
             mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(), 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+          } else {
+            RefreshExecutedGtidSet();
           }
           idle_timeout_reconnect = true;  // Mark this as an idle timeout reconnect
           // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
@@ -665,6 +692,7 @@ void BinlogReader::ReaderThreadFunc() {
               break;
             }
             mygram::utils::StructuredLog().Event("binlog_connection_restored").Info();
+            RefreshExecutedGtidSet();
 
             // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
             reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -1048,6 +1076,31 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
+  // Note: executed_gtid_set_ is intentionally NOT updated here.
+  // UpdateCurrentGTID is called with single GTIDs from binlog events (e.g., "uuid:101").
+  // The full GTID set for reconnection is maintained separately.
+}
+
+bool BinlogReader::RefreshExecutedGtidSet() {
+  auto gtid_set = binlog_connection_->GetExecutedGTID();
+  if (!gtid_set) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_warning")
+        .Field("type", "refresh_executed_gtid_failed")
+        .Field("error", "Failed to query @@GLOBAL.gtid_executed")
+        .Warn();
+    return false;
+  }
+  {
+    std::scoped_lock lock(gtid_mutex_);
+    executed_gtid_set_ = *gtid_set;
+  }
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "refreshed_executed_gtid_set")
+      .Field("gtid_set", *gtid_set)
+      .Debug();
+  return true;
 }
 
 // FetchColumnNames implementation (remains in BinlogReader as it accesses connection_)

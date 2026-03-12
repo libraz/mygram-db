@@ -304,6 +304,7 @@ class BinlogReader final : public IBinlogReader {
   // Statistics
   std::atomic<uint64_t> processed_events_{0};
   std::string current_gtid_;
+  std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
   server::ServerStats* server_stats_ = nullptr;  // Optional server statistics tracker
 
@@ -368,6 +369,12 @@ class BinlogReader final : public IBinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
+
+  /**
+   * @brief Refresh executed GTID set from server
+   * @return true if successful
+   */
+  bool RefreshExecutedGtidSet();
 
   /**
    * @brief Validate binlog connection after (re)connect
