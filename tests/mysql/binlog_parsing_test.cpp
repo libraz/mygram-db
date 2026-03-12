@@ -7,6 +7,7 @@
 
 #include <chrono>
 
+#include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader.h"
@@ -1045,6 +1046,45 @@ TEST(BinlogParsingTest, MultipleRowsWithChecksumBoundary) {
   // Verify checksum is excluded
   EXPECT_EQ(*(end + 0), 0xDE) << "Checksum starts after event data";
   EXPECT_EQ(*(end + 3), 0xEF) << "Checksum ends at correct position";
+}
+
+// ============================================================================
+// Phase 3a: ExtractTaggedGTID tests (MySQL 8.4+)
+// ============================================================================
+
+TEST(BinlogParsingTest, ExtractTaggedGTID_BasicFormat) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+
+  std::array<uint8_t, 16> uuid = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
+
+  auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 42, "mytag");
+
+  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "01020304-0506-0708-090a-0b0c0d0e0f10:mytag:42");
+}
+
+TEST(BinlogParsingTest, ExtractTaggedGTID_EmptyTag) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+
+  std::array<uint8_t, 16> uuid = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22,
+                                  0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00};
+
+  auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 100, "");
+
+  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  ASSERT_TRUE(result.has_value());
+  // Empty tag => UUID:GNO format (no tag separator)
+  EXPECT_EQ(*result, "aabbccdd-eeff-1122-3344-556677889900:100");
+}
+
+TEST(BinlogParsingTest, ExtractTaggedGTID_TruncatedBuffer) {
+  // Buffer too short to contain a valid GTID_TAGGED_LOG_EVENT
+  std::vector<uint8_t> short_buf(30, 0);
+
+  auto result = BinlogEventParser::ExtractTaggedGTID(short_buf.data(), short_buf.size());
+  EXPECT_FALSE(result.has_value());
 }
 
 #endif  // USE_MYSQL

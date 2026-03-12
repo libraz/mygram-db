@@ -623,7 +623,8 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
 std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                         const TableMetadata* table_metadata,
                                                         const std::string& pk_column_name,
-                                                        const std::string& text_column_name) {
+                                                        const std::string& text_column_name,
+                                                        MySQLBinlogEventType event_type) {
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
@@ -656,40 +657,33 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     // table_id (6 bytes) - already known from TABLE_MAP
     ptr += 6;
 
-    // flags (2 bytes)
-    uint16_t flags = binlog_util::uint2korr(ptr);
+    // flags (2 bytes) - reserved for future use in write rows
     ptr += 2;
 
-    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
-    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
-      if (ptr >= end) {
+    // V2 Rows Events (type >= 30): always have var_header_len (uint16_t, minimum value 2)
+    // V1 Rows Events (type 23-25): no var_header_len
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h)
+    bool is_v2 = (event_type == MySQLBinlogEventType::WRITE_ROWS_EVENT);
+    if (is_v2) {
+      if (ptr + 2 > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
             .Field("type", "write_rows_too_short")
-            .Field("section", "extra_row_info_length")
+            .Field("section", "var_header_len")
             .Error();
         return std::nullopt;
       }
-      const unsigned char* ptr_before = ptr;
-      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
-      auto len_bytes = static_cast<int>(ptr - ptr_before);
-
-      // IMPORTANT: extra_info_len is the TOTAL length INCLUDING the packed integer itself.
-      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
-      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
-      // So we skip (extra_info_len - len_bytes) more bytes.
-      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
-      if (skip_bytes < 0 || ptr + skip_bytes > end) {
+      uint16_t var_header_len = binlog_util::uint2korr(ptr);
+      if (var_header_len < 2 || ptr + var_header_len > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
-            .Field("type", "invalid_extra_row_info")
+            .Field("type", "invalid_var_header_len")
             .Field("event_type", "write_rows")
+            .Field("var_header_len", static_cast<uint64_t>(var_header_len))
             .Error();
         return std::nullopt;
       }
-      ptr += skip_bytes;
+      ptr += var_header_len;  // Skip entire var_header (len field + extra data)
     }
 
     // Parse body
@@ -727,16 +721,6 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     }
     const unsigned char* columns_present = ptr;
     ptr += bitmap_size;
-
-    // Parse extra_row_info if present
-    size_t extra_info_size = binlog_util::skip_extra_row_info(&ptr, end, flags);
-    if (extra_info_size > 0) {
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "skipped_extra_row_info")
-          .Field("bytes", static_cast<uint64_t>(extra_info_size))
-          .Debug();
-    }
 
     // Pre-calculate bitmap sizes for better cache locality
     const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);
@@ -847,11 +831,9 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
   }
 }
 
-std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(const unsigned char* buffer,
-                                                                             unsigned long length,
-                                                                             const TableMetadata* table_metadata,
-                                                                             const std::string& pk_column_name,
-                                                                             const std::string& text_column_name) {
+std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type) {
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
@@ -895,89 +877,30 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
         .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
         .Debug();
 
-    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
-    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-    // The flags field indicates if extra info exists
-    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
-      // Read extra_row_info_length (packed integer)
-      if (ptr >= end) {
+    // V2 Rows Events (type >= 30): always have var_header_len (uint16_t, minimum value 2)
+    // V1 Rows Events (type 23-25): no var_header_len
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h)
+    bool is_v2 = (event_type == MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+    if (is_v2) {
+      if (ptr + 2 > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
             .Field("type", "update_rows_too_short")
-            .Field("section", "extra_row_info_length")
+            .Field("section", "var_header_len")
             .Error();
         return std::nullopt;
       }
-
-      // NOLINTBEGIN(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
-      // Reason: C-style arrays are used with snprintf() for debug hex formatting
-      // Debug: show bytes before reading
-      char pre_hex[31];
-      for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
-        snprintf(&pre_hex[i * 3], 4, "%02x ", ptr[i]);
-      }
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "before_extra_row_info_read")
-          .Field("hex", std::string(pre_hex))
-          .Debug();
-
-      const unsigned char* ptr_before = ptr;
-      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
-      auto len_bytes = static_cast<int>(ptr - ptr_before);
-
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "extra_row_info_len")
-          .Field("total_bytes", extra_info_len)
-          .Field("packed_int_bytes", static_cast<int64_t>(len_bytes))
-          .Debug();
-
-      // IMPORTANT: extra_row_info_len is the TOTAL length INCLUDING the packed integer itself.
-      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
-      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
-      // So we skip (extra_info_len - len_bytes) more bytes.
-      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
-      if (skip_bytes < 0) {
+      uint16_t var_header_len = binlog_util::uint2korr(ptr);
+      if (var_header_len < 2 || ptr + var_header_len > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
-            .Field("type", "invalid_extra_row_info_len")
-            .Field("extra_info_len", extra_info_len)
-            .Field("packed_int_bytes", static_cast<uint64_t>(len_bytes))
+            .Field("type", "invalid_var_header_len")
+            .Field("event_type", "update_rows")
+            .Field("var_header_len", static_cast<uint64_t>(var_header_len))
             .Error();
         return std::nullopt;
       }
-
-      if (ptr + skip_bytes > end) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_error")
-            .Field("type", "update_rows_too_short")
-            .Field("section", "extra_row_info data")
-            .Error();
-        return std::nullopt;
-      }
-
-      // Debug: show the extra bytes we're skipping
-      if (skip_bytes > 0) {
-        char skip_hex[31];
-        for (int i = 0; i < std::min(10, skip_bytes); i++) {
-          snprintf(&skip_hex[i * 3], 4, "%02x ", ptr[i]);
-        }
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "skipping_extra_row_info")
-            .Field("bytes", static_cast<int64_t>(skip_bytes))
-            .Field("hex", std::string(skip_hex))
-            .Debug();
-      }
-
-      ptr += skip_bytes;  // Skip the extra row info data
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "after_extra_row_info_skip")
-          .Field("offset", static_cast<int64_t>(ptr - buffer))
-          .Debug();
+      ptr += var_header_len;  // Skip entire var_header (len field + extra data)
     }
 
     // Parse body
@@ -989,18 +912,6 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
           .Error();
       return std::nullopt;
     }
-
-    // Debug: log the bytes we're about to read
-    char debug_hex[31];
-    for (int i = 0; i < std::min(10, static_cast<int>(end - ptr)); i++) {
-      snprintf(&debug_hex[i * 3], 4, "%02x ", ptr[i]);
-    }
-    mygram::utils::StructuredLog()
-        .Event("binlog_debug")
-        .Field("action", "update_rows_body_start")
-        .Field("hex", std::string(debug_hex))
-        .Debug();
-    // NOLINTEND(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
 
     const unsigned char* column_count_ptr = ptr;  // Save position before read
     uint64_t column_count = binlog_util::read_packed_integer(&ptr);
@@ -1369,7 +1280,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                          const TableMetadata* table_metadata,
                                                          const std::string& pk_column_name,
-                                                         const std::string& text_column_name) {
+                                                         const std::string& text_column_name,
+                                                         MySQLBinlogEventType event_type) {
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
     return std::nullopt;
   }
@@ -1394,39 +1306,32 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     }
 
     ptr += 6;  // table_id
-    uint16_t flags = binlog_util::uint2korr(ptr);
-    ptr += 2;  // flags
+    ptr += 2;  // flags - reserved for future use in delete rows
 
-    // MySQL 8.0 ROWS_EVENT_V2: skip extra_row_info if present
-    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-    if ((flags & 0x0001) != 0) {  // ROWS_EVENT_V2 with extra info
-      if (ptr >= end) {
+    // V2 Rows Events (type >= 30): always have var_header_len (uint16_t, minimum value 2)
+    // V1 Rows Events (type 23-25): no var_header_len
+    // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h)
+    bool is_v2 = (event_type == MySQLBinlogEventType::DELETE_ROWS_EVENT);
+    if (is_v2) {
+      if (ptr + 2 > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
             .Field("type", "delete_rows_too_short")
-            .Field("section", "extra_row_info_length")
+            .Field("section", "var_header_len")
             .Error();
         return std::nullopt;
       }
-      const unsigned char* ptr_before = ptr;
-      uint64_t extra_info_len = binlog_util::read_packed_integer(&ptr);
-      auto len_bytes = static_cast<int>(ptr - ptr_before);
-
-      // IMPORTANT: extra_info_len is the TOTAL length INCLUDING the packed integer itself.
-      // MySQL format: [packed_int_len_byte(s)][extra_row_info_data]
-      // If packed_int is 1 byte (value=2), then total=2 means: 1 byte for packed_int + 1 byte data.
-      // So we skip (extra_info_len - len_bytes) more bytes.
-      // (see mysql-8.4.7/libs/mysql/binlog/event/rows_event.h: EXTRA_ROW_INFO_LEN_OFFSET)
-      auto skip_bytes = static_cast<int>(extra_info_len) - len_bytes;
-      if (skip_bytes < 0 || ptr + skip_bytes > end) {
+      uint16_t var_header_len = binlog_util::uint2korr(ptr);
+      if (var_header_len < 2 || ptr + var_header_len > end) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
-            .Field("type", "invalid_extra_row_info")
+            .Field("type", "invalid_var_header_len")
             .Field("event_type", "delete_rows")
+            .Field("var_header_len", static_cast<uint64_t>(var_header_len))
             .Error();
         return std::nullopt;
       }
-      ptr += skip_bytes;
+      ptr += var_header_len;  // Skip entire var_header (len field + extra data)
     }
 
     // Parse body
@@ -1463,16 +1368,6 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
     }
     const unsigned char* columns_present = ptr;
     ptr += bitmap_size;
-
-    // Parse extra_row_info if present
-    size_t extra_info_size = binlog_util::skip_extra_row_info(&ptr, end, flags);
-    if (extra_info_size > 0) {
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "skipped_extra_row_info_delete")
-          .Field("bytes", static_cast<uint64_t>(extra_info_size))
-          .Debug();
-    }
 
     // Pre-calculate bitmap size
     const size_t kNullBitmapSize = binlog_util::bitmap_bytes(column_count);

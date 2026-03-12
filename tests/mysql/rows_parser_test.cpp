@@ -179,7 +179,8 @@ TEST_F(RowsParserTest, ParseSimpleIntRow) {
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -214,7 +215,8 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -249,7 +251,8 @@ TEST_F(RowsParserTest, ParseTextRow) {
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -284,7 +287,8 @@ TEST_F(RowsParserTest, ParseMultipleRows) {
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(3, result->size());
@@ -305,16 +309,19 @@ TEST_F(RowsParserTest, ParseInvalidBuffer) {
   table_meta.columns.resize(2);
 
   // Parse with nullptr buffer
-  auto result1 = ParseWriteRowsEvent(nullptr, 100, &table_meta, "id", "");
+  auto result1 =
+      ParseWriteRowsEvent(nullptr, 100, &table_meta, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
   EXPECT_FALSE(result1.has_value());
 
   // Parse with nullptr table_meta
   unsigned char dummy_buffer[100] = {0};
-  auto result2 = ParseWriteRowsEvent(dummy_buffer, 100, nullptr, "id", "");
+  auto result2 =
+      ParseWriteRowsEvent(dummy_buffer, 100, nullptr, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
   EXPECT_FALSE(result2.has_value());
 
   // Parse with too short buffer (less than post-header)
-  auto result3 = ParseWriteRowsEvent(dummy_buffer, 10, &table_meta, "id", "");
+  auto result3 =
+      ParseWriteRowsEvent(dummy_buffer, 10, &table_meta, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
   EXPECT_FALSE(result3.has_value());
 }
 
@@ -701,7 +708,8 @@ TEST_F(DateTimeParsingTest, Datetime2BasicParsing) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -719,7 +727,8 @@ TEST_F(DateTimeParsingTest, Datetime2YearBoundary) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -735,7 +744,8 @@ TEST_F(DateTimeParsingTest, Datetime2MaxTimeValues) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2023-12-31 23:59:59", result->front().columns.at("dt_col"));
@@ -750,7 +760,8 @@ TEST_F(DateTimeParsingTest, Datetime2WithMicroseconds) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.123456", result->front().columns.at("dt_col"));
@@ -765,7 +776,8 @@ TEST_F(DateTimeParsingTest, Datetime2WithMilliseconds) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 3);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.123000", result->front().columns.at("dt_col"));
@@ -780,7 +792,8 @@ TEST_F(DateTimeParsingTest, Time2BasicParsing) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("14:30:45", result->front().columns.at("dt_col"));
@@ -795,7 +808,8 @@ TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("10:20:30.654321", result->front().columns.at("dt_col"));
@@ -810,7 +824,8 @@ TEST_F(DateTimeParsingTest, Time2MaxHour) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("838:59:59", result->front().columns.at("dt_col"));
@@ -825,7 +840,8 @@ TEST_F(DateTimeParsingTest, TimeOldFormat) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("12:34:56", result->front().columns.at("dt_col"));
@@ -840,7 +856,8 @@ TEST_F(DateTimeParsingTest, Timestamp2BasicParsing) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("1732545600", result->front().columns.at("dt_col"));
@@ -855,7 +872,8 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("1732545600.123456", result->front().columns.at("dt_col"));
@@ -870,7 +888,8 @@ TEST_F(DateTimeParsingTest, DateParsing) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATE, 0);
   auto buffer = CreateDateTimeEvent(table_meta, date_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-11-25", result->front().columns.at("dt_col"));
@@ -885,7 +904,8 @@ TEST_F(DateTimeParsingTest, DateLeapYear) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATE, 0);
   auto buffer = CreateDateTimeEvent(table_meta, date_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2024-02-29", result->front().columns.at("dt_col"));
@@ -904,7 +924,8 @@ TEST_F(DateTimeParsingTest, Datetime2BugReproduction) {
   auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   // Before fix: was "0110-00-25 14:30:00" (year=110, month=0)

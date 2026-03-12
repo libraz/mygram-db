@@ -370,6 +370,55 @@ TEST(BinlogEventParserBugFixTest, TableNameLooksLikeTransactionKeyword) {
   EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("BEGIN", "begin"));
 }
 
+// =============================================================================
+// Phase 2: Unsupported event types — explicit handling
+// =============================================================================
+
+TEST(BinlogEventParserBugFixTest, TransactionPayloadEventReturnsEmpty) {
+  // TRANSACTION_PAYLOAD_EVENT (type 40) should be explicitly handled
+  // and return empty vector (not silently ignored in default case)
+
+  // Build minimal event with TRANSACTION_PAYLOAD_EVENT type
+  std::vector<uint8_t> buffer(50, 0);
+  // Common header
+  buffer[4] = 40;  // event_type = TRANSACTION_PAYLOAD_EVENT
+  // Set event_size
+  auto event_size = static_cast<uint32_t>(buffer.size());
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
+                                                    nullptr, false);
+
+  EXPECT_TRUE(events.empty()) << "TRANSACTION_PAYLOAD_EVENT should return empty vector";
+}
+
+TEST(BinlogEventParserBugFixTest, PartialUpdateRowsEventReturnsEmpty) {
+  // PARTIAL_UPDATE_ROWS_EVENT (type 39) should be explicitly handled
+  // and return empty vector
+
+  std::vector<uint8_t> buffer(50, 0);
+  buffer[4] = 39;  // event_type = PARTIAL_UPDATE_ROWS_EVENT
+  auto event_size = static_cast<uint32_t>(buffer.size());
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
+                                                    nullptr, false);
+
+  EXPECT_TRUE(events.empty()) << "PARTIAL_UPDATE_ROWS_EVENT should return empty vector";
+}
+
 }  // namespace
 
 #endif  // USE_MYSQL

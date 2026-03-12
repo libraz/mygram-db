@@ -112,6 +112,16 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
       return "ROWS_QUERY_LOG_EVENT";
     case MySQLBinlogEventType::PREVIOUS_GTIDS_LOG_EVENT:
       return "PREVIOUS_GTIDS_LOG_EVENT";
+    case MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT:
+      return "TRANSACTION_PAYLOAD_EVENT";
+    case MySQLBinlogEventType::HEARTBEAT_LOG_EVENT_V2:
+      return "HEARTBEAT_LOG_EVENT_V2";
+    case MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT:
+      return "GTID_TAGGED_LOG_EVENT";
+    case MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT:
+      return "PARTIAL_UPDATE_ROWS_EVENT";
+    case MySQLBinlogEventType::ANONYMOUS_GTID_LOG_EVENT:
+      return "ANONYMOUS_GTID_LOG_EVENT";
     default:
       return "UNKNOWN";
   }

@@ -308,6 +308,8 @@ class QueryCache {
 
   /**
    * @brief Move key to front of LRU list (most recently used)
+   * @param key Cache key to move
+   * @pre Caller must hold exclusive lock on mutex_
    */
   void Touch(const CacheKey& key);
 

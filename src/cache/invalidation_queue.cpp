@@ -39,30 +39,35 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
 
   // Phase 2: Queue for deferred deletion or process immediately
   // Check running_ inside lock to prevent TOCTOU race condition
+  bool process_immediately = false;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
     if (!running_.load()) {
-      // If worker not running, process immediately (while holding lock)
-      // This ensures UnregisterCacheEntry is always called
+      // Worker not running, process after releasing lock to avoid
+      // nested lock acquisition (queue_mutex_ → InvalidationManager::mutex_ → QueryCache::mutex_)
+      process_immediately = true;
+    } else {
+      // Worker is running, add to queue
+      // Always update timestamp even if key exists to ensure proper batch processing
       for (const auto& key : affected_keys) {
-        // Unregister metadata first to prevent memory leak even if Erase throws
-        invalidation_mgr_->UnregisterCacheEntry(key);
-
-        if (cache_ != nullptr) {
-          cache_->Erase(key);
-        }
+        const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
+        pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
       }
-      return;
     }
+  }
 
-    // Worker is running, add to queue
-    // Add affected keys to pending set
-    // Always update timestamp even if key exists to ensure proper batch processing
+  if (process_immediately) {
+    // Process outside lock to prevent deadlock from nested lock acquisition
     for (const auto& key : affected_keys) {
-      const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-      pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
+      // Unregister metadata first to prevent memory leak even if Erase fails
+      invalidation_mgr_->UnregisterCacheEntry(key);
+
+      if (cache_ != nullptr) {
+        cache_->Erase(key);
+      }
     }
+    return;
   }
 
   // Wake up worker (running_ already verified inside lock)
@@ -160,8 +165,9 @@ void InvalidationQueue::ProcessBatch() {
     }
 
     // Move pending items to batch
+    // std::move leaves pending_ngrams_ in a valid but empty state for
+    // std::unordered_map, so explicit clear() is unnecessary
     batch = std::move(pending_ngrams_);
-    pending_ngrams_.clear();
   }
 
   // Process batch: erase invalidated entries from cache

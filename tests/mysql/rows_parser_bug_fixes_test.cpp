@@ -12,6 +12,7 @@
 #include <limits>
 #include <vector>
 
+#include "binlog_event_builder.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
@@ -180,7 +181,8 @@ TEST_F(RowsParserBugFixesTest, Bug10_BlobInvalidMetadataZero) {
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
   // This should not crash - either return nullopt or handle gracefully
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   // With invalid metadata, the parser should return nullopt or handle safely
   // The key requirement is: NO CRASH
@@ -224,7 +226,8 @@ TEST_F(RowsParserBugFixesTest, Bug10_BlobInvalidMetadataFive) {
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
   // Should not crash
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
   SUCCEED();
 }
 
@@ -269,7 +272,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_YearTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -314,7 +318,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_YearMinValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("1901", result->front().columns.at("year_col"));
@@ -351,7 +356,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_YearMaxValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2155", result->front().columns.at("year_col"));
@@ -388,7 +394,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_YearZeroValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   // 0 is a special value in MySQL YEAR type representing 0000
@@ -430,7 +437,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_FloatTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -482,7 +490,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_DoubleTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -530,7 +539,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_FloatSpecialValues) {
 
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value());
     double parsed = std::stod(result->front().columns.at("val"));
@@ -547,7 +557,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_FloatSpecialValues) {
 
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value());
     double parsed = std::stod(result->front().columns.at("val"));
@@ -598,7 +609,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_BitTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -648,7 +660,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_BitMultipleBytes) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -696,7 +709,8 @@ TEST_F(RowsParserBugFixesTest, Bug11_BitPartialByte) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -759,7 +773,8 @@ TEST_F(RowsParserBugFixesTest, Bug9_ValidUtf8PassThrough) {
 
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value()) << "Failed for string: " << test_str;
     ASSERT_EQ(1, result->size());
@@ -830,7 +845,8 @@ TEST_F(RowsParserBugFixesTest, Bug9_InvalidUtf8Sanitized) {
 
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+    auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value()) << "Failed for: " << tc.description;
     ASSERT_EQ(1, result->size());
@@ -893,7 +909,8 @@ TEST_F(RowsParserBugFixesTest, Bug9_BlobTextUtf8Sanitization) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -939,7 +956,8 @@ TEST_F(RowsParserBugFixesTest, Bug9_EmptyStringHandling) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -980,7 +998,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1014,7 +1033,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedTinyIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1048,7 +1068,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedSmallIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1083,7 +1104,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_UnsignedBigIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1119,7 +1141,8 @@ TEST_F(RowsParserBugFixesTest, Bug32_SignedIntNegativeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1188,7 +1211,8 @@ TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeBasic) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value()) << "BUG-0072: GEOMETRY type should be parsed successfully";
   ASSERT_EQ(1, result->size());
@@ -1333,7 +1357,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalPositiveInteger) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1373,7 +1398,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalNegativeInteger) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1413,7 +1439,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalWithFraction) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1453,7 +1480,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalNegativeWithFraction) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1493,7 +1521,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalZero) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1535,7 +1564,8 @@ TEST_F(RowsParserBugFixesTest, Bug0087_DecimalSmallValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1657,7 +1687,8 @@ TEST_F(RowsParserBugFixesTest, Bug0085_MinimalModePartialColumns) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value()) << "BUG-0085: Parser should handle MINIMAL mode";
   ASSERT_EQ(1, result->size());
@@ -1702,7 +1733,8 @@ TEST_F(RowsParserBugFixesTest, Bug0085_MinimalModeOnlyPrimaryKey) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1733,7 +1765,8 @@ TEST_F(RowsParserBugFixesTest, Bug0085_NoColumnsPresent) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   // Should return a result with an empty row (no crash)
   ASSERT_TRUE(result.has_value());
@@ -1775,7 +1808,8 @@ TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeEmpty) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "");
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1783,6 +1817,266 @@ TEST_F(RowsParserBugFixesTest, Bug0072_GeometryTypeEmpty) {
   // Empty geometry should result in empty string
   ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
   EXPECT_EQ("", result->front().columns.at("location")) << "Empty GEOMETRY should return empty string";
+}
+
+// =============================================================================
+// Phase 1: V2 Rows Event var_header_len processing bug fix tests
+// =============================================================================
+// These tests verify that V2 Rows Events (types 30-32) correctly process
+// the var_header_len field regardless of the STMT_END_F flag value.
+// The bug was that var_header_len was only read when flags & 0x0001 was set.
+// =============================================================================
+
+namespace {
+
+using mygramdb::mysql::test::BinlogEventBuilder;
+
+// Create TableMetadata for a 2-column table: id(INT), name(VARCHAR)
+TableMetadata CreateTestTableMeta() {
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "test";
+  meta.table_name = "articles";
+
+  ColumnMetadata id_col;
+  id_col.name = "id";
+  id_col.type = ColumnType::LONG;
+  id_col.metadata = 0;
+  id_col.is_nullable = false;
+  id_col.is_unsigned = false;
+  meta.columns.push_back(id_col);
+
+  ColumnMetadata name_col;
+  name_col.name = "name";
+  name_col.type = ColumnType::VARCHAR;
+  name_col.metadata = 100;
+  name_col.is_nullable = false;
+  name_col.is_unsigned = false;
+  meta.columns.push_back(name_col);
+
+  return meta;
+}
+
+// Build row data for a single row: id (INT) + name (VARCHAR)
+std::vector<uint8_t> BuildSingleRowData(int32_t id, const std::string& name) {
+  std::vector<uint8_t> data;
+  // null bitmap: 1 byte for 2 columns (all zeros = no nulls)
+  data.push_back(0x00);
+  // id: 4 bytes LE
+  BinlogEventBuilder::AppendLittleEndian32(data, static_cast<uint32_t>(id));
+  // name: 1-byte length (metadata <= 255) + string data
+  data.push_back(static_cast<uint8_t>(name.size()));
+  data.insert(data.end(), name.begin(), name.end());
+  return data;
+}
+
+// Build update row data: before image + after image
+std::vector<uint8_t> BuildUpdateRowPair(int32_t old_id, const std::string& old_name, int32_t new_id,
+                                        const std::string& new_name) {
+  auto before = BuildSingleRowData(old_id, old_name);
+  auto after = BuildSingleRowData(new_id, new_name);
+  std::vector<uint8_t> data;
+  data.insert(data.end(), before.begin(), before.end());
+  data.insert(data.end(), after.begin(), after.end());
+  return data;
+}
+
+}  // namespace
+
+class RowsParserV2BugFixTest : public RowsParserBugFixesTest {};
+
+/**
+ * @test V2 WRITE_ROWS_EVENT with flags=0x0000 (no STMT_END_F).
+ *
+ * This is the core bug case: in a batch INSERT, intermediate events have
+ * flags=0x0000. The old code only read var_header_len when flags & 0x0001,
+ * so the 2-byte var_header_len was not consumed and column_count misparsed.
+ */
+TEST_F(RowsParserV2BugFixTest, V2WriteRowsWithoutStmtEndFlag) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildSingleRowData(1, "hello");
+
+  // columns_bitmap: 1 byte, all columns present
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+
+  // V2 event: flags=0x0000 (no STMT_END_F), var_header_len=2 (no extra data)
+  auto event = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data);
+
+  auto result =
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with flags=0x0000 should parse (was the bug case)";
+  ASSERT_EQ(1, result->size());
+  EXPECT_EQ("1", result->front().columns.at("id"));
+  EXPECT_EQ("hello", result->front().columns.at("name"));
+}
+
+/**
+ * @test V2 WRITE_ROWS_EVENT with EXTRA_DATA_PRESENT flag and extra data.
+ *
+ * flags=0x0002 means extra data is present after var_header_len.
+ * var_header_len=6 means 4 bytes of extra data (6 - 2 = 4).
+ */
+TEST_F(RowsParserV2BugFixTest, V2WriteRowsWithExtraDataPresent) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildSingleRowData(42, "world");
+
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+
+  // 4 bytes of dummy extra data
+  std::vector<uint8_t> extra_data = {0xDE, 0xAD, 0xBE, 0xEF};
+
+  // flags=0x0002 (EXTRA_DATA_PRESENT), var_header_len=6 (2 + 4 extra bytes)
+  auto event =
+      BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0002, 6, extra_data, 2, columns_bitmap, row_data);
+
+  auto result =
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with extra data should skip extra bytes and parse correctly";
+  ASSERT_EQ(1, result->size());
+  EXPECT_EQ("42", result->front().columns.at("id"));
+  EXPECT_EQ("world", result->front().columns.at("name"));
+}
+
+/**
+ * @test V2 WRITE_ROWS_EVENT with both STMT_END_F and EXTRA_DATA_PRESENT flags.
+ *
+ * flags=0x0003 (STMT_END_F | EXTRA_DATA_PRESENT), var_header_len=6.
+ */
+TEST_F(RowsParserV2BugFixTest, V2WriteRowsBothFlagsSet) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildSingleRowData(99, "both");
+
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+  std::vector<uint8_t> extra_data = {0x01, 0x02, 0x03, 0x04};
+
+  // flags=0x0003 (STMT_END_F | EXTRA_DATA_PRESENT), var_header_len=6
+  auto event =
+      BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0003, 6, extra_data, 2, columns_bitmap, row_data);
+
+  auto result =
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with both flags should parse correctly";
+  ASSERT_EQ(1, result->size());
+  EXPECT_EQ("99", result->front().columns.at("id"));
+  EXPECT_EQ("both", result->front().columns.at("name"));
+}
+
+/**
+ * @test V1 WRITE_ROWS_EVENT (type 23) has no var_header_len field.
+ *
+ * V1 events should continue to work without a var_header_len field.
+ */
+TEST_F(RowsParserV2BugFixTest, V1WriteRowsNoVarHeader) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildSingleRowData(7, "v1test");
+
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+
+  // V1 event: no var_header_len, flags=0x0001 (STMT_END_F)
+  auto event = BinlogEventBuilder::BuildWriteRowsV1(table_meta.table_id, 0x0001, 2, columns_bitmap, row_data);
+
+  auto result = ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value()) << "V1 WRITE_ROWS should parse without var_header_len";
+  ASSERT_EQ(1, result->size());
+  EXPECT_EQ("7", result->front().columns.at("id"));
+  EXPECT_EQ("v1test", result->front().columns.at("name"));
+}
+
+/**
+ * @test V2 UPDATE_ROWS_EVENT with flags=0x0000 (no STMT_END_F).
+ *
+ * UPDATE events have before and after column bitmaps and row image pairs.
+ * With flags=0x0000, var_header_len must still be consumed.
+ */
+TEST_F(RowsParserV2BugFixTest, V2UpdateRowsWithoutStmtEndFlag) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildUpdateRowPair(1, "old_name", 1, "new_name");
+
+  // Both before and after bitmaps: all columns present
+  std::vector<uint8_t> columns_before_bitmap = {0xFF};
+  std::vector<uint8_t> columns_after_bitmap = {0xFF};
+
+  // V2 UPDATE: flags=0x0000, var_header_len=2
+  auto event = BinlogEventBuilder::BuildUpdateRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_before_bitmap,
+                                                     columns_after_bitmap, row_data);
+
+  auto result =
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+
+  ASSERT_TRUE(result.has_value()) << "V2 UPDATE_ROWS with flags=0x0000 should parse correctly";
+  ASSERT_EQ(1, result->size());
+
+  // Check before image
+  EXPECT_EQ("1", result->front().first.columns.at("id"));
+  EXPECT_EQ("old_name", result->front().first.columns.at("name"));
+
+  // Check after image
+  EXPECT_EQ("1", result->front().second.columns.at("id"));
+  EXPECT_EQ("new_name", result->front().second.columns.at("name"));
+}
+
+/**
+ * @test V2 DELETE_ROWS_EVENT with flags=0x0000 (no STMT_END_F).
+ *
+ * DELETE events have only the before image. With flags=0x0000,
+ * var_header_len must still be consumed.
+ */
+TEST_F(RowsParserV2BugFixTest, V2DeleteRowsWithoutStmtEndFlag) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildSingleRowData(5, "deleted");
+
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+
+  // V2 DELETE: flags=0x0000, var_header_len=2
+  auto event = BinlogEventBuilder::BuildDeleteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data);
+
+  auto result =
+      ParseDeleteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::DELETE_ROWS_EVENT);
+
+  ASSERT_TRUE(result.has_value()) << "V2 DELETE_ROWS with flags=0x0000 should parse correctly";
+  ASSERT_EQ(1, result->size());
+  EXPECT_EQ("5", result->front().columns.at("id"));
+  EXPECT_EQ("deleted", result->front().columns.at("name"));
+}
+
+/**
+ * @test V2 batch INSERT: multiple WRITE_ROWS_EVENTs with different flags.
+ *
+ * In a batch INSERT, intermediate events have flags=0x0000 and the final
+ * event has flags=0x0001 (STMT_END_F). Both must parse correctly.
+ */
+TEST_F(RowsParserV2BugFixTest, V2BatchInsertMultipleEvents) {
+  auto table_meta = CreateTestTableMeta();
+  std::vector<uint8_t> columns_bitmap = {0xFF};
+
+  // First event: flags=0x0000 (intermediate, no STMT_END_F)
+  auto row_data1 = BuildSingleRowData(10, "batch1");
+  auto event1 = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data1);
+
+  auto result1 =
+      ParseWriteRowsEvent(event1.data(), event1.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  ASSERT_TRUE(result1.has_value()) << "Intermediate batch event (flags=0x0000) should parse correctly";
+  ASSERT_EQ(1, result1->size());
+  EXPECT_EQ("10", result1->front().columns.at("id"));
+  EXPECT_EQ("batch1", result1->front().columns.at("name"));
+
+  // Second event: flags=0x0001 (final, STMT_END_F set)
+  auto row_data2 = BuildSingleRowData(11, "batch2");
+  auto event2 = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0001, 2, {}, 2, columns_bitmap, row_data2);
+
+  auto result2 =
+      ParseWriteRowsEvent(event2.data(), event2.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  ASSERT_TRUE(result2.has_value()) << "Final batch event (flags=0x0001) should parse correctly";
+  ASSERT_EQ(1, result2->size());
+  EXPECT_EQ("11", result2->front().columns.at("id"));
+  EXPECT_EQ("batch2", result2->front().columns.at("name"));
 }
 
 #endif  // USE_MYSQL

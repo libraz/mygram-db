@@ -9,6 +9,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+
 #include "mysql/connection.h"
 #include "utils/structured_log.h"
 
@@ -68,6 +70,23 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   if (!CheckGTIDConsistency(conn, std::nullopt, gtid_consistency_error)) {
     result.warnings.push_back("GTID consistency check: " + gtid_consistency_error);
   }
+
+  // 5. Check binlog compression (TRANSACTION_PAYLOAD_EVENT not supported)
+  std::string compression_error;
+  if (!CheckBinlogCompression(conn, compression_error)) {
+    result.error_message = compression_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_compression_enabled")
+        .Error();
+    return result;
+  }
+
+  // 6. Check partial JSON mode (warning only)
+  CheckPartialJsonMode(conn, result.warnings);
+
+  // 7. Check tagged GTID support (warning only)
+  CheckTaggedGTIDSupport(conn, result.warnings);
 
   // All checks passed
   result.valid = true;
@@ -157,16 +176,135 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
     return false;
   }
 
-  // If we have a last GTID, check if it's in the purged set
-  // This would indicate we can't continue replication from where we left off
-  if (last_gtid && !purged_gtid->empty() && !last_gtid->empty()) {
-    // Simple check: if purged set is not empty, warn that some GTIDs may be unavailable
-    // A more sophisticated check would parse the GTID sets and compare ranges
-    mygram::utils::StructuredLog()
-        .Event("gtid_consistency_check")
-        .Field("executed_gtid", *executed_gtid)
-        .Field("purged_gtid", *purged_gtid)
-        .Debug();
+  // If we have a last GTID, check if it has been purged using MySQL's GTID_SUBSET function
+  if (last_gtid && !last_gtid->empty() && !purged_gtid->empty()) {
+    // Validate GTID format to prevent SQL injection
+    // Valid GTID format: UUID:GNO or UUID:TAG:GNO or UUID:GNO-GNO2
+    // Characters allowed: hex digits, hyphens, colons, commas, spaces, newlines
+    const std::string& gtid_str = *last_gtid;
+    for (char chr : gtid_str) {  // NOLINT(readability-identifier-length)
+      if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' && chr != ' ' &&
+          chr != '\n' && chr != '\r') {
+        error = "Invalid GTID format: contains illegal character '" + std::string(1, chr) + "'";
+        return false;
+      }
+    }
+
+    // Use GTID_SUBSET to check if our start position has been purged
+    std::string query = "SELECT GTID_SUBSET('" + gtid_str + "', @@GLOBAL.gtid_purged) AS is_purged";
+    auto result = conn.Execute(query);
+    if (result) {
+      MYSQL_ROW row = mysql_fetch_row(result->get());
+      if (row != nullptr && row[0] != nullptr && std::string(row[0]) == "1") {
+        error = "Start GTID '" + gtid_str +
+                "' has been purged from server binlog. "
+                "Available positions start after purged set: " +
+                *purged_gtid +
+                ". "
+                "Run SYNC command to establish a new position.";
+        return false;
+      }
+    }
+  }
+
+  // Log for debugging
+  mygram::utils::StructuredLog()
+      .Event("gtid_consistency_check")
+      .Field("executed_gtid", *executed_gtid)
+      .Field("purged_gtid", *purged_gtid)
+      .Debug();
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogCompression(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
+  if (!result) {
+    // Variable doesn't exist (MySQL < 8.0.20) - OK
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - OK (MySQL < 8.0.20)
+    return true;
+  }
+
+  // row[0] = variable name, row[1] = value
+  if (row[1] != nullptr && std::string(row[1]) == "ON") {
+    error =
+        "binlog_transaction_compression=ON is not supported. "
+        "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
+        "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
+    return false;
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_value_options'");
+  if (!result) {
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    // Check if PARTIAL_JSON is in the value (case-insensitive)
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value.find("PARTIAL_JSON") != std::string::npos) {
+      warnings.emplace_back(
+          "binlog_row_value_options contains PARTIAL_JSON. "
+          "PARTIAL_UPDATE_ROWS_EVENT is not supported and will be skipped. "
+          "JSON column updates may be lost. Consider: "
+          "SET GLOBAL binlog_row_value_options=''");
+    }
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings) {
+  auto executed = conn.GetExecutedGTID();
+  if (!executed) {
+    return true;
+  }
+
+  // Tagged GTIDs use format UUID:TAG:GNO where TAG contains no hyphens
+  // The '::' pattern indicates tag separator in GTID sets (empty tag)
+  // MySQL 8.4 tagged GTID format: UUID:tag:GNO
+  // Non-tagged format: UUID:GNO or UUID:GNO-GNO2
+
+  // Check if the server version supports tagged GTIDs (MySQL 8.4+)
+  auto result = conn.Execute("SELECT VERSION()");
+  if (result) {
+    MYSQL_ROW row = mysql_fetch_row(result->get());
+    if (row != nullptr && row[0] != nullptr) {
+      std::string version(row[0]);
+      // MySQL 8.4+ supports tagged GTIDs
+      int major = 0;
+      int minor = 0;
+      // NOLINTNEXTLINE(cert-err34-c,cppcoreguidelines-pro-type-vararg)
+      if (sscanf(version.c_str(), "%d.%d", &major, &minor) == 2) {
+        constexpr int kMinMajorVersion = 8;
+        constexpr int kMinMinorVersion = 4;
+        if (major > kMinMajorVersion || (major == kMinMajorVersion && minor >= kMinMinorVersion)) {
+          // MySQL 8.4+ - tagged GTIDs are possible
+          // Check if any are actually in use
+          if (executed->find("::") != std::string::npos) {
+            warnings.emplace_back(
+                "Tagged GTIDs detected in executed GTID set. "
+                "Tagged GTID support is experimental.");
+          }
+        }
+      }
+    }
   }
 
   return true;

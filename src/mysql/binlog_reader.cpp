@@ -758,6 +758,31 @@ void BinlogReader::ReaderThreadFunc() {
           continue;  // Skip to next event
         }
 
+        if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
+          // MySQL 8.4+ tagged GTID (UUID:TAG:GNO)
+          auto gtid_opt = BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length);
+          if (gtid_opt) {
+            UpdateCurrentGTID(gtid_opt.value());
+            mygram::utils::StructuredLog()
+                .Event("binlog_debug")
+                .Field("action", "updated_tagged_gtid")
+                .Field("gtid", gtid_opt.value())
+                .Debug();
+          } else {
+            // Fallback: query server for current GTID position
+            auto server_gtid = connection_.GetExecutedGTID();
+            if (server_gtid) {
+              UpdateCurrentGTID(*server_gtid);
+            }
+            mygram::utils::StructuredLog()
+                .Event("binlog_warning")
+                .Field("type", "gtid_tagged_parse_fallback")
+                .Field("message", "Failed to parse GTID_TAGGED_LOG_EVENT, using server query fallback")
+                .Warn();
+          }
+          continue;  // Skip to next event
+        }
+
         if (event_type == MySQLBinlogEventType::TABLE_MAP_EVENT) {
           mygram::utils::StructuredLog()
               .Event("binlog_debug")

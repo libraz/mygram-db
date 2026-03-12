@@ -18,6 +18,7 @@
 #ifdef USE_MYSQL
 
 #include "mock_connection.h"
+#include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
@@ -560,6 +561,38 @@ TEST_F(BinlogReaderFixture, FilterValueSizeValidation) {
   storage::FilterValue just_over_test_value = std::string("test");
   EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(just_over_test_value, just_over_filter))
       << "Filter value just over limit (1MB+1) should be rejected";
+}
+
+/**
+ * @brief Test that tagged GTIDs (MySQL 8.4+) are stored correctly
+ *
+ * GTID_TAGGED_LOG_EVENT produces GTIDs in "UUID:TAG:GNO" format.
+ * UpdateCurrentGTID should accept and preserve this format.
+ */
+TEST_F(BinlogReaderFixture, HandlesTaggedGTIDFormat) {
+  // Standard GTID format
+  reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:42");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:42");
+
+  // Tagged GTID format (MySQL 8.4+)
+  reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
+}
+
+/**
+ * @brief Test that tagged GTIDs are extracted correctly from event buffers
+ *
+ * Verifies the ExtractTaggedGTID function via BinlogEventParser directly.
+ */
+TEST(BinlogReaderTest, ExtractTaggedGTIDFromEventBuffer) {
+  // Use BinlogEventParser::ExtractTaggedGTID with a manually constructed buffer
+  // (Full tests are in binlog_parsing_test.cpp; this validates the integration path)
+  auto result = BinlogEventParser::ExtractTaggedGTID(nullptr, 0);
+  EXPECT_FALSE(result.has_value()) << "Null buffer should return empty";
+
+  std::vector<uint8_t> short_buf(10, 0);
+  result = BinlogEventParser::ExtractTaggedGTID(short_buf.data(), short_buf.size());
+  EXPECT_FALSE(result.has_value()) << "Short buffer should return empty";
 }
 
 /**

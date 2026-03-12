@@ -90,16 +90,28 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Cache hit
   stats_.cache_hits++;
 
-  // Decompress result and copy query_cost_ms before releasing lock
+  // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
+  std::vector<uint8_t> compressed_copy = entry.compressed;
+  const size_t original_size = entry.original_size;
+  const double query_cost_ms = entry.query_cost_ms;
+
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+
+  // Release shared lock before decompression
+  lock.unlock();
+
+  // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(entry.compressed, entry.original_size);
+    result = ResultCompressor::Decompress(compressed_copy, original_size);
   } catch (const std::exception& e) {
     // Decompression failed, treat as miss
     stats_.cache_misses++;
 
-    // Record miss latency
     auto end_time = std::chrono::high_resolution_clock::now();
     double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     {
@@ -109,14 +121,6 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
 
     return std::nullopt;
   }
-
-  // Copy query_cost_ms before releasing lock to avoid use-after-free
-  const double query_cost_ms = entry.query_cost_ms;
-
-  // Lock-free access tracking (no lock upgrade needed)
-  // Atomic increment of access count and set dirty flag for background LRU refresh
-  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -196,16 +200,29 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
   // Cache hit
   stats_.cache_hits++;
 
-  // Decompress result and copy metadata before releasing lock
+  // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
+  std::vector<uint8_t> compressed_copy = entry.compressed;
+  const size_t original_size = entry.original_size;
+  metadata.query_cost_ms = entry.query_cost_ms;
+  metadata.created_at = entry.metadata.created_at;
+
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+
+  // Release shared lock before decompression
+  lock.unlock();
+
+  // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(entry.compressed, entry.original_size);
+    result = ResultCompressor::Decompress(compressed_copy, original_size);
   } catch (const std::exception& e) {
     // Decompression failed, treat as miss
     stats_.cache_misses++;
 
-    // Record miss latency
     auto end_time = std::chrono::high_resolution_clock::now();
     double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     {
@@ -215,15 +232,6 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
 
     return std::nullopt;
   }
-
-  // Copy metadata before releasing lock to avoid use-after-free
-  metadata.query_cost_ms = entry.query_cost_ms;
-  metadata.created_at = entry.metadata.created_at;
-
-  // Lock-free access tracking (no lock upgrade needed)
-  // Atomic increment of access count and set dirty flag for background LRU refresh
-  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -465,13 +473,47 @@ void QueryCache::RefreshLRU() {
 
   auto now = std::chrono::steady_clock::now();
 
+  // Collect TTL-expired entries for removal
+  std::vector<CacheKey> expired_keys;
+
   // Update LRU for entries that were accessed since last refresh
   for (auto& [key, entry_pair] : cache_map_) {
+    // Check TTL expiration
+    if (ttl_seconds_ > 0) {
+      auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
+      if (age >= ttl_seconds_) {
+        expired_keys.push_back(key);
+        continue;  // Skip LRU update for expired entries
+      }
+    }
+
     if (entry_pair.first.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
       // Entry was accessed, move to front of LRU list
       Touch(key);
       entry_pair.first.metadata.last_accessed = now;
     }
+  }
+
+  // Remove expired entries
+  for (const auto& key : expired_keys) {
+    auto iter = cache_map_.find(key);
+    if (iter != cache_map_.end()) {
+      // Notify eviction callback before deletion
+      if (eviction_callback_) {
+        eviction_callback_(key);
+      }
+
+      lru_list_.erase(iter->second.second);
+      const size_t entry_memory = iter->second.first.MemoryUsage();
+      total_memory_bytes_ -= entry_memory;
+      stats_.current_entries--;
+      stats_.evictions++;
+      cache_map_.erase(iter);
+    }
+  }
+
+  if (!expired_keys.empty()) {
+    stats_.current_memory_bytes = total_memory_bytes_;
   }
 }
 

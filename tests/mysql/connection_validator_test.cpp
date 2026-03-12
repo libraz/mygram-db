@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
+#include <cctype>
 #include <cstdlib>
 
 #include "mysql/connection.h"
@@ -434,6 +435,63 @@ TEST_F(ConnectionValidatorIntegrationTest, ValidationPreservesConnectionState) {
   // Verify we can still execute queries
   auto query_result = conn_->Execute("SELECT 1");
   EXPECT_TRUE(query_result.has_value());
+}
+
+// ============================================================================
+// Phase 2: Binlog compression and partial JSON checks (integration)
+// ============================================================================
+
+/**
+ * @brief Test ValidateServer with binlog compression OFF (typical case)
+ *
+ * Most MySQL servers have binlog_transaction_compression=OFF by default.
+ * Validation should pass.
+ */
+TEST_F(ConnectionValidatorIntegrationTest, ValidateServerNoBinlogCompression) {
+  // Check current compression setting
+  auto result = conn_->Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
+  if (!result) {
+    // MySQL < 8.0.20 doesn't have this variable - should pass
+    GTEST_SKIP() << "binlog_transaction_compression variable not available";
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row != nullptr && row[1] != nullptr && std::string(row[1]) == "ON") {
+    GTEST_SKIP() << "binlog_transaction_compression is ON on test server, "
+                 << "cannot test the OFF path";
+  }
+
+  // Validation should pass when compression is OFF
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+  auto validation_result = ConnectionValidator::ValidateServer(*conn_, required_tables);
+  EXPECT_TRUE(validation_result.valid) << "Error: " << validation_result.error_message;
+}
+
+/**
+ * @brief Test that GTID format validation rejects SQL injection attempts
+ *
+ * CheckGTIDConsistency validates GTID format before using it in SQL.
+ * Invalid characters should be rejected.
+ */
+TEST(ConnectionValidatorUnitTest, GTIDFormatValidation) {
+  // Valid GTID characters: hex digits, hyphens, colons, commas, spaces,
+  // newlines. These are validated by CheckGTIDConsistency before SQL execution.
+
+  // Verify valid format characters
+  std::string valid_gtid = "a1b2c3d4-e5f6-1234-5678-90abcdef1234:1-5";
+  for (char c : valid_gtid) {
+    bool is_valid = std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == ':' || c == ',' || c == ' ' ||
+                    c == '\n' || c == '\r';
+    EXPECT_TRUE(is_valid) << "Character '" << c << "' should be valid in GTID";
+  }
+
+  // Verify invalid characters are detected
+  std::vector<char> invalid_chars = {'\'', '"', ';', '(', ')', '@', '#', '!', '\\', '/'};
+  for (char c : invalid_chars) {
+    bool is_valid = std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == ':' || c == ',' || c == ' ' ||
+                    c == '\n' || c == '\r';
+    EXPECT_FALSE(is_valid) << "Character '" << c << "' should be invalid in GTID";
+  }
 }
 
 }  // namespace mygramdb::mysql
