@@ -1,18 +1,16 @@
 /**
- * @file binlog_event_processor_bug_fixes_test.cpp
- * @brief Tests for BinlogEventProcessor bug fixes
- *
- * Tests for:
- * - Bug #6: Non-atomic document store and index updates
+ * @file binlog_event_processor_test.cpp
+ * @brief Tests for BinlogEventProcessor
  */
 
 #ifdef USE_MYSQL
+
+#include "mysql/binlog_event_processor.h"
 
 #include <gtest/gtest.h>
 
 #include "config/config.h"
 #include "index/index.h"
-#include "mysql/binlog_event_processor.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::mysql {
@@ -226,7 +224,7 @@ TEST_F(BinlogEventProcessorTest, DeleteNonExistentHandled) {
  * This test verifies that when both old_text and new_text are provided,
  * the update is performed atomically to prevent partial index states.
  */
-TEST_F(BinlogEventProcessorTest, Bug34_UpdateUsesAtomicIndexUpdate) {
+TEST_F(BinlogEventProcessorTest, UpdateUsesAtomicIndexUpdate) {
   // First insert a document
   BinlogEvent insert_event;
   insert_event.type = BinlogEventType::INSERT;
@@ -279,7 +277,7 @@ TEST_F(BinlogEventProcessorTest, Bug34_UpdateUsesAtomicIndexUpdate) {
  * When doc_store.UpdateDocument returns false (document was removed),
  * the processor should handle it gracefully.
  */
-TEST_F(BinlogEventProcessorTest, Bug34_UpdateHandlesStoreUpdateFailure) {
+TEST_F(BinlogEventProcessorTest, UpdateHandlesStoreUpdateFailure) {
   // This test verifies that if a document is removed between GetDocId and UpdateDocument,
   // the system handles it gracefully. We can't easily simulate this race condition,
   // but we can verify that normal updates still work correctly.
@@ -315,7 +313,7 @@ TEST_F(BinlogEventProcessorTest, Bug34_UpdateHandlesStoreUpdateFailure) {
  * DELETE should succeed even if the document was already partially removed
  * from the index.
  */
-TEST_F(BinlogEventProcessorTest, Bug34_DeleteWithEmptyText) {
+TEST_F(BinlogEventProcessorTest, DeleteWithEmptyText) {
   // First insert a document
   BinlogEvent insert_event;
   insert_event.type = BinlogEventType::INSERT;
@@ -350,7 +348,7 @@ TEST_F(BinlogEventProcessorTest, Bug34_DeleteWithEmptyText) {
  * When a document transitions out of required conditions, both index
  * and document store should be updated consistently.
  */
-TEST_F(BinlogEventProcessorTest, Bug34_UpdateTransitionOutOfRequired) {
+TEST_F(BinlogEventProcessorTest, UpdateTransitionOutOfRequired) {
   // Setup table config with required filter (proper RequiredFilterConfig format)
   config::RequiredFilterConfig required_filter;
   required_filter.name = "status";

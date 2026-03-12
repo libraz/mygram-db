@@ -1435,6 +1435,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
       cache_obj["memory_human"] = utils::FormatBytes(cache_stats.current_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
+      cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
       cache_obj["invalidations_deferred"] = cache_stats.invalidations_deferred;
       cache_obj["invalidations_batches"] = cache_stats.invalidations_batches;

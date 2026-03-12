@@ -1087,4 +1087,289 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_TruncatedBuffer) {
   EXPECT_FALSE(result.has_value());
 }
 
+// ============================================================================
+// Tests moved from binlog_event_parser_bug_fixes_test.cpp
+// ============================================================================
+
+/**
+ * @brief Multi-row INSERT events should return all rows
+ *
+ * MySQL batches multiple row operations into single binlog events.
+ * ParseBinlogEvent must return all rows, not just the first one.
+ */
+TEST(BinlogParsingTest, MultiRowInsertReturnsAllRows) {
+  std::vector<BinlogEvent> events;
+
+  BinlogEvent event1;
+  event1.type = BinlogEventType::INSERT;
+  event1.primary_key = "1";
+  event1.text = "text1";
+  events.push_back(event1);
+
+  BinlogEvent event2;
+  event2.type = BinlogEventType::INSERT;
+  event2.primary_key = "2";
+  event2.text = "text2";
+  events.push_back(event2);
+
+  BinlogEvent event3;
+  event3.type = BinlogEventType::INSERT;
+  event3.primary_key = "3";
+  event3.text = "text3";
+  events.push_back(event3);
+
+  EXPECT_EQ(events.size(), 3) << "Multi-row events should return all rows";
+  EXPECT_EQ(events[0].primary_key, "1");
+  EXPECT_EQ(events[1].primary_key, "2");
+  EXPECT_EQ(events[2].primary_key, "3");
+}
+
+/**
+ * @brief Multi-row UPDATE events should process all row pairs
+ */
+TEST(BinlogParsingTest, MultiRowUpdateReturnsAllRows) {
+  std::vector<BinlogEvent> events;
+
+  for (int i = 1; i <= 3; ++i) {
+    BinlogEvent event;
+    event.type = BinlogEventType::UPDATE;
+    event.primary_key = std::to_string(i);
+    event.text = "new_text";
+    event.old_text = "old_text";
+    events.push_back(event);
+  }
+
+  EXPECT_EQ(events.size(), 3) << "Multi-row UPDATEs should return all rows";
+}
+
+/**
+ * @brief Multi-row DELETE events should process all rows
+ */
+TEST(BinlogParsingTest, MultiRowDeleteReturnsAllRows) {
+  std::vector<BinlogEvent> events;
+
+  for (int i = 1; i <= 3; ++i) {
+    BinlogEvent event;
+    event.type = BinlogEventType::DELETE;
+    event.primary_key = std::to_string(i);
+    events.push_back(event);
+  }
+
+  EXPECT_EQ(events.size(), 3) << "Multi-row DELETEs should return all rows";
+}
+
+/**
+ * @brief text_source.concat should use all specified columns
+ */
+TEST(BinlogParsingTest, ConcatTextSourceUsesAllColumns) {
+  config::TableConfig table_config;
+  table_config.name = "articles";
+  table_config.primary_key = "id";
+  table_config.text_source.concat = {"title", "body", "tags"};
+
+  EXPECT_EQ(table_config.text_source.concat.size(), 3);
+  EXPECT_EQ(table_config.text_source.concat[0], "title");
+  EXPECT_EQ(table_config.text_source.concat[1], "body");
+  EXPECT_EQ(table_config.text_source.concat[2], "tags");
+
+  std::string title = "Hello World";
+  std::string body = "This is the body text";
+  std::string tags = "news tech";
+
+  std::string expected_text = title + " " + body + " " + tags;
+  EXPECT_EQ(expected_text, "Hello World This is the body text news tech");
+}
+
+/**
+ * @brief Single column text_source should work correctly
+ */
+TEST(BinlogParsingTest, SingleColumnTextSourceWorks) {
+  config::TableConfig table_config;
+  table_config.name = "articles";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+
+  EXPECT_FALSE(table_config.text_source.column.empty());
+  EXPECT_TRUE(table_config.text_source.concat.empty());
+}
+
+/**
+ * @brief Empty text source config is handled gracefully
+ */
+TEST(BinlogParsingTest, EmptyTextSourceFallback) {
+  config::TableConfig table_config;
+  table_config.name = "articles";
+  table_config.primary_key = "id";
+
+  std::string text_column;
+  if (!table_config.text_source.column.empty()) {
+    text_column = table_config.text_source.column;
+  } else if (!table_config.text_source.concat.empty()) {
+    text_column = "concatenated";
+  } else {
+    text_column = "";
+  }
+
+  EXPECT_TRUE(text_column.empty()) << "Empty config should result in empty text column";
+}
+
+/**
+ * @brief ROLLBACK statement is not treated as DDL
+ */
+TEST(BinlogParsingTest, RollbackStatementNotTreatedAsDDL) {
+  std::vector<std::string> rollback_statements = {
+      "ROLLBACK", "rollback", "ROLLBACK;", "  ROLLBACK  ", "ROLLBACK TO SAVEPOINT sp1", "ROLLBACK TO sp1",
+  };
+
+  for (const auto& stmt : rollback_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "ROLLBACK statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief BEGIN statement is not treated as DDL
+ */
+TEST(BinlogParsingTest, BeginStatementNotTreatedAsDDL) {
+  std::vector<std::string> begin_statements = {
+      "BEGIN",
+      "begin",
+      "BEGIN;",
+      "  BEGIN  ",
+      "START TRANSACTION",
+      "START TRANSACTION READ ONLY",
+      "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+  };
+
+  for (const auto& stmt : begin_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "BEGIN statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief COMMIT statement is not treated as DDL
+ */
+TEST(BinlogParsingTest, CommitStatementNotTreatedAsDDL) {
+  std::vector<std::string> commit_statements = {
+      "COMMIT", "commit", "COMMIT;", "  COMMIT  ", "COMMIT WORK",
+  };
+
+  for (const auto& stmt : commit_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "COMMIT statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief XA transaction statements are not treated as DDL
+ */
+TEST(BinlogParsingTest, XAStatementsNotTreatedAsDDL) {
+  std::vector<std::string> xa_statements = {
+      "XA START 'xid1'",    "XA END 'xid1'", "XA PREPARE 'xid1'", "XA COMMIT 'xid1'",
+      "XA ROLLBACK 'xid1'", "XA RECOVER",    "xa commit 'xid1'",  "xa rollback 'xid1'",
+  };
+
+  for (const auto& stmt : xa_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "XA statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief SAVEPOINT statements are not treated as DDL
+ */
+TEST(BinlogParsingTest, SavepointStatementsNotTreatedAsDDL) {
+  std::vector<std::string> savepoint_statements = {
+      "SAVEPOINT sp1",
+      "RELEASE SAVEPOINT sp1",
+      "savepoint my_savepoint",
+  };
+
+  for (const auto& stmt : savepoint_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "SAVEPOINT statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief SET statements are not treated as DDL
+ */
+TEST(BinlogParsingTest, SetStatementsNotTreatedAsDDL) {
+  std::vector<std::string> set_statements = {
+      "SET autocommit=0",
+      "SET @var = 1",
+      "SET NAMES utf8mb4",
+      "SET SESSION sql_mode = ''",
+      "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  };
+
+  for (const auto& stmt : set_statements) {
+    bool is_ddl = BinlogEventParser::IsTableAffectingDDL(stmt, "articles");
+    EXPECT_FALSE(is_ddl) << "SET statement should not be treated as DDL: " << stmt;
+  }
+}
+
+/**
+ * @brief Actual DDL statements are still correctly detected
+ */
+TEST(BinlogParsingTest, DDLStatementsStillDetected) {
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE IF EXISTS articles", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE articles ADD COLUMN foo INT", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("TRUNCATE TABLE articles", "articles"));
+
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE other_table", "articles"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE other_table ADD COLUMN foo INT", "articles"));
+}
+
+/**
+ * @brief Table name that looks like transaction keyword is still detected in DDL
+ */
+TEST(BinlogParsingTest, TableNameLooksLikeTransactionKeyword) {
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE rollback", "rollback"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("ALTER TABLE rollback ADD COLUMN x INT", "rollback"));
+
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("ROLLBACK", "rollback"));
+
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE begin", "begin"));
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("BEGIN", "begin"));
+}
+
+TEST(BinlogParsingTest, TransactionPayloadEventReturnsEmpty) {
+  std::vector<uint8_t> buffer(50, 0);
+  buffer[4] = 40;  // event_type = TRANSACTION_PAYLOAD_EVENT
+  auto event_size = static_cast<uint32_t>(buffer.size());
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
+                                                    nullptr, false);
+
+  EXPECT_TRUE(events.empty()) << "TRANSACTION_PAYLOAD_EVENT should return empty vector";
+}
+
+TEST(BinlogParsingTest, PartialUpdateRowsEventReturnsEmpty) {
+  std::vector<uint8_t> buffer(50, 0);
+  buffer[4] = 39;  // event_type = PARTIAL_UPDATE_ROWS_EVENT
+  auto event_size = static_cast<uint32_t>(buffer.size());
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
+                                                    nullptr, false);
+
+  EXPECT_TRUE(events.empty()) << "PARTIAL_UPDATE_ROWS_EVENT should return empty vector";
+}
+
 #endif  // USE_MYSQL

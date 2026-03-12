@@ -45,6 +45,7 @@ struct CacheStatisticsSnapshot {
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
   uint64_t evictions = 0;
+  uint64_t ttl_expirations = 0;  ///< TTL-expired entries removed
 
   // Timing statistics
   double total_cache_hit_time_ms = 0.0;
@@ -100,6 +101,7 @@ struct CacheStatistics {
   std::atomic<uint64_t> current_entries{0};
   std::atomic<uint64_t> current_memory_bytes{0};
   std::atomic<uint64_t> evictions{0};
+  std::atomic<uint64_t> ttl_expirations{0};
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
@@ -107,6 +109,9 @@ struct CacheStatistics {
   double total_cache_miss_time_ms{0.0};
   double total_query_saved_time_ms{0.0};
 };
+
+/// Reason for cache entry removal (used by RemoveEntryLocked)
+enum class RemovalReason { kLRUEviction, kTTLExpired, kTableClear };
 
 /**
  * @brief LRU cache for query results
@@ -216,6 +221,7 @@ class QueryCache {
     snapshot.current_entries = stats_.current_entries.load();
     snapshot.current_memory_bytes = stats_.current_memory_bytes.load();
     snapshot.evictions = stats_.evictions.load();
+    snapshot.ttl_expirations = stats_.ttl_expirations.load();
     {
       std::lock_guard<std::mutex> lock(stats_.timing_mutex_);
       snapshot.total_cache_hit_time_ms = stats_.total_cache_hit_time_ms;
@@ -310,6 +316,14 @@ class QueryCache {
    * @return true if enough space was freed
    */
   bool EvictForSpace(size_t required_bytes);
+
+  /**
+   * @brief Remove a single cache entry while holding exclusive lock
+   * @param iter Iterator to entry in cache_map_
+   * @param reason Why the entry is being removed
+   * @pre Caller must hold exclusive lock on mutex_
+   */
+  void RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason);
 
   /**
    * @brief Move key to front of LRU list (most recently used)

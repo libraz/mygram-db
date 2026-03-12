@@ -92,9 +92,7 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     }
   }
 
-  // Cache hit
-  stats_.cache_hits++;
-
+  // Cache hit - copy data while holding lock, defer stats update until after decompression
   // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
   std::vector<uint8_t> compressed_copy = entry.compressed;
@@ -126,6 +124,9 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
 
     return std::nullopt;
   }
+
+  // Decompression succeeded - now count as hit
+  stats_.cache_hits++;
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -207,9 +208,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     }
   }
 
-  // Cache hit
-  stats_.cache_hits++;
-
+  // Cache hit - copy data while holding lock, defer stats update until after decompression
   // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
   std::vector<uint8_t> compressed_copy = entry.compressed;
@@ -242,6 +241,9 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
 
     return std::nullopt;
   }
+
+  // Decompression succeeded - now count as hit
+  stats_.cache_hits++;
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -390,21 +392,10 @@ void QueryCache::ClearTable(const std::string& table) {
   for (const auto& key : to_erase) {
     auto iter = cache_map_.find(key);
     if (iter != cache_map_.end()) {
-      // Notify eviction callback BEFORE deletion
-      // This allows the callback to access entry data if needed
-      if (eviction_callback_) {
-        eviction_callback_(key);
-      }
-
-      // Remove entry (after callback has been notified)
-      lru_list_.erase(iter->second.second);
-      const size_t entry_memory = iter->second.first.MemoryUsage();
-      total_memory_bytes_ -= entry_memory;
-      stats_.current_entries--;
-      stats_.current_memory_bytes = total_memory_bytes_;
-      cache_map_.erase(iter);
+      RemoveEntryLocked(iter, RemovalReason::kTableClear);
     }
   }
+  stats_.current_memory_bytes = total_memory_bytes_;
 }
 
 std::optional<CacheMetadata> QueryCache::GetMetadata(const CacheKey& key) const {
@@ -431,27 +422,46 @@ bool QueryCache::EvictForSpace(size_t required_bytes) {
       continue;
     }
 
-    // Notify eviction callback BEFORE deletion
-    // This allows the callback to access entry data if needed
-    if (eviction_callback_) {
-      eviction_callback_(lru_key);
-    }
-
-    // Remove entry (after callback has been notified)
-    const size_t entry_memory = iter->second.first.MemoryUsage();
-    lru_list_.pop_back();
-    cache_map_.erase(iter);
-
-    // Update memory tracking
-    total_memory_bytes_ -= entry_memory;
-    stats_.current_entries--;
-    stats_.evictions++;
+    RemoveEntryLocked(iter, RemovalReason::kLRUEviction);
   }
 
   stats_.current_memory_bytes = total_memory_bytes_;
 
   // Check if enough space was freed
   return total_memory_bytes_ + required_bytes <= max_memory_bytes_;
+}
+
+void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason) {
+  const CacheKey& key = iter->first;
+
+  // Notify eviction callback before deletion (metadata cleanup)
+  if (eviction_callback_) {
+    eviction_callback_(key);
+  }
+
+  // Remove from LRU list
+  lru_list_.erase(iter->second.second);
+
+  // Update memory tracking
+  const size_t entry_memory = iter->second.first.MemoryUsage();
+  total_memory_bytes_ -= entry_memory;
+  stats_.current_entries--;
+
+  // Update reason-specific stats
+  switch (reason) {
+    case RemovalReason::kLRUEviction:
+      stats_.evictions++;
+      break;
+    case RemovalReason::kTTLExpired:
+      stats_.ttl_expirations++;
+      break;
+    case RemovalReason::kTableClear:
+      // No additional counter (existing behavior)
+      break;
+  }
+
+  // Remove from cache map
+  cache_map_.erase(iter);
 }
 
 void QueryCache::Touch(const CacheKey& key) {
@@ -517,17 +527,7 @@ void QueryCache::RefreshLRU() {
   for (const auto& key : expired_keys) {
     auto iter = cache_map_.find(key);
     if (iter != cache_map_.end()) {
-      // Notify eviction callback before deletion
-      if (eviction_callback_) {
-        eviction_callback_(key);
-      }
-
-      lru_list_.erase(iter->second.second);
-      const size_t entry_memory = iter->second.first.MemoryUsage();
-      total_memory_bytes_ -= entry_memory;
-      stats_.current_entries--;
-      stats_.evictions++;
-      cache_map_.erase(iter);
+      RemoveEntryLocked(iter, RemovalReason::kTTLExpired);
     }
   }
 

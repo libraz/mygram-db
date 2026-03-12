@@ -3,113 +3,13 @@
  * @brief Unit tests for binlog reader - Multi-table mode and integration tests
  */
 
-#include <gtest/gtest.h>
-
-#include <atomic>
-#include <chrono>
-#include <thread>
-
-#define private public
-#define protected public
-#include "mysql/binlog_reader.h"
-#undef private
-#undef protected
+#include "binlog_test_fixtures.h"
 
 #ifdef USE_MYSQL
 
-#include "mock_connection.h"
 #include "mysql/binlog_filter_evaluator.h"
-#include "server/server_stats.h"
-#include "server/server_types.h"
 
-using namespace mygramdb::mysql;
-using namespace mygramdb;
-
-namespace {
-
-/**
- * @brief Helper that creates a default table configuration for tests
- */
-config::TableConfig MakeDefaultTableConfig() {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  config::RequiredFilterConfig required_filter;
-  required_filter.name = "status";
-  required_filter.type = "int";
-  required_filter.op = "=";
-  required_filter.value = "1";
-  table_config.required_filters.push_back(required_filter);
-
-  config::FilterConfig optional_filter;
-  optional_filter.name = "category";
-  optional_filter.type = "string";
-  table_config.filters.push_back(optional_filter);
-
-  return table_config;
-}
-
-/**
- * @brief BinlogReader test fixture providing in-memory dependencies
- */
-class BinlogReaderFixture : public ::testing::Test {
- protected:
-  BinlogReaderFixture() : connection_(connection_config_), index_(2) {}
-
-  void SetUp() override {
-    table_config_ = MakeDefaultTableConfig();
-    reader_config_.start_gtid = "uuid:1";
-    reader_config_.queue_size = 2;
-    reader_config_.reconnect_delay_ms = 10;
-    reader_config_.server_id = 12345;  // Test server ID
-
-    index_.Clear();
-    doc_store_.Clear();
-    ResetReader();
-  }
-
-  void TearDown() override {
-    reader_.reset();
-    doc_store_.Clear();
-    index_.Clear();
-  }
-
-  /**
-   * @brief Recreate BinlogReader with current configuration
-   */
-  void ResetReader() {
-    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
-    reader_ =
-        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
-  }
-
-  /**
-   * @brief Utility to build a fully populated event for tests
-   */
-  BinlogEvent MakeEvent(BinlogEventType type, const std::string& pk, int status, const std::string& text = "hello") {
-    BinlogEvent event;
-    event.type = type;
-    event.table_name = table_config_.name;
-    event.primary_key = pk;
-    event.text = text;
-    event.gtid = "uuid:" + pk;
-    event.filters["status"] = static_cast<int64_t>(status);
-    event.filters["category"] = std::string("news");
-    return event;
-  }
-
-  Connection::Config connection_config_;
-  Connection connection_;
-  index::Index index_;
-  storage::DocumentStore doc_store_;
-  config::TableConfig table_config_;
-  BinlogReader::Config reader_config_;
-  std::unique_ptr<BinlogReader> reader_;
-};
-
-}  // namespace
+using namespace binlog_test;
 
 /**
  * @brief Ensure events are routed to correct TableContext in multi-table mode
@@ -272,77 +172,6 @@ TEST(BinlogReaderTest, MultiTableModeWithServerStats) {
 
   // Verify BinlogReader is not running
   EXPECT_FALSE(reader.IsRunning());
-}
-
-/**
- * @brief Test BinlogReader Stop() doesn't cause use-after-free
- *
- * Verifies that Stop() properly signals shutdown and that reader thread
- * checks should_stop_ after returning from blocking mysql_binlog_fetch().
- *
- * NOTE: This is a structural/lifecycle test. The actual fix (checking should_stop_
- * after mysql_binlog_fetch returns) is verified in integration tests with real
- * MySQL connections, as unit tests cannot easily simulate the blocking call.
- */
-TEST(BinlogReaderTest, StopDoesNotCauseUseAfterFree) {
-  Connection::Config config;
-  config.host = "localhost";
-  config.user = "test";
-  config.database = "test";
-
-  Connection conn(config);
-
-  // Create table contexts (not actually used in this test)
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-
-  BinlogReader::Config reader_config;
-  config::MysqlConfig mysql_config;  // Use default (UTC timezone)
-  BinlogReader reader(conn, table_contexts, mysql_config, reader_config);
-
-  // Start and immediately stop
-  // (Start will fail without real connection, but that's ok for this test)
-  reader.Stop();
-
-  // Verify Stop() completes without hanging
-  // The fix ensures that should_stop_ is checked after mysql_binlog_fetch() returns,
-  // preventing use-after-free when connection is closed during Stop()
-  SUCCEED();
-}
-
-/**
- * @brief Test reconnection delay reset behavior
- *
- * Verifies that reconnection attempt counter is properly managed during
- * connection failures and successful reconnections.
- *
- * NOTE: This is a documentation test. The actual behavior (resetting reconnect_attempt
- * to 0 after successful reconnection) is verified in integration tests with real
- * MySQL connections. The fix prevents infinite delay increase by resetting the
- * counter when reconnection succeeds.
- *
- * Key behaviors tested in integration tests:
- * 1. reconnect_attempt increments on connection failure
- * 2. Delay increases exponentially: delay = base_delay * min(attempt, 10)
- * 3. reconnect_attempt resets to 0 after successful reconnection
- * 4. Prevents unbounded delay growth in long-running systems
- */
-TEST(BinlogReaderTest, ReconnectionDelayResetBehaviorDocumented) {
-  // This test documents the expected behavior for reconnection delay management
-  //
-  // Before fix:
-  //   - reconnect_attempt never reset after successful reconnection
-  //   - Delay would stay at maximum (10x base delay) forever
-  //   - Long-running systems would have unnecessarily long reconnection delays
-  //
-  // After fix:
-  //   - reconnect_attempt resets to 0 after any successful reconnection
-  //   - Subsequent failures start from base delay again
-  //   - Better recovery behavior for transient connection issues
-  //
-  // The actual verification requires integration tests with MySQL connection
-  // failures and recovery scenarios.
-
-  SUCCEED();
 }
 
 /**
@@ -525,35 +354,6 @@ TEST_F(BinlogReaderFixture, MultiTableModeDifferentTextSources) {
 }
 
 /**
- * @brief Test null pointer safety in table context handling
- * Regression test for: table_iter->second->index/doc_store could be null
- *
- * Note: This is a documentation test since creating a TableContext with null
- * index/doc_store in production code is prevented by design. The actual fix
- * adds defensive null checks to prevent crashes if this ever happens.
- *
- * The modified code path is:
- * - src/mysql/binlog_reader.cpp:665-668
- *
- * Now checks for null pointers and logs error instead of crashing.
- */
-TEST(BinlogReaderPointerSafetyTest, NullTableContextDefensiveChecks) {
-  // This test documents the safety improvements
-  // In practice, the null pointer checks in binlog_reader.cpp prevent crashes when:
-  // 1. A table is registered but index/doc_store initialization fails
-  // 2. A table is in an inconsistent state during reconfiguration
-  // 3. Memory corruption or other unexpected conditions occur
-
-  // The fix ensures:
-  // - No segfault/crash occurs
-  // - Error is logged
-  // - Binlog event processing fails gracefully
-  // - Reader continues with next event
-
-  SUCCEED() << "Null pointer safety checks added to binlog event processing";
-}
-
-/**
  * @brief Test concurrent Start() calls don't cause race conditions
  * Regression test for: gtid_encoded_data_ was not protected by mutex
  * and running_ flag was not atomically checked-and-set
@@ -599,94 +399,10 @@ TEST_F(BinlogReaderFixture, ConcurrentStartCallsThreadSafe) {
 }
 
 /**
- * @brief Test exponential backoff cap behavior
- * Regression test for: reconnect_attempt could grow unbounded
- * Verifies that reconnect delay is properly capped at 10x base delay
- */
-TEST(BinlogReaderTest, ExponentialBackoffCapped) {
-  // This test documents the expected behavior for reconnection backoff
-
-  // The implementation should ensure:
-  // - reconnect_attempt is capped at 10 using std::min(reconnect_attempt + 1, 10)
-  // - This prevents integer overflow and unbounded delays
-  // - Maximum delay is base_delay * 10
-
-  // Example with base delay of 1000ms:
-  // Attempt 1: 1000ms * 1 = 1000ms
-  // Attempt 2: 1000ms * 2 = 2000ms
-  // ...
-  // Attempt 10: 1000ms * 10 = 10000ms
-  // Attempt 11+: 1000ms * 10 = 10000ms (capped)
-
-  // Without the cap:
-  // - After many reconnection attempts, delay_ms could overflow
-  // - System would have excessive delays during network issues
-
-  // With the cap (current implementation):
-  // - Maximum delay is predictable: config.reconnect_delay_ms * 10
-  // - No overflow risk
-  // - Reasonable maximum backoff time
-
-  SUCCEED() << "Exponential backoff is capped at 10x base delay (src/mysql/binlog_reader.cpp:380)";
-}
-
-/**
- * @brief Test multi-table DDL processing
- * Regression test for: QUERY_EVENT only checked single table_config_.name
- * Verifies that DDL events are properly detected for all registered tables
- */
-TEST(BinlogReaderTest, MultiTableDDLProcessing) {
-  // This test documents the expected behavior for multi-table DDL handling
-
-  // In multi-table mode (multi_table_mode_ == true):
-  // - QUERY_EVENT (DDL) should check all tables in table_contexts_
-  // - DDL affecting any registered table should be detected
-  // - Example: "ALTER TABLE table1 ..." should be caught if table1 is registered
-
-  // In single-table mode (multi_table_mode_ == false):
-  // - QUERY_EVENT should only check table_config_.name
-  // - Only DDL affecting the configured table is processed
-
-  // The implementation (src/mysql/binlog_reader.cpp:1181-1201):
-  // if (multi_table_mode_) {
-  //   for (const auto& [table_name, ctx] : table_contexts_) {
-  //     if (IsTableAffectingDDL(query, table_name)) {
-  //       // Process DDL for this table
-  //     }
-  //   }
-  // } else {
-  //   if (IsTableAffectingDDL(query, table_config_.name)) {
-  //     // Process DDL for single table
-  //   }
-  // }
-
-  // Without this fix:
-  // - Multi-table mode would only check table_config_.name
-  // - DDL for other registered tables would be missed
-  // - Schema changes could be lost
-
-  // With this fix:
-  // - All registered tables are checked for DDL
-  // - Proper multi-table DDL handling
-
-  SUCCEED()
-      << "Multi-table DDL processing properly iterates all registered tables (src/mysql/binlog_reader.cpp:1181-1201)";
-}
-
-/**
  * @brief Test that FetchColumnNames is skipped for non-monitored tables
  *
  * Regression test for: FetchColumnNames was called for all TABLE_MAP_EVENTs regardless
  * of whether the table was monitored, causing permission errors and unnecessary queries.
- *
- * The fix adds a check before FetchColumnNames:
- * - In multi-table mode: checks if table_name exists in table_contexts_
- * - In single-table mode: checks if table_name matches table_config_.name
- *
- * This prevents:
- * - SELECT permission errors for non-monitored tables (e.g., ignore_threads)
- * - Unnecessary SHOW COLUMNS queries
- * - Error log spam for tables we don't have access to
  */
 TEST_F(BinlogReaderFixture, SkipsColumnFetchForNonMonitoredTablesMultiTableMode) {
   // Set up multi-table mode with only "articles" registered

@@ -61,7 +61,9 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     // Process outside lock to prevent deadlock from nested lock acquisition
     for (const auto& key : affected_keys) {
       // Unregister metadata first to prevent memory leak even if Erase fails
-      invalidation_mgr_->UnregisterCacheEntry(key);
+      if (invalidation_mgr_ != nullptr) {
+        invalidation_mgr_->UnregisterCacheEntry(key);
+      }
 
       if (cache_ != nullptr) {
         cache_->Erase(key);

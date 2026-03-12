@@ -1560,4 +1560,72 @@ TEST(QueryCacheTest, TTLExpiredMemoryReclaimed) {
   EXPECT_LT(stats_after.current_memory_bytes, mem_before);
 }
 
+/**
+ * @brief Test stats invariant: total_queries == cache_hits + cache_misses
+ */
+TEST(QueryCacheTest, StatsInvariantHitsPlusMissesEqualsTotal) {
+  QueryCache cache(1024 * 1024, 0.0);
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"abc"};
+
+  // Insert some entries
+  auto key1 = CacheKeyGenerator::Generate("inv_q1");
+  auto key2 = CacheKeyGenerator::Generate("inv_q2");
+  cache.Insert(key1, {1, 2, 3}, meta, 10.0);
+  cache.Insert(key2, {4, 5, 6}, meta, 10.0);
+
+  // Generate hits
+  cache.Lookup(key1);
+  cache.Lookup(key2);
+  cache.Lookup(key1);
+
+  // Generate misses
+  auto missing = CacheKeyGenerator::Generate("inv_missing");
+  cache.Lookup(missing);
+  cache.Lookup(missing);
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.total_queries, stats.cache_hits + stats.cache_misses)
+      << "Invariant violated: total=" << stats.total_queries
+      << " hits=" << stats.cache_hits << " misses=" << stats.cache_misses;
+  EXPECT_EQ(stats.cache_hits, 3);
+  EXPECT_EQ(stats.cache_misses, 2);
+}
+
+/**
+ * @brief Test TTL expiration uses ttl_expirations counter (not evictions)
+ */
+TEST(QueryCacheTest, TTLExpirationStats) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"abc"};
+
+  // Insert entries
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("ttl_stat_" + std::to_string(i));
+    cache.Insert(key, {1, 2, 3}, meta, 10.0);
+  }
+
+  auto stats_before = cache.GetStatistics();
+  EXPECT_EQ(stats_before.current_entries, 5);
+  EXPECT_EQ(stats_before.evictions, 0);
+  EXPECT_EQ(stats_before.ttl_expirations, 0);
+
+  // Wait for TTL to expire + RefreshLRU to clean up
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+
+  auto stats_after = cache.GetStatistics();
+  EXPECT_EQ(stats_after.current_entries, 0);
+  EXPECT_EQ(stats_after.ttl_expirations, 5);
+  EXPECT_EQ(stats_after.evictions, 0)
+      << "TTL expirations should not increment evictions counter";
+
+  // Verify invariant still holds
+  EXPECT_EQ(stats_after.total_queries, stats_after.cache_hits + stats_after.cache_misses);
+}
+
 }  // namespace mygramdb::cache

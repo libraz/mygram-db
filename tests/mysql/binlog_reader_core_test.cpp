@@ -3,112 +3,11 @@
  * @brief Unit tests for binlog reader - Core lifecycle and queue operations
  */
 
-#include <gtest/gtest.h>
-
-#include <atomic>
-#include <chrono>
-#include <thread>
-
-#define private public
-#define protected public
-#include "mysql/binlog_reader.h"
-#undef private
-#undef protected
+#include "binlog_test_fixtures.h"
 
 #ifdef USE_MYSQL
 
-#include "mock_connection.h"
-#include "server/server_stats.h"
-#include "server/server_types.h"
-
-using namespace mygramdb::mysql;
-using namespace mygramdb;
-
-namespace {
-
-/**
- * @brief Helper that creates a default table configuration for tests
- */
-config::TableConfig MakeDefaultTableConfig() {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  config::RequiredFilterConfig required_filter;
-  required_filter.name = "status";
-  required_filter.type = "int";
-  required_filter.op = "=";
-  required_filter.value = "1";
-  table_config.required_filters.push_back(required_filter);
-
-  config::FilterConfig optional_filter;
-  optional_filter.name = "category";
-  optional_filter.type = "string";
-  table_config.filters.push_back(optional_filter);
-
-  return table_config;
-}
-
-/**
- * @brief BinlogReader test fixture providing in-memory dependencies
- */
-class BinlogReaderFixture : public ::testing::Test {
- protected:
-  BinlogReaderFixture() : connection_(connection_config_), index_(2) {}
-
-  void SetUp() override {
-    table_config_ = MakeDefaultTableConfig();
-    reader_config_.start_gtid = "uuid:1";
-    reader_config_.queue_size = 2;
-    reader_config_.reconnect_delay_ms = 10;
-    reader_config_.server_id = 12345;  // Test server ID
-
-    index_.Clear();
-    doc_store_.Clear();
-    ResetReader();
-  }
-
-  void TearDown() override {
-    reader_.reset();
-    doc_store_.Clear();
-    index_.Clear();
-  }
-
-  /**
-   * @brief Recreate BinlogReader with current configuration
-   */
-  void ResetReader() {
-    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
-    reader_ =
-        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
-  }
-
-  /**
-   * @brief Utility to build a fully populated event for tests
-   */
-  BinlogEvent MakeEvent(BinlogEventType type, const std::string& pk, int status, const std::string& text = "hello") {
-    BinlogEvent event;
-    event.type = type;
-    event.table_name = table_config_.name;
-    event.primary_key = pk;
-    event.text = text;
-    event.gtid = "uuid:" + pk;
-    event.filters["status"] = static_cast<int64_t>(status);
-    event.filters["category"] = std::string("news");
-    return event;
-  }
-
-  Connection::Config connection_config_;
-  Connection connection_;
-  index::Index index_;
-  storage::DocumentStore doc_store_;
-  config::TableConfig table_config_;
-  BinlogReader::Config reader_config_;
-  std::unique_ptr<BinlogReader> reader_;
-};
-
-}  // namespace
+using namespace binlog_test;
 
 /**
  * @brief Validate Start/Stop lifecycle without a real MySQL connection
@@ -688,6 +587,164 @@ TEST_F(BinlogReaderFixture, EmptyExecutedGtidSetFallsBackToCurrentGtid) {
     gtid_for_reconnect = reader_->executed_gtid_set_.empty() ? reader_->current_gtid_ : reader_->executed_gtid_set_;
   }
   EXPECT_EQ(gtid_for_reconnect, "uuid1:5");
+}
+
+// ===========================================================================
+// Tests moved from binlog_reader_bug_fixes_test.cpp
+// ===========================================================================
+
+/**
+ * @brief ReaderThread loop should only exit when should_stop_ is true
+ *
+ * Previously the exit condition was `if (!connection_lost || should_stop_) { break; }`
+ * which incorrectly broke when connection_lost=false (normal idle). Fixed to
+ * `if (should_stop_) { break; }`.
+ */
+TEST_F(BinlogReaderFixture, ReaderThreadContinuesOnNormalIdle) {
+  // Normal operation: should NOT exit
+  EXPECT_FALSE(false) << "should_stop=false: loop continues";
+
+  // Connection lost without stop: should continue (for reconnect)
+  bool should_stop = false;
+  EXPECT_FALSE(should_stop) << "Connection lost: loop continues for reconnect";
+
+  // Stop requested: should exit
+  should_stop = true;
+  EXPECT_TRUE(should_stop) << "should_stop=true: loop exits";
+}
+
+/**
+ * @brief GTID is not updated when ProcessEvent fails
+ *
+ * When ProcessEvent() returns false, the GTID should NOT be updated.
+ * This prevents data loss on reconnect.
+ */
+TEST_F(BinlogReaderFixture, GtidNotUpdatedOnProcessEventFailure) {
+  reader_config_.queue_size = 100;
+  ResetReader();
+
+  // Set initial GTID
+  reader_->SetCurrentGTID("uuid:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100");
+
+  // Create an event with GTID "uuid:101"
+  auto event = MakeEvent(BinlogEventType::INSERT, "101", 1, "test text");
+  event.gtid = "uuid:101";
+
+  // Call ProcessEvent
+  bool result = reader_->ProcessEvent(event);
+
+  // If ProcessEvent failed, GTID should remain at original value
+  if (!result) {
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100") << "GTID was updated despite ProcessEvent failure";
+  }
+}
+
+/**
+ * @brief Worker thread only updates GTID on successful event processing
+ *
+ * Simulates the worker thread behavior and verifies that GTID is only
+ * updated on successful event processing.
+ */
+TEST_F(BinlogReaderFixture, WorkerThreadGtidUpdateOnlyOnSuccess) {
+  reader_config_.queue_size = 100;
+  ResetReader();
+
+  // Set initial state
+  reader_->SetCurrentGTID("uuid:50");
+  uint64_t initial_processed = reader_->GetProcessedEvents();
+
+  // Create and push a test event
+  auto event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "51", 0, "text"));
+  event->gtid = "uuid:51";
+
+  // Push event to queue
+  reader_->PushEvent(std::move(event));
+  EXPECT_EQ(reader_->GetQueueSize(), 1);
+
+  // Pop and process manually (simulating worker thread)
+  auto popped_event = reader_->PopEvent();
+  ASSERT_NE(popped_event, nullptr);
+
+  // Process the event
+  bool success = reader_->ProcessEvent(*popped_event);
+
+  if (success) {
+    // OK to update GTID
+    reader_->processed_events_++;
+    reader_->SetCurrentGTID(popped_event->gtid);
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:51");
+    EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed + 1);
+  } else {
+    // Should NOT update GTID
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << "GTID should not be updated on ProcessEvent failure";
+    EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed)
+        << "processed_events should not be incremented on failure";
+  }
+}
+
+/**
+ * @brief Pending events are processed during shutdown
+ *
+ * When Stop() is called, the worker thread processes all remaining events
+ * in the queue before exiting.
+ */
+TEST_F(BinlogReaderFixture, PendingEventsProcessedDuringShutdown) {
+  reader_config_.queue_size = 100;
+  ResetReader();
+
+  auto event1 = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "1", 1, "text1"));
+  auto event2 = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1, "text2"));
+  auto event3 = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1, "text3"));
+
+  reader_->PushEvent(std::move(event1));
+  reader_->PushEvent(std::move(event2));
+  reader_->PushEvent(std::move(event3));
+  EXPECT_EQ(reader_->GetQueueSize(), 3);
+
+  reader_->should_stop_ = true;
+
+  // PopEvent should still return events when queue is not empty during shutdown
+  auto popped1 = reader_->PopEvent();
+  ASSERT_NE(popped1, nullptr);
+  EXPECT_EQ(popped1->primary_key, "1");
+
+  auto popped2 = reader_->PopEvent();
+  ASSERT_NE(popped2, nullptr);
+  EXPECT_EQ(popped2->primary_key, "2");
+
+  auto popped3 = reader_->PopEvent();
+  ASSERT_NE(popped3, nullptr);
+  EXPECT_EQ(popped3->primary_key, "3");
+
+  // Now queue is empty and should_stop is true: PopEvent returns nullptr
+  auto popped4 = reader_->PopEvent();
+  EXPECT_EQ(popped4, nullptr);
+}
+
+/**
+ * @brief Multiple Stop() calls are handled safely without use-after-free
+ */
+TEST_F(BinlogReaderFixture, MultipleStopCallsSafe) {
+  reader_->Stop();
+  reader_->Stop();
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+}
+
+/**
+ * @brief Concurrent Stop() calls from multiple threads are safe
+ */
+TEST_F(BinlogReaderFixture, ConcurrentStopCallsSafe) {
+  std::vector<std::thread> threads;
+  const int num_threads = 10;
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([this]() { reader_->Stop(); });
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+  EXPECT_FALSE(reader_->IsRunning());
 }
 
 #endif  // USE_MYSQL

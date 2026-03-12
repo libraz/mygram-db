@@ -284,6 +284,101 @@ TEST_F(TableMetadataCacheTest, MultipleAddRemoveCycles) {
   }
 }
 
+// ===========================================================================
+// Schema change detection (AddOrUpdate)
+// ===========================================================================
+
+TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsNewEntry) {
+  TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  auto result = cache_.AddOrUpdate(100, meta);
+  EXPECT_EQ(TableMetadataCache::AddResult::kAdded, result);
+
+  // Verify the entry was added
+  const auto* cached = cache_.Get(100);
+  ASSERT_NE(nullptr, cached);
+  EXPECT_EQ("users", cached->table_name);
+}
+
+TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsUnchangedSchema) {
+  TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  cache_.AddOrUpdate(100, meta);
+
+  // Same schema should return kUpdated
+  auto result = cache_.AddOrUpdate(100, meta);
+  EXPECT_EQ(TableMetadataCache::AddResult::kUpdated, result);
+}
+
+TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnCountChange) {
+  TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
+  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  cache_.AddOrUpdate(100, meta1);
+
+  // Add a new column (ALTER TABLE ADD COLUMN)
+  TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
+  meta2.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta2.columns.push_back({ColumnType::VARCHAR, "email", 255, true, false});
+
+  auto result = cache_.AddOrUpdate(100, meta2);
+  EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
+
+  // Verify the cache was updated
+  const auto* cached = cache_.Get(100);
+  ASSERT_NE(nullptr, cached);
+  EXPECT_EQ(3, cached->columns.size());
+}
+
+TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnTypeChange) {
+  TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
+  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  cache_.AddOrUpdate(100, meta1);
+
+  // Change column type (ALTER TABLE MODIFY COLUMN)
+  TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
+  meta2.columns.push_back({ColumnType::LONGLONG, "id", 0, false, false});
+  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  auto result = cache_.AddOrUpdate(100, meta2);
+  EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
+}
+
+TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnNameChange) {
+  TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
+  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  cache_.AddOrUpdate(100, meta1);
+
+  // Rename column (ALTER TABLE CHANGE COLUMN)
+  TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
+  meta2.columns.push_back({ColumnType::LONG, "user_id", 0, false, false});
+  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+
+  auto result = cache_.AddOrUpdate(100, meta2);
+  EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
+}
+
+TEST_F(TableMetadataCacheTest, ContainsMethod) {
+  EXPECT_FALSE(cache_.Contains(100));
+
+  TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  cache_.AddOrUpdate(100, meta);
+
+  EXPECT_TRUE(cache_.Contains(100));
+  EXPECT_FALSE(cache_.Contains(101));
+}
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

@@ -410,6 +410,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
     oss << "cache_memory_human: " << utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
+    oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
     oss << "cache_invalidations_deferred: " << cache_stats.invalidations_deferred << "\r\n";
     oss << "cache_invalidations_batches: " << cache_stats.invalidations_batches << "\r\n";
@@ -834,6 +835,11 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "# HELP mygramdb_cache_evictions_total Total number of cache evictions\n";
     oss << "# TYPE mygramdb_cache_evictions_total counter\n";
     oss << "mygramdb_cache_evictions_total " << cache_stats.evictions << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_ttl_expirations_total Total TTL-expired entries removed\n";
+    oss << "# TYPE mygramdb_cache_ttl_expirations_total counter\n";
+    oss << "mygramdb_cache_ttl_expirations_total " << cache_stats.ttl_expirations << "\n";
     oss << "\n";
 
     oss << "# HELP mygramdb_cache_invalidations_total Total number of cache invalidations\n";
