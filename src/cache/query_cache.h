@@ -43,6 +43,7 @@ struct CacheStatisticsSnapshot {
   // Memory statistics
   uint64_t current_entries = 0;
   uint64_t current_memory_bytes = 0;
+  uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
   uint64_t evictions = 0;
 
   // Timing statistics
@@ -294,6 +295,10 @@ class QueryCache {
 
   // Eviction callback
   EvictionCallback eviction_callback_;
+
+  // TTL-expired keys pending cleanup (collected by Lookup, processed by RefreshLRU)
+  mutable std::mutex expired_keys_mutex_;
+  std::vector<CacheKey> pending_expired_keys_;
 
   // Background LRU refresh thread
   std::atomic<bool> should_stop_{false};

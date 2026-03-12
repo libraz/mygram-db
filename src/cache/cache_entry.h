@@ -7,7 +7,7 @@
 
 #include <atomic>
 #include <chrono>
-#include <set>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -26,7 +26,7 @@ namespace mygramdb::cache {
 struct CacheMetadata {
   CacheKey key;                                         ///< Cache key (MD5 hash)
   std::string table;                                    ///< Table name
-  std::set<std::string> ngrams;                         ///< All ngrams used in this query
+  std::vector<std::string> ngrams;                       ///< All ngrams used in this query (sorted)
   std::vector<query::FilterCondition> filters;          ///< Filter conditions (for future optimization)
   std::chrono::steady_clock::time_point created_at;     ///< Creation time
   std::chrono::steady_clock::time_point last_accessed;  ///< Last access time
@@ -166,12 +166,25 @@ struct CacheEntry {
    * @return Memory usage in bytes
    */
   [[nodiscard]] size_t MemoryUsage() const {
-    // Entry overhead + compressed data + ngrams
-    size_t ngrams_size = 0;
+    // Compressed data (heap allocation beyond sizeof)
+    size_t size = sizeof(CacheEntry) + compressed.capacity();
+
+    // Ngrams: vector buffer + each string's heap allocation
+    size += metadata.ngrams.capacity() * sizeof(std::string);
     for (const auto& ngram : metadata.ngrams) {
-      ngrams_size += ngram.capacity();
+      size += ngram.capacity();
     }
-    return sizeof(CacheEntry) + compressed.capacity() + ngrams_size;
+
+    // Table string heap allocation
+    size += metadata.table.capacity();
+
+    // Filters vector buffer + each FilterCondition's string heap allocations
+    size += metadata.filters.capacity() * sizeof(query::FilterCondition);
+    for (const auto& filter : metadata.filters) {
+      size += filter.column.capacity() + filter.value.capacity();
+    }
+
+    return size;
   }
 };
 

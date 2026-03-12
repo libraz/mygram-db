@@ -24,12 +24,15 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
     UnregisterCacheEntryUnlocked(key);
   }
 
-  // Store metadata
-  cache_metadata_[key] = metadata;
+  // Store minimal invalidation metadata (table + ngrams only)
+  InvalidationMetadata inv_meta;
+  inv_meta.table = metadata.table;
+  inv_meta.ngrams = metadata.ngrams;
+  cache_metadata_[key] = std::move(inv_meta);
 
   // Update reverse index: ngram -> cache keys
-  for (const auto& ngram : metadata.ngrams) {
-    ngram_to_cache_keys_[metadata.table][ngram].insert(key);
+  for (const auto& ngram : cache_metadata_[key].ngrams) {
+    ngram_to_cache_keys_[cache_metadata_[key].table][ngram].insert(key);
   }
 }
 
@@ -37,14 +40,14 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(cons
                                                                             const std::string& old_text,
                                                                             const std::string& new_text, int ngram_size,
                                                                             int kanji_ngram_size) {
-  // Extract ngrams from old and new text
-  std::set<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size);
-  std::set<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size);
+  // Extract ngrams from old and new text (both are sorted vectors)
+  std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size);
+  std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size);
 
-  // Find changed ngrams (symmetric difference)
-  std::set<std::string> changed_ngrams;
+  // Find changed ngrams (symmetric difference on sorted vectors)
+  std::vector<std::string> changed_ngrams;
   std::set_symmetric_difference(old_ngrams.begin(), old_ngrams.end(), new_ngrams.begin(), new_ngrams.end(),
-                                std::inserter(changed_ngrams, changed_ngrams.begin()));
+                                std::back_inserter(changed_ngrams));
 
   // Find affected cache keys
   std::unordered_set<CacheKey> affected_keys;
@@ -160,8 +163,50 @@ size_t InvalidationManager::GetTrackedNgramCount(const std::string& table_name) 
   return table_it->second.size();
 }
 
-std::set<std::string> InvalidationManager::ExtractNgrams(const std::string& text, int ngram_size,
-                                                         int kanji_ngram_size) {
+size_t InvalidationManager::MemoryUsage() const {
+  std::shared_lock lock(mutex_);
+
+  size_t total = 0;
+
+  // cache_metadata_ map overhead
+  // Each bucket is a pointer, each entry is a node with key + value + hash + pointer
+  total += cache_metadata_.bucket_count() * sizeof(void*);
+  for (const auto& [key, meta] : cache_metadata_) {
+    total += sizeof(CacheKey) + sizeof(InvalidationMetadata);
+    total += meta.table.capacity();
+    total += meta.ngrams.capacity() * sizeof(std::string);
+    for (const auto& ngram : meta.ngrams) {
+      total += ngram.capacity();
+    }
+    // Node overhead (next pointer + hash)
+    total += sizeof(void*) + sizeof(size_t);
+  }
+
+  // ngram_to_cache_keys_ 3-level map overhead
+  total += ngram_to_cache_keys_.bucket_count() * sizeof(void*);
+  for (const auto& [table_name, ngram_map] : ngram_to_cache_keys_) {
+    // Table-level entry: string key + inner map
+    total += table_name.capacity() + sizeof(void*) + sizeof(size_t);
+    total += ngram_map.bucket_count() * sizeof(void*);
+
+    for (const auto& [ngram, key_set] : ngram_map) {
+      // Ngram-level entry: string key + inner set
+      total += ngram.capacity() + sizeof(void*) + sizeof(size_t);
+      total += key_set.bucket_count() * sizeof(void*);
+
+      // Each CacheKey in the set
+      for (const auto& cache_key : key_set) {
+        (void)cache_key;
+        total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+      }
+    }
+  }
+
+  return total;
+}
+
+std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& text, int ngram_size,
+                                                            int kanji_ngram_size) {
   if (text.empty()) {
     return {};
   }
@@ -169,8 +214,11 @@ std::set<std::string> InvalidationManager::ExtractNgrams(const std::string& text
   // Use existing utility function for ngram generation
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size);
 
-  // Convert to set for deduplication
-  return {ngrams.begin(), ngrams.end()};
+  // Sort and deduplicate
+  std::sort(ngrams.begin(), ngrams.end());
+  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+
+  return ngrams;
 }
 
 bool InvalidationManager::IsCJK(uint32_t codepoint) {

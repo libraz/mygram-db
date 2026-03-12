@@ -357,11 +357,17 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   // Aggregate metrics
   auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
 
-  std::string response = ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr);
+  std::string response =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr, &cache_manager);
 
-  // Should contain Prometheus format metrics including cache metrics
-  EXPECT_TRUE(response.find("#") != std::string::npos);
-  EXPECT_TRUE(response.find("mygramdb_") != std::string::npos || response.find("mygram_") != std::string::npos);
+  // Should contain cache-specific Prometheus metrics
+  EXPECT_TRUE(response.find("mygramdb_cache_hits_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_memory_bytes") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_entries") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_evictions_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_invalidations_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_hit_rate") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_misses_total") != std::string::npos);
 }
 
 // Line ending tests for TCP protocol compatibility

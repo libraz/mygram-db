@@ -6,11 +6,11 @@
 #pragma once
 
 #include <memory>
-#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "cache/cache_entry.h"
 #include "query/cache_key.h"
@@ -29,6 +29,17 @@ class QueryCache;
  * This enables precise invalidation: only queries that actually use changed
  * ngrams are invalidated, unlike MySQL's coarse table-level invalidation.
  */
+/**
+ * @brief Minimal metadata stored by InvalidationManager for invalidation tracking
+ *
+ * Only stores fields needed for reverse index management, avoiding full
+ * CacheMetadata duplication.
+ */
+struct InvalidationMetadata {
+  std::string table;                  ///< Table name
+  std::vector<std::string> ngrams;    ///< Ngrams (sorted) for reverse index cleanup
+};
+
 class InvalidationManager {
  public:
   /**
@@ -104,6 +115,12 @@ class InvalidationManager {
    */
   [[nodiscard]] size_t GetTrackedNgramCount(const std::string& table_name) const;
 
+  /**
+   * @brief Estimate memory usage of invalidation tracking structures
+   * @return Estimated memory usage in bytes
+   */
+  [[nodiscard]] size_t MemoryUsage() const;
+
  private:
   QueryCache* cache_;  ///< Pointer to query cache
 
@@ -114,8 +131,8 @@ class InvalidationManager {
                      >
       ngram_to_cache_keys_;
 
-  // Map: cache key -> metadata
-  std::unordered_map<CacheKey, CacheMetadata> cache_metadata_;
+  // Map: cache key -> minimal invalidation metadata (table + ngrams only)
+  std::unordered_map<CacheKey, InvalidationMetadata> cache_metadata_;
 
   // Thread safety
   mutable std::shared_mutex mutex_;
@@ -134,7 +151,7 @@ class InvalidationManager {
    * @param kanji_ngram_size N-gram size (for CJK characters)
    * @return Set of ngrams
    */
-  static std::set<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size);
+  static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size);
 
   /**
    * @brief Check if character is CJK (Chinese, Japanese, Korean)

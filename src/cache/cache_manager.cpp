@@ -134,7 +134,7 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   CacheMetadata metadata;
   metadata.key = key;
   metadata.table = query.table;
-  metadata.ngrams = ngrams;
+  metadata.ngrams.assign(ngrams.begin(), ngrams.end());
   metadata.filters = query.filters;
   metadata.created_at = std::chrono::steady_clock::now();
   metadata.last_accessed = metadata.created_at;
@@ -191,7 +191,14 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
     return CacheStatisticsSnapshot{};
   }
 
-  return query_cache_->GetStatistics();
+  auto snapshot = query_cache_->GetStatistics();
+
+  // Add InvalidationManager memory usage
+  if (invalidation_mgr_) {
+    snapshot.invalidation_index_memory_bytes = invalidation_mgr_->MemoryUsage();
+  }
+
+  return snapshot;
 }
 
 bool CacheManager::Enable() {

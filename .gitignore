@@ -28,6 +28,9 @@ _deps/
 .claude/
 CLAUDE.md
 
+# Serena
+.serena/
+
 # Test diff configuration (local customizations)
 .test-diff.conf
 

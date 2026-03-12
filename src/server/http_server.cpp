@@ -1664,7 +1664,8 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
 
     // Format response
     std::string metrics = ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, effective_stats,
-                                                                     table_contexts_, binlog_reader_);
+                                                                     table_contexts_, binlog_reader_,
+                                                                     cache_manager_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

@@ -11,6 +11,7 @@
 
 #include "cache/query_cache.h"
 #include "query/cache_key.h"
+#include "query/query_parser.h"
 
 namespace mygramdb::cache {
 
@@ -616,6 +617,141 @@ TEST(InvalidationManagerTest, Bug18_CompleteTextReplacementInvalidatesAll) {
   EXPECT_EQ(2, invalidated.size());
   EXPECT_NE(invalidated.find(key1), invalidated.end());
   EXPECT_NE(invalidated.find(key2), invalidated.end());
+}
+
+// =============================================================================
+// InvalidationMetadata minimal storage tests
+// =============================================================================
+
+/**
+ * @brief Test that InvalidationManager stores only table + ngrams (minimal metadata)
+ */
+TEST(InvalidationManagerTest, MetadataStorageMinimal) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"hel", "ell", "llo"};
+  meta.filters = {{"col", query::FilterOp::EQ, "val"}};
+  meta.access_count = 42;  // Should NOT be stored in InvalidationManager
+  mgr.RegisterCacheEntry(key, meta);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(3, mgr.GetTrackedNgramCount("posts"));
+
+  // Verify invalidation still works correctly
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2);
+  EXPECT_GE(invalidated.size(), 1);
+}
+
+/**
+ * @brief Test register/unregister memory consistency
+ */
+TEST(InvalidationManagerTest, RegisterUnregisterMemoryConsistency) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  size_t base_mem = mgr.MemoryUsage();
+
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"aaa", "bbb", "ccc"};
+  mgr.RegisterCacheEntry(key, meta);
+
+  size_t after_register = mgr.MemoryUsage();
+  EXPECT_GT(after_register, base_mem);
+
+  mgr.UnregisterCacheEntry(key);
+
+  size_t after_unregister = mgr.MemoryUsage();
+  // Memory may not return exactly to base due to bucket retention,
+  // but tracked entry count should be zero
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount());
+  EXPECT_LE(after_unregister, after_register);
+}
+
+// =============================================================================
+// MemoryUsage tests
+// =============================================================================
+
+/**
+ * @brief Test memory usage grows with entries
+ */
+TEST(InvalidationManagerTest, MemoryUsageGrowsWithEntries) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  size_t mem0 = mgr.MemoryUsage();
+
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("q" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "t";
+    meta.ngrams = {"ng" + std::to_string(i)};
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  size_t mem10 = mgr.MemoryUsage();
+  EXPECT_GT(mem10, mem0);
+}
+
+/**
+ * @brief Test memory usage decreases on unregister
+ */
+TEST(InvalidationManagerTest, MemoryUsageDecreasesOnUnregister) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  std::vector<CacheKey> keys;
+  for (int i = 0; i < 20; ++i) {
+    auto key = CacheKeyGenerator::Generate("q" + std::to_string(i));
+    keys.push_back(key);
+    CacheMetadata meta;
+    meta.table = "t";
+    meta.ngrams = {"ng" + std::to_string(i), "xg" + std::to_string(i)};
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  size_t mem_full = mgr.MemoryUsage();
+
+  // Remove half
+  for (int i = 0; i < 10; ++i) {
+    mgr.UnregisterCacheEntry(keys[static_cast<size_t>(i)]);
+  }
+
+  size_t mem_half = mgr.MemoryUsage();
+  EXPECT_LT(mem_half, mem_full);
+}
+
+/**
+ * @brief Test entries with more ngrams use more memory
+ */
+TEST(InvalidationManagerTest, MemoryUsageReflectsNgramCount) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr1(&cache);
+  InvalidationManager mgr2(&cache);
+
+  // mgr1: few ngrams
+  auto key1 = CacheKeyGenerator::Generate("q1");
+  CacheMetadata meta1;
+  meta1.table = "t";
+  meta1.ngrams = {"a", "b"};
+  mgr1.RegisterCacheEntry(key1, meta1);
+
+  // mgr2: many ngrams
+  auto key2 = CacheKeyGenerator::Generate("q2");
+  CacheMetadata meta2;
+  meta2.table = "t";
+  for (int i = 0; i < 50; ++i) {
+    meta2.ngrams.push_back("ngram_" + std::to_string(i));
+  }
+  mgr2.RegisterCacheEntry(key2, meta2);
+
+  EXPECT_GT(mgr2.MemoryUsage(), mgr1.MemoryUsage());
 }
 
 }  // namespace mygramdb::cache

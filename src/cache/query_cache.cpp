@@ -71,7 +71,12 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
     if (age >= ttl_seconds_) {
-      // Entry expired
+      // Entry expired - enqueue for cleanup by RefreshLRU
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        pending_expired_keys_.push_back(key);
+      }
+
       stats_.cache_misses++;
       stats_.cache_misses_not_found++;  // Treat expired as not found
 
@@ -181,7 +186,12 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
     if (age >= ttl_seconds_) {
-      // Entry expired
+      // Entry expired - enqueue for cleanup by RefreshLRU
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        pending_expired_keys_.push_back(key);
+      }
+
       stats_.cache_misses++;
       stats_.cache_misses_not_found++;  // Treat expired as not found
 
@@ -314,6 +324,9 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 }
 
 bool QueryCache::MarkInvalidated(const CacheKey& key) {
+  // Uses shared_lock intentionally for performance: invalidation can be high-frequency
+  // and only updates atomic fields (invalidated flag + atomic counter).
+  // Snapshot consistency with non-atomic stats fields is not required here.
   std::shared_lock lock(mutex_);
 
   auto iter = cache_map_.find(key);
@@ -388,11 +401,10 @@ void QueryCache::ClearTable(const std::string& table) {
       const size_t entry_memory = iter->second.first.MemoryUsage();
       total_memory_bytes_ -= entry_memory;
       stats_.current_entries--;
+      stats_.current_memory_bytes = total_memory_bytes_;
       cache_map_.erase(iter);
     }
   }
-
-  stats_.current_memory_bytes = total_memory_bytes_;
 }
 
 std::optional<CacheMetadata> QueryCache::GetMetadata(const CacheKey& key) const {
@@ -469,12 +481,19 @@ void QueryCache::RefreshLRUWorker() {
 }
 
 void QueryCache::RefreshLRU() {
+  // Drain pending expired keys from Lookup() before acquiring main lock
+  std::vector<CacheKey> lookup_expired_keys;
+  {
+    std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+    lookup_expired_keys.swap(pending_expired_keys_);
+  }
+
   std::unique_lock lock(mutex_);
 
   auto now = std::chrono::steady_clock::now();
 
-  // Collect TTL-expired entries for removal
-  std::vector<CacheKey> expired_keys;
+  // Start with keys detected as expired during Lookup
+  std::vector<CacheKey> expired_keys = std::move(lookup_expired_keys);
 
   // Update LRU for entries that were accessed since last refresh
   for (auto& [key, entry_pair] : cache_map_) {
@@ -512,9 +531,8 @@ void QueryCache::RefreshLRU() {
     }
   }
 
-  if (!expired_keys.empty()) {
-    stats_.current_memory_bytes = total_memory_bytes_;
-  }
+  // Always sync stats with actual memory tracking
+  stats_.current_memory_bytes = total_memory_bytes_;
 }
 
 }  // namespace mygramdb::cache

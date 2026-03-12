@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "query/cache_key.h"
+#include "query/query_parser.h"
 
 namespace mygramdb::cache {
 
@@ -1296,8 +1297,8 @@ TEST(QueryCacheTest, Bug0070_ConcurrentLookupsNoLockUpgrade) {
  * @test BUG-0070: LRU refresh still works with approximate updates
  */
 TEST(QueryCacheTest, Bug0070_ApproximateLRUStillEvictsOldEntries) {
-  // Small cache to trigger evictions
-  QueryCache cache(800, 1.0);
+  // Small cache to trigger evictions (sized for accurate MemoryUsage accounting)
+  QueryCache cache(2000, 1.0);
 
   CacheMetadata meta;
   meta.table = "test";
@@ -1368,6 +1369,195 @@ TEST(QueryCacheTest, Bug0070_AccessCountIncrement) {
   // Access count should be reasonably close to 100
   // With approximate LRU, it may not be exact but should be > 0
   EXPECT_GT(metadata->access_count, 0);
+}
+
+// =============================================================================
+// MemoryUsage accuracy tests
+// =============================================================================
+
+/**
+ * @brief Test MemoryUsage includes compressed data, ngrams, table, and filters
+ */
+TEST(QueryCacheTest, MemoryUsageAccuracy) {
+  CacheEntry entry;
+  entry.compressed.resize(100, 0x42);
+  entry.metadata.table = "test_table";
+  entry.metadata.ngrams = {"abc", "bcd", "cde"};
+  entry.metadata.filters = {{"col1", query::FilterOp::EQ, "val1"}};
+
+  size_t usage = entry.MemoryUsage();
+
+  // Must be larger than just sizeof(CacheEntry) + compressed
+  EXPECT_GT(usage, sizeof(CacheEntry) + 100);
+
+  // Must include table string
+  EXPECT_GE(usage, sizeof(CacheEntry) + entry.compressed.capacity() + entry.metadata.table.capacity());
+}
+
+/**
+ * @brief Test MemoryUsage grows with many ngrams
+ */
+TEST(QueryCacheTest, MemoryUsageWithManyNgrams) {
+  CacheEntry entry_few;
+  entry_few.compressed.resize(50, 0x00);
+  entry_few.metadata.table = "t";
+  entry_few.metadata.ngrams = {"aa", "bb"};
+
+  CacheEntry entry_many;
+  entry_many.compressed.resize(50, 0x00);
+  entry_many.metadata.table = "t";
+  for (int i = 0; i < 100; ++i) {
+    entry_many.metadata.ngrams.push_back("ng" + std::to_string(i));
+  }
+
+  EXPECT_GT(entry_many.MemoryUsage(), entry_few.MemoryUsage());
+}
+
+/**
+ * @brief Test MemoryUsage of empty entry
+ */
+TEST(QueryCacheTest, MemoryUsageEmptyEntry) {
+  CacheEntry entry;
+  size_t usage = entry.MemoryUsage();
+
+  // Should at least be sizeof(CacheEntry) (no heap allocations)
+  EXPECT_GE(usage, sizeof(CacheEntry));
+}
+
+// =============================================================================
+// Stats consistency tests (Problems 6, 7, 8)
+// =============================================================================
+
+/**
+ * @brief Test ClearTable stats consistency
+ */
+TEST(QueryCacheTest, ClearTableStatsConsistency) {
+  QueryCache cache(1024 * 1024, 0.0);
+
+  // Insert several entries for one table
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("query" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"ng" + std::to_string(i)};
+    cache.Insert(key, {1, 2, 3}, meta, 10.0);
+  }
+
+  auto stats_before = cache.GetStatistics();
+  EXPECT_EQ(stats_before.current_entries, 5);
+  EXPECT_GT(stats_before.current_memory_bytes, 0);
+
+  cache.ClearTable("posts");
+
+  auto stats_after = cache.GetStatistics();
+  EXPECT_EQ(stats_after.current_entries, 0);
+  EXPECT_EQ(stats_after.current_memory_bytes, 0);
+}
+
+/**
+ * @brief Test RefreshLRU always updates stats
+ */
+TEST(QueryCacheTest, RefreshLRUStatsAlwaysUpdated) {
+  // TTL=0 means no expiration; RefreshLRU should still sync stats
+  QueryCache cache(1024 * 1024, 0.0, 0);
+
+  auto key = CacheKeyGenerator::Generate("q1");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  cache.Insert(key, {1}, meta, 10.0);
+
+  // Wait for at least one RefreshLRU cycle (100ms interval)
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 1);
+  EXPECT_GT(stats.current_memory_bytes, 0);
+}
+
+// =============================================================================
+// TTL expired entry cleanup tests
+// =============================================================================
+
+/**
+ * @brief Test TTL expired entries are cleaned up after Lookup detects them
+ */
+TEST(QueryCacheTest, TTLExpiredEntryCleanedUp) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  auto key = CacheKeyGenerator::Generate("ttl_test");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  cache.Insert(key, {1, 2, 3}, meta, 10.0);
+
+  EXPECT_EQ(cache.GetStatistics().current_entries, 1);
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // Lookup should detect expiry
+  auto result = cache.Lookup(key);
+  EXPECT_FALSE(result.has_value());
+
+  // Wait for RefreshLRU to process the expired key
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Entry should be cleaned up and memory reclaimed
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0);
+  EXPECT_EQ(stats.current_memory_bytes, 0);
+}
+
+/**
+ * @brief Test TTL expired entries don't return results
+ */
+TEST(QueryCacheTest, TTLExpiredEntryNotReturned) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  auto key = CacheKeyGenerator::Generate("ttl_miss");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"cd"};
+  cache.Insert(key, {10, 20}, meta, 10.0);
+
+  // Before TTL: should hit
+  auto result1 = cache.Lookup(key);
+  EXPECT_TRUE(result1.has_value());
+
+  // Wait for TTL
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // After TTL: should miss
+  auto result2 = cache.Lookup(key);
+  EXPECT_FALSE(result2.has_value());
+}
+
+/**
+ * @brief Test memory is reclaimed after TTL expiry
+ */
+TEST(QueryCacheTest, TTLExpiredMemoryReclaimed) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  // Insert multiple entries
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("mem_ttl_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "t";
+    meta.ngrams = {"ng" + std::to_string(i)};
+    cache.Insert(key, {1, 2, 3, 4, 5}, meta, 10.0);
+  }
+
+  auto stats_before = cache.GetStatistics();
+  EXPECT_EQ(stats_before.current_entries, 10);
+  uint64_t mem_before = stats_before.current_memory_bytes;
+
+  // Wait for TTL to expire + RefreshLRU to clean up
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+
+  auto stats_after = cache.GetStatistics();
+  EXPECT_EQ(stats_after.current_entries, 0);
+  EXPECT_LT(stats_after.current_memory_bytes, mem_before);
 }
 
 }  // namespace mygramdb::cache
