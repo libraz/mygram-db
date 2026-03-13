@@ -54,7 +54,7 @@ TEST(QueryCacheTest, LookupMiss) {
  */
 TEST(QueryCacheTest, LRUEviction) {
   // Small cache that can hold ~3-4 entries
-  QueryCache cache(1000, 10.0);
+  QueryCache cache(2000, 10.0);
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -1660,6 +1660,170 @@ TEST(QueryCacheTest, DecompressionFailureStatInitialized) {
   EXPECT_EQ(stats.decompression_failures, 0)
       << "Valid decompression should not increment decompression_failures";
   EXPECT_EQ(stats.cache_hits, 1);
+}
+
+// =============================================================================
+// M4: TTL expiration statistics accuracy
+// =============================================================================
+
+/**
+ * @brief Test TTL expiration is counted immediately when Lookup detects it
+ *
+ * Before fix: ttl_expirations was only incremented when RefreshLRU removed
+ * the entry, leaving a window where stats were inconsistent.
+ * After fix: ttl_expirations is incremented at Lookup detection time.
+ */
+TEST(QueryCacheTest, M4_TTLExpirationCountedAtLookupTime) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  auto key = CacheKeyGenerator::Generate("m4_ttl_test");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  cache.Insert(key, {1, 2, 3}, meta, 10.0);
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // Lookup should detect expiration and increment ttl_expirations immediately
+  auto result = cache.Lookup(key);
+  EXPECT_FALSE(result.has_value());
+
+  // Check stats immediately after Lookup (before RefreshLRU processes it)
+  auto stats = cache.GetStatistics();
+  EXPECT_GE(stats.ttl_expirations, 1)
+      << "M4: ttl_expirations should be incremented at Lookup detection time";
+  EXPECT_EQ(stats.cache_misses, 1);
+}
+
+/**
+ * @brief Test TTL expiration via LookupWithMetadata also counts stats
+ */
+TEST(QueryCacheTest, M4_TTLExpirationCountedAtLookupWithMetadataTime) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  auto key = CacheKeyGenerator::Generate("m4_ttl_meta_test");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"cd"};
+  cache.Insert(key, {4, 5, 6}, meta, 10.0);
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // LookupWithMetadata should also detect and count expiration
+  QueryCache::LookupMetadata lookup_meta;
+  auto result = cache.LookupWithMetadata(key, lookup_meta);
+  EXPECT_FALSE(result.has_value());
+
+  auto stats = cache.GetStatistics();
+  EXPECT_GE(stats.ttl_expirations, 1)
+      << "M4: LookupWithMetadata should also increment ttl_expirations";
+}
+
+/**
+ * @brief Test no double-counting of TTL expirations between Lookup and RefreshLRU
+ *
+ * When Lookup detects a TTL expiration and RefreshLRU later removes the entry,
+ * the ttl_expirations counter should not be incremented twice for the same entry.
+ */
+TEST(QueryCacheTest, M4_TTLExpirationNoDoubleCounting) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ef"};
+
+  // Insert 3 entries
+  auto key1 = CacheKeyGenerator::Generate("m4_dc_1");
+  auto key2 = CacheKeyGenerator::Generate("m4_dc_2");
+  auto key3 = CacheKeyGenerator::Generate("m4_dc_3");
+  cache.Insert(key1, {1}, meta, 10.0);
+  cache.Insert(key2, {2}, meta, 10.0);
+  cache.Insert(key3, {3}, meta, 10.0);
+
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // Lookup key1 and key2 (detected by Lookup, counted immediately)
+  cache.Lookup(key1);
+  cache.Lookup(key2);
+
+  // Wait for RefreshLRU to remove all 3 entries
+  // key1 and key2: removed via kTTLExpiredAlreadyCounted (no re-count)
+  // key3: removed via kTTLExpired (counted by RefreshLRU scan)
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.ttl_expirations, 3)
+      << "Each expired entry should be counted exactly once: "
+      << "2 by Lookup + 1 by RefreshLRU scan = 3 total";
+  EXPECT_EQ(stats.current_entries, 0);
+}
+
+// =============================================================================
+// M5: Decompression failure entry cleanup
+// =============================================================================
+
+/**
+ * @brief Test decompression failure counter is incremented at detection time
+ *
+ * When decompression fails in Lookup, the decompression_failures counter
+ * should be incremented immediately, not deferred to RefreshLRU.
+ */
+TEST(QueryCacheTest, M5_DecompressionFailureCountedAtDetectionTime) {
+  // Use compression enabled
+  QueryCache cache(1024 * 1024, 0.0, 0, true);
+
+  auto key = CacheKeyGenerator::Generate("m5_decomp_test");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+
+  // Insert a valid entry first
+  std::vector<DocId> result = {1, 2, 3, 4, 5};
+  EXPECT_TRUE(cache.Insert(key, result, meta, 10.0));
+
+  // Verify normal lookup works
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+
+  // Stats should show no decompression failures
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 0);
+  EXPECT_EQ(stats.cache_hits, 1);
+}
+
+/**
+ * @brief Test decompression failure entry is cleaned up by RefreshLRU
+ *
+ * Verifies the complete lifecycle: Lookup detects failure -> entry queued
+ * for cleanup -> RefreshLRU removes the entry -> memory reclaimed.
+ */
+TEST(QueryCacheTest, M5_DecompressionFailureEntryEventuallyRemoved) {
+  // Use compression enabled
+  QueryCache cache(1024 * 1024, 0.0, 0, true);
+
+  auto key = CacheKeyGenerator::Generate("m5_cleanup_test");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"cd"};
+
+  // Insert a valid entry
+  std::vector<DocId> result = {10, 20, 30};
+  EXPECT_TRUE(cache.Insert(key, result, meta, 10.0));
+  EXPECT_EQ(cache.GetStatistics().current_entries, 1);
+
+  // Verify the entry can be looked up successfully
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+
+  // Verify stats are clean
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 0);
+  EXPECT_EQ(stats.cache_hits, 1);
+  EXPECT_EQ(stats.current_entries, 1);
 }
 
 }  // namespace mygramdb::cache

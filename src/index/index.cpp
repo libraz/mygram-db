@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -23,6 +24,63 @@
 
 namespace mygramdb::index {
 
+namespace {
+
+// Current serialization format version (writes V2 with CRC32 trailer)
+constexpr uint32_t kFormatVersionV1 = 1;
+constexpr uint32_t kFormatVersionV2 = 2;
+constexpr uint32_t kCurrentFormatVersion = kFormatVersionV2;
+
+// Size of the CRC32 checksum trailer (4 bytes)
+constexpr size_t kCRC32Size = 4;
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+/**
+ * @brief Compute CRC32 checksum using standard lookup table (polynomial 0xEDB88320)
+ * @param data Pointer to data buffer
+ * @param length Length of data in bytes
+ * @return CRC32 checksum value
+ */
+uint32_t ComputeCRC32(const uint8_t* data, size_t length) {
+  static constexpr uint32_t kCRC32Table[256] = {
+      0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3,
+      0x0EDB8832, 0x79DCB8A4, 0xE0D5E91B, 0x97D2D988, 0x09B64C2B, 0x7EB17CBE, 0xE7B82D09, 0x90BF1D91,
+      0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7,
+      0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5,
+      0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB,
+      0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7A23,
+      0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F,
+      0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81, 0xB7BD5C3B, 0xC0BA6CFD,
+      0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A, 0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683,
+      0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8, 0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1,
+      0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB, 0x196C3671, 0x6E6B06E7,
+      0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5,
+      0xD6D6A3E8, 0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B,
+      0xD80D2BDA, 0xAF0A1B4A, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF, 0x4669BE79,
+      0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236, 0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F,
+      0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D,
+      0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713,
+      0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21,
+      0x86D3D2D4, 0xF1D4E242, 0x68DDB3F6, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777,
+      0x88085AE6, 0xFF0F6B18, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45,
+      0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7, 0x4969474D, 0x3E6E77DB,
+      0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9,
+      0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD706FF, 0x54DE5729, 0x23D967BF,
+      0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
+  };
+
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < length; ++i) {
+    crc = kCRC32Table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+  }
+  return crc ^ 0xFFFFFFFF;
+}
+
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+}  // namespace
+
 Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams,
              bool normalize_nfkc, const std::string& normalize_width, bool normalize_lower)
     : ngram_size_(ngram_size),
@@ -33,7 +91,7 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, boo
       normalize_width_(normalize_width),
       normalize_lower_(normalize_lower) {}
 
-void Index::AddDocument(DocId doc_id, std::string_view text) {
+bool Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
@@ -45,11 +103,12 @@ void Index::AddDocument(DocId doc_id, std::string_view text) {
   // DocumentStore but will never appear in search results)
   if (ngrams.empty()) {
     mygram::utils::StructuredLog()
-        .Event("empty_document_added")
+        .Event("empty_document_skipped")
         .Field("doc_id", static_cast<uint64_t>(doc_id))
         .Field("text_length", static_cast<uint64_t>(text.size()))
         .Message("Document has no indexable n-grams; it will not appear in search results")
         .Warn();
+    return false;
   }
 
   // Acquire exclusive lock for modifying posting lists
@@ -70,6 +129,7 @@ void Index::AddDocument(DocId doc_id, std::string_view text) {
       .Field("ngram_size", static_cast<int64_t>(ngram_size_))
       .Field("mode", mode)
       .Debug();
+  return true;
 }
 
 void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
@@ -506,17 +566,18 @@ void Index::Optimize(uint64_t total_docs) {
   };
   OptimizationGuard guard(is_optimizing_);
 
-  // Phase 1a: Take snapshot of posting list SIZES and pointers (brief shared_lock)
-  // IMPORTANT: We store both sizes and shared_ptrs:
+  // Phase 1a: Take snapshot of posting list VERSIONS and pointers (brief shared_lock)
+  // IMPORTANT: We store both versions and shared_ptrs:
   // - shared_ptr copies keep posting lists alive during optimization
-  // - Size snapshots capture state at T0, unaffected by concurrent AddDocument()
+  // - Version snapshots capture state at T0, unaffected by concurrent mutations
+  // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
   std::unordered_map<std::string, std::shared_ptr<PostingList>> snapshot;
-  std::unordered_map<std::string, size_t> snapshot_sizes;
+  std::unordered_map<std::string, uint64_t> snapshot_versions;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
     for (const auto& [term, posting] : term_postings_) {
-      snapshot[term] = posting;                // Copy shared_ptr (reference counting)
-      snapshot_sizes[term] = posting->Size();  // Capture size at snapshot time
+      snapshot[term] = posting;                      // Copy shared_ptr (reference counting)
+      snapshot_versions[term] = posting->Version();  // Capture version at snapshot time
     }
   }
   // Lock released - AddDocument/RemoveDocument can now proceed
@@ -548,19 +609,20 @@ void Index::Optimize(uint64_t total_docs) {
       auto current_it = term_postings_.find(term);
       if (current_it != term_postings_.end()) {
         const auto& current_posting = current_it->second;
-        auto snapshot_size_it = snapshot_sizes.find(term);
+        auto snapshot_version_it = snapshot_versions.find(term);
 
-        // Check if documents were added during optimization
-        // IMPORTANT: Compare with snapshot SIZE, not snapshot object's current size
-        // The snapshot shared_ptr points to the same mutable object that AddDocument() modifies
-        if (snapshot_size_it != snapshot_sizes.end() && current_posting->Size() > snapshot_size_it->second) {
-          // New documents were added: merge them with the optimized version
+        // Check if posting list was modified during optimization
+        // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
+        // catches balanced Remove+Add operations where size stays the same but data changed.
+        if (snapshot_version_it != snapshot_versions.end() &&
+            current_posting->Version() != snapshot_version_it->second) {
+          // Posting list was modified: merge current state with the optimized version
           auto merged = optimized_posting->Union(*current_posting);
           merged->Optimize(total_docs);  // Re-optimize after merge
           term_postings_[term] = std::move(merged);
           merged_count++;
         } else {
-          // No changes or only removals: use optimized version as-is
+          // No changes: use optimized version as-is
           term_postings_[term] = std::move(optimized_posting);
         }
       }
@@ -640,12 +702,11 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   for (size_t i = 0; i < total_terms; i += batch_size) {
     size_t batch_end = std::min(i + batch_size, total_terms);
 
-    // Phase 1a: Take snapshot of posting list SIZES for this batch (brief shared_lock)
-    // IMPORTANT: We only store sizes, not shared_ptrs, because:
-    // - shared_ptr copies would point to the same mutable objects
-    // - AddDocument() modifies the objects in-place, invalidating the "snapshot"
-    // - Storing sizes ensures we can detect concurrent additions accurately
-    std::unordered_map<std::string, size_t> batch_snapshot_sizes;
+    // Phase 1a: Take snapshot of posting list VERSIONS for this batch (brief shared_lock)
+    // IMPORTANT: We store versions (not sizes) to detect all concurrent mutations:
+    // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
+    // - shared_ptr copies keep posting lists alive during optimization
+    std::unordered_map<std::string, uint64_t> batch_snapshot_versions;
     std::unordered_map<std::string, std::shared_ptr<PostingList>> batch_snapshot_ptrs;
     {
       std::shared_lock<std::shared_mutex> lock(postings_mutex_);
@@ -653,8 +714,8 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
         const auto& term = terms[j];
         auto iter = term_postings_.find(term);
         if (iter != term_postings_.end()) {
-          batch_snapshot_sizes[term] = iter->second->Size();  // Capture size at snapshot time
-          batch_snapshot_ptrs[term] = iter->second;           // Keep pointer for optimization
+          batch_snapshot_versions[term] = iter->second->Version();  // Capture version at snapshot time
+          batch_snapshot_ptrs[term] = iter->second;                 // Keep pointer for optimization
         }
       }
     }
@@ -704,19 +765,19 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
         auto current_it = term_postings_.find(term);
         if (current_it != term_postings_.end()) {
           const auto& current_posting = current_it->second;
-          auto snapshot_size_it = batch_snapshot_sizes.find(term);
+          auto snapshot_version_it = batch_snapshot_versions.find(term);
 
-          // Check if documents were added during this batch's optimization
-          // IMPORTANT: Compare with snapshot SIZE, not snapshot object, because:
-          // - The snapshot shared_ptr points to the same mutable object
-          // - AddDocument() modifies it in-place, invalidating size comparisons
-          if (snapshot_size_it != batch_snapshot_sizes.end() && current_posting->Size() > snapshot_size_it->second) {
-            // New documents were added: merge them with the optimized version
+          // Check if posting list was modified during this batch's optimization
+          // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
+          // catches balanced Remove+Add operations where size stays the same but data changed.
+          if (snapshot_version_it != batch_snapshot_versions.end() &&
+              current_posting->Version() != snapshot_version_it->second) {
+            // Posting list was modified: merge current state with the optimized version
             auto merged = opt_it->second->Union(*current_posting);
             merged->Optimize(total_docs);
             term_postings_[term] = std::move(merged);
           } else {
-            // No changes or only removals: use optimized version as-is
+            // No changes: use optimized version as-is
             term_postings_[term] = std::move(opt_it->second);
           }
         }
@@ -841,52 +902,15 @@ bool Index::SaveToFile(const std::string& filepath) const {
       return false;
     }
 
-    // File format:
-    // [4 bytes: magic "MGIX"] [4 bytes: version] [4 bytes: ngram_size]
-    // [8 bytes: term_count] [terms and posting lists...]
-
-    // Write magic number
-    ofs.write("MGIX", 4);
-
-    // Write version
-    uint32_t version = 1;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
-
-    // Write ngram_size
-    auto ngram = static_cast<uint32_t>(ngram_size_);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    ofs.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
+    // Serialize to stream (includes CRC32 trailer in V2 format)
+    if (!SaveToStream(ofs)) {
+      return false;
+    }
 
     uint64_t term_count = 0;
-    // Lock scope: iterate and serialize posting lists
     {
-      std::scoped_lock lock(postings_mutex_);
-
-      // Write term count
+      std::shared_lock<std::shared_mutex> lock(postings_mutex_);
       term_count = term_postings_.size();
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      ofs.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
-
-      // Write each term and its posting list
-      for (const auto& [term, posting] : term_postings_) {
-        // Write term length and term
-        auto term_len = static_cast<uint32_t>(term.size());
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        ofs.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
-        ofs.write(term.data(), static_cast<std::streamsize>(term_len));
-
-        // Serialize posting list to buffer
-        std::vector<uint8_t> posting_data;
-        posting->Serialize(posting_data);
-
-        // Write posting list size and data
-        uint64_t posting_size = posting_data.size();
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        ofs.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        ofs.write(reinterpret_cast<const char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
-      }
     }
 
     ofs.close();
@@ -931,22 +955,27 @@ bool Index::SaveToFile(const std::string& filepath) const {
 
 bool Index::SaveToStream(std::ostream& output_stream) const {
   try {
-    // File format:
-    // [4 bytes: magic "MGIX"] [4 bytes: version] [4 bytes: ngram_size]
+    // V2 format:
+    // [4 bytes: magic "MGIX"] [4 bytes: version=2] [4 bytes: ngram_size]
     // [8 bytes: term_count] [terms and posting lists...]
+    // [4 bytes: CRC32 of all preceding data]
+    //
+    // Serialize all data to an intermediate buffer so we can compute the CRC32
+    // before writing to the output stream (which may not be seekable).
+    std::ostringstream buffer(std::ios::binary);
 
     // Write magic number
-    output_stream.write("MGIX", 4);
+    buffer.write("MGIX", 4);
 
     // Write version
-    uint32_t version = 1;
+    uint32_t version = kCurrentFormatVersion;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    output_stream.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    buffer.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
     // Write ngram_size
     auto ngram = static_cast<uint32_t>(ngram_size_);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    output_stream.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
+    buffer.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
 
     uint64_t term_count = 0;
     // Lock scope: iterate and serialize posting lists
@@ -956,15 +985,15 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
       // Write term count
       term_count = term_postings_.size();
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      output_stream.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+      buffer.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
 
       // Write each term and its posting list
       for (const auto& [term, posting] : term_postings_) {
         // Write term length and term
         auto term_len = static_cast<uint32_t>(term.size());
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        output_stream.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
-        output_stream.write(term.data(), static_cast<std::streamsize>(term_len));
+        buffer.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+        buffer.write(term.data(), static_cast<std::streamsize>(term_len));
 
         // Serialize posting list to buffer
         std::vector<uint8_t> posting_data;
@@ -973,12 +1002,22 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
         // Write posting list size and data
         uint64_t posting_size = posting_data.size();
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        output_stream.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
+        buffer.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        output_stream.write(reinterpret_cast<const char*>(posting_data.data()),
-                            static_cast<std::streamsize>(posting_size));
+        buffer.write(reinterpret_cast<const char*>(posting_data.data()),
+                     static_cast<std::streamsize>(posting_size));
       }
     }
+
+    // Get the serialized data and compute CRC32
+    std::string data = buffer.str();
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for CRC32 computation
+    uint32_t crc = ComputeCRC32(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+
+    // Write data followed by CRC32 trailer to the actual output stream
+    output_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    output_stream.write(reinterpret_cast<const char*>(&crc), sizeof(crc));
 
     if (!output_stream.good()) {
       mygram::utils::StructuredLog()
@@ -1015,103 +1054,22 @@ bool Index::LoadFromFile(const std::string& filepath) {
       return false;
     }
 
-    // Read and verify magic number
-    std::array<char, 4> magic{};
-    ifs.read(magic.data(), magic.size());
-    if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
-      mygram::utils::StructuredLog()
-          .Event("index_io_error")
-          .Field("type", "invalid_format")
-          .Field("operation", "load")
-          .Field("error", "bad_magic_number")
-          .Field("filepath", filepath)
-          .Error();
-      return false;
-    }
-
-    // Read version
-    uint32_t version = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (version != 1) {
-      mygram::utils::StructuredLog()
-          .Event("index_io_error")
-          .Field("type", "unsupported_version")
-          .Field("operation", "load")
-          .Field("version", std::to_string(version))
-          .Field("filepath", filepath)
-          .Error();
-      return false;
-    }
-
-    // Read ngram_size
-    uint32_t ngram = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    ifs.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
-    if (static_cast<int>(ngram) != ngram_size_) {
-      mygram::utils::StructuredLog()
-          .Event("index_ngram_mismatch")
-          .Field("file_ngram", static_cast<uint64_t>(ngram))
-          .Field("current_ngram", static_cast<uint64_t>(ngram_size_))
-          .Warn();
-      // Continue anyway, but this might cause issues
-    }
-
-    // Read term count
-    uint64_t term_count = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    ifs.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
-
-    // Load into a new map to minimize lock time
-    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>, TransparentStringHash, TransparentStringEqual>
-        new_postings;
-
-    // Read each term and its posting list
-    for (uint64_t i = 0; i < term_count; ++i) {
-      // Read term length and term
-      uint32_t term_len = 0;
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      ifs.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
-
-      std::string term(term_len, '\0');
-      ifs.read(term.data(), static_cast<std::streamsize>(term_len));
-
-      // Read posting list size and data
-      uint64_t posting_size = 0;
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      ifs.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
-
-      std::vector<uint8_t> posting_data(posting_size);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      ifs.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
-
-      // Deserialize posting list
-      auto posting = std::make_shared<PostingList>(roaring_threshold_);
-      size_t offset = 0;
-      if (!posting->Deserialize(posting_data, offset)) {
-        mygram::utils::StructuredLog()
-            .Event("index_io_error")
-            .Field("type", "deserialization_failed")
-            .Field("operation", "load")
-            .Field("term", term)
-            .Field("filepath", filepath)
-            .Error();
-        return false;
-      }
-
-      new_postings[term] = std::move(posting);
-    }
-
+    // Read entire file into memory for CRC32 verification
+    std::string file_data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     ifs.close();
 
-    // Swap the loaded data in with minimal lock time
-    {
-      std::scoped_lock lock(postings_mutex_);
-      term_postings_ = std::move(new_postings);
+    std::istringstream input_stream(file_data, std::ios::binary);
+    if (!LoadFromStream(input_stream)) {
+      return false;
     }
 
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 1024: Standard conversion factor for bytes to KB to MB
+    uint64_t term_count = 0;
+    {
+      std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+      term_count = term_postings_.size();
+    }
     mygram::utils::StructuredLog()
         .Event("index_loaded")
         .Field("path", filepath)
@@ -1133,10 +1091,26 @@ bool Index::LoadFromFile(const std::string& filepath) {
 
 bool Index::LoadFromStream(std::istream& input_stream) {
   try {
-    // Read and verify magic number
-    std::array<char, 4> magic{};
-    input_stream.read(magic.data(), magic.size());
-    if (std::memcmp(magic.data(), "MGIX", 4) != 0) {
+    // Read entire stream into memory for CRC32 verification
+    std::string all_data((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+
+    // Minimum size: magic(4) + version(4) + ngram(4) + term_count(8) = 20 bytes
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // 20: minimum header size (magic + version + ngram_size + term_count)
+    constexpr size_t kMinHeaderSize = 20;
+    if (all_data.size() < kMinHeaderSize) {
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "invalid_format")
+          .Field("operation", "load_from_stream")
+          .Field("error", "data_too_short")
+          .Error();
+      return false;
+    }
+    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+    // Verify magic number
+    if (std::memcmp(all_data.data(), "MGIX", 4) != 0) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "invalid_format")
@@ -1146,11 +1120,11 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       return false;
     }
 
-    // Read version
+    // Read version (offset 4)
     uint32_t version = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    input_stream.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (version != 1) {
+    std::memcpy(&version, all_data.data() + 4, sizeof(version));
+
+    if (version != kFormatVersionV1 && version != kFormatVersionV2) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "unsupported_version")
@@ -1160,10 +1134,54 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       return false;
     }
 
-    // Read ngram_size
+    // For V2, verify CRC32 checksum before deserializing any data
+    size_t data_size = all_data.size();
+    if (version == kFormatVersionV2) {
+      if (data_size < kMinHeaderSize + kCRC32Size) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "invalid_format")
+            .Field("operation", "load_from_stream")
+            .Field("error", "missing_crc32_trailer")
+            .Error();
+        return false;
+      }
+
+      // Split data: payload is everything except the trailing 4-byte CRC32
+      size_t payload_size = data_size - kCRC32Size;
+
+      // Read stored CRC32 from trailer
+      uint32_t stored_crc = 0;
+      std::memcpy(&stored_crc, all_data.data() + payload_size, sizeof(stored_crc));
+
+      // Compute CRC32 over the payload
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for CRC32 computation
+      uint32_t computed_crc = ComputeCRC32(reinterpret_cast<const uint8_t*>(all_data.data()), payload_size);
+
+      if (stored_crc != computed_crc) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "crc32_mismatch")
+            .Field("operation", "load_from_stream")
+            .Field("expected_crc", static_cast<uint64_t>(stored_crc))
+            .Field("computed_crc", static_cast<uint64_t>(computed_crc))
+            .Error();
+        return false;
+      }
+
+      // Truncate to payload only for deserialization
+      data_size = payload_size;
+    }
+
+    // Deserialize from the validated payload using a memory stream
+    // Skip past magic(4) + version(4) = 8 bytes
+    size_t pos = 8;
+
+    // Read ngram_size (offset 8)
     uint32_t ngram = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    input_stream.read(reinterpret_cast<char*>(&ngram), sizeof(ngram));
+    std::memcpy(&ngram, all_data.data() + pos, sizeof(ngram));
+    pos += sizeof(ngram);
+
     if (static_cast<int>(ngram) != ngram_size_) {
       mygram::utils::StructuredLog()
           .Event("index_ngram_mismatch")
@@ -1175,8 +1193,8 @@ bool Index::LoadFromStream(std::istream& input_stream) {
 
     // Read term count
     uint64_t term_count = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    input_stream.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
+    std::memcpy(&term_count, all_data.data() + pos, sizeof(term_count));
+    pos += sizeof(term_count);
 
     // Load into a new map to minimize lock time
     absl::flat_hash_map<std::string, std::shared_ptr<PostingList>, TransparentStringHash, TransparentStringEqual>
@@ -1184,22 +1202,58 @@ bool Index::LoadFromStream(std::istream& input_stream) {
 
     // Read each term and its posting list
     for (uint64_t i = 0; i < term_count; ++i) {
+      if (pos + sizeof(uint32_t) > data_size) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "truncated_data")
+            .Field("operation", "load_from_stream")
+            .Error();
+        return false;
+      }
+
       // Read term length and term
       uint32_t term_len = 0;
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      input_stream.read(reinterpret_cast<char*>(&term_len), sizeof(term_len));
+      std::memcpy(&term_len, all_data.data() + pos, sizeof(term_len));
+      pos += sizeof(term_len);
 
-      std::string term(term_len, '\0');
-      input_stream.read(term.data(), static_cast<std::streamsize>(term_len));
+      if (pos + term_len > data_size) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "truncated_data")
+            .Field("operation", "load_from_stream")
+            .Error();
+        return false;
+      }
+
+      std::string term(all_data.data() + pos, term_len);
+      pos += term_len;
+
+      if (pos + sizeof(uint64_t) > data_size) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "truncated_data")
+            .Field("operation", "load_from_stream")
+            .Error();
+        return false;
+      }
 
       // Read posting list size and data
       uint64_t posting_size = 0;
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      input_stream.read(reinterpret_cast<char*>(&posting_size), sizeof(posting_size));
+      std::memcpy(&posting_size, all_data.data() + pos, sizeof(posting_size));
+      pos += sizeof(posting_size);
+
+      if (pos + posting_size > data_size) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "truncated_data")
+            .Field("operation", "load_from_stream")
+            .Error();
+        return false;
+      }
 
       std::vector<uint8_t> posting_data(posting_size);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      input_stream.read(reinterpret_cast<char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
+      std::memcpy(posting_data.data(), all_data.data() + pos, posting_size);
+      pos += posting_size;
 
       // Deserialize posting list
       auto posting = std::make_shared<PostingList>(roaring_threshold_);
@@ -1217,22 +1271,17 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       new_postings[term] = std::move(posting);
     }
 
-    if (!input_stream.good()) {
-      mygram::utils::StructuredLog()
-          .Event("index_io_error")
-          .Field("type", "stream_error")
-          .Field("operation", "load_from_stream")
-          .Error();
-      return false;
-    }
-
     // Swap the loaded data in with minimal lock time
     {
       std::scoped_lock lock(postings_mutex_);
       term_postings_ = std::move(new_postings);
     }
 
-    mygram::utils::StructuredLog().Event("index_loaded_from_stream").Field("terms", term_count).Debug();
+    mygram::utils::StructuredLog()
+        .Event("index_loaded_from_stream")
+        .Field("terms", term_count)
+        .Field("format_version", static_cast<uint64_t>(version))
+        .Debug();
     return true;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()

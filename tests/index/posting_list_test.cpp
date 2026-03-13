@@ -7,6 +7,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <iostream>
+
 using namespace mygramdb::index;
 
 class PostingListTest : public ::testing::Test {
@@ -338,10 +341,10 @@ TEST_F(PostingListTest, ContainsAfterMixedOperations) {
 }
 
 /**
- * @brief Test Contains() with small delta-compressed list (linear scan)
+ * @brief Test Contains() with small delta-compressed list (streaming decode)
  *
- * This test verifies that Contains() uses linear scan for small lists
- * (size <= 64) for optimal performance.
+ * This test verifies that Contains() uses streaming decode with early exit
+ * for small lists.
  */
 TEST_F(PostingListTest, ContainsSmallListOptimization) {
   PostingList posting;
@@ -367,12 +370,10 @@ TEST_F(PostingListTest, ContainsSmallListOptimization) {
 }
 
 /**
- * @brief Test Contains() with large delta-compressed list (decode + binary search)
+ * @brief Test Contains() with large delta-compressed list (streaming decode)
  *
- * This test verifies that Contains() uses full decode + binary search
- * for large lists (size > 64) to achieve O(n) + O(log n) instead of O(n log n).
- *
- * This is the fix for the performance issue in the improvement report.
+ * This test verifies that Contains() uses streaming decode with early exit
+ * for large lists, avoiding O(n) memory allocation from full decode.
  */
 TEST_F(PostingListTest, ContainsLargeListOptimization) {
   PostingList posting;
@@ -406,10 +407,8 @@ TEST_F(PostingListTest, ContainsLargeListOptimization) {
 /**
  * @brief Benchmark test for Contains() performance improvement
  *
- * This test measures the performance difference between the old O(n log n)
- * implementation and the new optimized O(n) + O(log n) implementation.
- *
- * Expected: 10x faster for 1000-element lists.
+ * This test measures performance of the streaming decode with early exit
+ * approach, which avoids O(n) memory allocation per call.
  */
 TEST_F(PostingListTest, ContainsPerformanceBenchmark) {
   PostingList posting;
@@ -445,10 +444,10 @@ TEST_F(PostingListTest, ContainsPerformanceBenchmark) {
 }
 
 /**
- * @brief Test Contains() correctness at threshold boundary
+ * @brief Test Contains() correctness at various list sizes
  *
- * This test verifies correct behavior at the threshold (64 elements)
- * where the algorithm switches from linear scan to decode + binary search.
+ * This test verifies correct behavior at various sizes to ensure
+ * the unified streaming decode path works for all list sizes.
  */
 TEST_F(PostingListTest, ContainsThresholdBoundary) {
   PostingList posting;
@@ -722,4 +721,76 @@ TEST_F(PostingListTest, IterationLargeRoaringPartialRetrieval) {
   for (size_t i = 0; i < 5; ++i) {
     EXPECT_EQ(reverse_result[i], 10000 - i);
   }
+}
+
+// =============================================================================
+// Contains() optimization tests for large delta-compressed lists
+// =============================================================================
+
+/**
+ * @brief Test Contains() correctness on large sparse delta-compressed list
+ *
+ * Verifies that the streaming decode with early exit correctly handles
+ * a large list with sparse (non-contiguous) doc IDs.
+ */
+TEST_F(PostingListTest, ContainsLargeSparseList) {
+  PostingList posting;
+
+  // Add 10000 sparse elements (every 3rd ID)
+  std::vector<DocId> ids;
+  for (DocId i = 1; i <= 10000; i += 3) {
+    ids.push_back(i);
+  }
+  posting.AddBatch(ids);
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+
+  // Test Contains for existing elements
+  EXPECT_TRUE(posting.Contains(1));
+  EXPECT_TRUE(posting.Contains(4));
+  EXPECT_TRUE(posting.Contains(10000));
+
+  // Test Contains for non-existing elements (gaps between sparse IDs)
+  EXPECT_FALSE(posting.Contains(0));
+  EXPECT_FALSE(posting.Contains(2));
+  EXPECT_FALSE(posting.Contains(3));
+  EXPECT_FALSE(posting.Contains(10001));
+}
+
+/**
+ * @brief Benchmark Contains() on large delta-compressed list
+ *
+ * Measures that 1000 Contains() calls on a 10K-element delta list complete
+ * within a reasonable time, validating the streaming decode optimization
+ * avoids unnecessary memory allocation.
+ */
+TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
+  PostingList posting;
+
+  // Add 10000 elements (even numbers)
+  std::vector<DocId> ids;
+  ids.reserve(10000);
+  for (DocId i = 1; i <= 10000; ++i) {
+    ids.push_back(i * 2);
+  }
+  posting.AddBatch(ids);
+
+  // Ensure still delta-compressed (not Roaring)
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+
+  // Run 1000 Contains() calls and measure time
+  auto start = std::chrono::steady_clock::now();
+  size_t found = 0;
+  for (int i = 0; i < 1000; ++i) {
+    if (posting.Contains(static_cast<DocId>(i * 20 + 2))) {
+      found++;
+    }
+  }
+  auto end = std::chrono::steady_clock::now();
+  auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+  std::cout << "1000 Contains() on 10K delta list: " << duration_us << "us, found=" << found << std::endl;
+
+  // Should complete in reasonable time (< 100ms)
+  EXPECT_LT(duration_us, 100000);
 }

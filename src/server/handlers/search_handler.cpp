@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <limits>
 
 #include "cache/cache_manager.h"
@@ -50,12 +51,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         // If any are stale (document deleted since cache population), invalidate and fall through
         auto full_results = cached_lookup.value().results;
 
-        // Validate sample of cached results (check up to 10 random positions)
-        constexpr size_t kValidationSampleSize = 10;
+        // Validate sample of cached results with adaptive sample size
+        // Small result sets: check all; large sets: check at least 10% or 10 entries
         bool cache_stale = false;
         if (!full_results.empty()) {
-          size_t step = std::max(size_t{1}, full_results.size() / kValidationSampleSize);
-          for (size_t i = 0; i < full_results.size() && i / step < kValidationSampleSize; i += step) {
+          size_t sample_size = std::min(full_results.size(), std::max(size_t{10}, full_results.size() / 10));
+          size_t step = std::max(size_t{1}, full_results.size() / sample_size);
+          for (size_t i = 0; i < full_results.size() && i / step < sample_size; i += step) {
             if (!current_doc_store->GetPrimaryKey(full_results[i]).has_value()) {
               cache_stale = true;
               break;
@@ -276,8 +278,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   // Intersect with remaining terms
   for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
     // Use filter approach when candidate set is small enough
-    constexpr size_t kFilterThreshold = 1000;
-    if (results.size() <= kFilterThreshold) {
+    if (results.size() <= filter_threshold_) {
       // Filter candidates by checking each one against posting lists
       results = current_index->FilterByNgrams(results, term_infos[i].ngrams);
     } else {
@@ -341,7 +342,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     }
 
     // Insert full result (before pagination) into cache
-    ctx_.cache_manager->Insert(query, results, all_ngrams, query_time_ms);
+    ctx_.cache_manager->Insert(query, results, all_ngrams, query_time_ms, current_ngram_size,
+                               current_kanji_ngram_size, current_cross_boundary);
   }
 
   // Calculate final debug info
@@ -491,7 +493,8 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
     }
 
     // Insert result into cache (COUNT caches the full result set like SEARCH)
-    ctx_.cache_manager->Insert(query, results, all_ngrams, query_time_ms);
+    ctx_.cache_manager->Insert(query, results, all_ngrams, query_time_ms, current_ngram_size,
+                               current_kanji_ngram_size, current_cross_boundary);
   }
 
   // Calculate final debug info
@@ -704,14 +707,20 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
                 return false;  // Invalid number
               }
               switch (filter_cond.op) {
-                case query::FilterOp::EQ:
-                  // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
-                  return val == parsed_value.double_val;
-                  // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
-                case query::FilterOp::NE:
-                  // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
-                  return val != parsed_value.double_val;
-                  // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
+                case query::FilterOp::EQ: {
+                  // Use relative epsilon comparison to handle floating-point rounding
+                  // (e.g., 0.1 + 0.2 == 0.3 should match)
+                  double max_abs =
+                      std::max({1.0, std::abs(val), std::abs(parsed_value.double_val)});
+                  return std::abs(val - parsed_value.double_val) <
+                         std::numeric_limits<double>::epsilon() * max_abs;
+                }
+                case query::FilterOp::NE: {
+                  double max_abs =
+                      std::max({1.0, std::abs(val), std::abs(parsed_value.double_val)});
+                  return std::abs(val - parsed_value.double_val) >=
+                         std::numeric_limits<double>::epsilon() * max_abs;
+                }
                 case query::FilterOp::GT:
                   return val > parsed_value.double_val;
                 case query::FilterOp::GTE:

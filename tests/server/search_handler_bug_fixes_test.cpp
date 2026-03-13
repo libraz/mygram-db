@@ -12,6 +12,8 @@
 #include <cmath>
 #include <limits>
 
+#include "server/handlers/search_handler.h"
+
 namespace mygramdb {
 namespace server {
 
@@ -322,6 +324,142 @@ TEST(SearchHandlerBugFixTest, Bug25_FreshCacheNotDetectedAsStale) {
   }
 
   EXPECT_FALSE(cache_is_stale) << "Fresh cache should not be detected as stale";
+}
+
+// =============================================================================
+// H3: Floating-point epsilon comparison for FILTER
+// =============================================================================
+
+/**
+ * @brief Test that floating-point filter equality uses epsilon comparison
+ *
+ * The classic 0.1 + 0.2 != 0.3 problem should be handled gracefully.
+ */
+TEST(SearchHandlerBugFixTest, H3_FloatFilterEqualityWithEpsilon) {
+  // Simulate the filter comparison logic
+  double stored_value = 0.1 + 0.2;  // = 0.30000000000000004
+  double filter_value = 0.3;         // Exact 0.3
+
+  // Exact comparison fails
+  EXPECT_NE(stored_value, filter_value) << "Exact comparison should fail (demonstrates the problem)";
+
+  // Epsilon comparison should succeed
+  double max_abs = std::max({1.0, std::abs(stored_value), std::abs(filter_value)});
+  double epsilon = std::numeric_limits<double>::epsilon() * max_abs;
+  bool matches = std::abs(stored_value - filter_value) < epsilon;
+  EXPECT_TRUE(matches) << "Epsilon comparison should handle 0.1+0.2 == 0.3";
+}
+
+/**
+ * @brief Test NaN handling in float filter
+ */
+TEST(SearchHandlerBugFixTest, H3_FloatFilterNaNHandling) {
+  double nan_val = std::numeric_limits<double>::quiet_NaN();
+  double normal_val = 1.0;
+
+  // NaN comparisons
+  double max_abs = std::max({1.0, std::abs(nan_val), std::abs(normal_val)});
+  // std::abs(NaN) is NaN, std::max with NaN is implementation-defined
+  // The epsilon comparison with NaN should NOT match (NaN != anything)
+  bool eq_result = std::abs(nan_val - normal_val) < std::numeric_limits<double>::epsilon() * max_abs;
+  EXPECT_FALSE(eq_result) << "NaN should not equal any value";
+}
+
+/**
+ * @brief Test large value epsilon comparison
+ */
+TEST(SearchHandlerBugFixTest, H3_LargeValueEpsilonComparison) {
+  // For large values, absolute epsilon would fail but relative epsilon works
+  double large1 = 1e15;
+  double large2 = 1e15 + 1.0;  // Difference of 1.0
+
+  // These are different values
+  double max_abs = std::max({1.0, std::abs(large1), std::abs(large2)});
+  double epsilon = std::numeric_limits<double>::epsilon() * max_abs;
+  bool matches = std::abs(large1 - large2) < epsilon;
+  // 1.0 difference at 1e15 scale is within relative epsilon
+  // epsilon * 1e15 ≈ 2.2e-16 * 1e15 ≈ 0.22 < 1.0, so should NOT match
+  EXPECT_FALSE(matches) << "Values differing by 1.0 at 1e15 scale should not match";
+
+  // But values that are representationally close should match
+  double a = 1e15;
+  double b = a;  // Exact same value
+  max_abs = std::max({1.0, std::abs(a), std::abs(b)});
+  epsilon = std::numeric_limits<double>::epsilon() * max_abs;
+  matches = std::abs(a - b) < epsilon;
+  EXPECT_TRUE(matches) << "Identical large values should match";
+}
+
+// =============================================================================
+// M1: Adaptive cache validation sampling
+// =============================================================================
+
+/**
+ * @brief Test adaptive sample size calculation
+ *
+ * Validates the formula: min(n, max(10, n/10))
+ */
+TEST(SearchHandlerBugFixTest, M1_AdaptiveSampleSize) {
+  // Small result set: check all
+  {
+    size_t n = 5;
+    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
+    EXPECT_EQ(sample, 5) << "For n=5, should check all (5 < 10)";
+  }
+
+  // Medium result set: check 10
+  {
+    size_t n = 50;
+    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
+    EXPECT_EQ(sample, 10) << "For n=50, should check 10 (50/10=5 < 10, so 10)";
+  }
+
+  // Large result set: check 10%
+  {
+    size_t n = 1000;
+    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
+    EXPECT_EQ(sample, 100) << "For n=1000, should check 100 (10%)";
+  }
+
+  // Very large result set: check 10%
+  {
+    size_t n = 100000;
+    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
+    EXPECT_EQ(sample, 10000) << "For n=100000, should check 10000 (10%)";
+  }
+
+  // Edge case: empty
+  {
+    size_t n = 0;
+    // The actual code guards with !full_results.empty()
+    // but the formula itself: min(0, max(10, 0)) = 0
+    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
+    EXPECT_EQ(sample, 0);
+  }
+}
+
+// =============================================================================
+// M6: Configurable FilterByNgrams threshold
+// =============================================================================
+
+/**
+ * @brief Test that filter threshold is configurable
+ */
+TEST(SearchHandlerBugFixTest, M6_FilterThresholdConfigurable) {
+  // Default threshold
+  EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
+
+  // Set custom threshold
+  SearchHandler::SetFilterThreshold(500);
+  EXPECT_EQ(SearchHandler::GetFilterThreshold(), 500);
+
+  // Set another threshold
+  SearchHandler::SetFilterThreshold(2000);
+  EXPECT_EQ(SearchHandler::GetFilterThreshold(), 2000);
+
+  // Restore default
+  SearchHandler::SetFilterThreshold(1000);
+  EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
 }
 
 }  // namespace server

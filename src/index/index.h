@@ -74,8 +74,10 @@ class Index {
    *
    * @param doc_id Document ID
    * @param text Normalized text content
+   * @return true if document produced N-grams and was indexed, false if text
+   *         was too short
    */
-  void AddDocument(DocId doc_id, std::string_view text);
+  bool AddDocument(DocId doc_id, std::string_view text);
 
   /**
    * @brief Add multiple documents to index (batch operation, thread-safe)

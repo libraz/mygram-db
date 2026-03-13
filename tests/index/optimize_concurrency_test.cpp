@@ -548,4 +548,104 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOperationsDuringBatchedOptimization) {
       << "Concurrent searches should not crash (even if optimization is too fast to interleave)";
 }
 
+/**
+ * @brief Regression test: Remove+Add during Optimize() (size unchanged) must detect change
+ *
+ * Bug: When a Remove and Add happen during Optimize() such that the posting list
+ * size remains the same, the size-based detection misses the change, causing
+ * data loss (new doc lost) or resurrection (deleted doc restored).
+ * Fix: Use version counter instead of size for change detection.
+ */
+TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringOptimizeDetectsChange) {
+  // Create a fresh index with known documents
+  auto test_index = std::make_unique<Index>(2, 1);
+  const uint32_t num_docs = 200;
+
+  for (uint32_t i = 1; i <= num_docs; ++i) {
+    test_index->AddDocument(i, "common term document " + std::to_string(i));
+  }
+
+  std::atomic<bool> optimize_started{false};
+  std::atomic<bool> optimize_finished{false};
+  std::atomic<bool> modification_done{false};
+
+  // Thread 1: Run Optimize
+  std::thread optimizer([&]() {
+    optimize_started = true;
+    test_index->Optimize(num_docs);
+    optimize_finished = true;
+  });
+
+  // Thread 2: Remove doc 50, add doc 300 (net size change = 0)
+  std::thread modifier([&]() {
+    while (!optimize_started.load()) {
+      std::this_thread::yield();
+    }
+    // Small delay to let Optimize start Phase 1
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    test_index->RemoveDocument(50, "common term document 50");
+    test_index->AddDocument(300, "common term document 300");
+    modification_done = true;
+  });
+
+  optimizer.join();
+  modifier.join();
+
+  // After both threads finish, doc 300 must be searchable and doc 50 must not be
+  auto results = test_index->SearchAnd({"co", "mm"});  // "common"
+
+  bool found_300 = std::find(results.begin(), results.end(), 300) != results.end();
+  bool found_50 = std::find(results.begin(), results.end(), 50) != results.end();
+
+  // Doc 300 should always be present (it was added)
+  EXPECT_TRUE(found_300) << "Document 300 (added during Optimize) must be searchable";
+  // Doc 50 should not be present (it was removed)
+  EXPECT_FALSE(found_50) << "Document 50 (removed during Optimize) must not be searchable";
+}
+
+/**
+ * @brief Regression test: Remove+Add during OptimizeInBatches() must detect change
+ */
+TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringBatchOptimizeDetectsChange) {
+  auto test_index = std::make_unique<Index>(2, 1);
+  const uint32_t num_docs = 200;
+
+  for (uint32_t i = 1; i <= num_docs; ++i) {
+    test_index->AddDocument(i, "common term document " + std::to_string(i));
+  }
+
+  std::atomic<bool> optimize_started{false};
+  std::atomic<bool> optimize_finished{false};
+
+  // Thread 1: Run OptimizeInBatches with small batches
+  std::thread optimizer([&]() {
+    optimize_started = true;
+    test_index->OptimizeInBatches(num_docs, 5);
+    optimize_finished = true;
+  });
+
+  // Thread 2: Remove doc 50, add doc 300 (net size change = 0)
+  std::thread modifier([&]() {
+    while (!optimize_started.load()) {
+      std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    test_index->RemoveDocument(50, "common term document 50");
+    test_index->AddDocument(300, "common term document 300");
+  });
+
+  optimizer.join();
+  modifier.join();
+
+  auto results = test_index->SearchAnd({"co", "mm"});
+
+  bool found_300 = std::find(results.begin(), results.end(), 300) != results.end();
+  bool found_50 = std::find(results.begin(), results.end(), 50) != results.end();
+
+  EXPECT_TRUE(found_300) << "Document 300 (added during BatchOptimize) must be searchable";
+  EXPECT_FALSE(found_50) << "Document 50 (removed during BatchOptimize) must not be searchable";
+}
+
 }  // namespace mygramdb::index

@@ -38,6 +38,9 @@ class QueryCache;
 struct InvalidationMetadata {
   std::string table;                  ///< Table name
   std::vector<std::string> ngrams;    ///< Ngrams (sorted) for reverse index cleanup
+  int ngram_size = 0;                 ///< N-gram size used when entry was created
+  int kanji_ngram_size = 0;           ///< Kanji N-gram size used when entry was created
+  bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used when entry was created
 };
 
 class InvalidationManager {
@@ -154,10 +157,6 @@ class InvalidationManager {
   static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size,
                                                   bool cross_boundary_ngrams = true);
 
-  /**
-   * @brief Check if character is CJK (Chinese, Japanese, Korean)
-   */
-  static bool IsCJK(uint32_t codepoint);
 };
 
 }  // namespace mygramdb::cache

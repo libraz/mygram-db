@@ -24,7 +24,21 @@ class SearchHandler : public CommandHandler {
 
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
 
+  /**
+   * @brief Set the FilterByNgrams/SearchAnd threshold
+   * @param threshold Candidate count at or below which FilterByNgrams is used
+   */
+  static void SetFilterThreshold(size_t threshold) { filter_threshold_ = threshold; }
+
+  /**
+   * @brief Get the current filter threshold
+   * @return Current threshold value
+   */
+  static size_t GetFilterThreshold() { return filter_threshold_; }
+
  private:
+  /// Candidate count threshold: at or below this, use FilterByNgrams; above, use full SearchAnd intersection
+  static inline size_t filter_threshold_ = 1000;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
   /**
    * @brief Internal structure for term information
    */

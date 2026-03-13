@@ -497,4 +497,86 @@ TEST(QueryNormalizerTest, LongNormalizedQuery) {
   EXPECT_GT(normalized.length(), 100);
 }
 
+// =============================================================================
+// M7: Unicode space normalization
+// =============================================================================
+
+/**
+ * @brief Test No-Break Space (U+00A0) normalization
+ */
+TEST(QueryNormalizerTest, NoBreakingSpaceNormalized) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  // U+00A0 is 0xC2 0xA0 in UTF-8
+  query1.search_text = "hello\xC2\xA0world";
+  query1.limit = 100;
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "hello world";
+  query2.limit = 100;
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+
+  EXPECT_EQ(normalized1, normalized2) << "No-Break Space (U+00A0) should be normalized to regular space";
+}
+
+/**
+ * @brief Test various Unicode spaces normalization
+ */
+TEST(QueryNormalizerTest, VariousUnicodeSpacesNormalized) {
+  // U+2003 (Em Space) = 0xE2 0x80 0x83
+  query::Query query_em;
+  query_em.type = query::QueryType::SEARCH;
+  query_em.table = "posts";
+  query_em.search_text = "hello\xE2\x80\x83world";
+  query_em.limit = 100;
+
+  // U+2002 (En Space) = 0xE2 0x80 0x82
+  query::Query query_en;
+  query_en.type = query::QueryType::SEARCH;
+  query_en.table = "posts";
+  query_en.search_text = "hello\xE2\x80\x82world";
+  query_en.limit = 100;
+
+  // U+200B (Zero Width Space) = 0xE2 0x80 0x8B
+  query::Query query_zw;
+  query_zw.type = query::QueryType::SEARCH;
+  query_zw.table = "posts";
+  query_zw.search_text = "hello\xE2\x80\x8Bworld";
+  query_zw.limit = 100;
+
+  // U+202F (Narrow No-Break Space) = 0xE2 0x80 0xAF
+  query::Query query_nnbs;
+  query_nnbs.type = query::QueryType::SEARCH;
+  query_nnbs.table = "posts";
+  query_nnbs.search_text = "hello\xE2\x80\xAFworld";
+  query_nnbs.limit = 100;
+
+  // U+205F (Medium Mathematical Space) = 0xE2 0x81 0x9F
+  query::Query query_mms;
+  query_mms.type = query::QueryType::SEARCH;
+  query_mms.table = "posts";
+  query_mms.search_text = "hello\xE2\x81\x9Fworld";
+  query_mms.limit = 100;
+
+  // Reference: normal space
+  query::Query query_ref;
+  query_ref.type = query::QueryType::SEARCH;
+  query_ref.table = "posts";
+  query_ref.search_text = "hello world";
+  query_ref.limit = 100;
+
+  std::string ref = QueryNormalizer::Normalize(query_ref);
+
+  EXPECT_EQ(QueryNormalizer::Normalize(query_em), ref) << "Em Space (U+2003) should normalize";
+  EXPECT_EQ(QueryNormalizer::Normalize(query_en), ref) << "En Space (U+2002) should normalize";
+  EXPECT_EQ(QueryNormalizer::Normalize(query_zw), ref) << "Zero Width Space (U+200B) should normalize";
+  EXPECT_EQ(QueryNormalizer::Normalize(query_nnbs), ref) << "Narrow No-Break Space (U+202F) should normalize";
+  EXPECT_EQ(QueryNormalizer::Normalize(query_mms), ref) << "Medium Mathematical Space (U+205F) should normalize";
+}
+
 }  // namespace mygramdb::cache

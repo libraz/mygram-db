@@ -6,6 +6,8 @@
 #include "cache/invalidation_manager.h"
 
 #include <algorithm>
+#include <set>
+#include <tuple>
 
 #include "cache/query_cache.h"
 #include "utils/string_utils.h"
@@ -24,10 +26,13 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
     UnregisterCacheEntryUnlocked(key);
   }
 
-  // Store minimal invalidation metadata (table + ngrams only)
+  // Store minimal invalidation metadata (table + ngrams + ngram settings)
   InvalidationMetadata inv_meta;
   inv_meta.table = metadata.table;
   inv_meta.ngrams = metadata.ngrams;
+  inv_meta.ngram_size = metadata.ngram_size;
+  inv_meta.kanji_ngram_size = metadata.kanji_ngram_size;
+  inv_meta.cross_boundary_ngrams = metadata.cross_boundary_ngrams;
   cache_metadata_[key] = std::move(inv_meta);
 
   // Update reverse index: ngram -> cache keys
@@ -59,6 +64,34 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(cons
     auto table_it = ngram_to_cache_keys_.find(table_name);
     if (table_it == ngram_to_cache_keys_.end()) {
       return affected_keys;  // No entries for this table
+    }
+
+    // Collect distinct historical ngram settings for this table that differ
+    // from the current settings. This handles config changes (e.g., ngram_size
+    // changed from 2 to 3) where cached entries were created with old settings.
+    std::set<std::tuple<int, int, bool>> historical_settings;
+    for (const auto& [key, meta] : cache_metadata_) {
+      if (meta.table == table_name && meta.ngram_size > 0 &&
+          (meta.ngram_size != ngram_size || meta.kanji_ngram_size != kanji_ngram_size ||
+           meta.cross_boundary_ngrams != cross_boundary_ngrams)) {
+        historical_settings.insert({meta.ngram_size, meta.kanji_ngram_size, meta.cross_boundary_ngrams});
+      }
+    }
+
+    // Generate changed ngrams with each historical setting and merge
+    for (const auto& [hist_ngram, hist_kanji, hist_cross] : historical_settings) {
+      auto hist_old = ExtractNgrams(old_text, hist_ngram, hist_kanji, hist_cross);
+      auto hist_new = ExtractNgrams(new_text, hist_ngram, hist_kanji, hist_cross);
+      std::vector<std::string> hist_changed;
+      std::set_symmetric_difference(hist_old.begin(), hist_old.end(), hist_new.begin(), hist_new.end(),
+                                    std::back_inserter(hist_changed));
+      // Merge into changed_ngrams (both are sorted)
+      std::vector<std::string> merged;
+      merged.reserve(changed_ngrams.size() + hist_changed.size());
+      std::merge(changed_ngrams.begin(), changed_ngrams.end(), hist_changed.begin(), hist_changed.end(),
+                 std::back_inserter(merged));
+      merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+      changed_ngrams = std::move(merged);
     }
 
     // For each changed ngram, collect affected cache keys
@@ -220,18 +253,6 @@ std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& t
   ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
 
   return ngrams;
-}
-
-bool InvalidationManager::IsCJK(uint32_t codepoint) {
-  // Unicode ranges for CJK and Japanese characters
-  // CJK Unified Ideographs: U+4E00 - U+9FFF
-  // CJK Extension A: U+3400 - U+4DBF
-  // Hiragana: U+3040 - U+309F
-  // Katakana: U+30A0 - U+30FF
-  // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
-  return (codepoint >= 0x4E00 && codepoint <= 0x9FFF) || (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||
-         (codepoint >= 0x3040 && codepoint <= 0x309F) || (codepoint >= 0x30A0 && codepoint <= 0x30FF);
-  // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 }
 
 }  // namespace mygramdb::cache

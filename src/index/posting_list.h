@@ -7,6 +7,7 @@
 
 #include <roaring/roaring.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -113,6 +114,17 @@ class PostingList {
   [[nodiscard]] uint64_t Size() const;
 
   /**
+   * @brief Get mutation version counter
+   *
+   * Incremented on every Add/AddBatch/Remove operation. Used by Index::Optimize()
+   * to detect concurrent modifications (including balanced Remove+Add that leave
+   * size unchanged).
+   *
+   * @return Current version number
+   */
+  [[nodiscard]] uint64_t Version() const { return version_.load(std::memory_order_acquire); }
+
+  /**
    * @brief Get memory usage in bytes
    * @return Memory used by this posting list
    */
@@ -173,6 +185,11 @@ class PostingList {
 
   // Roaring bitmap storage
   roaring_bitmap_t* roaring_bitmap_ = nullptr;
+
+  // Mutation version counter for change detection in Index::Optimize().
+  // Atomic (not protected by mutex_) - incremented inside mutation methods
+  // that already hold the exclusive lock.
+  std::atomic<uint64_t> version_{0};
 
   // Protects all data members for thread-safe read/write operations
   // Uses shared_mutex to allow concurrent reads while serializing writes

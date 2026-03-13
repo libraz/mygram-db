@@ -112,7 +112,8 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 }
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
-                          const std::set<std::string>& ngrams, double query_cost_ms) {
+                          const std::set<std::string>& ngrams, double query_cost_ms, int ngram_size,
+                          int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;
   }
@@ -136,6 +137,9 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   metadata.table = query.table;
   metadata.ngrams.assign(ngrams.begin(), ngrams.end());
   metadata.filters = query.filters;
+  metadata.ngram_size = ngram_size;
+  metadata.kanji_ngram_size = kanji_ngram_size;
+  metadata.cross_boundary_ngrams = cross_boundary_ngrams;
   metadata.created_at = std::chrono::steady_clock::now();
   metadata.last_accessed = metadata.created_at;
   metadata.access_count = 0;

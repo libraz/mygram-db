@@ -114,7 +114,14 @@ struct CacheStatistics {
 };
 
 /// Reason for cache entry removal (used by RemoveEntryLocked)
-enum class RemovalReason { kLRUEviction, kTTLExpired, kDecompressionFailure, kTableClear };
+enum class RemovalReason {
+  kLRUEviction,
+  kTTLExpired,
+  kTTLExpiredAlreadyCounted,          ///< TTL expired, stats already counted by Lookup
+  kDecompressionFailure,
+  kDecompressionFailureAlreadyCounted,  ///< Decompression failed, stats already counted by Lookup
+  kTableClear
+};
 
 /**
  * @brief LRU cache for query results

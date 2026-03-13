@@ -88,7 +88,8 @@ PostingList::PostingList(PostingList&& other) noexcept
     : strategy_(other.strategy_),
       roaring_threshold_(other.roaring_threshold_),
       delta_compressed_(std::move(other.delta_compressed_)),
-      roaring_bitmap_(other.roaring_bitmap_) {
+      roaring_bitmap_(other.roaring_bitmap_),
+      version_(other.version_.load(std::memory_order_relaxed)) {
   other.roaring_bitmap_ = nullptr;
 }
 
@@ -101,6 +102,7 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
     roaring_threshold_ = other.roaring_threshold_;
     delta_compressed_ = std::move(other.delta_compressed_);
     roaring_bitmap_ = other.roaring_bitmap_;
+    version_.store(other.version_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.roaring_bitmap_ = nullptr;
   }
   return *this;
@@ -120,6 +122,7 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
@@ -138,6 +141,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 void PostingList::Remove(DocId doc_id) {
@@ -154,6 +158,7 @@ void PostingList::Remove(DocId doc_id) {
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 bool PostingList::Contains(DocId doc_id) const {
@@ -171,44 +176,11 @@ bool PostingList::Contains(DocId doc_id) const {
       return false;
     }
 
-    // For small arrays, linear search is faster than repeated accumulation
-    // Threshold chosen based on performance profiling
-    constexpr size_t kLinearSearchThreshold = 16;
-    if (delta_compressed_.size() <= kLinearSearchThreshold) {
-      DocId current = 0;
-      for (const auto& delta : delta_compressed_) {
-        current += delta;
-        if (current == doc_id) {
-          return true;
-        }
-        if (current > doc_id) {
-          return false;
-        }
-      }
-      return false;
-    }
-
-    // Binary search for larger arrays
-    // Cache accumulated values during search to avoid redundant computation
-    // For large posting lists, decode fully first for O(n) + O(log n) instead of O(n log n)
-    // Threshold: 64 elements (empirically determined for best performance)
-    constexpr size_t kDecodeThreshold = 64;
-
-    if (delta_compressed_.size() > kDecodeThreshold) {
-      // Decode delta-compressed array to absolute values
-      std::vector<DocId> decoded;
-      decoded.reserve(delta_compressed_.size());
-      DocId cumulative = 0;
-      for (DocId delta : delta_compressed_) {
-        cumulative += delta;
-        decoded.push_back(cumulative);
-      }
-
-      // Binary search on decoded array (O(log n))
-      return std::binary_search(decoded.begin(), decoded.end(), doc_id);
-    }
-
-    // For small lists, use linear scan (simpler and faster for small sizes)
+    // Streaming decode with early exit - O(n) time, O(1) memory
+    // More efficient than full decode + binary search for all sizes because
+    // it avoids vector allocation and exits early when target is passed.
+    // Since delta values are non-negative and cumulative is monotonically
+    // increasing, we can stop as soon as cumulative exceeds doc_id.
     DocId cumulative = 0;
     for (DocId delta : delta_compressed_) {
       cumulative += delta;

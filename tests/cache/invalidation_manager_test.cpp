@@ -754,4 +754,243 @@ TEST(InvalidationManagerTest, MemoryUsageReflectsNgramCount) {
   EXPECT_GT(mgr2.MemoryUsage(), mgr1.MemoryUsage());
 }
 
+// =============================================================================
+// IsCJK consistency - Hiragana/Katakana invalidation
+// =============================================================================
+
+/**
+ * @brief Test that Hiragana text invalidation works correctly
+ *
+ * Verifies that N-gram generation for cache invalidation uses the same
+ * CJK classification as indexing (Hiragana = non-CJK = ascii_ngram_size).
+ */
+TEST(InvalidationManagerTest, HiraganaTextInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);  // min_query_cost=0 to allow all inserts
+  InvalidationManager mgr(&cache);
+
+  // Register a cache entry with bigram ngrams for hiragana text "あいうえお"
+  // Using ascii_ngram_size=2, kanji_ngram_size=1 (hiragana uses ascii_ngram_size)
+  auto key1 = CacheKeyGenerator::Generate("hiragana_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Hiragana bigrams: "あい", "いう", "うえ", "えお"
+  meta1.ngrams = {"あい", "いう", "うえ", "えお"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidate with hiragana text - ExtractNgrams should generate same bigrams
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "あいうえお", 2, 1);
+
+  // Cache entry should be invalidated because N-grams match
+  EXPECT_GE(invalidated.size(), 1) << "Hiragana text should invalidate matching cache entries";
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test that Katakana text invalidation works correctly
+ */
+TEST(InvalidationManagerTest, KatakanaTextInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key1 = CacheKeyGenerator::Generate("katakana_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Katakana bigrams: "アイ", "イウ", "ウエ", "エオ"
+  meta1.ngrams = {"アイ", "イウ", "ウエ", "エオ"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "アイウエオ", 2, 1);
+
+  EXPECT_GE(invalidated.size(), 1) << "Katakana text should invalidate matching cache entries";
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test mixed CJK (Kanji) + Hiragana text invalidation
+ *
+ * "東京の空" has:
+ * - Kanji: 東, 京, 空 (kanji_ngram_size=1 -> unigrams "東", "京", "空")
+ * - Hiragana: の (ascii_ngram_size=2 -> but single char, no bigram possible alone)
+ * - Cross-boundary ngrams may be generated
+ */
+TEST(InvalidationManagerTest, MixedCJKHiraganaInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key1 = CacheKeyGenerator::Generate("mixed_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Register with unigrams for kanji characters
+  meta1.ngrams = {"東", "京", "空"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidate with the mixed text
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "東京の空", 2, 1);
+
+  // Should invalidate because kanji unigrams match
+  EXPECT_GE(invalidated.size(), 1) << "Mixed CJK+Hiragana should invalidate via kanji unigrams";
+}
+
+// =============================================================================
+// C2: N-gram config change invalidation consistency
+// =============================================================================
+
+/**
+ * @brief Test that ngram settings are stored in InvalidationMetadata
+ *
+ * When cache entries are created with specific ngram settings, those settings
+ * should be preserved so that invalidation can use them if the config changes.
+ */
+TEST(InvalidationManagerTest, NgramSettingsStoredInMetadata) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"he", "el", "ll", "lo"};  // bigrams from "hello"
+  meta.ngram_size = 2;
+  meta.kanji_ngram_size = 1;
+  meta.cross_boundary_ngrams = false;
+  mgr.RegisterCacheEntry(key, meta);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(4, mgr.GetTrackedNgramCount("posts"));
+}
+
+/**
+ * @brief Test invalidation with changed ngram_size finds entries created with old settings
+ *
+ * Scenario: Cache entry was created with ngram_size=2 (bigrams).
+ * Config is then changed to ngram_size=3 (trigrams).
+ * When invalidation occurs with the new config, it should still find and
+ * invalidate entries whose reverse index was built with the old bigram settings.
+ */
+TEST(InvalidationManagerTest, C2_ConfigChangeInvalidatesOldEntries) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Register cache entry created with ngram_size=2 (bigrams)
+  auto key1 = CacheKeyGenerator::Generate("query_bigram");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Bigrams for "hello": "he", "el", "ll", "lo"
+  meta1.ngrams = {"el", "he", "ll", "lo"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Now config changes to ngram_size=3. Invalidation is called with new settings.
+  // INSERT "hello world" - trigrams would be: "hel", "ell", "llo", "wor", "orl", "rld"
+  // With bigrams (old settings): "he", "el", "ll", "lo", "wo", "or", "rl", "ld"
+  // The reverse index has bigrams, so trigram-based lookup would miss them.
+  // With the fix, historical settings (ngram_size=2) are also checked.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello world", 3, 1, true);
+
+  // key1 should be invalidated because historical bigram generation finds "he", "el", etc.
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
+      << "C2: Entry created with old ngram_size should be invalidated after config change";
+}
+
+/**
+ * @brief Test invalidation with multiple historical ngram settings
+ *
+ * Entries created with different ngram settings should all be properly
+ * invalidated when the config has changed.
+ */
+TEST(InvalidationManagerTest, C2_MultipleHistoricalSettings) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry 1: created with ngram_size=2
+  auto key1 = CacheKeyGenerator::Generate("query_bigram");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"el", "he", "ll", "lo"};  // bigrams for "hello"
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Entry 2: created with ngram_size=3 (maybe after a first config change)
+  auto key2 = CacheKeyGenerator::Generate("query_trigram");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"ell", "hel", "llo"};  // trigrams for "hello"
+  meta2.ngram_size = 3;
+  meta2.kanji_ngram_size = 1;
+  meta2.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Now config changes to ngram_size=4. Invalidation with new settings.
+  // 4-grams for "hello": "hell", "ello"
+  // Neither matches bigrams nor trigrams directly. But with historical settings,
+  // bigrams and trigrams are also generated and matched.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
+
+  EXPECT_EQ(2, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
+      << "C2: Bigram entry should be invalidated";
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
+      << "C2: Trigram entry should be invalidated";
+}
+
+/**
+ * @brief Test that entries with current settings still work normally
+ *
+ * When all entries use the same ngram settings as the current config,
+ * invalidation should work exactly as before (no regression).
+ */
+TEST(InvalidationManagerTest, C2_CurrentSettingsNoRegression) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry with ngram_size=3 matching current config
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"gol", "ola", "lan", "ang"};
+  meta1.ngram_size = 3;
+  meta1.kanji_ngram_size = 2;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidation with same settings
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tips", 3, 2, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test that entries with zero ngram_size (legacy) are handled gracefully
+ *
+ * Entries created before this fix will have ngram_size=0. They should not
+ * trigger historical settings lookup (treated as "unknown/current").
+ */
+TEST(InvalidationManagerTest, C2_LegacyZeroNgramSizeHandled) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Legacy entry with ngram_size=0 (not set)
+  auto key1 = CacheKeyGenerator::Generate("query_legacy");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};
+  // ngram_size defaults to 0 (legacy behavior)
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidation with current settings should work via direct ngram match
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
 }  // namespace mygramdb::cache
