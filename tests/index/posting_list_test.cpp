@@ -482,3 +482,244 @@ TEST_F(PostingListTest, ContainsThresholdBoundary) {
   EXPECT_TRUE(posting.Contains(1000));
   EXPECT_FALSE(posting.Contains(1001));
 }
+
+/**
+ * @brief Test Optimize() correctly converts from Roaring to Delta without deadlock
+ *
+ * This is a regression test for a critical bug where ConvertToDelta() called
+ * GetAll(), which tried to acquire a shared_lock on mutex_ while the caller
+ * Optimize() already held a unique_lock. With std::shared_mutex, re-acquiring
+ * a lock (even shared) on the same thread is undefined behavior and typically
+ * causes a deadlock.
+ *
+ * The fix accesses the roaring bitmap directly instead of going through GetAll().
+ */
+TEST_F(PostingListTest, OptimizeRoaringToDeltaNoDeadlock) {
+  // Use a very low threshold so that even a few docs trigger Roaring conversion
+  PostingList posting(0.01);
+
+  // Add enough documents to exceed the roaring threshold
+  // With threshold 0.01 and total_docs=100, density=50/100=0.5 >> 0.01
+  std::vector<DocId> doc_ids;
+  for (DocId id = 1; id <= 50; ++id) {
+    doc_ids.push_back(id);
+  }
+  posting.AddBatch(doc_ids);
+
+  // First, convert to Roaring by calling Optimize with small total_docs
+  // density = 50/100 = 0.5, threshold = 0.01, so 0.5 >= 0.01 triggers Roaring
+  posting.Optimize(100);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  // Now convert back to Delta by calling Optimize with very large total_docs
+  // density = 50/100000 = 0.0005, hysteresis threshold = 0.01 * 0.5 = 0.005
+  // 0.0005 < 0.005, so this should trigger ConvertToDelta()
+  // Before the fix, this would deadlock due to recursive lock acquisition
+  posting.Optimize(100000);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+
+  // Verify all data is preserved after the conversion
+  EXPECT_EQ(posting.Size(), 50);
+  for (DocId id = 1; id <= 50; ++id) {
+    EXPECT_TRUE(posting.Contains(id)) << "DocID " << id << " should be preserved after Roaring->Delta conversion";
+  }
+
+  // Verify non-existent elements are still not found
+  EXPECT_FALSE(posting.Contains(0));
+  EXPECT_FALSE(posting.Contains(51));
+  EXPECT_FALSE(posting.Contains(100));
+}
+
+/**
+ * @brief Test Optimize() preserves data integrity through full round-trip conversion
+ *
+ * Verifies that data survives Delta -> Roaring -> Delta conversion cycle with
+ * various doc ID patterns (sparse, dense, edge values).
+ */
+TEST_F(PostingListTest, OptimizeRoundTripPreservesData) {
+  PostingList posting(0.01);
+
+  // Add sparse doc IDs with gaps to test delta encoding correctness
+  std::vector<DocId> original_ids = {1, 5, 10, 100, 500, 1000, 5000, 10000, 50000, 100000};
+  posting.AddBatch(original_ids);
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+
+  // Convert to Roaring (density = 10/20 = 0.5 >> 0.01)
+  posting.Optimize(20);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  // Verify data after Delta -> Roaring
+  EXPECT_EQ(posting.Size(), original_ids.size());
+  for (DocId id : original_ids) {
+    EXPECT_TRUE(posting.Contains(id)) << "DocID " << id << " lost after Delta->Roaring";
+  }
+
+  // Convert back to Delta (density = 10/10000000 ≈ 0)
+  posting.Optimize(10000000);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+
+  // Verify data after Roaring -> Delta
+  EXPECT_EQ(posting.Size(), original_ids.size());
+  auto all_docs = posting.GetAll();
+  ASSERT_EQ(all_docs.size(), original_ids.size());
+  for (size_t i = 0; i < original_ids.size(); ++i) {
+    EXPECT_EQ(all_docs[i], original_ids[i]) << "DocID mismatch at index " << i << " after round-trip conversion";
+  }
+}
+
+// =============================================================================
+// Iterator consistency tests (forward and reverse)
+// =============================================================================
+
+/**
+ * @brief Helper to create a PostingList in Roaring bitmap strategy
+ *
+ * Forces conversion to Roaring by using a very low threshold and calling
+ * Optimize() with a small total_docs value to achieve high density.
+ */
+static PostingList CreateRoaringPostingList(const std::vector<DocId>& doc_ids) {
+  PostingList posting(0.01);  // Very low threshold to force Roaring
+  posting.AddBatch(doc_ids);
+  posting.Optimize(static_cast<uint64_t>(doc_ids.size()));  // density = 1.0 >> 0.01
+  return posting;
+}
+
+/**
+ * @brief Test forward iteration produces correct sorted results (Roaring)
+ */
+TEST_F(PostingListTest, ForwardIterationRoaringCorrectness) {
+  std::vector<DocId> doc_ids = {50, 10, 30, 20, 40};
+  std::sort(doc_ids.begin(), doc_ids.end());
+  auto posting = CreateRoaringPostingList(doc_ids);
+
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto result = posting.GetTopN(doc_ids.size(), false);
+  ASSERT_EQ(result.size(), doc_ids.size());
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    EXPECT_EQ(result[i], doc_ids[i]) << "Forward iteration mismatch at index " << i;
+  }
+}
+
+/**
+ * @brief Test reverse iteration produces correct reverse-sorted results (Roaring)
+ */
+TEST_F(PostingListTest, ReverseIterationRoaringCorrectness) {
+  std::vector<DocId> doc_ids = {50, 10, 30, 20, 40};
+  std::sort(doc_ids.begin(), doc_ids.end());
+  auto posting = CreateRoaringPostingList(doc_ids);
+
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto result = posting.GetTopN(doc_ids.size(), true);
+  ASSERT_EQ(result.size(), doc_ids.size());
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    EXPECT_EQ(result[i], doc_ids[doc_ids.size() - 1 - i])
+        << "Reverse iteration mismatch at index " << i;
+  }
+}
+
+/**
+ * @brief Test forward and reverse iterations produce consistent data (Roaring)
+ *
+ * Verifies that sorting the reverse result gives the same sequence as the
+ * forward result, ensuring both iterators traverse the same set of elements.
+ */
+TEST_F(PostingListTest, ForwardReverseConsistencyRoaring) {
+  std::vector<DocId> doc_ids;
+  for (DocId id = 1; id <= 200; ++id) {
+    doc_ids.push_back(id * 3);  // 3, 6, 9, ..., 600
+  }
+  auto posting = CreateRoaringPostingList(doc_ids);
+
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto forward_result = posting.GetTopN(0, false);   // all, ascending
+  auto reverse_result = posting.GetTopN(0, true);     // all, descending
+
+  ASSERT_EQ(forward_result.size(), reverse_result.size());
+  ASSERT_EQ(forward_result.size(), doc_ids.size());
+
+  // Reverse the reverse_result and compare with forward_result
+  std::vector<DocId> reversed_back(reverse_result.rbegin(), reverse_result.rend());
+  EXPECT_EQ(forward_result, reversed_back);
+
+  // Verify forward is sorted ascending
+  EXPECT_TRUE(std::is_sorted(forward_result.begin(), forward_result.end()));
+
+  // Verify reverse is sorted descending
+  EXPECT_TRUE(std::is_sorted(reverse_result.begin(), reverse_result.end(), std::greater<DocId>()));
+}
+
+/**
+ * @brief Test iteration on an empty Roaring bitmap
+ */
+TEST_F(PostingListTest, IterationEmptyRoaringBitmap) {
+  // Create empty posting list and force Roaring strategy
+  PostingList posting(0.01);
+  // Add and remove to trigger Roaring conversion, then empty it
+  std::vector<DocId> temp = {1, 2, 3};
+  posting.AddBatch(temp);
+  posting.Optimize(3);
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  posting.Remove(1);
+  posting.Remove(2);
+  posting.Remove(3);
+  ASSERT_EQ(posting.Size(), 0);
+
+  auto forward_result = posting.GetTopN(10, false);
+  auto reverse_result = posting.GetTopN(10, true);
+
+  EXPECT_TRUE(forward_result.empty());
+  EXPECT_TRUE(reverse_result.empty());
+}
+
+/**
+ * @brief Test iteration on a single-element Roaring bitmap
+ */
+TEST_F(PostingListTest, IterationSingleElementRoaring) {
+  std::vector<DocId> doc_ids = {42};
+  auto posting = CreateRoaringPostingList(doc_ids);
+
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto forward_result = posting.GetTopN(10, false);
+  auto reverse_result = posting.GetTopN(10, true);
+
+  ASSERT_EQ(forward_result.size(), 1);
+  ASSERT_EQ(reverse_result.size(), 1);
+  EXPECT_EQ(forward_result[0], 42);
+  EXPECT_EQ(reverse_result[0], 42);
+}
+
+/**
+ * @brief Test iteration on a large Roaring bitmap with partial retrieval
+ *
+ * Verifies that GetTopN with a limit smaller than the total count works
+ * correctly for both forward and reverse iterators.
+ */
+TEST_F(PostingListTest, IterationLargeRoaringPartialRetrieval) {
+  std::vector<DocId> doc_ids;
+  for (DocId id = 1; id <= 10000; ++id) {
+    doc_ids.push_back(id);
+  }
+  auto posting = CreateRoaringPostingList(doc_ids);
+
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  // Forward: first 5 elements
+  auto forward_result = posting.GetTopN(5, false);
+  ASSERT_EQ(forward_result.size(), 5);
+  for (size_t i = 0; i < 5; ++i) {
+    EXPECT_EQ(forward_result[i], i + 1);
+  }
+
+  // Reverse: last 5 elements (highest DocIds)
+  auto reverse_result = posting.GetTopN(5, true);
+  ASSERT_EQ(reverse_result.size(), 5);
+  for (size_t i = 0; i < 5; ++i) {
+    EXPECT_EQ(reverse_result[i], 10000 - i);
+  }
+}

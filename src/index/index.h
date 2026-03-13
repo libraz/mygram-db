@@ -44,9 +44,10 @@ class Index {
    * @param ngram_size N-gram size for ASCII/alphanumeric characters (typically 2 for bigrams)
    * @param kanji_ngram_size N-gram size for CJK characters (0 = use ngram_size)
    * @param roaring_threshold Density threshold for Roaring bitmaps
+   * @param cross_boundary_ngrams Generate N-grams spanning CJK/non-CJK boundaries
    */
   explicit Index(int ngram_size = kDefaultNgramSize, int kanji_ngram_size = kDefaultKanjiNgramSize,
-                 double roaring_threshold = kDefaultRoaringThreshold);
+                 double roaring_threshold = kDefaultRoaringThreshold, bool cross_boundary_ngrams = true);
 
   ~Index() = default;
 
@@ -238,10 +239,17 @@ class Index {
    */
   [[nodiscard]] int GetKanjiNgramSize() const { return kanji_ngram_size_; }
 
+  /**
+   * @brief Get cross-boundary N-gram generation setting
+   * @return true if cross-boundary N-grams are generated
+   */
+  [[nodiscard]] bool GetCrossBoundaryNgrams() const { return cross_boundary_ngrams_; }
+
  private:
   int ngram_size_;
   int kanji_ngram_size_;
   double roaring_threshold_;
+  bool cross_boundary_ngrams_;
 
   // Term -> Posting list mapping
   // Note: Using shared_ptr instead of unique_ptr to safely handle concurrent access
@@ -265,7 +273,12 @@ class Index {
   PostingList* GetOrCreatePostingList(std::string_view term);
 
   /**
-   * @brief Internal search methods (no locking, assumes caller holds lock)
+   * @brief Internal OR search (no locking)
+   *
+   * @pre Caller MUST hold postings_mutex_ (shared or exclusive).
+   *      Violating this precondition causes undefined behavior.
+   * @param terms Search terms
+   * @return Vector of document IDs containing any of the terms
    */
   [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
 

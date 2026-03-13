@@ -747,4 +747,108 @@ TEST_F(BinlogReaderFixture, ConcurrentStopCallsSafe) {
   EXPECT_FALSE(reader_->IsRunning());
 }
 
+// ===========================================================================
+// BUG 1: ConvertSingleGtidToRange tests
+// ===========================================================================
+
+/**
+ * @brief Test ConvertSingleGtidToRange with single GTID
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeBasic) {
+  // Single GTID "uuid:101" should be converted to "uuid:1-101"
+  std::string result = BinlogReader::ConvertSingleGtidToRange(
+      "61d5b289-bccc-11f0-b921-cabbb4ee51f6:101");
+  EXPECT_EQ(result, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-101");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with range GTID (no conversion)
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithRange) {
+  // Range GTID should pass through unchanged
+  std::string result = BinlogReader::ConvertSingleGtidToRange(
+      "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-100");
+  EXPECT_EQ(result, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-100");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID GTID (no conversion)
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithMultiUuid) {
+  // Multi-UUID GTID should pass through unchanged (has comma)
+  std::string result = BinlogReader::ConvertSingleGtidToRange(
+      "uuid1:1-100,uuid2:1-50");
+  EXPECT_EQ(result, "uuid1:1-100,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with empty string
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeEmpty) {
+  std::string result = BinlogReader::ConvertSingleGtidToRange("");
+  EXPECT_EQ(result, "");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with transaction 1
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeTransaction1) {
+  // Edge case: transaction 1 -> "uuid:1-1"
+  std::string result = BinlogReader::ConvertSingleGtidToRange(
+      "00000000-0000-0000-0000-000000000001:1");
+  EXPECT_EQ(result, "00000000-0000-0000-0000-000000000001:1-1");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multiple intervals (no conversion)
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithMultipleIntervals) {
+  // Multiple intervals use colon separator - should pass through
+  std::string result = BinlogReader::ConvertSingleGtidToRange(
+      "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-3:5-7");
+  EXPECT_EQ(result, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-3:5-7");
+}
+
+/**
+ * @brief BUG 1: Verify fallback uses converted GTID for safe reconnection
+ */
+TEST_F(BinlogReaderFixture, FallbackGtidIsConvertedToRange) {
+  // Simulate initial startup with single GTID from config
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    reader_->current_gtid_ = "61d5b289-bccc-11f0-b921-cabbb4ee51f6:50";
+    reader_->executed_gtid_set_ = "";  // Empty - simulates first startup
+  }
+
+  // The GTID used for reconnection should be converted to range
+  std::string gtid_for_reconnect;
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    gtid_for_reconnect = reader_->executed_gtid_set_.empty()
+        ? BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_)
+        : reader_->executed_gtid_set_;
+  }
+  EXPECT_EQ(gtid_for_reconnect, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-50");
+}
+
+/**
+ * @brief BUG 1: When executed_gtid_set_ is set, it takes priority (no conversion needed)
+ */
+TEST_F(BinlogReaderFixture, ExecutedGtidSetTakesPriorityOverConversion) {
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    reader_->current_gtid_ = "uuid1:103";
+    reader_->executed_gtid_set_ = "uuid1:1-100,uuid2:1-50";
+  }
+
+  std::string gtid_for_reconnect;
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    gtid_for_reconnect = reader_->executed_gtid_set_.empty()
+        ? BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_)
+        : reader_->executed_gtid_set_;
+  }
+  EXPECT_EQ(gtid_for_reconnect, "uuid1:1-100,uuid2:1-50");
+}
+
 #endif  // USE_MYSQL

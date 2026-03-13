@@ -146,8 +146,9 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Generate n-grams for each term and estimate result sizes
+  bool current_cross_boundary = current_index->GetCrossBoundaryNgrams();
   auto term_infos = GenerateTermInfos(all_search_terms, current_index, current_ngram_size, current_kanji_ngram_size,
-                                      conn_ctx.debug_mode ? &debug_info : nullptr);
+                                      conn_ctx.debug_mode ? &debug_info : nullptr, current_cross_boundary);
 
   // Sort terms by estimated size (smallest first for faster intersection)
   std::sort(term_infos.begin(), term_infos.end(),
@@ -284,7 +285,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   // Apply NOT filter if present
   if (!query.not_terms.empty()) {
-    results = ApplyNotFilter(results, query.not_terms, current_index, current_ngram_size, current_kanji_ngram_size);
+    results = ApplyNotFilter(results, query.not_terms, current_index, current_ngram_size, current_kanji_ngram_size,
+                             current_cross_boundary);
     if (conn_ctx.debug_mode) {
       debug_info.after_not = results.size();
     }
@@ -425,8 +427,9 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
   }
 
   // Generate n-grams for each term and estimate result sizes
+  bool current_cross_boundary = current_index->GetCrossBoundaryNgrams();
   auto term_infos = GenerateTermInfos(all_search_terms, current_index, current_ngram_size, current_kanji_ngram_size,
-                                      conn_ctx.debug_mode ? &debug_info : nullptr);
+                                      conn_ctx.debug_mode ? &debug_info : nullptr, current_cross_boundary);
 
   // Sort terms by estimated size (smallest first for faster intersection)
   std::sort(term_infos.begin(), term_infos.end(),
@@ -458,7 +461,8 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
 
   // Apply NOT filter if present
   if (!query.not_terms.empty()) {
-    results = ApplyNotFilter(results, query.not_terms, current_index, current_ngram_size, current_kanji_ngram_size);
+    results = ApplyNotFilter(results, query.not_terms, current_index, current_ngram_size, current_kanji_ngram_size,
+                             current_cross_boundary);
   }
 
   // Apply filter conditions
@@ -506,7 +510,8 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
 std::vector<SearchHandler::TermInfo> SearchHandler::GenerateTermInfos(const std::vector<std::string>& search_terms,
                                                                       index::Index* current_index, int ngram_size,
                                                                       int kanji_ngram_size,
-                                                                      query::DebugInfo* debug_info) {
+                                                                      query::DebugInfo* debug_info,
+                                                                      bool cross_boundary_ngrams) {
   std::vector<TermInfo> term_infos;
   term_infos.reserve(search_terms.size());
 
@@ -516,7 +521,7 @@ std::vector<SearchHandler::TermInfo> SearchHandler::GenerateTermInfos(const std:
 
     // Always use hybrid n-grams if kanji_ngram_size is configured
     if (kanji_ngram_size > 0) {
-      ngrams = utils::GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size);
+      ngrams = utils::GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
     } else if (ngram_size == 0) {
       ngrams = utils::GenerateHybridNgrams(normalized);
     } else {
@@ -552,14 +557,14 @@ std::vector<SearchHandler::TermInfo> SearchHandler::GenerateTermInfos(const std:
 std::vector<storage::DocId> SearchHandler::ApplyNotFilter(const std::vector<storage::DocId>& results,
                                                           const std::vector<std::string>& not_terms,
                                                           index::Index* current_index, int ngram_size,
-                                                          int kanji_ngram_size) {
+                                                          int kanji_ngram_size, bool cross_boundary_ngrams) {
   // Generate NOT term n-grams
   std::vector<std::string> not_ngrams;
   for (const auto& not_term : not_terms) {
     std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
     std::vector<std::string> ngrams;
     if (kanji_ngram_size > 0) {
-      ngrams = utils::GenerateHybridNgrams(norm_not, ngram_size, kanji_ngram_size);
+      ngrams = utils::GenerateHybridNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
     } else if (ngram_size == 0) {
       ngrams = utils::GenerateHybridNgrams(norm_not);
     } else {

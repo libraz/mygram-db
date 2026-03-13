@@ -68,20 +68,24 @@ bool WriteString(std::ostream& output_stream, const std::string& str) {
 }
 
 /**
- * @brief Read string from stream (length-prefixed)
+ * @brief Read string from stream (length-prefixed) with field-specific size limit
+ * @param input_stream Input stream to read from
+ * @param str Output string
+ * @param max_length Maximum allowed string length for this field type
+ * @return true if read succeeded and length is within limit, false otherwise
  */
-bool ReadString(std::istream& input_stream, std::string& str) {
-  constexpr uint32_t kMaxStringLength = 256 * 1024 * 1024;  // 256MB limit
+bool ReadString(std::istream& input_stream, std::string& str,
+                uint32_t max_length = kMaxGeneralStringLength) {
   uint32_t len = 0;
   if (!ReadBinary(input_stream, len)) {
     return false;
   }
-  if (len > kMaxStringLength) {
+  if (len > max_length) {
     StructuredLog()
         .Event("storage_validation_error")
         .Field("type", "string_length_exceeded")
         .Field("length", static_cast<uint64_t>(len))
-        .Field("max_length", static_cast<uint64_t>(kMaxStringLength))
+        .Field("max_length", static_cast<uint64_t>(max_length))
         .Error();
     return false;
   }
@@ -138,7 +142,7 @@ Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header)
   if (!ReadBinary(input_stream, header.file_crc32)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read file CRC32"));
   }
-  if (!ReadString(input_stream, header.gtid)) {
+  if (!ReadString(input_stream, header.gtid, kMaxPathLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read GTID"));
   }
   return {};
@@ -262,10 +266,10 @@ bool SerializeFilterConfig(std::ostream& output_stream, const config::FilterConf
  * @brief Deserialize FilterConfig from stream
  */
 bool DeserializeFilterConfig(std::istream& input_stream, config::FilterConfig& filter) {
-  if (!ReadString(input_stream, filter.name)) {
+  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
     return false;
   }
-  if (!ReadString(input_stream, filter.type)) {
+  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
     return false;
   }
   if (!ReadBinary(input_stream, filter.dict_compress)) {
@@ -274,7 +278,7 @@ bool DeserializeFilterConfig(std::istream& input_stream, config::FilterConfig& f
   if (!ReadBinary(input_stream, filter.bitmap_index)) {
     return false;
   }
-  if (!ReadString(input_stream, filter.bucket)) {
+  if (!ReadString(input_stream, filter.bucket, kMaxIdentifierLength)) {
     return false;
   }
   return true;
@@ -306,16 +310,16 @@ bool SerializeRequiredFilterConfig(std::ostream& output_stream, const config::Re
  * @brief Deserialize RequiredFilterConfig from stream
  */
 bool DeserializeRequiredFilterConfig(std::istream& input_stream, config::RequiredFilterConfig& filter) {
-  if (!ReadString(input_stream, filter.name)) {
+  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
     return false;
   }
-  if (!ReadString(input_stream, filter.type)) {
+  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
     return false;
   }
-  if (!ReadString(input_stream, filter.op)) {
+  if (!ReadString(input_stream, filter.op, kMaxIdentifierLength)) {
     return false;
   }
-  if (!ReadString(input_stream, filter.value)) {
+  if (!ReadString(input_stream, filter.value, kMaxConfigValueLength)) {
     return false;
   }
   if (!ReadBinary(input_stream, filter.bitmap_index)) {
@@ -400,17 +404,17 @@ bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig
  * @brief Deserialize TableConfig from stream
  */
 bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table) {
-  if (!ReadString(input_stream, table.name)) {
+  if (!ReadString(input_stream, table.name, kMaxIdentifierLength)) {
     return false;
   }
-  if (!ReadString(input_stream, table.primary_key)) {
+  if (!ReadString(input_stream, table.primary_key, kMaxIdentifierLength)) {
     return false;
   }
 
   // text_source
   constexpr uint32_t kMaxConcatColumns = 1000;
   constexpr uint32_t kMaxFilterCount = 1000;
-  if (!ReadString(input_stream, table.text_source.column)) {
+  if (!ReadString(input_stream, table.text_source.column, kMaxIdentifierLength)) {
     return false;
   }
   uint32_t concat_size = 0;
@@ -428,11 +432,11 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   }
   table.text_source.concat.resize(concat_size);
   for (uint32_t i = 0; i < concat_size; ++i) {
-    if (!ReadString(input_stream, table.text_source.concat[i])) {
+    if (!ReadString(input_stream, table.text_source.concat[i], kMaxIdentifierLength)) {
       return false;
     }
   }
-  if (!ReadString(input_stream, table.text_source.delimiter)) {
+  if (!ReadString(input_stream, table.text_source.delimiter, kMaxIdentifierLength)) {
     return false;
   }
 
@@ -493,7 +497,7 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, table.posting.freq_bits)) {
     return false;
   }
-  if (!ReadString(input_stream, table.posting.use_roaring)) {
+  if (!ReadString(input_stream, table.posting.use_roaring, kMaxIdentifierLength)) {
     return false;
   }
 
@@ -675,7 +679,7 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
 Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config) {
   constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
   // MySQL config
-  if (!ReadString(input_stream, config.mysql.host)) {
+  if (!ReadString(input_stream, config.mysql.host, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.host"));
   }
   if (!ReadBinary(input_stream, config.mysql.port)) {
@@ -684,24 +688,24 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   // Read user/password fields (will be empty in new dumps, ignored from old dumps)
   std::string unused_user;
   std::string unused_password;
-  if (!ReadString(input_stream, unused_user)) {
+  if (!ReadString(input_stream, unused_user, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.user"));
   }
-  if (!ReadString(input_stream, unused_password)) {
+  if (!ReadString(input_stream, unused_password, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.password"));
   }
   // Note: user/password from dump are intentionally ignored for security.
   // Credentials must be provided via config file at startup.
-  if (!ReadString(input_stream, config.mysql.database)) {
+  if (!ReadString(input_stream, config.mysql.database, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.database"));
   }
   if (!ReadBinary(input_stream, config.mysql.use_gtid)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.use_gtid"));
   }
-  if (!ReadString(input_stream, config.mysql.binlog_format)) {
+  if (!ReadString(input_stream, config.mysql.binlog_format, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.binlog_format"));
   }
-  if (!ReadString(input_stream, config.mysql.binlog_row_image)) {
+  if (!ReadString(input_stream, config.mysql.binlog_row_image, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.binlog_row_image"));
   }
   if (!ReadBinary(input_stream, config.mysql.connect_timeout_ms)) {
@@ -731,7 +735,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   }
 
   // Build config
-  if (!ReadString(input_stream, config.build.mode)) {
+  if (!ReadString(input_stream, config.build.mode, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read build.mode"));
   }
   if (!ReadBinary(input_stream, config.build.batch_size)) {
@@ -751,7 +755,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   if (!ReadBinary(input_stream, config.replication.server_id)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.server_id"));
   }
-  if (!ReadString(input_stream, config.replication.start_from)) {
+  if (!ReadString(input_stream, config.replication.start_from, kMaxPathLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.start_from"));
   }
   if (!ReadBinary(input_stream, config.replication.queue_size)) {
@@ -785,7 +789,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   if (!ReadBinary(input_stream, config.memory.normalize.nfkc)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.normalize.nfkc"));
   }
-  if (!ReadString(input_stream, config.memory.normalize.width)) {
+  if (!ReadString(input_stream, config.memory.normalize.width, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.normalize.width"));
   }
   if (!ReadBinary(input_stream, config.memory.normalize.lower)) {
@@ -793,7 +797,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   }
 
   // Snapshot config
-  if (!ReadString(input_stream, config.dump.dir)) {
+  if (!ReadString(input_stream, config.dump.dir, kMaxPathLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read dump.dir"));
   }
   if (!ReadBinary(input_stream, config.dump.interval_sec)) {
@@ -804,7 +808,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   }
 
   // API config
-  if (!ReadString(input_stream, config.api.tcp.bind)) {
+  if (!ReadString(input_stream, config.api.tcp.bind, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.tcp.bind"));
   }
   if (!ReadBinary(input_stream, config.api.tcp.port)) {
@@ -813,7 +817,7 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   if (!ReadBinary(input_stream, config.api.http.enable)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.http.enable"));
   }
-  if (!ReadString(input_stream, config.api.http.bind)) {
+  if (!ReadString(input_stream, config.api.http.bind, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.http.bind"));
   }
   if (!ReadBinary(input_stream, config.api.http.port)) {
@@ -835,16 +839,16 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   }
   config.network.allow_cidrs.resize(cidr_count);
   for (uint32_t i = 0; i < cidr_count; ++i) {
-    if (!ReadString(input_stream, config.network.allow_cidrs[i])) {
+    if (!ReadString(input_stream, config.network.allow_cidrs[i], kMaxConfigValueLength)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read network CIDR"));
     }
   }
 
   // Logging config
-  if (!ReadString(input_stream, config.logging.level)) {
+  if (!ReadString(input_stream, config.logging.level, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.level"));
   }
-  if (!ReadString(input_stream, config.logging.format)) {
+  if (!ReadString(input_stream, config.logging.format, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.format"));
   }
 
@@ -1436,7 +1440,7 @@ Expected<void, Error> ReadDumpV1(
 
     for (uint32_t i = 0; i < table_count; ++i) {
       std::string table_name;
-      if (!ReadString(ifs, table_name)) {
+      if (!ReadString(ifs, table_name, kMaxIdentifierLength)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
 

@@ -23,18 +23,30 @@
 
 namespace mygramdb::index {
 
-Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold)
+Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams)
     : ngram_size_(ngram_size),
       kanji_ngram_size_(kanji_ngram_size > 0 ? kanji_ngram_size : ngram_size),
-      roaring_threshold_(roaring_threshold) {}
+      roaring_threshold_(roaring_threshold),
+      cross_boundary_ngrams_(cross_boundary_ngrams) {}
 
 void Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   std::sort(ngrams.begin(), ngrams.end());
   ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+
+  // Warn when empty text produces no index entries (document will exist in
+  // DocumentStore but will never appear in search results)
+  if (ngrams.empty()) {
+    mygram::utils::StructuredLog()
+        .Event("empty_document_added")
+        .Field("doc_id", static_cast<uint64_t>(doc_id))
+        .Field("text_length", static_cast<uint64_t>(text.size()))
+        .Message("Document has no indexable n-grams; it will not appear in search results")
+        .Warn();
+  }
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
@@ -68,7 +80,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   for (const auto& doc : documents) {
     // Generate n-grams
     std::vector<std::string> ngrams;
-    ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_);
+    ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
     // Remove duplicates by sorting and using unique (more efficient than unordered_set)
     std::sort(ngrams.begin(), ngrams.end());
@@ -97,8 +109,8 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 
 void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_view new_text) {
   // Generate n-grams for both texts (no lock needed for CPU-intensive operation)
-  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_);
-  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Sort and remove duplicates (more efficient than unordered_set)
   std::sort(old_ngrams.begin(), old_ngrams.end());
@@ -149,7 +161,7 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
 
 void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   std::sort(ngrams.begin(), ngrams.end());
@@ -326,7 +338,10 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
 }
 
 std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms) const {
-  // Internal implementation (assumes postings_mutex_ is already locked)
+  // PRECONDITION: Caller MUST hold postings_mutex_ (shared or exclusive) before
+  // calling this method. Accessing term_postings_ without the lock is undefined
+  // behavior. This method is private and must only be called from methods that
+  // already hold the lock (e.g., SearchNot with its shared_lock).
   std::vector<DocId> result;
 
   for (const auto& term : terms) {

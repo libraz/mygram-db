@@ -545,3 +545,34 @@ TEST_F(GtidEncoderTest, OverflowCheckForNearMaxRangeEnd) {
   auto result = GtidEncoder::Encode(gtid);
   EXPECT_FALSE(result.has_value());
 }
+
+// ===========================================================================
+// Single GTID encoding tests (BUG 1: verify single GTID creates correct interval)
+// ===========================================================================
+
+TEST_F(GtidEncoderTest, SingleGtidCreatesIntervalFromTransactionNumber) {
+  // When encoding "uuid:101", it creates interval [101, 102)
+  // This is the RAW encoder behavior - BinlogReader's ConvertSingleGtidToRange
+  // is responsible for converting "uuid:101" to "uuid:1-101" before encoding
+  std::string gtid = "00000000-0000-0000-0000-000000000001:101";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value());
+
+  int64_t interval_start = ReadInt64LE(*result, 32);
+  int64_t interval_end = ReadInt64LE(*result, 40);
+  EXPECT_EQ(interval_start, 101);
+  EXPECT_EQ(interval_end, 102);  // exclusive
+}
+
+TEST_F(GtidEncoderTest, ConvertedRangeGtidCreatesCorrectInterval) {
+  // After ConvertSingleGtidToRange: "uuid:101" -> "uuid:1-101"
+  // Encoding "uuid:1-101" should create interval [1, 102)
+  std::string gtid = "00000000-0000-0000-0000-000000000001:1-101";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value());
+
+  int64_t interval_start = ReadInt64LE(*result, 32);
+  int64_t interval_end = ReadInt64LE(*result, 40);
+  EXPECT_EQ(interval_start, 1);
+  EXPECT_EQ(interval_end, 102);  // exclusive
+}

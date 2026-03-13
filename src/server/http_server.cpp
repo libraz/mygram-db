@@ -502,6 +502,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Get ngram sizes for this table
     int current_ngram_size = table_iter->second->config.ngram_size;
     int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -524,7 +525,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
       // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
       if (current_kanji_ngram_size > 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        ngrams =
+            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
       } else if (current_ngram_size == 0) {
         ngrams = utils::GenerateHybridNgrams(normalized);
       } else {
@@ -580,7 +582,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
         // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
         if (current_kanji_ngram_size > 0) {
-          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
+                                               current_cross_boundary);
         } else if (current_ngram_size == 0) {
           ngrams = utils::GenerateHybridNgrams(normalized);
         } else {
@@ -971,6 +974,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Get ngram sizes for this table
     int current_ngram_size = table_iter->second->config.ngram_size;
     int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -993,7 +997,8 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 
       // Use hybrid n-grams if kanji_ngram_size is configured
       if (current_kanji_ngram_size > 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        ngrams =
+            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
       } else if (current_ngram_size == 0) {
         ngrams = utils::GenerateHybridNgrams(normalized);
       } else {
@@ -1046,7 +1051,8 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
         std::vector<std::string> not_ngrams;
 
         if (current_kanji_ngram_size > 0) {
-          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
+                                                   current_cross_boundary);
         } else if (current_ngram_size == 0) {
           not_ngrams = utils::GenerateHybridNgrams(normalized);
         } else {

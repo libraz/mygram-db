@@ -99,6 +99,51 @@ void ValidatePathNoTraversal(const std::string& path, const std::string& field_n
 }
 
 /**
+ * @brief Validate bind address format
+ *
+ * Checks that a bind address is a reasonable IP address or hostname.
+ * Rejects path traversal sequences, null bytes, and obviously invalid formats
+ * (e.g., paths with slashes, whitespace).
+ *
+ * @param address Bind address to validate
+ * @param field_name Name of the field for error messages
+ * @throws std::runtime_error if address is invalid
+ */
+void ValidateBindAddress(const std::string& address, const std::string& field_name) {
+  if (address.empty()) {
+    return;  // Empty addresses use defaults
+  }
+
+  // Check for null bytes
+  if (address.find('\0') != std::string::npos) {
+    throw std::runtime_error("Invalid bind address in '" + field_name + "': address contains null bytes.");
+  }
+
+  // Check for path traversal patterns
+  if (address.find("..") != std::string::npos) {
+    throw std::runtime_error("Invalid bind address in '" + field_name +
+                             "': address contains '..' which is not allowed. "
+                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+  }
+
+  // Check for path separators (bind addresses should not contain slashes)
+  if (address.find('/') != std::string::npos) {
+    throw std::runtime_error("Invalid bind address in '" + field_name +
+                             "': address contains '/' which is not allowed. "
+                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+  }
+
+  // Check for whitespace
+  for (char character : address) {
+    if (std::isspace(static_cast<unsigned char>(character)) != 0) {
+      throw std::runtime_error("Invalid bind address in '" + field_name +
+                               "': address contains whitespace. "
+                               "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+    }
+  }
+}
+
+/**
  * @brief Convert YAML node to JSON object recursively
  */
 json YamlToJson(const YAML::Node& node) {
@@ -388,6 +433,9 @@ TableConfig ParseTableConfig(const json& json_obj) {
   if (config.kanji_ngram_size == 0) {
     config.kanji_ngram_size = config.ngram_size;
   }
+  if (json_obj.contains("cross_boundary_ngrams")) {
+    config.cross_boundary_ngrams = json_obj["cross_boundary_ngrams"].get<bool>();
+  }
 
   // Check for deprecated where_clause
   if (json_obj.contains("where_clause")) {
@@ -625,6 +673,7 @@ Config ParseConfigFromJson(const json& root) {
     const auto& server = root["server"];
     if (server.contains("host")) {
       config.api.tcp.bind = server["host"].get<std::string>();
+      ValidateBindAddress(config.api.tcp.bind, "server.host");
     }
     if (server.contains("port")) {
       config.api.tcp.port = server["port"].get<int>();
@@ -636,6 +685,7 @@ Config ParseConfigFromJson(const json& root) {
       const auto& tcp = api["tcp"];
       if (tcp.contains("bind")) {
         config.api.tcp.bind = tcp["bind"].get<std::string>();
+        ValidateBindAddress(config.api.tcp.bind, "api.tcp.bind");
       }
       if (tcp.contains("port")) {
         config.api.tcp.port = tcp["port"].get<int>();
@@ -648,6 +698,7 @@ Config ParseConfigFromJson(const json& root) {
       }
       if (http.contains("bind")) {
         config.api.http.bind = http["bind"].get<std::string>();
+        ValidateBindAddress(config.api.http.bind, "api.http.bind");
       }
       if (http.contains("port")) {
         config.api.http.port = http["port"].get<int>();

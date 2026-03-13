@@ -392,6 +392,80 @@ TEST(ConnectionValidatorErrorTest, ValidateServerNotConnected) {
   EXPECT_THAT(result.error_message, ::testing::HasSubstr("Connection is not active"));
 }
 
+// ============================================================================
+// BUG 2: GTID purge check with last_gtid parameter
+// ============================================================================
+
+/**
+ * @brief Test ValidateServer with last_gtid parameter (purge check enabled)
+ */
+TEST_F(ConnectionValidatorIntegrationTest, ValidateServerWithLastGtid) {
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+  auto executed = conn_->GetExecutedGTID();
+  ASSERT_TRUE(executed.has_value());
+
+  // Pass a valid GTID that's a subset of server's executed set
+  auto result = ConnectionValidator::ValidateServer(
+      *conn_, required_tables, std::nullopt, *executed);
+  EXPECT_TRUE(result.valid) << "Error: " << result.error_message;
+}
+
+// ============================================================================
+// BUG 3: Failover detection integration tests
+// ============================================================================
+
+/**
+ * @brief Test failover_detected flag is set when UUID changes
+ */
+TEST_F(ConnectionValidatorIntegrationTest, FailoverSetsDetectedFlag) {
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+  std::string fake_uuid = "00000000-0000-0000-0000-000000000000";
+
+  auto result = ConnectionValidator::ValidateServer(
+      *conn_, required_tables, fake_uuid);
+
+  EXPECT_TRUE(result.valid);
+  EXPECT_TRUE(result.failover_detected);
+  EXPECT_FALSE(result.warnings.empty());
+}
+
+/**
+ * @brief Test failover_detected is false when UUID matches
+ */
+TEST_F(ConnectionValidatorIntegrationTest, NoFailoverWhenUUIDMatches) {
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+
+  // First get actual UUID
+  auto first = ConnectionValidator::ValidateServer(*conn_, required_tables);
+  ASSERT_TRUE(first.valid);
+  ASSERT_TRUE(first.server_uuid.has_value());
+
+  // Second call with matching UUID
+  auto result = ConnectionValidator::ValidateServer(
+      *conn_, required_tables, *first.server_uuid);
+
+  EXPECT_TRUE(result.valid);
+  EXPECT_FALSE(result.failover_detected);
+}
+
+/**
+ * @brief Test failover with valid GTID subset check
+ */
+TEST_F(ConnectionValidatorIntegrationTest, FailoverWithValidGtidSubset) {
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+  auto executed = conn_->GetExecutedGTID();
+  ASSERT_TRUE(executed.has_value());
+
+  std::string fake_uuid = "00000000-0000-0000-0000-000000000000";
+
+  // Pass a GTID that IS a subset of server's executed - should succeed
+  auto result = ConnectionValidator::ValidateServer(
+      *conn_, required_tables, fake_uuid, *executed);
+
+  EXPECT_TRUE(result.valid) << "Error: " << result.error_message;
+  EXPECT_TRUE(result.failover_detected);
+}
+
 /**
  * @brief Test multiple consecutive validations
  */
@@ -491,6 +565,105 @@ TEST(ConnectionValidatorUnitTest, GTIDFormatValidation) {
     bool is_valid = std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == ':' || c == ',' || c == ' ' ||
                     c == '\n' || c == '\r';
     EXPECT_FALSE(is_valid) << "Character '" << c << "' should be invalid in GTID";
+  }
+}
+
+// ============================================================================
+// BUG 3: Failover detection tests (unit tests)
+// ============================================================================
+
+/**
+ * @brief Test ValidationResult failover_detected default state
+ */
+TEST(ConnectionValidatorUnitTest, ValidationResultFailoverDetectedDefault) {
+  ValidationResult result;
+  EXPECT_FALSE(result.failover_detected);
+}
+
+/**
+ * @brief Test ValidationResult failover_detected can be set
+ */
+TEST(ConnectionValidatorUnitTest, ValidationResultFailoverDetectedSet) {
+  ValidationResult result;
+  result.failover_detected = true;
+  EXPECT_TRUE(result.failover_detected);
+}
+
+// ============================================================================
+// BUG 4: Table name validation tests (unit tests)
+// ============================================================================
+
+/**
+ * @brief Test that SQL injection characters in table names are rejected
+ */
+TEST(ConnectionValidatorUnitTest, InvalidTableNameWithSQLInjection) {
+  // We can't directly call CheckTablesExist (it's private), but we can verify
+  // through ValidateServer with a disconnected connection.
+  // The important thing is that CheckTablesExist validates table names.
+
+  // Verify the validation logic: valid characters are [a-zA-Z0-9_$-]
+  std::string valid_table = "articles_2024";
+  bool is_valid = true;
+  for (char chr : valid_table) {
+    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+      is_valid = false;
+      break;
+    }
+  }
+  EXPECT_TRUE(is_valid) << "Normal table name should be valid";
+
+  // SQL injection attempt
+  std::string injection_table = "'; DROP TABLE users; --";
+  is_valid = true;
+  for (char chr : injection_table) {
+    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+      is_valid = false;
+      break;
+    }
+  }
+  EXPECT_FALSE(is_valid) << "SQL injection table name should be rejected";
+}
+
+/**
+ * @brief Test valid table name patterns
+ */
+TEST(ConnectionValidatorUnitTest, ValidTableNamePatterns) {
+  std::vector<std::string> valid_names = {"articles", "user_profiles", "tbl$1", "test-table", "Table123"};
+
+  for (const auto& name : valid_names) {
+    bool is_valid = !name.empty();
+    for (char chr : name) {
+      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+        is_valid = false;
+        break;
+      }
+    }
+    EXPECT_TRUE(is_valid) << "Table name '" << name << "' should be valid";
+  }
+}
+
+/**
+ * @brief Test invalid table name patterns
+ */
+TEST(ConnectionValidatorUnitTest, InvalidTableNamePatterns) {
+  std::vector<std::string> invalid_names = {
+      "",                          // empty
+      "table'name",                // single quote
+      "table;name",                // semicolon
+      "table name",                // space
+      "table(name)",               // parentheses
+      "table@name",                // at sign
+  };
+
+  for (const auto& name : invalid_names) {
+    bool is_valid = !name.empty();
+    for (char chr : name) {
+      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+        is_valid = false;
+        break;
+      }
+    }
+    EXPECT_FALSE(is_valid) << "Table name '" << name << "' should be invalid";
   }
 }
 

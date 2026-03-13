@@ -282,44 +282,37 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   std::vector<DocId> result;
   result.reserve(actual_limit);
 
-  if (reverse) {
-    // For reverse order: use reverse iterator to get last N elements efficiently
-    // CRoaring library requires manual memory management for iterators
-    // Use RAII via unique_ptr with custom deleter for exception safety
-    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-    auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
-    if (raw_iter != nullptr) {
-      // RAII wrapper ensures free() is called even if push_back throws
-      auto deleter = [](roaring_uint32_iterator_t* ptr) {
-        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-        free(ptr);
-      };
-      std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
+  // CRoaring iterator lifecycle: use malloc + init/init_last + free consistently
+  // for both forward and reverse directions. This avoids mixing
+  // roaring_iterator_create()/roaring_uint32_iterator_free() (which uses
+  // roaring_malloc/roaring_free internally) with malloc()/free().
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+  auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
+  if (raw_iter != nullptr) {
+    // RAII wrapper ensures free() is called even if push_back throws
+    auto deleter = [](roaring_uint32_iterator_t* ptr) {
+      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+      free(ptr);
+    };
+    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
 
+    if (reverse) {
       roaring_iterator_init_last(roaring_bitmap_, iter.get());
-      size_t count = 0;
-      while (count < actual_limit && iter->has_value) {
-        result.push_back(iter->current_value);
+    } else {
+      roaring_iterator_init(roaring_bitmap_, iter.get());
+    }
+
+    size_t count = 0;
+    while (count < actual_limit && iter->has_value) {
+      result.push_back(iter->current_value);
+      if (reverse) {
         roaring_uint32_iterator_previous(iter.get());
-        count++;
-      }
-      // iter automatically freed by unique_ptr destructor
-    }
-  } else {
-    // For forward order: use iterator to get first N
-    // Use RAII via unique_ptr with custom deleter for exception safety
-    auto deleter = [](roaring_uint32_iterator_t* ptr) { roaring_uint32_iterator_free(ptr); };
-    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(roaring_iterator_create(roaring_bitmap_),
-                                                                       deleter);
-    if (iter != nullptr) {
-      size_t count = 0;
-      while (count < actual_limit && iter->has_value) {
-        result.push_back(iter->current_value);
+      } else {
         roaring_uint32_iterator_advance(iter.get());
-        count++;
       }
-      // iter automatically freed by unique_ptr destructor
+      count++;
     }
+    // iter automatically freed by unique_ptr destructor
   }
 
   return result;
@@ -507,7 +500,12 @@ void PostingList::ConvertToDelta() {
     return;
   }
 
-  auto docs = GetAll();
+  // Access roaring bitmap directly instead of calling GetAll(),
+  // because the caller (Optimize()) already holds a unique_lock on mutex_.
+  // Calling GetAll() would try to acquire a shared_lock, causing undefined behavior.
+  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  std::vector<DocId> docs(size);
+  roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
   delta_compressed_ = EncodeDelta(docs);
 
   roaring_bitmap_free(roaring_bitmap_);

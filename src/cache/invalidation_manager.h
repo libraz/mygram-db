@@ -82,7 +82,7 @@ class InvalidationManager {
    */
   std::unordered_set<CacheKey> InvalidateAffectedEntries(const std::string& table_name, const std::string& old_text,
                                                          const std::string& new_text, int ngram_size,
-                                                         int kanji_ngram_size);
+                                                         int kanji_ngram_size, bool cross_boundary_ngrams = true);
 
   /**
    * @brief Unregister cache entry from invalidation tracking
@@ -151,7 +151,8 @@ class InvalidationManager {
    * @param kanji_ngram_size N-gram size (for CJK characters)
    * @return Set of ngrams
    */
-  static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size);
+  static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size,
+                                                  bool cross_boundary_ngrams = true);
 
   /**
    * @brief Check if character is CJK (Chinese, Japanese, Korean)

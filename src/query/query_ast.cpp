@@ -90,9 +90,10 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
       std::vector<std::string> ngrams;
       int ngram_size = index.GetNgramSize();
       int kanji_ngram_size = index.GetKanjiNgramSize();
+      bool cross_boundary = index.GetCrossBoundaryNgrams();
 
       // Always use hybrid mode to match index generation logic
-      ngrams = utils::GenerateHybridNgrams(normalized_term, ngram_size, kanji_ngram_size);
+      ngrams = utils::GenerateHybridNgrams(normalized_term, ngram_size, kanji_ngram_size, cross_boundary);
 
       // If no n-grams generated (e.g., 1-char term with ngram_size=2), return empty
       if (ngrams.empty()) {

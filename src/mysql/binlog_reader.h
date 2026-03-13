@@ -332,6 +332,19 @@ class BinlogReader final : public IBinlogReader {
   static void FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set);
 
   /**
+   * @brief Convert a single GTID "uuid:N" to range "uuid:1-N"
+   *
+   * COM_BINLOG_DUMP_GTID semantics: "send events NOT in this set".
+   * A single GTID "uuid:101" means interval [101,102), so the server
+   * sends transactions 1-100 and 102+, causing duplicate delivery.
+   * Converting to "uuid:1-101" excludes all transactions 1 through 101.
+   *
+   * @param gtid GTID string to convert
+   * @return Converted GTID string (unchanged if already a range or multi-UUID)
+   */
+  static std::string ConvertSingleGtidToRange(const std::string& gtid);
+
+  /**
    * @brief Reader thread function
    */
   void ReaderThreadFunc();

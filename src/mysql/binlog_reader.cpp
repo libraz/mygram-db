@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <utility>
@@ -222,6 +223,9 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
+
+  // Refresh executed GTID set so the initial binlog open has the full set
+  RefreshExecutedGtidSet();
 
   should_stop_ = false;
   // Note: running_ is already set to true by compare_exchange_strong above
@@ -450,7 +454,7 @@ void BinlogReader::ReaderThreadFunc() {
     std::string current_gtid;
     {
       std::scoped_lock lock(gtid_mutex_);
-      current_gtid = executed_gtid_set_.empty() ? current_gtid_ : executed_gtid_set_;
+      current_gtid = executed_gtid_set_.empty() ? ConvertSingleGtidToRange(current_gtid_) : executed_gtid_set_;
     }
 
     // Encode GTID set to binary format if we have one
@@ -1216,8 +1220,48 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
 void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set) {
   // Copy pre-encoded GTID data into the packet buffer
+  // Invariant: rpl->gtid_set_encoded_size == encoded_data->size()
+  // This is guaranteed because we set rpl->gtid_set_encoded_size from the same
+  // vector before calling mysql_binlog_open(), which allocates packet_gtid_set
+  // with exactly that size.
   auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
+  assert(rpl->gtid_set_encoded_size == encoded_data->size());  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
+}
+
+std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
+  if (gtid.empty()) {
+    return gtid;
+  }
+
+  // Check if this looks like a single GTID (uuid:N) vs a range (uuid:1-N) or multi-UUID
+  // If it contains a comma, it's multi-UUID - pass through
+  if (gtid.find(',') != std::string::npos) {
+    return gtid;
+  }
+
+  // Find the colon separating UUID from transaction number
+  size_t colon_pos = gtid.find(':');
+  if (colon_pos == std::string::npos) {
+    return gtid;
+  }
+
+  std::string after_colon = gtid.substr(colon_pos + 1);
+
+  // If it contains a dash, it's already a range - pass through
+  if (after_colon.find('-') != std::string::npos) {
+    return gtid;
+  }
+
+  // If it contains another colon, it could be tagged GTID or multiple intervals - pass through
+  if (after_colon.find(':') != std::string::npos) {
+    return gtid;
+  }
+
+  // It's a single transaction number (e.g., "uuid:101")
+  // Convert to range "uuid:1-101" so the server excludes transactions 1 through 101
+  std::string uuid = gtid.substr(0, colon_pos);
+  return uuid + ":1-" + after_colon;
 }
 
 bool BinlogReader::ValidateConnection() {
@@ -1242,8 +1286,20 @@ bool BinlogReader::ValidateConnection() {
     }
   }
 
+  // Pass current GTID position for purge check
+  std::optional<std::string> current_gtid_for_validation;
+  {
+    std::lock_guard<std::mutex> lock(gtid_mutex_);
+    if (!executed_gtid_set_.empty()) {
+      current_gtid_for_validation = executed_gtid_set_;
+    } else if (!current_gtid_.empty()) {
+      current_gtid_for_validation = current_gtid_;
+    }
+  }
+
   // Validate connection using ConnectionValidator
-  auto result = ConnectionValidator::ValidateServer(*binlog_connection_, required_tables, expected_uuid);
+  auto result = ConnectionValidator::ValidateServer(*binlog_connection_, required_tables, expected_uuid,
+                                                    current_gtid_for_validation);
 
   if (!result.valid) {
     // Validation failed - server is invalid
@@ -1271,6 +1327,16 @@ bool BinlogReader::ValidateConnection() {
           .Field("warning", warning)
           .Warn();
     }
+  }
+
+  // Log failover detection if applicable
+  if (result.failover_detected) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_failover_handled")
+        .Field("old_uuid", expected_uuid.value_or(""))
+        .Field("new_uuid", result.server_uuid.value_or(""))
+        .Field("gtid", GetCurrentGTID())
+        .Info();
   }
 
   return true;

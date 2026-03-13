@@ -39,10 +39,11 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
 std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(const std::string& table_name,
                                                                             const std::string& old_text,
                                                                             const std::string& new_text, int ngram_size,
-                                                                            int kanji_ngram_size) {
+                                                                            int kanji_ngram_size,
+                                                                            bool cross_boundary_ngrams) {
   // Extract ngrams from old and new text (both are sorted vectors)
-  std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size);
-  std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size);
+  std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
   // Find changed ngrams (symmetric difference on sorted vectors)
   std::vector<std::string> changed_ngrams;
@@ -206,13 +207,13 @@ size_t InvalidationManager::MemoryUsage() const {
 }
 
 std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& text, int ngram_size,
-                                                            int kanji_ngram_size) {
+                                                            int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (text.empty()) {
     return {};
   }
 
   // Use existing utility function for ngram generation
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
   // Sort and deduplicate
   std::sort(ngrams.begin(), ngrams.end());

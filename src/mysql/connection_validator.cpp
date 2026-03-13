@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 
 #include "mysql/connection.h"
 #include "utils/structured_log.h"
@@ -17,7 +18,8 @@
 namespace mygramdb::mysql {
 
 ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
-                                                     const std::optional<std::string>& expected_uuid) {
+                                                     const std::optional<std::string>& expected_uuid,
+                                                     const std::optional<std::string>& last_gtid) {
   ValidationResult result;
 
   // Check connection status
@@ -47,6 +49,47 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
   result.server_uuid = actual_uuid;
 
+  // Detect failover (server UUID changed)
+  if (expected_uuid && *expected_uuid != actual_uuid) {
+    result.failover_detected = true;
+
+    // Verify current GTID position is valid on the new server
+    if (last_gtid && !last_gtid->empty()) {
+      // Validate GTID format before using in SQL
+      const std::string& gtid_str = *last_gtid;
+      bool valid_format = true;
+      for (char chr : gtid_str) {
+        if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' &&
+            chr != ' ' && chr != '\n' && chr != '\r') {
+          valid_format = false;
+          break;
+        }
+      }
+
+      if (valid_format) {
+        std::string query = "SELECT GTID_SUBSET('" + gtid_str + "', @@GLOBAL.gtid_executed) AS is_subset";
+        auto subset_result = conn.Execute(query);
+        if (subset_result) {
+          MYSQL_ROW row = mysql_fetch_row(subset_result->get());
+          if (row != nullptr && row[0] != nullptr && std::string(row[0]) == "0") {
+            result.error_message =
+                "Failover detected but current GTID position is not a subset of new server's gtid_executed. "
+                "GTID position: " +
+                gtid_str +
+                ". "
+                "Manual intervention required: run SYNC command to establish a new position.";
+            mygram::utils::StructuredLog()
+                .Event("connection_validation_failed")
+                .Field("reason", "failover_gtid_mismatch")
+                .Field("gtid", gtid_str)
+                .Error();
+            return result;
+          }
+        }
+      }
+    }
+  }
+
   // 3. Check required tables exist
   std::vector<std::string> missing_tables;
   if (!CheckTablesExist(conn, required_tables, missing_tables)) {
@@ -67,7 +110,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
 
   // 4. Check GTID consistency (if we have an expected state)
   std::string gtid_consistency_error;
-  if (!CheckGTIDConsistency(conn, std::nullopt, gtid_consistency_error)) {
+  if (!CheckGTIDConsistency(conn, last_gtid, gtid_consistency_error)) {
     result.warnings.push_back("GTID consistency check: " + gtid_consistency_error);
   }
 
@@ -114,6 +157,25 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
   missing_tables.clear();
 
   for (const auto& table : tables) {
+    // Validate table name to prevent SQL injection
+    // MySQL table names can contain: letters, digits, underscore, dollar sign, hyphen
+    bool valid_name = !table.empty();
+    for (char chr : table) {
+      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+        valid_name = false;
+        break;
+      }
+    }
+    if (!valid_name) {
+      mygram::utils::StructuredLog()
+          .Event("connection_validation_warning")
+          .Field("reason", "invalid_table_name")
+          .Field("table", table)
+          .Warn();
+      missing_tables.push_back(table);
+      continue;
+    }
+
     // Query INFORMATION_SCHEMA to check if table exists
     std::string query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" +
                         table + "' LIMIT 1";

@@ -163,6 +163,7 @@ struct TableConfig {
   std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
   int ngram_size = 2;                                  // N-gram size for ASCII/alphanumeric characters
   int kanji_ngram_size = 0;  // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
+  bool cross_boundary_ngrams = true;  // Generate N-grams that span CJK/non-CJK boundaries
   PostingConfig posting;
 };
 

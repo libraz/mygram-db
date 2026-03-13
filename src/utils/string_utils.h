@@ -59,10 +59,11 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n = 1);
  * @param text Input text (should be normalized)
  * @param ascii_ngram_size N-gram size for ASCII/alphanumeric characters (default: 2)
  * @param kanji_ngram_size N-gram size for CJK characters (default: 1)
+ * @param cross_boundary_ngrams Generate N-grams spanning CJK/non-CJK boundaries (default: true)
  * @return Vector of n-gram strings
  */
 std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size = 2,
-                                              int kanji_ngram_size = 1);
+                                              int kanji_ngram_size = 1, bool cross_boundary_ngrams = true);
 
 /**
  * @brief Convert UTF-8 string to codepoint vector

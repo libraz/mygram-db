@@ -24,17 +24,19 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   // Get ngram settings for this specific table
   int ngram_size = 3;        // Default
   int kanji_ngram_size = 2;  // Default
+  bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
     ngram_size = table_iter->second->config.ngram_size;
     kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    cross_boundary_ngrams = table_iter->second->config.cross_boundary_ngrams;
   }
 
   // Phase 1: Immediate invalidation (mark entries)
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
-    affected_keys =
-        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
+    affected_keys = invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size,
+                                                                  kanji_ngram_size, cross_boundary_ngrams);
   }
 
   // Phase 2: Queue for deferred deletion or process immediately

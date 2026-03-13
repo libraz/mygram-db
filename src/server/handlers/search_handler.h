@@ -54,14 +54,15 @@ class SearchHandler : public CommandHandler {
    */
   static std::vector<TermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms,
                                                  index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                                 query::DebugInfo* debug_info);
+                                                 query::DebugInfo* debug_info, bool cross_boundary_ngrams = true);
 
   /**
    * @brief Apply NOT filter to results
    */
   static std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
                                                     const std::vector<std::string>& not_terms,
-                                                    index::Index* current_index, int ngram_size, int kanji_ngram_size);
+                                                    index::Index* current_index, int ngram_size, int kanji_ngram_size,
+                                                    bool cross_boundary_ngrams = true);
 
   /**
    * @brief Apply filter conditions to results

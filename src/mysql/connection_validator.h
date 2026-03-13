@@ -21,9 +21,10 @@ class Connection;
  */
 struct ValidationResult {
   bool valid = false;
+  bool failover_detected = false;  ///< True when server UUID changed
   std::string error_message;
   std::vector<std::string> warnings;
-  std::optional<std::string> server_uuid;  // Detected server UUID
+  std::optional<std::string> server_uuid;  ///< Detected server UUID
 
   /**
    * @brief Check if validation passed
@@ -49,7 +50,8 @@ class ConnectionValidator {
    * @return ValidationResult with validation status and details
    */
   static ValidationResult ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
-                                         const std::optional<std::string>& expected_uuid = std::nullopt);
+                                         const std::optional<std::string>& expected_uuid = std::nullopt,
+                                         const std::optional<std::string>& last_gtid = std::nullopt);
 
  private:
   /**

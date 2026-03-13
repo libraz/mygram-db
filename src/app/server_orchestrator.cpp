@@ -186,7 +186,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     ctx->config = table_config;
 
     // Create index and document store for this table
-    ctx->index = std::make_unique<index::Index>(table_config.ngram_size, table_config.kanji_ngram_size);
+    ctx->index = std::make_unique<index::Index>(table_config.ngram_size, table_config.kanji_ngram_size,
+                                                   index::kDefaultRoaringThreshold,
+                                                   table_config.cross_boundary_ngrams);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
     table_contexts_[table_config.name] = std::move(ctx);
