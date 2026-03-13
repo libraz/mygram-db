@@ -61,11 +61,23 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       // nested lock acquisition (queue_mutex_ -> InvalidationManager::mutex_ -> QueryCache::mutex_)
       process_immediately = true;
     } else {
-      // Worker is running, add to queue
-      // Always update timestamp even if key exists to ensure proper batch processing
-      for (const auto& key : affected_keys) {
-        const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-        pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
+      // Worker is running, add to queue with backpressure check
+      if (pending_cache_keys_.size() >= max_queue_size_) {
+        // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
+        // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
+        spdlog::warn(
+            "InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
+            pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+      } else {
+        // Always update timestamp even if key exists to ensure proper batch processing
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& key : affected_keys) {
+          const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
+          pending_cache_keys_[composite_key] = now;
+        }
+        if (now < oldest_timestamp_) {
+          oldest_timestamp_ = now;
+        }
       }
     }
   }
@@ -120,7 +132,7 @@ void InvalidationQueue::Stop() {
 
 size_t InvalidationQueue::GetPendingCount() const {
   std::lock_guard<std::mutex> lock(queue_mutex_);
-  return pending_ngrams_.size();
+  return pending_cache_keys_.size();
 }
 
 void InvalidationQueue::WorkerLoop() {
@@ -128,19 +140,11 @@ void InvalidationQueue::WorkerLoop() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
 
     // Wait for trigger: batch size reached or max delay elapsed
-    if (!pending_ngrams_.empty()) {
-      // Find oldest entry
-      auto oldest_timestamp = std::chrono::steady_clock::time_point::max();
-      for (const auto& [key, timestamp] : pending_ngrams_) {
-        if (timestamp < oldest_timestamp) {
-          oldest_timestamp = timestamp;
-        }
-      }
-
+    if (!pending_cache_keys_.empty()) {
       const auto now = std::chrono::steady_clock::now();
-      const auto time_since_oldest = now - oldest_timestamp;
+      const auto time_since_oldest = now - oldest_timestamp_;
 
-      if (pending_ngrams_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
+      if (pending_cache_keys_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
         // Check running_ before processing to handle spurious wakeup and shutdown
         if (!running_.load()) {
           break;
@@ -153,7 +157,7 @@ void InvalidationQueue::WorkerLoop() {
         // Wait for signal or timeout
         const auto remaining_delay = max_delay_ - time_since_oldest;
         queue_cv_.wait_for(lock, remaining_delay,
-                           [this] { return !running_.load() || pending_ngrams_.size() >= batch_size_; });
+                           [this] { return !running_.load() || pending_cache_keys_.size() >= batch_size_; });
 
         // After wakeup, check running_ before continuing
         if (!running_.load()) {
@@ -162,7 +166,7 @@ void InvalidationQueue::WorkerLoop() {
       }
     } else {
       // Queue is empty: wait indefinitely for new items
-      queue_cv_.wait(lock, [this] { return !running_.load() || !pending_ngrams_.empty(); });
+      queue_cv_.wait(lock, [this] { return !running_.load() || !pending_cache_keys_.empty(); });
 
       // After wakeup, check running_ before continuing
       if (!running_.load()) {
@@ -177,14 +181,15 @@ void InvalidationQueue::ProcessBatch() {
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (pending_ngrams_.empty()) {
+    if (pending_cache_keys_.empty()) {
       return;
     }
 
     // Move pending items to batch
-    // std::move leaves pending_ngrams_ in a valid but empty state for
+    // std::move leaves pending_cache_keys_ in a valid but empty state for
     // std::unordered_map, so explicit clear() is unnecessary
-    batch = std::move(pending_ngrams_);
+    batch = std::move(pending_cache_keys_);
+    oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
   // Process batch: erase invalidated entries from cache

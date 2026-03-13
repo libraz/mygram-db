@@ -692,7 +692,7 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
 
 /**
  * @brief Test empty queue handling (time calculation bug regression test)
- * Regression test for: pending_ngrams_ empty caused negative time calculation
+ * Regression test for: pending_cache_keys_ empty caused negative time calculation
  */
 TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
   QueryCache cache(1024 * 1024, 10.0);

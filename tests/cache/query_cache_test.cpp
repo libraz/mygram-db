@@ -1628,4 +1628,38 @@ TEST(QueryCacheTest, TTLExpirationStats) {
   EXPECT_EQ(stats_after.total_queries, stats_after.cache_hits + stats_after.cache_misses);
 }
 
+/**
+ * @brief Test that decompression_failures stat is properly tracked
+ *
+ * Verifies that the decompression_failures counter is initialized to 0
+ * and is included in the statistics snapshot. A full decompression failure
+ * test would require injecting corrupted compressed data into a cache entry,
+ * which requires internal access (the fix ensures such entries are cleaned up
+ * by RefreshLRU via pending_decompression_keys_).
+ */
+TEST(QueryCacheTest, DecompressionFailureStatInitialized) {
+  QueryCache cache(1024 * 1024, 10.0, 0, true);
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 0);
+
+  // Insert and lookup a valid entry - should not trigger decompression failure
+  auto key = CacheKeyGenerator::Generate("test query");
+  std::vector<DocId> result = {1, 2, 3, 4, 5};
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  EXPECT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+
+  stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 0)
+      << "Valid decompression should not increment decompression_failures";
+  EXPECT_EQ(stats.cache_hits, 1);
+}
+
 }  // namespace mygramdb::cache

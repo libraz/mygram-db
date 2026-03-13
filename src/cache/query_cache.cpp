@@ -78,7 +78,9 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
       // Entry expired - enqueue for cleanup by RefreshLRU
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-        pending_expired_keys_.push_back(key);
+        if (pending_expired_keys_.size() < kMaxPendingKeys) {
+          pending_expired_keys_.insert(key);
+        }
       }
 
       stats_.cache_misses++;
@@ -122,7 +124,14 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
       std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
     }
   } catch (const std::exception& e) {
-    // Decompression failed, treat as miss
+    // Decompression failed - enqueue for cleanup and treat as miss
+    {
+      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+        pending_decompression_keys_.insert(key);
+      }
+    }
+
     stats_.cache_misses++;
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -200,7 +209,9 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
       // Entry expired - enqueue for cleanup by RefreshLRU
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-        pending_expired_keys_.push_back(key);
+        if (pending_expired_keys_.size() < kMaxPendingKeys) {
+          pending_expired_keys_.insert(key);
+        }
       }
 
       stats_.cache_misses++;
@@ -245,7 +256,14 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
       std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
     }
   } catch (const std::exception& e) {
-    // Decompression failed, treat as miss
+    // Decompression failed - enqueue for cleanup and treat as miss
+    {
+      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+        pending_decompression_keys_.insert(key);
+      }
+    }
+
     stats_.cache_misses++;
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -477,6 +495,9 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
     case RemovalReason::kTTLExpired:
       stats_.ttl_expirations++;
       break;
+    case RemovalReason::kDecompressionFailure:
+      stats_.decompression_failures++;
+      break;
     case RemovalReason::kTableClear:
       // No additional counter (existing behavior)
       break;
@@ -513,19 +534,21 @@ void QueryCache::RefreshLRUWorker() {
 }
 
 void QueryCache::RefreshLRU() {
-  // Drain pending expired keys from Lookup() before acquiring main lock
-  std::vector<CacheKey> lookup_expired_keys;
+  // Drain pending keys from Lookup() before acquiring main lock
+  std::unordered_set<CacheKey> lookup_expired_keys;
+  std::unordered_set<CacheKey> decomp_failed_keys;
   {
     std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
     lookup_expired_keys.swap(pending_expired_keys_);
+    decomp_failed_keys.swap(pending_decompression_keys_);
   }
 
   std::unique_lock lock(mutex_);
 
   auto now = std::chrono::steady_clock::now();
 
-  // Start with keys detected as expired during Lookup
-  std::vector<CacheKey> expired_keys = std::move(lookup_expired_keys);
+  // Start with keys detected as expired during Lookup (already deduplicated)
+  std::unordered_set<CacheKey> expired_keys = std::move(lookup_expired_keys);
 
   // Update LRU for entries that were accessed since last refresh
   for (auto& [key, entry_pair] : cache_map_) {
@@ -533,7 +556,7 @@ void QueryCache::RefreshLRU() {
     if (ttl_seconds_ > 0) {
       auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
       if (age >= ttl_seconds_) {
-        expired_keys.push_back(key);
+        expired_keys.insert(key);
         continue;  // Skip LRU update for expired entries
       }
     }
@@ -550,6 +573,14 @@ void QueryCache::RefreshLRU() {
     auto iter = cache_map_.find(key);
     if (iter != cache_map_.end()) {
       RemoveEntryLocked(iter, RemovalReason::kTTLExpired);
+    }
+  }
+
+  // Remove decompression-failed entries
+  for (const auto& key : decomp_failed_keys) {
+    auto iter = cache_map_.find(key);
+    if (iter != cache_map_.end()) {
+      RemoveEntryLocked(iter, RemovalReason::kDecompressionFailure);
     }
   }
 

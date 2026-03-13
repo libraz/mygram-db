@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "cache/cache_entry.h"
 #include "cache/result_compressor.h"
@@ -45,7 +46,8 @@ struct CacheStatisticsSnapshot {
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
   uint64_t evictions = 0;
-  uint64_t ttl_expirations = 0;  ///< TTL-expired entries removed
+  uint64_t ttl_expirations = 0;          ///< TTL-expired entries removed
+  uint64_t decompression_failures = 0;   ///< Entries removed due to decompression failure
 
   // Timing statistics
   double total_cache_hit_time_ms = 0.0;
@@ -102,6 +104,7 @@ struct CacheStatistics {
   std::atomic<uint64_t> current_memory_bytes{0};
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> ttl_expirations{0};
+  std::atomic<uint64_t> decompression_failures{0};
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
@@ -111,7 +114,7 @@ struct CacheStatistics {
 };
 
 /// Reason for cache entry removal (used by RemoveEntryLocked)
-enum class RemovalReason { kLRUEviction, kTTLExpired, kTableClear };
+enum class RemovalReason { kLRUEviction, kTTLExpired, kDecompressionFailure, kTableClear };
 
 /**
  * @brief LRU cache for query results
@@ -224,6 +227,7 @@ class QueryCache {
     snapshot.current_memory_bytes = stats_.current_memory_bytes.load();
     snapshot.evictions = stats_.evictions.load();
     snapshot.ttl_expirations = stats_.ttl_expirations.load();
+    snapshot.decompression_failures = stats_.decompression_failures.load();
     {
       std::lock_guard<std::mutex> lock(stats_.timing_mutex_);
       snapshot.total_cache_hit_time_ms = stats_.total_cache_hit_time_ms;
@@ -310,9 +314,12 @@ class QueryCache {
   // Eviction callback
   EvictionCallback eviction_callback_;
 
-  // TTL-expired keys pending cleanup (collected by Lookup, processed by RefreshLRU)
+  // Keys pending cleanup (collected by Lookup, processed by RefreshLRU)
+  // Using unordered_set for deduplication (same key may expire on multiple Lookups)
+  static constexpr size_t kMaxPendingKeys = 10000;      ///< Max pending keys per category
   mutable std::mutex expired_keys_mutex_;
-  std::vector<CacheKey> pending_expired_keys_;
+  std::unordered_set<CacheKey> pending_expired_keys_;          ///< TTL-expired keys
+  std::unordered_set<CacheKey> pending_decompression_keys_;    ///< Decompression-failed keys
 
   // Background LRU refresh thread
   std::atomic<bool> should_stop_{false};
