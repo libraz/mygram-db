@@ -794,3 +794,120 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
   // Should complete in reasonable time (< 100ms)
   EXPECT_LT(duration_us, 100000);
 }
+
+// =============================================================================
+// Delta encoding roundtrip tests (#3)
+// =============================================================================
+
+/**
+ * @brief Test EncodeDelta/DecodeDelta roundtrip with sorted input
+ */
+TEST_F(PostingListTest, DeltaEncodingRoundtrip) {
+  PostingList posting(0.5);
+
+  // Add documents in order
+  std::vector<DocId> doc_ids = {5, 10, 20, 50, 100, 500, 1000};
+  for (auto id : doc_ids) {
+    posting.Add(id);
+  }
+
+  // Verify all elements are retrievable
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), doc_ids.size());
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    EXPECT_EQ(all[i], doc_ids[i]);
+  }
+}
+
+/**
+ * @brief Test delta encoding with empty input
+ */
+TEST_F(PostingListTest, DeltaEncodingEmpty) {
+  PostingList posting(0.5);
+  EXPECT_EQ(posting.Size(), 0);
+  auto all = posting.GetAll();
+  EXPECT_TRUE(all.empty());
+}
+
+/**
+ * @brief Test delta encoding with single element
+ */
+TEST_F(PostingListTest, DeltaEncodingSingleElement) {
+  PostingList posting(0.5);
+  posting.Add(42);
+  EXPECT_EQ(posting.Size(), 1);
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), 1);
+  EXPECT_EQ(all[0], 42);
+}
+
+/**
+ * @brief Test delta encoding with large DocId values
+ */
+TEST_F(PostingListTest, DeltaEncodingLargeDocIds) {
+  PostingList posting(0.5);
+
+  // Use large DocId values near uint32_t max
+  std::vector<DocId> large_ids = {
+      4000000000U, 4100000000U, 4200000000U, 4294967290U};
+  for (auto id : large_ids) {
+    posting.Add(id);
+  }
+
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), large_ids.size());
+  for (size_t i = 0; i < large_ids.size(); ++i) {
+    EXPECT_EQ(all[i], large_ids[i]);
+  }
+}
+
+/**
+ * @brief Test delta encoding with consecutive DocIds
+ */
+TEST_F(PostingListTest, DeltaEncodingConsecutive) {
+  PostingList posting(0.5);
+
+  for (DocId id = 1; id <= 20; ++id) {
+    posting.Add(id);
+  }
+
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), 20);
+  for (DocId id = 1; id <= 20; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}
+
+// =============================================================================
+// ConvertToRoaring data preservation test (#5)
+// =============================================================================
+
+/**
+ * @brief Test that ConvertToRoaring preserves all data
+ */
+TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
+  // Use very low threshold so Optimize triggers conversion
+  PostingList posting(0.01);  // 1% threshold
+
+  // Add enough documents to trigger roaring conversion
+  std::vector<DocId> doc_ids;
+  for (DocId id = 1; id <= 100; ++id) {
+    doc_ids.push_back(id);
+  }
+  posting.AddBatch(doc_ids);
+
+  // Force optimization with total_docs close to doc count (high density)
+  posting.Optimize(100);  // density = 100/100 = 1.0 > threshold
+
+  // Verify all data preserved after conversion
+  EXPECT_EQ(posting.Size(), 100);
+  for (DocId id = 1; id <= 100; ++id) {
+    EXPECT_TRUE(posting.Contains(id)) << "DocId " << id << " missing after ConvertToRoaring";
+  }
+
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), 100);
+  for (DocId id = 1; id <= 100; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}

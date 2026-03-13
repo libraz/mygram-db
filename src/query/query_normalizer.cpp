@@ -104,6 +104,12 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
         is_space = true;
         i += 2;
       }
+      // U+2028 (Line Separator): 0xE2 0x80 0xA8
+      // U+2029 (Paragraph Separator): 0xE2 0x80 0xA9
+      else if (byte2 == 0x80 && (byte3 == 0xA8 || byte3 == 0xA9)) {
+        is_space = true;
+        i += 2;
+      }
       // U+202F (Narrow No-Break Space): 0xE2 0x80 0xAF
       else if (byte2 == 0x80 && byte3 == 0xAF) {
         is_space = true;
@@ -114,6 +120,15 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
         is_space = true;
         i += 2;
       }
+    }
+    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    // Check for UTF-8 Ogham Space Mark U+1680 (0xE1 0x9A 0x80)
+    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+    else if (byte == 0xE1 && i + 2 < text.size() &&
+             static_cast<unsigned char>(text[i + 1]) == 0x9A &&
+             static_cast<unsigned char>(text[i + 2]) == 0x80) {
+      is_space = true;
+      i += 2;
     }
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // Check for UTF-8 full-width space U+3000 (0xE3 0x80 0x80)

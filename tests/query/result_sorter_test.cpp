@@ -865,3 +865,47 @@ TEST_F(ResultSorterTest, SchwartzianTransformWithMissingPrimaryKeys) {
     EXPECT_LE(num_prev, num_curr);
   }
 }
+
+// =============================================================================
+// #6: Schwartzian Transform threshold test
+// =============================================================================
+
+/**
+ * @brief Test sorting correctness at Schwartzian Transform threshold boundary
+ *
+ * Verifies that sorting produces correct results both below and above
+ * the Schwartzian Transform threshold (100 entries).
+ */
+TEST_F(ResultSorterTest, SchwartzianTransformThresholdBoundary) {
+  // Add 150 documents (above threshold of 100)
+  std::vector<DocId> doc_ids;
+  for (int i = 150; i >= 1; --i) {
+    auto result = doc_store_.AddDocument(std::to_string(i));
+    ASSERT_TRUE(result.has_value());
+    doc_ids.push_back(result.value());
+  }
+
+  // Create query with default ordering (primary key DESC)
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Verify we get 10 results
+  ASSERT_EQ(sorted.size(), 10);
+
+  // Verify results are sorted by primary key DESC (150, 149, 148, ...)
+  for (size_t i = 0; i < sorted.size(); ++i) {
+    auto pk = doc_store_.GetPrimaryKey(sorted[i]);
+    ASSERT_TRUE(pk.has_value());
+    EXPECT_EQ(pk.value(), std::to_string(150 - static_cast<int>(i)))
+        << "Position " << i << " should have primary key "
+        << (150 - static_cast<int>(i));
+  }
+}

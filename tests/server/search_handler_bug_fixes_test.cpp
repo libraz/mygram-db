@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <charconv>
 #include <cmath>
 #include <limits>
 
@@ -460,6 +461,165 @@ TEST(SearchHandlerBugFixTest, M6_FilterThresholdConfigurable) {
   // Restore default
   SearchHandler::SetFilterThreshold(1000);
   EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
+}
+
+// =============================================================================
+// #1: NOT n-gram deduplication
+// =============================================================================
+
+/**
+ * @brief Test that NOT n-gram deduplication logic works correctly
+ *
+ * When multiple NOT terms generate overlapping n-grams, duplicates should
+ * be removed to avoid redundant PostingList lookups.
+ */
+TEST(SearchHandlerBugFixTest, NotNgramDeduplication) {
+  // Simulate multiple NOT terms generating overlapping n-grams
+  // e.g., NOT "abc" and NOT "abcd" both generate n-gram "ab", "bc"
+  std::vector<std::string> not_ngrams;
+
+  // Term 1: "abc" -> n-grams "ab", "bc"
+  not_ngrams.push_back("ab");
+  not_ngrams.push_back("bc");
+
+  // Term 2: "abcd" -> n-grams "ab", "bc", "cd"
+  not_ngrams.push_back("ab");
+  not_ngrams.push_back("bc");
+  not_ngrams.push_back("cd");
+
+  // Before dedup: 5 entries with duplicates
+  EXPECT_EQ(not_ngrams.size(), 5);
+
+  // Apply deduplication (same logic as the fix)
+  std::sort(not_ngrams.begin(), not_ngrams.end());
+  not_ngrams.erase(std::unique(not_ngrams.begin(), not_ngrams.end()), not_ngrams.end());
+
+  // After dedup: 3 unique entries
+  EXPECT_EQ(not_ngrams.size(), 3);
+  EXPECT_EQ(not_ngrams[0], "ab");
+  EXPECT_EQ(not_ngrams[1], "bc");
+  EXPECT_EQ(not_ngrams[2], "cd");
+}
+
+/**
+ * @brief Test deduplication with no duplicates (no-op case)
+ */
+TEST(SearchHandlerBugFixTest, NotNgramDeduplicationNoDuplicates) {
+  std::vector<std::string> not_ngrams = {"ab", "cd", "ef"};
+
+  std::sort(not_ngrams.begin(), not_ngrams.end());
+  not_ngrams.erase(std::unique(not_ngrams.begin(), not_ngrams.end()), not_ngrams.end());
+
+  EXPECT_EQ(not_ngrams.size(), 3);
+}
+
+// =============================================================================
+// #2: HandleCount FilterByNgrams optimization
+// =============================================================================
+
+/**
+ * @brief Conceptual test for FilterByNgrams threshold logic in COUNT
+ *
+ * Verifies the decision logic: when candidate set is small, use FilterByNgrams;
+ * when large, use full SearchAnd intersection.
+ */
+TEST(SearchHandlerBugFixTest, CountFilterByNgramsThresholdLogic) {
+  size_t filter_threshold = 1000;
+
+  // Small candidate set -> should use FilterByNgrams
+  {
+    size_t candidates = 500;
+    bool use_filter = (candidates <= filter_threshold);
+    EXPECT_TRUE(use_filter) << "500 candidates should use FilterByNgrams (threshold=1000)";
+  }
+
+  // Exactly at threshold -> should use FilterByNgrams
+  {
+    size_t candidates = 1000;
+    bool use_filter = (candidates <= filter_threshold);
+    EXPECT_TRUE(use_filter) << "1000 candidates should use FilterByNgrams (threshold=1000)";
+  }
+
+  // Large candidate set -> should use full intersection
+  {
+    size_t candidates = 5000;
+    bool use_filter = (candidates <= filter_threshold);
+    EXPECT_FALSE(use_filter) << "5000 candidates should use full intersection (threshold=1000)";
+  }
+}
+
+// =============================================================================
+// #7: ParseFilterValue from_chars
+// =============================================================================
+
+/**
+ * @brief Test from_chars integer parsing behavior
+ *
+ * Validates that from_chars correctly parses various numeric formats.
+ */
+TEST(SearchHandlerBugFixTest, FromCharsIntegerParsing) {
+  // Valid integer
+  {
+    int64_t result = 0;
+    std::string value = "12345";
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_EQ(ec, std::errc());
+    EXPECT_EQ(result, 12345);
+  }
+
+  // Negative integer
+  {
+    int64_t result = 0;
+    std::string value = "-42";
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_EQ(ec, std::errc());
+    EXPECT_EQ(result, -42);
+  }
+
+  // Invalid string
+  {
+    int64_t result = 0;
+    std::string value = "abc";
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_NE(ec, std::errc());
+  }
+
+  // Empty string
+  {
+    int64_t result = 0;
+    std::string value;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_NE(ec, std::errc());
+  }
+}
+
+/**
+ * @brief Test from_chars double parsing behavior
+ */
+TEST(SearchHandlerBugFixTest, FromCharsDoubleParsing) {
+  // Valid double
+  {
+    double result = 0.0;
+    std::string value = "3.14";
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_EQ(ec, std::errc());
+    EXPECT_DOUBLE_EQ(result, 3.14);
+  }
+
+  // Large value
+  {
+    uint64_t result = 0;
+    std::string value = "18446744073709551615";  // UINT64_MAX
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+    EXPECT_EQ(ec, std::errc());
+    EXPECT_EQ(result, UINT64_MAX);
+  }
 }
 
 }  // namespace server

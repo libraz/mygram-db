@@ -27,8 +27,12 @@ using mygram::utils::MakeUnexpected;
 
 MysqlReconnectionHandler::MysqlReconnectionHandler(mysql::Connection* mysql_connection,
                                                    mysql::BinlogReader* binlog_reader,
-                                                   std::atomic<bool>* reconnecting_flag)
-    : mysql_connection_(mysql_connection), binlog_reader_(binlog_reader), reconnecting_flag_(reconnecting_flag) {}
+                                                   std::atomic<bool>* reconnecting_flag,
+                                                   std::vector<std::string> required_tables)
+    : mysql_connection_(mysql_connection),
+      binlog_reader_(binlog_reader),
+      reconnecting_flag_(reconnecting_flag),
+      required_tables_(std::move(required_tables)) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
   // Set reconnecting flag to block manual REPLICATION START
@@ -164,14 +168,13 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   return {};
 }
 
-Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) {
+Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) const {
   if (connection == nullptr) {
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Connection is null"));
   }
 
-  // Use ConnectionValidator to validate the connection
-  // Note: We don't specify required_tables or expected_uuid here since this is a new connection
-  auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, {}, std::nullopt);
+  // Validate connection including required tables check
+  auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, required_tables_, std::nullopt);
 
   if (!validation_result.valid) {
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, validation_result.error_message));
@@ -191,7 +194,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& /*n
 }
 
 Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(
-    void* /*connection*/) {  // NOLINT(readability-convert-member-functions-to-static)
+    void* /*connection*/) const {
   return MakeUnexpected(MakeError(ErrorCode::kInternalError, "MySQL support not enabled"));
 }
 

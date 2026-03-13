@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
 #include <limits>
 
@@ -460,6 +461,14 @@ void PostingList::ConvertToRoaring() {
 
   auto docs = DecodeDelta(delta_compressed_);
   roaring_bitmap_ = roaring_bitmap_create();
+  if (roaring_bitmap_ == nullptr) {
+    // OOM: keep delta-compressed strategy, log error
+    mygram::utils::StructuredLog()
+        .Event("posting_list_roaring_alloc_failed")
+        .Field("doc_count", static_cast<uint64_t>(docs.size()))
+        .Error();
+    return;
+  }
   if (!docs.empty()) {
     roaring_bitmap_add_many(roaring_bitmap_, docs.size(), docs.data());
   }
@@ -492,6 +501,11 @@ std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids
   if (doc_ids.empty()) {
     return {};
   }
+
+  // Debug assertion: input must be strictly sorted (no duplicates)
+  assert(std::is_sorted(doc_ids.begin(), doc_ids.end()) && "EncodeDelta: input must be sorted");
+  assert(std::adjacent_find(doc_ids.begin(), doc_ids.end()) == doc_ids.end() &&
+         "EncodeDelta: input must not contain duplicates");
 
   std::vector<uint32_t> encoded;
   encoded.reserve(doc_ids.size());

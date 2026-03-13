@@ -2015,3 +2015,66 @@ TEST(QueryParserTest, LargeOffsetWithMaxLimit) {
   EXPECT_EQ(query->limit, 1000);
   EXPECT_TRUE(query->IsValid());
 }
+
+// =============================================================================
+// Unicode whitespace tokenization tests (#4)
+// =============================================================================
+
+/**
+ * @brief Test tokenization with full-width space (U+3000)
+ */
+TEST(QueryParserTest, TokenizeFullWidthSpace) {
+  QueryParser parser;
+  // U+3000 (Ideographic Space) = 0xE3 0x80 0x80
+  auto query = parser.Parse("SEARCH articles hello\xE3\x80\x80world");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "articles");
+  // Full-width space should separate tokens, so "hello" becomes search_text
+  // and "world" may become an additional term depending on parser behavior
+  // At minimum, the search text should not contain the raw full-width space bytes
+  EXPECT_EQ(query->search_text, "hello world");
+}
+
+/**
+ * @brief Test tokenization with No-Break Space (U+00A0)
+ */
+TEST(QueryParserTest, TokenizeNoBreakSpace) {
+  QueryParser parser;
+  // U+00A0 (No-Break Space) = 0xC2 0xA0
+  auto query = parser.Parse("SEARCH articles hello\xC2\xA0world");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "articles");
+  EXPECT_EQ(query->search_text, "hello world");
+}
+
+/**
+ * @brief Test tokenization with Em Space (U+2003)
+ */
+TEST(QueryParserTest, TokenizeEmSpace) {
+  QueryParser parser;
+  // U+2003 (Em Space) = 0xE2 0x80 0x83
+  auto query = parser.Parse("SEARCH articles hello\xE2\x80\x83world");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "articles");
+  EXPECT_EQ(query->search_text, "hello world");
+}
+
+/**
+ * @brief Test tokenization with Ogham Space Mark (U+1680)
+ */
+TEST(QueryParserTest, TokenizeOghamSpaceMark) {
+  QueryParser parser;
+  // U+1680 (Ogham Space Mark) = 0xE1 0x9A 0x80
+  auto query = parser.Parse("SEARCH articles hello\xE1\x9A\x80world");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "articles");
+  EXPECT_EQ(query->search_text, "hello world");
+}

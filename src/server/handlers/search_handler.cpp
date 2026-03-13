@@ -6,6 +6,7 @@
 #include "server/handlers/search_handler.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -464,12 +465,19 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
 
   // Intersect with remaining terms
   for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
-    auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
-    std::vector<storage::DocId> intersection;
-    intersection.reserve(std::min(results.size(), and_results.size()));
-    std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
-                          std::back_inserter(intersection));
-    results = std::move(intersection);
+    // Use filter approach when candidate set is small enough
+    if (results.size() <= filter_threshold_) {
+      // Filter candidates by checking each one against posting lists
+      results = current_index->FilterByNgrams(results, term_infos[i].ngrams);
+    } else {
+      // Full intersection for large result sets
+      auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
+      std::vector<storage::DocId> intersection;
+      intersection.reserve(std::min(results.size(), and_results.size()));
+      std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
+                            std::back_inserter(intersection));
+      results = std::move(intersection);
+    }
   }
 
   // Apply NOT filter if present
@@ -591,6 +599,10 @@ std::vector<storage::DocId> SearchHandler::ApplyNotFilter(const std::vector<stor
     not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
   }
 
+  // Deduplicate n-grams to avoid redundant PostingList lookups in SearchNot
+  std::sort(not_ngrams.begin(), not_ngrams.end());
+  not_ngrams.erase(std::unique(not_ngrams.begin(), not_ngrams.end()), not_ngrams.end());
+
   return current_index->SearchNot(results, not_ngrams);
 }
 
@@ -613,28 +625,37 @@ inline ParsedFilterValue ParseFilterValue(const std::string& value) {
   // Parse as bool
   parsed_value.bool_val = (value == "1" || value == "true");
 
-  // Parse as double
-  try {
-    parsed_value.double_val = std::stod(value);
-    parsed_value.double_valid = true;
-  } catch (const std::exception&) {
-    // Invalid double
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+  const char* end = value.data() + value.size();
+
+  // Parse as double (locale-independent, no exceptions)
+  {
+    double result = 0.0;
+    auto [ptr, ec] = std::from_chars(value.data(), end, result);
+    if (ec == std::errc() && ptr == end) {
+      parsed_value.double_val = result;
+      parsed_value.double_valid = true;
+    }
   }
 
-  // Parse as int64_t
-  try {
-    parsed_value.int64_val = std::stoll(value);
-    parsed_value.int64_valid = true;
-  } catch (const std::exception&) {
-    // Invalid int64
+  // Parse as int64_t (locale-independent, no exceptions)
+  {
+    int64_t result = 0;
+    auto [ptr, ec] = std::from_chars(value.data(), end, result);
+    if (ec == std::errc() && ptr == end) {
+      parsed_value.int64_val = result;
+      parsed_value.int64_valid = true;
+    }
   }
 
-  // Parse as uint64_t
-  try {
-    parsed_value.uint64_val = std::stoull(value);
-    parsed_value.uint64_valid = true;
-  } catch (const std::exception&) {
-    // Invalid uint64
+  // Parse as uint64_t (locale-independent, no exceptions)
+  {
+    uint64_t result = 0;
+    auto [ptr, ec] = std::from_chars(value.data(), end, result);
+    if (ec == std::errc() && ptr == end) {
+      parsed_value.uint64_val = result;
+      parsed_value.uint64_valid = true;
+    }
   }
 
   return parsed_value;

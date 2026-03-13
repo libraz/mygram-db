@@ -136,10 +136,21 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
     return result;
   }
 
-  // 7. Check partial JSON mode (warning only)
+  // 7. Check binlog_format=ROW (required for row-level replication)
+  std::string format_error;
+  if (!CheckBinlogFormat(conn, format_error)) {
+    result.error_message = format_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_format_not_row")
+        .Error();
+    return result;
+  }
+
+  // 8. Check partial JSON mode (warning only)
   CheckPartialJsonMode(conn, result.warnings);
 
-  // 8. Check tagged GTID support (warning only)
+  // 9. Check tagged GTID support (warning only)
   CheckTaggedGTIDSupport(conn, result.warnings);
 
   // All checks passed
@@ -337,6 +348,35 @@ bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& err
           "binlog_row_image=" + value + " is not supported. "
           "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
           "Set it with: SET GLOBAL binlog_row_image=FULL";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_format'");
+  if (!result) {
+    // Cannot determine - assume ROW (variable always exists in MySQL 5.6+)
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - shouldn't happen but assume ROW
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value != "ROW") {
+      error =
+          "binlog_format=" + value + " is not supported. "
+          "MygramDB requires binlog_format=ROW for row-level replication. "
+          "Set it with: SET GLOBAL binlog_format=ROW";
       return false;
     }
   }

@@ -579,4 +579,73 @@ TEST(QueryNormalizerTest, VariousUnicodeSpacesNormalized) {
   EXPECT_EQ(QueryNormalizer::Normalize(query_mms), ref) << "Medium Mathematical Space (U+205F) should normalize";
 }
 
+/**
+ * @brief Test Ogham Space Mark (U+1680) normalization
+ */
+TEST(QueryNormalizerTest, OghamSpaceMarkNormalized) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  // U+1680 is 0xE1 0x9A 0x80 in UTF-8
+  query1.search_text = "hello\xE1\x9A\x80world";
+  query1.limit = 100;
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "hello world";
+  query2.limit = 100;
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+
+  EXPECT_EQ(normalized1, normalized2) << "Ogham Space Mark (U+1680) should be normalized to regular space";
+}
+
+/**
+ * @brief Test Line Separator (U+2028) normalization
+ */
+TEST(QueryNormalizerTest, LineSeparatorNormalized) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  // U+2028 is 0xE2 0x80 0xA8 in UTF-8
+  query1.search_text = "hello\xE2\x80\xA8world";
+  query1.limit = 100;
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "hello world";
+  query2.limit = 100;
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+
+  EXPECT_EQ(normalized1, normalized2) << "Line Separator (U+2028) should be normalized to regular space";
+}
+
+/**
+ * @brief Test Paragraph Separator (U+2029) normalization
+ */
+TEST(QueryNormalizerTest, ParagraphSeparatorNormalized) {
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  // U+2029 is 0xE2 0x80 0xA9 in UTF-8
+  query1.search_text = "hello\xE2\x80\xA9world";
+  query1.limit = 100;
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "hello world";
+  query2.limit = 100;
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+
+  EXPECT_EQ(normalized1, normalized2) << "Paragraph Separator (U+2029) should be normalized to regular space";
+}
+
 }  // namespace mygramdb::cache

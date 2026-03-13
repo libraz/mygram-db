@@ -97,6 +97,14 @@ class ConnectionValidator {
   static bool CheckBinlogRowImage(Connection& conn, std::string& error);
 
   /**
+   * @brief Check if binlog_format is set to ROW
+   *
+   * MygramDB requires binlog_format=ROW because it relies on row-level events
+   * for data replication. STATEMENT or MIXED formats are not supported.
+   */
+  static bool CheckBinlogFormat(Connection& conn, std::string& error);
+
+  /**
    * @brief Check if partial JSON update mode is enabled
    *
    * binlog_row_value_options=PARTIAL_JSON causes PARTIAL_UPDATE_ROWS_EVENT

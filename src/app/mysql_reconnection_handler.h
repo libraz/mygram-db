@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -55,7 +56,8 @@ class MysqlReconnectionHandler {
    * @param reconnecting_flag Optional flag to set during reconnection (to block manual REPLICATION START)
    */
   MysqlReconnectionHandler(mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader,
-                           std::atomic<bool>* reconnecting_flag = nullptr);
+                           std::atomic<bool>* reconnecting_flag = nullptr,
+                           std::vector<std::string> required_tables = {});
 #else
   MysqlReconnectionHandler(void* mysql_connection, void* binlog_reader);
 #endif
@@ -93,6 +95,7 @@ class MysqlReconnectionHandler {
   mysql::Connection* mysql_connection_;
   mysql::BinlogReader* binlog_reader_;
   std::atomic<bool>* reconnecting_flag_;  // Flag to set during reconnection (non-owning)
+  std::vector<std::string> required_tables_;  // Tables to validate after reconnection
 #else
   void* mysql_connection_;
   void* binlog_reader_;
@@ -108,13 +111,13 @@ class MysqlReconnectionHandler {
    * - binlog_format is ROW
    * - binlog_row_image is FULL
    */
-  static mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(
 #ifdef USE_MYSQL
       mysql::Connection* connection
 #else
       void* connection
 #endif
-  );
+  ) const;
 };
 
 }  // namespace mygramdb::app

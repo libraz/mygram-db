@@ -201,27 +201,33 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
   bool replication_was_running = false;
 
 #ifdef USE_MYSQL
-  // Get current GTID first (before stopping replication)
   std::string gtid;
-  if (ctx_.binlog_reader != nullptr) {
-    gtid = ctx_.binlog_reader->GetCurrentGTID();
-  }
 
-  // Check if replication is running and stop it
+  // Stop replication first, then capture GTID.
+  // This ensures the worker thread has drained all queued events
+  // before we capture the final processed GTID position.
   if (ctx_.binlog_reader != nullptr) {
     replication_was_running = ctx_.binlog_reader->IsRunning();
 
     if (replication_was_running) {
       ctx_.binlog_reader->Stop();
       ctx_.replication_paused_for_dump = true;
-      mygram::utils::StructuredLog()
-          .Event("replication_paused_for_dump")
-          .Field("operation", "dump_save")
-          .Field("gtid", gtid)
-          .Field("filepath", filepath)
-          .Field("auto_resume", "true")
-          .Info();
     }
+  }
+
+  // Capture GTID after stopping replication (last processed position)
+  if (ctx_.binlog_reader != nullptr) {
+    gtid = ctx_.binlog_reader->GetCurrentGTID();
+  }
+
+  if (replication_was_running) {
+    mygram::utils::StructuredLog()
+        .Event("replication_paused_for_dump")
+        .Field("operation", "dump_save")
+        .Field("gtid", gtid)
+        .Field("filepath", filepath)
+        .Field("auto_resume", "true")
+        .Info();
   }
 #else
   std::string gtid;

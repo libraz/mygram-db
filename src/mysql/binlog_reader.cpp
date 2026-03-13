@@ -209,10 +209,10 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   binlog_conn_config.password = connection_.GetConfig().password;
   binlog_conn_config.database = connection_.GetConfig().database;
   binlog_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
-  // Use a short read timeout (5 seconds) for the binlog connection
+  // Use a short read timeout (60 seconds) for the binlog connection
   // This allows the reader thread to check should_stop_ periodically
-  // and exit gracefully when Stop() is called (within 5 seconds max)
-  binlog_conn_config.read_timeout = 5;
+  // and exit gracefully when Stop() is called (within 60 seconds max)
+  binlog_conn_config.read_timeout = 60;  // Heartbeat keeps connection alive
   binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
 
   binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
@@ -252,9 +252,6 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
-
-  // Refresh executed GTID set so the initial binlog open has the full set
-  RefreshExecutedGtidSet();
 
   should_stop_ = false;
   // Note: running_ is already set to true by compare_exchange_strong above
@@ -352,9 +349,9 @@ std::string BinlogReader::GetCurrentGTID() const {
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
-  // If the GTID contains a range (e.g., "uuid:1-100" or "uuid1:1-100,uuid2:1-50"),
-  // also update executed_gtid_set_ for reconnection use.
-  // Single GTIDs (e.g., "uuid:101") from event processing should NOT overwrite it.
+  // Update executed_gtid_set_ for REPLICATION STATUS display only.
+  // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
+  // never executed_gtid_set_, to prevent skipping undelivered events.
   if (gtid.find('-') != std::string::npos || gtid.find(',') != std::string::npos) {
     executed_gtid_set_ = gtid;
   }
@@ -444,7 +441,6 @@ void BinlogReader::ReaderThreadFunc() {
           .Event("binlog_debug")
           .Field("action", "reconnected_after_checksum_failure")
           .Debug();
-      RefreshExecutedGtidSet();
 
       // Validate connection after reconnection (detect failover, invalid servers)
       if (!ValidateConnection()) {
@@ -462,13 +458,25 @@ void BinlogReader::ReaderThreadFunc() {
           .Event("binlog_debug")
           .Field("action", "connection_validated_after_reconnect")
           .Debug();
-      RefreshExecutedGtidSet();
 
       // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
       reconnect_attempt = 0;  // Reset delay counter after successful reconnection
       continue;
     }
     mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksums_disabled").Debug();
+
+    // Configure heartbeat to keep connection alive during idle periods.
+    // Without heartbeat, the read_timeout causes periodic TCP disconnects
+    // and full reconnection cycles, increasing the risk of data loss.
+    if (mysql_query(binlog_connection_->GetHandle(),
+                    "SET @master_heartbeat_period = 30000000000") != 0) {
+      // Non-fatal: heartbeat is optional, log and continue
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "heartbeat_config_failed")
+          .Field("error", binlog_connection_->GetLastError())
+          .Debug();
+    }
 
     // Initialize MYSQL_RPL structure for binlog reading
     MYSQL_RPL rpl{};
@@ -478,19 +486,14 @@ void BinlogReader::ReaderThreadFunc() {
     rpl.server_id = config_.server_id;  // Use configured server ID for replica
     rpl.flags = MYSQL_RPL_GTID;         // Use GTID mode (allow heartbeat events)
 
-    // Use current_gtid_ (last processed position) for reconnection, falling back to executed_gtid_set_
+    // Always use current_gtid_ (last processed by worker thread) as the
+    // authoritative source for reconnection. Never use executed_gtid_set_
+    // (from @@GLOBAL.gtid_executed) which may include events committed on
+    // the server but not yet delivered to MygramDB, causing data loss.
     std::string current_gtid;
     {
       std::scoped_lock lock(gtid_mutex_);
-      // Use current_gtid_ (last *processed* position) for reconnection.
-      // executed_gtid_set_ (from @@GLOBAL.gtid_executed) may include events
-      // the client hasn't processed yet, causing them to be skipped on reconnect.
-      // Fall back to executed_gtid_set_ only on initial connection when current_gtid_ is empty.
-      if (!current_gtid_.empty()) {
-        current_gtid = ConvertSingleGtidToRange(current_gtid_);
-      } else {
-        current_gtid = executed_gtid_set_;
-      }
+      current_gtid = ConvertSingleGtidToRange(current_gtid_);
     }
 
     // Encode GTID set to binary format if we have one
@@ -602,7 +605,6 @@ void BinlogReader::ReaderThreadFunc() {
             .Field("context", "after_reconnect")
             .Field("gtid", GetCurrentGTID())
             .Debug();
-        RefreshExecutedGtidSet();
 
         // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
         reconnect_attempt = 0;  // Reset delay counter after successful reconnection
@@ -651,7 +653,7 @@ void BinlogReader::ReaderThreadFunc() {
         last_error_ =
             "Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
 
-        // Check if this is a read timeout (expected with 5-second timeout)
+        // Check if this is a read timeout (expected with 60-second timeout when heartbeat fails)
         // errno 2013 (CR_SERVER_LOST) can indicate either timeout or actual connection loss
         if (should_stop_) {
           // Timeout while stopping - exit gracefully
@@ -660,7 +662,7 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         // Check if this is likely a read timeout (errno 2013 during idle)
-        // Read timeouts are expected every 5 seconds when there are no binlog events
+        // With heartbeat configured, timeouts indicate actual connection issues.
         // The TCP connection is broken by the timeout, so we need a full reconnect
         if (err_no == 2013) {
           // Full reconnect (closes handle, reinitializes, and connects)
@@ -673,8 +675,6 @@ void BinlogReader::ReaderThreadFunc() {
             // Failed to reconnect - log and retry with backoff
             mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(), 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
-          } else {
-            RefreshExecutedGtidSet();
           }
           idle_timeout_reconnect = true;  // Mark this as an idle timeout reconnect
           // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
@@ -735,7 +735,6 @@ void BinlogReader::ReaderThreadFunc() {
               break;
             }
             mygram::utils::StructuredLog().Event("binlog_connection_restored").Info();
-            RefreshExecutedGtidSet();
 
             // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
             reconnect_attempt = 0;  // Reset delay counter after successful reconnection
