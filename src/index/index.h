@@ -47,7 +47,9 @@ class Index {
    * @param cross_boundary_ngrams Generate N-grams spanning CJK/non-CJK boundaries
    */
   explicit Index(int ngram_size = kDefaultNgramSize, int kanji_ngram_size = kDefaultKanjiNgramSize,
-                 double roaring_threshold = kDefaultRoaringThreshold, bool cross_boundary_ngrams = true);
+                 double roaring_threshold = kDefaultRoaringThreshold, bool cross_boundary_ngrams = true,
+                 bool normalize_nfkc = true, const std::string& normalize_width = "keep",
+                 bool normalize_lower = true);
 
   ~Index() = default;
 
@@ -114,6 +116,17 @@ class Index {
    */
   [[nodiscard]] std::vector<DocId> SearchAnd(const std::vector<std::string>& terms, size_t limit = 0,
                                              bool reverse = false) const;
+
+  /**
+   * @brief Filter candidate documents by checking membership in posting lists
+   *
+   * More efficient than full intersection when candidates set is small.
+   * @param candidates Candidate document IDs to check
+   * @param terms N-gram terms that candidates must match
+   * @return Filtered vector of document IDs matching all terms
+   */
+  [[nodiscard]] std::vector<DocId> FilterByNgrams(const std::vector<DocId>& candidates,
+                                                   const std::vector<std::string>& terms) const;
 
   /**
    * @brief Search for documents containing any term (OR)
@@ -245,11 +258,23 @@ class Index {
    */
   [[nodiscard]] bool GetCrossBoundaryNgrams() const { return cross_boundary_ngrams_; }
 
+  /** @brief Get NFKC normalization setting */
+  [[nodiscard]] bool GetNormalizeNfkc() const { return normalize_nfkc_; }
+
+  /** @brief Get width normalization setting */
+  [[nodiscard]] const std::string& GetNormalizeWidth() const { return normalize_width_; }
+
+  /** @brief Get lowercase normalization setting */
+  [[nodiscard]] bool GetNormalizeLower() const { return normalize_lower_; }
+
  private:
   int ngram_size_;
   int kanji_ngram_size_;
   double roaring_threshold_;
   bool cross_boundary_ngrams_;
+  bool normalize_nfkc_;
+  std::string normalize_width_;
+  bool normalize_lower_;
 
   // Term -> Posting list mapping
   // Note: Using shared_ptr instead of unique_ptr to safely handle concurrent access

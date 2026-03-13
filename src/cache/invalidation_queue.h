@@ -140,6 +140,7 @@ class InvalidationQueue {
   std::condition_variable queue_cv_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> stopped_{false};  ///< Set by Stop(), prevents post-shutdown enqueues
 
   // Configuration defaults (match CacheConfig::invalidation defaults)
   static constexpr size_t kDefaultBatchSize = 1000;

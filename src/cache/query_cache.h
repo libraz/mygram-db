@@ -132,8 +132,10 @@ class QueryCache {
    * @param max_memory_bytes Maximum memory usage in bytes
    * @param min_query_cost_ms Minimum query cost to cache (ms)
    * @param ttl_seconds Time-to-live for cache entries in seconds (0 = no expiration)
+   * @param compression_enabled Enable LZ4 compression for cached results (default: true)
    */
-  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0);
+  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0,
+                      bool compression_enabled = true);
 
   /**
    * @brief Destructor - stops background LRU refresh thread
@@ -278,6 +280,11 @@ class QueryCache {
    */
   [[nodiscard]] int GetTtl() const { return ttl_seconds_; }
 
+  /**
+   * @brief Check if compression is enabled for cached results
+   */
+  [[nodiscard]] bool IsCompressionEnabled() const { return compression_enabled_; }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
@@ -288,7 +295,8 @@ class QueryCache {
   // Configuration
   size_t max_memory_bytes_;
   double min_query_cost_ms_;
-  int ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
+  int ttl_seconds_;              ///< Time-to-live in seconds (0 = no expiration)
+  bool compression_enabled_;     ///< Enable LZ4 compression for cached results
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;

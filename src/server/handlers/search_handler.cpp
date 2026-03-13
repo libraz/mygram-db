@@ -275,12 +275,20 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   // Intersect with remaining terms
   for (size_t i = 1; i < term_infos.size() && !results.empty(); ++i) {
-    auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
-    std::vector<storage::DocId> intersection;
-    intersection.reserve(std::min(results.size(), and_results.size()));
-    std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
-                          std::back_inserter(intersection));
-    results = std::move(intersection);
+    // Use filter approach when candidate set is small enough
+    constexpr size_t kFilterThreshold = 1000;
+    if (results.size() <= kFilterThreshold) {
+      // Filter candidates by checking each one against posting lists
+      results = current_index->FilterByNgrams(results, term_infos[i].ngrams);
+    } else {
+      // Full intersection for large result sets
+      auto and_results = current_index->SearchAnd(term_infos[i].ngrams);
+      std::vector<storage::DocId> intersection;
+      intersection.reserve(std::min(results.size(), and_results.size()));
+      std::set_intersection(results.begin(), results.end(), and_results.begin(), and_results.end(),
+                            std::back_inserter(intersection));
+      results = std::move(intersection);
+    }
   }
 
   // Apply NOT filter if present
@@ -516,7 +524,7 @@ std::vector<SearchHandler::TermInfo> SearchHandler::GenerateTermInfos(const std:
   term_infos.reserve(search_terms.size());
 
   for (const auto& search_term : search_terms) {
-    std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+    std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
     std::vector<std::string> ngrams;
 
     // Always use hybrid n-grams if kanji_ngram_size is configured
@@ -561,7 +569,7 @@ std::vector<storage::DocId> SearchHandler::ApplyNotFilter(const std::vector<stor
   // Generate NOT term n-grams
   std::vector<std::string> not_ngrams;
   for (const auto& not_term : not_terms) {
-    std::string norm_not = utils::NormalizeText(not_term, true, "keep", true);
+    std::string norm_not = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
     std::vector<std::string> ngrams;
     if (kanji_ngram_size > 0) {
       ngrams = utils::GenerateHybridNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);

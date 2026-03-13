@@ -58,7 +58,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           }
           storage::DocId doc_id = *doc_id_result;
 
-          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -108,7 +108,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
           // Extract text to remove from index
           if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+            std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {
@@ -150,7 +150,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           }
           storage::DocId doc_id = *doc_id_result;
 
-          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -201,18 +201,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             try {
               // Use Index::UpdateDocument for atomic update when both texts are available
               if (!event.old_text.empty() && !event.text.empty()) {
-                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
-                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.UpdateDocument(doc_id, old_normalized, new_normalized);
                 text_changed = true;
               } else if (!event.old_text.empty()) {
                 // Only old text available - remove from index
-                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
+                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.RemoveDocument(doc_id, old_normalized);
                 text_changed = true;
               } else if (!event.text.empty()) {
                 // Only new text available - add to index
-                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.AddDocument(doc_id, new_normalized);
                 text_changed = true;
               }
@@ -261,7 +261,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // For deletion, we extract text from binlog DELETE event (before image)
           // The rows_parser provides the deleted row data including text column
           if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+            std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {

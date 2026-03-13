@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 
@@ -664,6 +665,40 @@ TEST(ConnectionValidatorUnitTest, InvalidTableNamePatterns) {
       }
     }
     EXPECT_FALSE(is_valid) << "Table name '" << name << "' should be invalid";
+  }
+}
+
+/**
+ * @brief Test ValidateServer rejects non-FULL binlog_row_image
+ *
+ * Most servers use FULL by default, so this test just verifies
+ * validation passes with FULL. The rejection path is covered by
+ * the unit-level logic in CheckBinlogRowImage.
+ */
+TEST_F(ConnectionValidatorIntegrationTest, ValidateServerBinlogRowImageFull) {
+  // Check current setting
+  auto result = conn_->Execute("SHOW VARIABLES LIKE 'binlog_row_image'");
+  if (!result) {
+    GTEST_SKIP() << "binlog_row_image variable not available";
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr || row[1] == nullptr) {
+    GTEST_SKIP() << "Could not read binlog_row_image value";
+  }
+
+  std::string value(row[1]);
+  std::string upper_value = value;
+  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+
+  std::vector<std::string> required_tables = {"validator_test_table1"};
+  auto validation_result = ConnectionValidator::ValidateServer(*conn_, required_tables);
+
+  if (upper_value == "FULL") {
+    EXPECT_TRUE(validation_result.valid) << "Error: " << validation_result.error_message;
+  } else {
+    EXPECT_FALSE(validation_result.valid);
+    EXPECT_THAT(validation_result.error_message, ::testing::HasSubstr("binlog_row_image"));
   }
 }
 

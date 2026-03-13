@@ -273,8 +273,9 @@ class BinlogReader final : public IBinlogReader {
   void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
 
  private:
-  Connection& connection_;  // Reference to main connection (used for metadata queries, externally owned)
-  std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading (internally owned)
+  Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
+  std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
+  std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
 
   // Multi-table support
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
@@ -290,6 +291,7 @@ class BinlogReader final : public IBinlogReader {
 
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
+  std::mutex stop_mutex_;  ///< Serializes Stop() calls to prevent concurrent join races
 
   // Event queue (using unique_ptr to avoid copying large BinlogEvent objects)
   std::queue<std::unique_ptr<BinlogEvent>> event_queue_;
@@ -307,6 +309,10 @@ class BinlogReader final : public IBinlogReader {
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
   server::ServerStats* server_stats_ = nullptr;  // Optional server statistics tracker
+
+  // Debug log counters (instance-scoped, reset on Start())
+  std::atomic<int> no_data_log_count_{0};
+  std::atomic<int> skip_log_count_{0};
 
   std::string last_error_;
 

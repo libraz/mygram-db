@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #include "utils/structured_log.h"
 
@@ -562,6 +563,11 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Write size
+    if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
+      spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})",
+                    delta_compressed_.size());
+      return;
+    }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
     buffer.push_back((size >> kShift24Bits) & kByteMask);
     buffer.push_back((size >> kShift16Bits) & kByteMask);
@@ -579,11 +585,18 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     // Roaring bitmap: serialize using roaring's native format
     size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 
+    if (roaring_size > std::numeric_limits<uint32_t>::max()) {
+      spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})",
+                    roaring_size);
+      return;
+    }
+    auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);
+
     // Write size
-    buffer.push_back((roaring_size >> kShift24Bits) & kByteMask);
-    buffer.push_back((roaring_size >> kShift16Bits) & kByteMask);
-    buffer.push_back((roaring_size >> kBitsPerByte) & kByteMask);
-    buffer.push_back(roaring_size & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kShift24Bits) & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kShift16Bits) & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kBitsPerByte) & kByteMask);
+    buffer.push_back(roaring_size_u32 & kByteMask);
 
     // Write roaring bitmap data
     size_t old_size = buffer.size();
@@ -615,7 +628,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Read delta-compressed data
-    if (offset + (size * 4) > buffer.size()) {
+    if (offset + (static_cast<size_t>(size) * 4) > buffer.size()) {
       return false;
     }
 

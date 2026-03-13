@@ -5,6 +5,8 @@
 
 #include "cache/invalidation_queue.h"
 
+#include <spdlog/spdlog.h>
+
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "server/server_types.h"
@@ -40,14 +42,23 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   // Phase 2: Queue for deferred deletion or process immediately
+  // Reject enqueues after Stop() to prevent use-after-free
+  if (stopped_.load()) {
+    spdlog::warn(
+        "InvalidationQueue: Enqueue called after Stop(), "
+        "skipping deferred deletion for {} entries",
+        affected_keys.size());
+    return;
+  }
+
   // Check running_ inside lock to prevent TOCTOU race condition
   bool process_immediately = false;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
     if (!running_.load()) {
-      // Worker not running, process after releasing lock to avoid
-      // nested lock acquisition (queue_mutex_ → InvalidationManager::mutex_ → QueryCache::mutex_)
+      // Worker not running (not yet started), process after releasing lock to avoid
+      // nested lock acquisition (queue_mutex_ -> InvalidationManager::mutex_ -> QueryCache::mutex_)
       process_immediately = true;
     } else {
       // Worker is running, add to queue
@@ -89,6 +100,8 @@ void InvalidationQueue::Start() {
 }
 
 void InvalidationQueue::Stop() {
+  stopped_.store(true);
+
   // Atomically check and clear running_ to prevent concurrent Stop() calls
   bool expected = true;
   if (!running_.compare_exchange_strong(expected, false)) {

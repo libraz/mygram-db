@@ -520,7 +520,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     term_infos.reserve(all_search_terms.size());
 
     for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
       std::vector<std::string> ngrams;
 
       // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
@@ -577,7 +577,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     if (!query->not_terms.empty()) {
       std::vector<DocId> not_results_union;
       for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
+        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
         std::vector<std::string> ngrams;
 
         // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
@@ -992,7 +992,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     term_infos.reserve(all_search_terms.size());
 
     for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
       std::vector<std::string> ngrams;
 
       // Use hybrid n-grams if kanji_ngram_size is configured
@@ -1047,7 +1047,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Apply NOT terms if specified
     if (!query->not_terms.empty()) {
       for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
+        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
         std::vector<std::string> not_ngrams;
 
         if (current_kanji_ngram_size > 0) {

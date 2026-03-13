@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -94,6 +95,37 @@ mygram::utils::Expected<std::vector<uint8_t>, Error> GtidEncoder::Encode(const s
     }
 
     sids.push_back(sid);
+  }
+
+  // Merge SIDs with identical UUIDs (e.g., "uuid1:1-100, uuid1:200-300")
+  // MySQL protocol expects unique SID entries
+  if (sids.size() > 1) {
+    std::map<std::array<uint8_t, 16>, std::vector<Interval>> merged_map;
+    for (auto& sid : sids) {
+      auto& intervals = merged_map[sid.uuid];
+      intervals.insert(intervals.end(), sid.intervals.begin(), sid.intervals.end());
+    }
+
+    sids.clear();
+    for (auto& [uuid, intervals] : merged_map) {
+      Sid merged_sid;
+      merged_sid.uuid = uuid;
+
+      // Sort and merge intervals
+      std::sort(intervals.begin(), intervals.end(),
+                [](const Interval& a, const Interval& b) { return a.start < b.start; });
+      std::vector<Interval> merged_intervals;
+      merged_intervals.push_back(intervals[0]);
+      for (size_t i = 1; i < intervals.size(); ++i) {
+        if (intervals[i].start <= merged_intervals.back().end) {
+          merged_intervals.back().end = std::max(merged_intervals.back().end, intervals[i].end);
+        } else {
+          merged_intervals.push_back(intervals[i]);
+        }
+      }
+      merged_sid.intervals = std::move(merged_intervals);
+      sids.push_back(std::move(merged_sid));
+    }
   }
 
   // Calculate total size needed

@@ -15,8 +15,8 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config,
     : enabled_(cache_config.enabled), ttl_seconds_(cache_config.ttl_seconds) {
   if (enabled_) {
     // Create query cache with TTL support
-    query_cache_ =
-        std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms, ttl_seconds_);
+    query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
+                                                ttl_seconds_, cache_config.compression_enabled);
 
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());

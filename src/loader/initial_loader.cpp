@@ -162,7 +162,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("gtid_after", gtid_after)
           .Field("attempt", static_cast<int64_t>(retry_count + 1))
           .Warn();
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       retry_count++;
       continue;
     }
@@ -199,7 +206,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
         .Field("type", "gtid_empty")
         .Field("error", error_msg)
         .Error();
-    connection_.ExecuteUpdate("ROLLBACK");
+    auto rollback_result_gtid = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result_gtid) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -215,7 +229,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   auto result_exp = connection_.Execute(query);
   if (!result_exp) {
     std::string error_msg = "Failed to execute SELECT query: " + connection_.GetLastError();
-    connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
+    auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
+    if (!rollback_result_query) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -258,7 +279,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("error", error_msg)
           .Error();
       // result automatically freed by MySQLResult destructor
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -274,7 +302,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     }
 
     // Normalize text
-    std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+    std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
 
     // Extract filters
     auto filters = ExtractFilters(row, fields, num_fields);
@@ -296,7 +324,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
-        connection_.ExecuteUpdate("ROLLBACK");
+        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -318,7 +353,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
-        connection_.ExecuteUpdate("ROLLBACK");
+        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -367,7 +409,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
           .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
           .Error();
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -389,7 +438,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
           .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
           .Error();
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -554,7 +610,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   }
 
   // Normalize text
-  std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+  std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
 
   // Extract filters
   auto filters = ExtractFilters(row, fields, num_fields);

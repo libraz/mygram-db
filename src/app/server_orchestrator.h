@@ -6,6 +6,7 @@
 #ifndef MYGRAMDB_APP_SERVER_ORCHESTRATOR_H_
 #define MYGRAMDB_APP_SERVER_ORCHESTRATOR_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -157,8 +158,8 @@ class ServerOrchestrator {
 
   // State
   std::string snapshot_gtid_;  ///< Captured during snapshot build
-  bool initialized_{false};
-  bool started_{false};
+  std::atomic<bool> initialized_{false};
+  std::atomic<bool> started_{false};
 };
 
 }  // namespace app

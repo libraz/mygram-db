@@ -88,6 +88,15 @@ class ConnectionValidator {
   static bool CheckBinlogCompression(Connection& conn, std::string& error);
 
   /**
+   * @brief Check if binlog_row_image is set to FULL
+   *
+   * MygramDB requires binlog_row_image=FULL because the NULL bitmap and column
+   * data parsing assumes all columns are present. With MINIMAL or NOBLOB, the
+   * bitmap size and indexing are different, causing silent data corruption.
+   */
+  static bool CheckBinlogRowImage(Connection& conn, std::string& error);
+
+  /**
    * @brief Check if partial JSON update mode is enabled
    *
    * binlog_row_value_options=PARTIAL_JSON causes PARTIAL_UPDATE_ROWS_EVENT

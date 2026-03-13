@@ -7,11 +7,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 
 namespace mygramdb::cache {
 
-QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds)
-    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms), ttl_seconds_(ttl_seconds) {
+QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds, bool compression_enabled)
+    : max_memory_bytes_(max_memory_bytes),
+      min_query_cost_ms_(min_query_cost_ms),
+      ttl_seconds_(ttl_seconds),
+      compression_enabled_(compression_enabled) {
   // Start background LRU refresh thread
   lru_refresh_thread_ = std::thread(&QueryCache::RefreshLRUWorker, this);
 }
@@ -110,7 +114,13 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(compressed_copy, original_size);
+    if (compression_enabled_) {
+      result = ResultCompressor::Decompress(compressed_copy, original_size);
+    } else {
+      // No compression - interpret raw bytes as DocId array
+      result.resize(original_size);
+      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    }
   } catch (const std::exception& e) {
     // Decompression failed, treat as miss
     stats_.cache_misses++;
@@ -227,7 +237,13 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(compressed_copy, original_size);
+    if (compression_enabled_) {
+      result = ResultCompressor::Decompress(compressed_copy, original_size);
+    } else {
+      // No compression - interpret raw bytes as DocId array
+      result.resize(original_size);
+      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    }
   } catch (const std::exception& e) {
     // Decompression failed, treat as miss
     stats_.cache_misses++;
@@ -264,10 +280,16 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     return false;
   }
 
-  // Compress result
+  // Compress result (if enabled)
   std::vector<uint8_t> compressed;
   try {
-    compressed = ResultCompressor::Compress(result);
+    if (compression_enabled_) {
+      compressed = ResultCompressor::Compress(result);
+    } else {
+      // Store raw bytes without compression
+      compressed.resize(result.size() * sizeof(DocId));
+      std::memcpy(compressed.data(), result.data(), compressed.size());
+    }
   } catch (const std::exception& e) {
     return false;
   }

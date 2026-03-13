@@ -294,11 +294,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool s
         .Info();
   }
 
-  // Close existing connection if any
-  if (mysql_ != nullptr) {
-    mysql_close(mysql_);
-    mysql_ = nullptr;
-  }
+  // Close existing connection (mysql_ is guaranteed non-null here by the check above)
+  mysql_close(mysql_);
+  mysql_ = nullptr;
 
   // Reinitialize
   mysql_ = mysql_init(nullptr);

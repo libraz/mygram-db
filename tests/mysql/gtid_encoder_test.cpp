@@ -576,3 +576,62 @@ TEST_F(GtidEncoderTest, ConvertedRangeGtidCreatesCorrectInterval) {
   EXPECT_EQ(interval_start, 1);
   EXPECT_EQ(interval_end, 102);  // exclusive
 }
+
+// ===========================================================================
+// Duplicate UUID merging tests (P1-2)
+// ===========================================================================
+
+TEST_F(GtidEncoderTest, DuplicateUuidsMergedIntoSingleSid) {
+  // Same UUID with separate comma-delimited parts should merge
+  std::string gtid =
+      "00000000-0000-0000-0000-000000000001:1-100,"
+      "00000000-0000-0000-0000-000000000001:200-300";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value());
+
+  // Should produce 1 SID (not 2)
+  int64_t n_sids = ReadInt64LE(*result, 0);
+  EXPECT_EQ(n_sids, 1);
+
+  // Should have 2 intervals: [1,101) and [200,301)
+  int64_t n_intervals = ReadInt64LE(*result, 24);
+  EXPECT_EQ(n_intervals, 2);
+
+  EXPECT_EQ(ReadInt64LE(*result, 32), 1);    // start of first interval
+  EXPECT_EQ(ReadInt64LE(*result, 40), 101);  // end of first interval
+  EXPECT_EQ(ReadInt64LE(*result, 48), 200);  // start of second interval
+  EXPECT_EQ(ReadInt64LE(*result, 56), 301);  // end of second interval
+}
+
+TEST_F(GtidEncoderTest, DuplicateUuidsWithOverlappingIntervalsMerged) {
+  // Same UUID with overlapping intervals across comma parts
+  std::string gtid =
+      "00000000-0000-0000-0000-000000000001:1-100,"
+      "00000000-0000-0000-0000-000000000001:50-150";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value());
+
+  int64_t n_sids = ReadInt64LE(*result, 0);
+  EXPECT_EQ(n_sids, 1);
+
+  // Overlapping intervals should be merged into [1,151)
+  int64_t n_intervals = ReadInt64LE(*result, 24);
+  EXPECT_EQ(n_intervals, 1);
+
+  EXPECT_EQ(ReadInt64LE(*result, 32), 1);
+  EXPECT_EQ(ReadInt64LE(*result, 40), 151);
+}
+
+TEST_F(GtidEncoderTest, MixedDuplicateAndUniqueUuids) {
+  // Two different UUIDs, with uuid1 appearing twice
+  std::string gtid =
+      "00000000-0000-0000-0000-000000000001:1-50,"
+      "00000000-0000-0000-0000-000000000002:1-25,"
+      "00000000-0000-0000-0000-000000000001:100-150";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value());
+
+  // Should produce 2 SIDs
+  int64_t n_sids = ReadInt64LE(*result, 0);
+  EXPECT_EQ(n_sids, 2);
+}

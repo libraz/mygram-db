@@ -8,9 +8,6 @@
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 
-#include <array>
-#include <cstdlib>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -27,7 +24,6 @@
 namespace mygramdb::server {
 
 namespace {
-constexpr int kIpAddressBufferSize = 256;
 constexpr size_t kGtidPrefixLength = 7;  // Length of "gtid":"
 
 /**
@@ -157,12 +153,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
       }
     }
   } else {
-    auto now = std::time(nullptr);
-    std::tm tm_buf{};
-    localtime_r(&now, &tm_buf);  // Thread-safe version of localtime
-    std::array<char, kIpAddressBufferSize> buf{};
-    std::strftime(buf.data(), buf.size(), "dump_%Y%m%d_%H%M%S.dmp", &tm_buf);
-    filepath = ctx_.dump_dir + "/" + std::string(buf.data());
+    filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
 
   // Set flag to indicate save is starting

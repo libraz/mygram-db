@@ -84,7 +84,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
   switch (type) {
     case NodeType::TERM: {
       // Normalize search term before searching (must match index normalization)
-      std::string normalized_term = utils::NormalizeText(term, true, "keep", true);
+      std::string normalized_term = utils::NormalizeText(term, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
       // Generate n-grams from the normalized term
       std::vector<std::string> ngrams;
@@ -325,6 +325,7 @@ std::vector<Token> Tokenizer::Tokenize() {
 std::unique_ptr<QueryNode> QueryASTParser::Parse(const std::string& query_str) {
   error_.clear();
   pos_ = 0;
+  recursion_depth_ = 0;
 
   // Tokenize input
   Tokenizer tokenizer(query_str);
@@ -442,9 +443,16 @@ std::unique_ptr<QueryNode> QueryASTParser::ParseAndExpr() {
 std::unique_ptr<QueryNode> QueryASTParser::ParseNotExpr() {
   // not_expr → NOT not_expr | primary
   if (Match(TokenType::NOT)) {
+    if (recursion_depth_ >= kMaxRecursionDepth) {
+      SetError("Query too deeply nested (maximum depth: " + std::to_string(kMaxRecursionDepth) + ")");
+      return nullptr;
+    }
     Advance();
 
+    ++recursion_depth_;
     auto child = ParseNotExpr();
+    --recursion_depth_;
+
     if (!child || !error_.empty()) {
       return nullptr;
     }

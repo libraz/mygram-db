@@ -11,8 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
-#include <iomanip>
-#include <sstream>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -112,7 +111,7 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, int64_t value) {
     std::string val_str = std::to_string(value);
-    fields_.push_back(MakeJSONField(key, val_str, true));  // Quoted for JSON
+    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
     fields_text_.push_back(key + "=" + val_str);
     return *this;
   }
@@ -122,7 +121,7 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, uint64_t value) {
     std::string val_str = std::to_string(value);
-    fields_.push_back(MakeJSONField(key, val_str, true));  // Quoted for JSON
+    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
     fields_text_.push_back(key + "=" + val_str);
     return *this;
   }
@@ -131,10 +130,8 @@ class StructuredLog {
    * @brief Add double field
    */
   StructuredLog& Field(const std::string& key, double value) {
-    std::ostringstream oss;
-    oss << value;
-    std::string val_str = oss.str();
-    fields_.push_back(MakeJSONField(key, val_str, true));  // Quoted for JSON
+    std::string val_str = std::to_string(value);
+    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
     fields_text_.push_back(key + "=" + val_str);
     return *this;
   }
@@ -204,86 +201,101 @@ class StructuredLog {
    * @brief Build JSON string
    */
   std::string BuildJSON() const {
-    std::ostringstream json;
-    json << "{";
+    std::string json;
+    json += '{';
 
     bool first = true;
 
     // Add event type
     if (!event_.empty()) {
-      json << R"("event":")" << Escape(event_) << R"(")";
+      json += R"("event":")";
+      json += Escape(event_);
+      json += '"';
       first = false;
     }
 
     // Add message if present
     if (!message_.empty()) {
       if (!first) {
-        json << ",";
+        json += ',';
       }
-      json << R"("message":")" << Escape(message_) << R"(")";
+      json += R"("message":")";
+      json += Escape(message_);
+      json += '"';
       first = false;
     }
 
     // Add custom fields
     for (const auto& field : fields_) {
       if (!first) {
-        json << ",";
+        json += ',';
       }
-      json << field;
+      json += field;
       first = false;
     }
 
-    json << "}";
-    return json.str();
+    json += '}';
+    return json;
   }
 
   /**
    * @brief Build text string (key=value format)
    */
   std::string BuildText() const {
-    std::ostringstream text;
+    std::string text;
 
     bool first = true;
 
     // Add event type
     if (!event_.empty()) {
-      text << "event=" << EscapeText(event_);
+      text += "event=";
+      text += EscapeText(event_);
       first = false;
     }
 
     // Add message if present
     if (!message_.empty()) {
       if (!first) {
-        text << " ";
+        text += ' ';
       }
-      text << "message=\"" << EscapeText(message_) << "\"";
+      text += "message=\"";
+      text += EscapeText(message_);
+      text += '"';
       first = false;
     }
 
     // Add custom fields
     for (const auto& field : fields_text_) {
       if (!first) {
-        text << " ";
+        text += ' ';
       }
-      text << field;
+      text += field;
       first = false;
     }
 
-    return text.str();
+    return text;
   }
 
   /**
    * @brief Create a JSON field
    */
   static std::string MakeJSONField(const std::string& key, const std::string& value, bool quoted = true) {
-    std::ostringstream oss;
-    oss << "\"" << key << "\":";
+    std::string result;
     if (quoted) {
-      oss << "\"" << value << "\"";
+      result.reserve(key.size() + value.size() + 5);  // "key":"value"
+      result += '"';
+      result += key;
+      result += "\":\"";
+      result += value;
+      result += '"';
     } else {
-      oss << value;
+      result.reserve(key.size() + value.size() + 3);  // "key":value
+      result += '"';
+      result += key;
+      result += "\":";
+      result += value;
     }
-    return oss.str();
+    return result;
   }
 
   /**
@@ -302,21 +314,23 @@ class StructuredLog {
    * @brief Escape text for text format (escape quotes and backslashes)
    */
   static std::string EscapeText(const std::string& str) {
-    std::ostringstream escaped;
+    std::string escaped;
+    escaped.reserve(str.size());
     for (char chr : str) {
       if (chr == '"' || chr == '\\') {
-        escaped << '\\' << chr;
+        escaped += '\\';
+        escaped += chr;
       } else if (chr == '\n') {
-        escaped << "\\n";
+        escaped += "\\n";
       } else if (chr == '\r') {
-        escaped << "\\r";
+        escaped += "\\r";
       } else if (chr == '\t') {
-        escaped << "\\t";
+        escaped += "\\t";
       } else {
-        escaped << chr;
+        escaped += chr;
       }
     }
-    return escaped.str();
+    return escaped;
   }
 
   /**
@@ -326,40 +340,43 @@ class StructuredLog {
     // Control character threshold for JSON escaping (0x20 = space)
     constexpr char kControlCharThreshold = 0x20;
 
-    std::ostringstream escaped;
+    std::string escaped;
+    escaped.reserve(str.size());
     for (char chr : str) {
       switch (chr) {
         case '"':
-          escaped << R"(\")";
+          escaped += R"(\")";
           break;
         case '\\':
-          escaped << R"(\\)";
+          escaped += R"(\\)";
           break;
         case '\b':
-          escaped << R"(\b)";
+          escaped += R"(\b)";
           break;
         case '\f':
-          escaped << R"(\f)";
+          escaped += R"(\f)";
           break;
         case '\n':
-          escaped << R"(\n)";
+          escaped += R"(\n)";
           break;
         case '\r':
-          escaped << R"(\r)";
+          escaped += R"(\r)";
           break;
         case '\t':
-          escaped << R"(\t)";
+          escaped += R"(\t)";
           break;
         default:
           if (chr >= 0 && chr < kControlCharThreshold) {
-            // Control characters
-            escaped << R"(\u)" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(chr);
+            // Control characters: \u00XX format
+            char buf[7];  // NOLINT(modernize-avoid-c-arrays)
+            std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(chr));
+            escaped += buf;
           } else {
-            escaped << chr;
+            escaped += chr;
           }
       }
     }
-    return escaped.str();
+    return escaped;
   }
 };
 

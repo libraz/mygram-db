@@ -89,8 +89,8 @@ TEST_F(StructuredLogTest, IntegerFields) {
       .Info();
 
   std::string output = GetLogOutput();
-  EXPECT_NE(output.find("\"int_field\":\"42\""), std::string::npos);
-  EXPECT_NE(output.find("\"uint_field\":\"100\""), std::string::npos);
+  EXPECT_NE(output.find("\"int_field\":42"), std::string::npos);
+  EXPECT_NE(output.find("\"uint_field\":100"), std::string::npos);
 }
 
 /**
@@ -171,7 +171,7 @@ TEST_F(StructuredLogTest, MySQLConnectionErrorHelper) {
   std::string output = GetLogOutput();
   EXPECT_NE(output.find("\"event\":\"mysql_connection_error\""), std::string::npos);
   EXPECT_NE(output.find("\"host\":\"localhost\""), std::string::npos);
-  EXPECT_NE(output.find("\"port\":\"3306\""), std::string::npos);
+  EXPECT_NE(output.find("\"port\":3306"), std::string::npos);
   EXPECT_NE(output.find("\"error\":\"Connection refused\""), std::string::npos);
 }
 
@@ -197,7 +197,7 @@ TEST_F(StructuredLogTest, BinlogErrorHelper) {
   EXPECT_NE(output.find("\"event\":\"binlog_error\""), std::string::npos);
   EXPECT_NE(output.find("\"type\":\"connection_lost\""), std::string::npos);
   EXPECT_NE(output.find("\"gtid\":\"uuid:1-10\""), std::string::npos);
-  EXPECT_NE(output.find("\"retry_count\":\"3\""), std::string::npos);
+  EXPECT_NE(output.find("\"retry_count\":3"), std::string::npos);
   EXPECT_NE(output.find("\"error\":\"Connection timeout\""), std::string::npos);
 }
 
@@ -224,7 +224,7 @@ TEST_F(StructuredLogTest, QueryParseErrorHelper) {
   EXPECT_NE(output.find("\"event\":\"query_parse_error\""), std::string::npos);
   EXPECT_NE(output.find("\"query\":\"INVALID QUERY\""), std::string::npos);
   EXPECT_NE(output.find("\"error\":\"Unexpected token\""), std::string::npos);
-  EXPECT_NE(output.find("\"position\":\"8\""), std::string::npos);
+  EXPECT_NE(output.find("\"position\":8"), std::string::npos);
 }
 
 /**
@@ -255,7 +255,7 @@ TEST_F(StructuredLogTest, MultipleFieldTypes) {
 
   std::string output = GetLogOutput();
   EXPECT_NE(output.find("\"str_field\":\"test\""), std::string::npos);
-  EXPECT_NE(output.find("\"int_field\":\"42\""), std::string::npos);
+  EXPECT_NE(output.find("\"int_field\":42"), std::string::npos);
   EXPECT_NE(output.find("\"bool_field\":true"), std::string::npos);
   EXPECT_NE(output.find("\"double_field\":"), std::string::npos);
   EXPECT_NE(output.find("\"message\":\"Mixed types test\""), std::string::npos);

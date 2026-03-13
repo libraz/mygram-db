@@ -23,11 +23,15 @@
 
 namespace mygramdb::index {
 
-Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams)
+Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams,
+             bool normalize_nfkc, const std::string& normalize_width, bool normalize_lower)
     : ngram_size_(ngram_size),
       kanji_ngram_size_(kanji_ngram_size > 0 ? kanji_ngram_size : ngram_size),
       roaring_threshold_(roaring_threshold),
-      cross_boundary_ngrams_(cross_boundary_ngrams) {}
+      cross_boundary_ngrams_(cross_boundary_ngrams),
+      normalize_nfkc_(normalize_nfkc),
+      normalize_width_(normalize_width),
+      normalize_lower_(normalize_lower) {}
 
 void Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
@@ -334,6 +338,29 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
   // Note: limit and reverse are applied by ResultSorter layer, not here
   // This is because we don't know the offset, and for multi-term queries
   // the intersection result size is unpredictable
+  return result;
+}
+
+std::vector<DocId> Index::FilterByNgrams(const std::vector<DocId>& candidates,
+                                         const std::vector<std::string>& terms) const {
+  // Take snapshots of posting lists (RCU pattern, same as SearchAnd)
+  auto snapshots = TakePostingSnapshots(terms);
+
+  std::vector<DocId> result;
+  result.reserve(candidates.size());
+
+  for (const auto& doc_id : candidates) {
+    bool match = true;
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (!snapshots[i] || !snapshots[i]->Contains(doc_id)) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      result.push_back(doc_id);
+    }
+  }
   return result;
 }
 

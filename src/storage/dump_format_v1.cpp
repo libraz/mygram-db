@@ -386,6 +386,12 @@ bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig
     return false;
   }
 
+  // cross_boundary_ngrams
+  uint8_t cross_boundary = table.cross_boundary_ngrams ? 1 : 0;
+  if (!WriteBinary(output_stream, cross_boundary)) {
+    return false;
+  }
+
   // posting config
   if (!WriteBinary(output_stream, table.posting.block_size)) {
     return false;
@@ -489,6 +495,13 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, table.kanji_ngram_size)) {
     return false;
   }
+
+  // cross_boundary_ngrams
+  uint8_t cross_boundary = 1;
+  if (!ReadBinary(input_stream, cross_boundary)) {
+    return false;
+  }
+  table.cross_boundary_ngrams = (cross_boundary != 0);
 
   // posting config
   if (!ReadBinary(input_stream, table.posting.block_size)) {

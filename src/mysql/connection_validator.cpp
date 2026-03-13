@@ -125,10 +125,21 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
     return result;
   }
 
-  // 6. Check partial JSON mode (warning only)
+  // 6. Check binlog_row_image=FULL (required for correct NULL bitmap parsing)
+  std::string row_image_error;
+  if (!CheckBinlogRowImage(conn, row_image_error)) {
+    result.error_message = row_image_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_row_image_not_full")
+        .Error();
+    return result;
+  }
+
+  // 7. Check partial JSON mode (warning only)
   CheckPartialJsonMode(conn, result.warnings);
 
-  // 7. Check tagged GTID support (warning only)
+  // 8. Check tagged GTID support (warning only)
   CheckTaggedGTIDSupport(conn, result.warnings);
 
   // All checks passed
@@ -299,6 +310,35 @@ bool ConnectionValidator::CheckBinlogCompression(Connection& conn, std::string& 
         "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
         "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
     return false;
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_image'");
+  if (!result) {
+    // Cannot determine - assume FULL (variable always exists in MySQL 5.6+)
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - shouldn't happen but assume FULL
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value != "FULL") {
+      error =
+          "binlog_row_image=" + value + " is not supported. "
+          "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
+          "Set it with: SET GLOBAL binlog_row_image=FULL";
+      return false;
+    }
   }
 
   return true;

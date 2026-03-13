@@ -184,6 +184,7 @@ json YamlToJson(const YAML::Node& node) {
  *   - MYGRAM_MYSQL_PASSWORD: MySQL password (takes precedence over config file)
  *   - MYGRAM_MYSQL_USER: MySQL username (takes precedence over config file)
  *   - MYGRAM_MYSQL_HOST: MySQL host (takes precedence over config file)
+ *   - MYGRAM_MYSQL_PORT: MySQL port (takes precedence over config file)
  *   - MYGRAM_MYSQL_DATABASE: MySQL database (takes precedence over config file)
  */
 MysqlConfig ParseMysqlConfig(const json& json_obj) {
@@ -198,8 +199,18 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
     config.host = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_HOST", config.host);
   }
 
-  if (json_obj.contains("port")) {
-    config.port = json_obj["port"].get<int>();
+  {
+    // Port: environment variable takes precedence
+    auto env_port = GetEnvValue("MYGRAM_MYSQL_PORT");
+    if (env_port.has_value()) {
+      try {
+        config.port = std::stoi(env_port.value());
+      } catch (const std::exception&) {
+        // Invalid port in environment variable, fall through to config file value
+      }
+    } else if (json_obj.contains("port")) {
+      config.port = json_obj["port"].get<int>();
+    }
   }
 
   // User: environment variable takes precedence
