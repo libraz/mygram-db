@@ -63,6 +63,7 @@ struct ServerConfig {
   int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
   std::vector<std::string> allow_cidrs;
   std::vector<utils::CIDR> parsed_allow_cidrs;
+  std::string unix_socket_path;  // Empty = TCP mode, non-empty = UDS mode
 };
 
 /**

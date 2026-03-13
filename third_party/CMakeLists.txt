@@ -180,5 +180,22 @@ set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(abseil)
 
+# Mark abseil includes as system to suppress -Wpedantic warnings from __int128
+# Abseil creates many targets, so we recursively mark all of them
+function(mark_targets_as_system dir)
+  get_property(targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(target ${targets})
+    get_target_property(iid ${target} INTERFACE_INCLUDE_DIRECTORIES)
+    if(iid)
+      set_target_properties(${target} PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${iid}")
+    endif()
+  endforeach()
+  get_property(subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+  foreach(subdir ${subdirs})
+    mark_targets_as_system("${subdir}")
+  endforeach()
+endfunction()
+mark_targets_as_system(${abseil_SOURCE_DIR})
+
 # Note: libmysqlclient should be installed on the system
 # find_package(MySQL REQUIRED) will be called in src/mysql/CMakeLists.txt

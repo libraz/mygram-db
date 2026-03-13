@@ -423,6 +423,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   server_config.default_limit = deps_.config.api.default_limit;
   server_config.max_query_length = deps_.config.api.max_query_length;
   server_config.allow_cidrs = deps_.config.network.allow_cidrs;
+  server_config.unix_socket_path = deps_.config.api.unix_socket.path;
 
 #ifdef USE_MYSQL
   tcp_server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config,

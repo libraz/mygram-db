@@ -1142,8 +1142,20 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   // [db_name (variable length, null-terminated)]
   // [query (variable length)]
 
+  // Detect CRC32 checksum: the event header at bytes 9-12 contains the original
+  // event_length (including 4-byte CRC32). If the server didn't strip the checksum,
+  // length == header_event_length, and we need to subtract 4 bytes.
+  uint32_t header_event_length = buffer[9] | (static_cast<uint32_t>(buffer[10]) << 8) |
+                                 (static_cast<uint32_t>(buffer[11]) << 16) |
+                                 (static_cast<uint32_t>(buffer[12]) << 24);
+  size_t effective_length = length;
+  if (length == header_event_length && length > 4) {
+    // Checksum was NOT stripped by server — exclude 4-byte CRC32
+    effective_length = length - 4;
+  }
+
   const unsigned char* pos = buffer + 19;  // Skip common header
-  size_t remaining = length - 19;
+  size_t remaining = effective_length - 19;
 
   if (remaining < 13) {  // Minimum: 4+4+1+2+2
     return {};

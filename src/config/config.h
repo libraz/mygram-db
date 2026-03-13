@@ -241,6 +241,10 @@ struct ApiConfig {
     std::string cors_allow_origin;
   } http;
 
+  struct {
+    std::string path;  // Unix socket path (empty = disabled)
+  } unix_socket;
+
   /**
    * @brief Default LIMIT for SEARCH queries when not explicitly specified
    * Valid range: 5-1000 (enforced by validation)

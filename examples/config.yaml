@@ -178,6 +178,10 @@ api:
                                     # - Connections exceeding this limit are immediately rejected
                                     # - Set based on system ulimit -n and available memory
                                     # - Production recommendation: system ulimit / 2
+  unix_socket:
+    path: ""                          # Unix domain socket path (default: "" = disabled)
+                                      # Set to enable local connections without TCP overhead
+                                      # Example: "/tmp/mygramdb.sock"
   http:
     enable: false                   # Enable HTTP/JSON API (default: false)
                                      # - Set to true to enable HTTP API

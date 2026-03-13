@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -220,10 +221,32 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Set connection handler callback (must be done after acceptor_ is assigned)
   acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
 
+  // Start Unix domain socket acceptor (if configured)
+  if (!config_.unix_socket_path.empty()) {
+    ServerConfig uds_config;
+    uds_config.unix_socket_path = config_.unix_socket_path;
+    uds_config.max_connections = config_.max_connections;
+    unix_acceptor_ = std::make_unique<ConnectionAcceptor>(uds_config, thread_pool_.get());
+    unix_acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
+
+    auto uds_result = unix_acceptor_->Start();
+    if (!uds_result) {
+      // Stop TCP acceptor if UDS fails
+      acceptor_->Stop();
+      return MakeUnexpected(uds_result.error());
+    }
+
+    mygram::utils::StructuredLog()
+        .Event("unix_socket_acceptor_started")
+        .Field("path", config_.unix_socket_path)
+        .Info();
+  }
+
   mygram::utils::StructuredLog()
       .Event("tcp_server_started")
       .Field("host", config_.host)
       .Field("port", static_cast<uint64_t>(acceptor_->GetPort()))
+      .Field("unix_socket", config_.unix_socket_path.empty() ? "(disabled)" : config_.unix_socket_path)
       .Info();
   return {};
 }
@@ -252,6 +275,11 @@ void TcpServer::Stop() {
     acceptor_->Stop();
   }
 
+  // Stop Unix domain socket acceptor
+  if (unix_acceptor_) {
+    unix_acceptor_->Stop();
+  }
+
   // Shutdown thread pool (completes pending tasks)
   if (thread_pool_) {
     thread_pool_->Shutdown();
@@ -266,21 +294,27 @@ void TcpServer::HandleConnection(int client_fd) {
 
   // Get client IP address for rate limiting
   std::string client_ip;
-  struct sockaddr_in addr {};  // NOLINT(cppcoreguidelines-pro-type-member-init) - Zero-init needed for getpeername
-  socklen_t addr_len = sizeof(addr);
+  struct sockaddr_storage addr_storage{};
+  socklen_t addr_len = sizeof(addr_storage);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
-  if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-    char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Required for
-                                   // inet_ntop
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Required for inet_ntop
-    inet_ntop(AF_INET, &(addr.sin_addr), ip_str, INET_ADDRSTRLEN);
-    client_ip = ip_str;  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay) - Safe implicit conversion
+  if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0) {
+    if (addr_storage.ss_family == AF_INET) {
+      auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+      inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+      client_ip = ip_str;  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    } else if (addr_storage.ss_family == AF_UNIX) {
+      client_ip = "unix-local";
+    } else {
+      client_ip = "unknown";
+    }
   } else {
     client_ip = "unknown";
   }
 
-  // Check rate limit (if enabled)
-  if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+  // Skip rate limit for UDS connections
+  if (rate_limiter_ && client_ip != "unix-local" && !rate_limiter_->AllowRequest(client_ip)) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("type", "rate_limit_exceeded")

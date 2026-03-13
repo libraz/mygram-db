@@ -742,6 +742,12 @@ Config ParseConfigFromJson(const json& root) {
         config.api.rate_limiting.max_clients = rate_limiting["max_clients"].get<int>();
       }
     }
+    if (api.contains("unix_socket")) {
+      const auto& unix_socket = api["unix_socket"];
+      if (unix_socket.contains("path")) {
+        config.api.unix_socket.path = unix_socket["path"].get<std::string>();
+      }
+    }
   }
 
   // Parse network config

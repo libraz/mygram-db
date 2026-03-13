@@ -1272,14 +1272,31 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   auto result_exp = metadata_connection_->Execute(query);
   if (!result_exp) {
+    // Connection may have been lost (e.g., after MySQL restart).
+    // Try to reconnect the metadata connection and retry once.
     mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "column_query_failed")
+        .Event("binlog_warning")
+        .Field("type", "column_query_failed_retrying")
         .Field("database", metadata.database_name)
         .Field("table", metadata.table_name)
         .Field("error", metadata_connection_->GetLastError())
-        .Error();
-    return false;
+        .Warn();
+
+    auto reconnect_result = metadata_connection_->Reconnect(true /* silent */);
+    if (reconnect_result) {
+      result_exp = metadata_connection_->Execute(query);
+    }
+
+    if (!result_exp) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "column_query_failed")
+          .Field("database", metadata.database_name)
+          .Field("table", metadata.table_name)
+          .Field("error", metadata_connection_->GetLastError())
+          .Error();
+      return false;
+    }
   }
 
   std::vector<std::string> column_names;

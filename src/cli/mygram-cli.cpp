@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -307,6 +308,7 @@ struct Config {
   bool interactive = true;
   int retry_count = 0;     // Number of retries (0 = no retry)
   int retry_interval = 3;  // Seconds between retries
+  std::string socket_path;  // Unix socket path (empty = use TCP)
 };
 
 class MygramClient {
@@ -334,6 +336,41 @@ class MygramClient {
         sleep(config_.retry_interval);
       }
 
+      if (!config_.socket_path.empty()) {
+        // Unix domain socket connection
+        sock_ = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock_ < 0) {
+          std::cerr << "Failed to create unix socket: " << strerror(errno) << '\n';
+          attempts++;
+          continue;
+        }
+
+        struct sockaddr_un server_addr{};
+        server_addr.sun_family = AF_UNIX;
+        std::strncpy(server_addr.sun_path, config_.socket_path.c_str(),
+                     sizeof(server_addr.sun_path) - 1);
+
+        if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                    sizeof(server_addr)) < 0) {
+          int saved_errno = errno;
+          std::cerr << "Connection to " << config_.socket_path << " failed: "
+                    << strerror(saved_errno) << '\n';
+          close(sock_);
+          sock_ = -1;
+          if (saved_errno != ECONNREFUSED) {
+            return false;
+          }
+          attempts++;
+          continue;
+        }
+
+        if (attempts > 0) {
+          std::cerr << "\nConnected successfully after " << attempts << " retry(ies)!\n\n";
+        }
+        return true;
+      }
+
+      // TCP connection (existing code below)
       sock_ = socket(AF_INET, SOCK_STREAM, 0);
       if (sock_ < 0) {
         std::cerr << "Failed to create socket: " << strerror(errno) << '\n';
@@ -507,7 +544,11 @@ class MygramClient {
   }
 
   void RunInteractive() const {
-    std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
+    if (!config_.socket_path.empty()) {
+      std::cout << "mygram-cli " << config_.socket_path << '\n';
+    } else {
+      std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
+    }
 #ifdef USE_READLINE
     std::cout << "Type 'quit' or 'exit' to exit, 'help' for help" << '\n';
     std::cout << "Use TAB for context-aware command completion" << '\n';
@@ -530,7 +571,9 @@ class MygramClient {
 
 #ifdef USE_READLINE
       // Use readline for better line editing and history
-      std::string prompt = config_.host + ":" + std::to_string(config_.port) + "> ";
+      std::string prompt = config_.socket_path.empty()
+          ? config_.host + ":" + std::to_string(config_.port) + "> "
+          : config_.socket_path + "> ";
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       char* raw_input = readline(prompt.c_str());
 
@@ -799,6 +842,7 @@ void PrintUsage(const char* program_name) {
   std::cout << "Options:" << '\n';
   std::cout << "  -h HOST         Server hostname (default: 127.0.0.1)" << '\n';
   std::cout << "  -p PORT         Server port (default: 11016)" << '\n';
+  std::cout << "  -s SOCKET_PATH  Unix domain socket path (overrides -h/-p)" << '\n';
   std::cout << "  --retry N       Retry connection N times if refused (default: 0)" << '\n';
   std::cout << "  --wait-ready    Keep retrying until server is ready (max 100 attempts)" << '\n';
   std::cout << "  --help          Show this help" << '\n';
@@ -809,6 +853,7 @@ void PrintUsage(const char* program_name) {
   std::cout << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready" << '\n';
   std::cout << "  " << program_name << " --wait-ready INFO        # Wait until server is ready" << '\n';
   std::cout << "  " << program_name << " SEARCH articles hello    # Execute single command" << '\n';
+  std::cout << "  " << program_name << " -s /tmp/mygramdb.sock INFO # Connect via Unix socket" << '\n';
 }
 
 }  // namespace
@@ -844,6 +889,13 @@ int main(int argc, char* argv[]) {
         }
       } else {
         std::cerr << "Error: -p requires an argument" << '\n';
+        return 1;
+      }
+    } else if (arg == "-s") {
+      if (i + 1 < argc) {
+        config.socket_path = argv[++i];  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      } else {
+        std::cerr << "Error: -s requires an argument" << '\n';
         return 1;
       }
     } else if (arg == "--retry") {

@@ -123,6 +123,8 @@ enum class ErrorCode : std::uint16_t {
   kNetworkAlreadyRunning = 6011,        ///< Server already running
   kNetworkSocketCreationFailed = 6012,  ///< Failed to create socket
   kNetworkInvalidBindAddress = 6013,    ///< Invalid bind address
+  kNetworkUnixSocketPathTooLong = 6014,  ///< Unix socket path exceeds limit
+  kNetworkUnixSocketStale = 6015,        ///< Unix socket already in use by another server
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -317,6 +319,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Socket creation failed";
     case ErrorCode::kNetworkInvalidBindAddress:
       return "Invalid bind address";
+    case ErrorCode::kNetworkUnixSocketPathTooLong:
+      return "Unix socket path too long";
+    case ErrorCode::kNetworkUnixSocketStale:
+      return "Unix socket already in use";
 
     // Client
     case ErrorCode::kClientNotConnected:

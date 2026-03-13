@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <sstream>
 #include <string>
 

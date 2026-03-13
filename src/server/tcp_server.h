@@ -107,7 +107,9 @@ class TcpServer {
   /**
    * @brief Check if server is running
    */
-  bool IsRunning() const { return acceptor_ && acceptor_->IsRunning(); }
+  bool IsRunning() const {
+    return (acceptor_ && acceptor_->IsRunning()) || (unix_acceptor_ && unix_acceptor_->IsRunning());
+  }
 
   /**
    * @brief Get server port
@@ -200,6 +202,7 @@ class TcpServer {
   std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ConnectionAcceptor> acceptor_;
+  std::unique_ptr<ConnectionAcceptor> unix_acceptor_;
   std::unique_ptr<RequestDispatcher> dispatcher_;
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
