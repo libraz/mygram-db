@@ -200,7 +200,7 @@ struct HandlerContext {
   TableCatalog* table_catalog = nullptr;
 
   // Direct table access (maintained for backward compatibility)
-  std::unordered_map<std::string, TableContext*>& table_contexts;
+  const std::unordered_map<std::string, TableContext*>& table_contexts;
 
   ServerStats& stats;
   const config::Config* full_config;

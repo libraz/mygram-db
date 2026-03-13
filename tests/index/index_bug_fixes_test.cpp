@@ -5,6 +5,9 @@
  * This file contains tests for bugs discovered in the bug report.
  */
 
+#include <atomic>
+#include <thread>
+
 #include <gtest/gtest.h>
 
 #include "index/index.h"
@@ -364,4 +367,54 @@ TEST(IndexBugFixesTest, Bug16_SearchAndLargePostingListsCorrectResults) {
   for (size_t i = 0; i < 10; ++i) {
     EXPECT_EQ(results[i], kNumDocs - static_cast<DocId>(i)) << "Result[" << i << "] should be " << (kNumDocs - i);
   }
+}
+
+// =============================================================================
+// EstimatePostingSize: Thread-safe posting size estimation
+// =============================================================================
+
+TEST(IndexBugFixesTest, EstimatePostingSizeConcurrentWithRemove) {
+  Index index(2);
+  // Add 1000 documents
+  for (DocId i = 1; i <= 1000; i++) {
+    index.AddDocument(i, "hello world");
+  }
+
+  std::atomic<bool> stop{false};
+
+  // Thread 1: EstimatePostingSize continuously
+  std::thread reader([&]() {
+    while (!stop.load()) {
+      // Must be callable without external locking
+      auto size = index.EstimatePostingSize("he");
+      (void)size;  // No crash = success
+    }
+  });
+
+  // Thread 2: Remove documents causing erase
+  std::thread writer([&]() {
+    for (DocId i = 1; i <= 1000; i++) {
+      index.RemoveDocument(i, "hello world");
+    }
+    stop.store(true);
+  });
+
+  reader.join();
+  writer.join();
+
+  // All removed: size should be 0
+  EXPECT_EQ(index.EstimatePostingSize("he"), 0u);
+  // Non-existent term: size should be 0
+  EXPECT_EQ(index.EstimatePostingSize("zz"), 0u);
+}
+
+TEST(IndexBugFixesTest, EstimatePostingSizeBasic) {
+  Index index(2);
+  index.AddDocument(1, "hello world");
+  index.AddDocument(2, "hello there");
+
+  // "he" appears in both documents
+  EXPECT_EQ(index.EstimatePostingSize("he"), 2u);
+  // Non-existent term
+  EXPECT_EQ(index.EstimatePostingSize("zz"), 0u);
 }

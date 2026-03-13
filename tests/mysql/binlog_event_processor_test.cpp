@@ -395,6 +395,144 @@ TEST_F(BinlogEventProcessorTest, UpdateTransitionOutOfRequired) {
   EXPECT_EQ(removed_results.size(), 0);
 }
 
+/**
+ * @brief Bug: UPDATE transition out of required filters must use old_text (before-image) for removal
+ *
+ * When text changes AND the document transitions out of required filters,
+ * the index removal must use old_text (what was actually indexed), not event.text (after-image).
+ */
+TEST_F(BinlogEventProcessorTest, UpdateTransitionOutUsesOldTextForRemoval) {
+  // Setup required filter (status = 1)
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config_.required_filters.push_back(required_filter);
+
+  // INSERT: "alpha beta" with status=1 (matches filter)
+  BinlogEvent insert_event;
+  insert_event.type = BinlogEventType::INSERT;
+  insert_event.primary_key = "pk1";
+  insert_event.text = "alpha beta";
+  insert_event.filters["status"] = static_cast<int32_t>(1);
+  insert_event.table_name = "test_table";
+
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  // Verify "al" (from "alpha") is indexed
+  auto results_before = index_->SearchAnd({"al"});
+  ASSERT_EQ(results_before.size(), 1);
+
+  // UPDATE: text changes to "gamma delta", status=0 (transitions out of filter)
+  BinlogEvent update_event;
+  update_event.type = BinlogEventType::UPDATE;
+  update_event.primary_key = "pk1";
+  update_event.old_text = "alpha beta";     // before-image (what's in the index)
+  update_event.text = "gamma delta";        // after-image (NOT in the index)
+  update_event.filters["status"] = static_cast<int32_t>(0);
+  update_event.table_name = "test_table";
+
+  EXPECT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  // Document removed from store
+  EXPECT_FALSE(doc_store_->GetDocId("pk1").has_value());
+
+  // Old text n-grams must be removed from index (bug: was using after-image "gamma delta")
+  auto alpha_results = index_->SearchAnd({"al"});
+  EXPECT_EQ(alpha_results.size(), 0);
+
+  // After-image n-grams should not be in index either
+  auto gamma_results = index_->SearchAnd({"ga"});
+  EXPECT_EQ(gamma_results.size(), 0);
+}
+
+/**
+ * @brief Bug: UPDATE transition out falls back to event.text when old_text is empty
+ */
+TEST_F(BinlogEventProcessorTest, UpdateTransitionOutFallsBackToTextWhenOldTextEmpty) {
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config_.required_filters.push_back(required_filter);
+
+  // INSERT: "alpha beta" with status=1
+  BinlogEvent insert_event;
+  insert_event.type = BinlogEventType::INSERT;
+  insert_event.primary_key = "pk1";
+  insert_event.text = "alpha beta";
+  insert_event.filters["status"] = static_cast<int32_t>(1);
+  insert_event.table_name = "test_table";
+
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  // UPDATE: old_text empty, text = "alpha beta" (same text), status=0
+  BinlogEvent update_event;
+  update_event.type = BinlogEventType::UPDATE;
+  update_event.primary_key = "pk1";
+  update_event.old_text = "";               // before-image unavailable
+  update_event.text = "alpha beta";         // after-image happens to match
+  update_event.filters["status"] = static_cast<int32_t>(0);
+  update_event.table_name = "test_table";
+
+  EXPECT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  EXPECT_FALSE(doc_store_->GetDocId("pk1").has_value());
+  auto results = index_->SearchAnd({"al"});
+  EXPECT_EQ(results.size(), 0);
+}
+
+/**
+ * @brief Bug: Duplicate INSERT must be idempotent (skip, not double-register n-grams)
+ *
+ * Without the fix, the second INSERT adds n-grams from "different text abc" to the index
+ * under the same doc_id, causing index bloat and potential rollback accidents.
+ */
+TEST_F(BinlogEventProcessorTest, DuplicateInsertIsIdempotent) {
+  // First INSERT
+  BinlogEvent event1;
+  event1.type = BinlogEventType::INSERT;
+  event1.primary_key = "pk1";
+  event1.text = "unique keyword xyz";
+  event1.table_name = "test_table";
+
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(event1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto doc_id = *doc_store_->GetDocId("pk1");
+
+  // Second INSERT with same PK but different text (replay scenario)
+  BinlogEvent event2;
+  event2.type = BinlogEventType::INSERT;
+  event2.primary_key = "pk1";
+  event2.text = "different text abc";
+  event2.table_name = "test_table";
+
+  bool result2 =
+      BinlogEventProcessor::ProcessEvent(event2, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
+
+  // Should succeed (idempotent skip)
+  EXPECT_TRUE(result2);
+
+  // Only one document in store
+  EXPECT_EQ(doc_store_->Size(), 1);
+
+  // Original n-grams still present
+  auto original_results = index_->SearchAnd({"xy"});
+  ASSERT_EQ(original_results.size(), 1);
+  EXPECT_EQ(original_results[0], doc_id);
+
+  // Second text's n-grams must NOT be in the index
+  auto duplicate_results = index_->SearchAnd({"ab"});
+  EXPECT_EQ(duplicate_results.size(), 0);
+}
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

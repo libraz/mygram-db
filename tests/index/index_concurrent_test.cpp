@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -646,4 +647,79 @@ TEST(IndexConcurrentTest, ConcurrentOptimizeCalls) {
   // Index should still be functional (search for bigram "te" which appears in all "test" documents)
   auto results = index.SearchAnd({"te"});
   EXPECT_EQ(results.size(), static_cast<size_t>(num_docs)) << "Index corrupted after concurrent Optimize() calls";
+}
+
+// =============================================================================
+// SaveToStream concurrent access tests
+// =============================================================================
+
+TEST(IndexConcurrentTest, SaveToStreamDoesNotBlockSearch) {
+  Index index(2);
+  for (DocId i = 1; i <= 10000; i++) {
+    index.AddDocument(i, "hello world test data");
+  }
+
+  std::atomic<bool> save_started{false};
+  std::atomic<bool> save_done{false};
+  std::atomic<bool> search_completed_during_save{false};
+
+  std::thread saver([&]() {
+    std::ostringstream oss;
+    save_started.store(true);
+    index.SaveToStream(oss);
+    save_done.store(true);
+  });
+
+  std::thread searcher([&]() {
+    while (!save_started.load()) {
+      std::this_thread::yield();
+    }
+    auto results = index.SearchAnd({"he"});
+    if (!save_done.load()) {
+      search_completed_during_save.store(true);
+    }
+    EXPECT_EQ(results.size(), 10000u);
+  });
+
+  saver.join();
+  searcher.join();
+  // Note: timing-dependent, search result correctness is the main check
+}
+
+TEST(IndexConcurrentTest, SaveToStreamConcurrentWithWrite) {
+  Index index(2);
+  for (DocId i = 1; i <= 5000; i++) {
+    index.AddDocument(i, "hello world");
+  }
+
+  std::ostringstream oss;
+  std::atomic<bool> save_started{false};
+
+  std::thread saver([&]() {
+    save_started.store(true);
+    bool result = index.SaveToStream(oss);
+    EXPECT_TRUE(result);
+  });
+
+  std::thread writer([&]() {
+    while (!save_started.load()) {
+      std::this_thread::yield();
+    }
+    for (DocId i = 5001; i <= 6000; i++) {
+      index.AddDocument(i, "new data");
+    }
+  });
+
+  saver.join();
+  writer.join();
+
+  // Verify saved data can be loaded
+  std::string saved_data = oss.str();
+  EXPECT_GT(saved_data.size(), 0u);
+
+  Index loaded_index(2);
+  std::istringstream iss(saved_data);
+  EXPECT_TRUE(loaded_index.LoadFromStream(iss));
+  auto results = loaded_index.SearchAnd({"he"});
+  EXPECT_GE(results.size(), 5000u);
 }

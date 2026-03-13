@@ -533,12 +533,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
       }
 
-      // Estimate result size by checking the smallest posting list
+      // Estimate result size by checking the smallest posting list (thread-safe)
       size_t min_size = std::numeric_limits<size_t>::max();
       for (const auto& ngram : ngrams) {
-        const auto* posting = current_index->GetPostingList(ngram);
-        if (posting != nullptr) {
-          min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+        if (posting_size > 0) {
+          min_size = std::min(min_size, static_cast<size_t>(posting_size));
         } else {
           min_size = 0;
           break;
@@ -1005,12 +1005,12 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
         ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
       }
 
-      // Estimate result size by checking the smallest posting list
+      // Estimate result size by checking the smallest posting list (thread-safe)
       size_t min_size = std::numeric_limits<size_t>::max();
       for (const auto& ngram : ngrams) {
-        const auto* posting = current_index->GetPostingList(ngram);
-        if (posting != nullptr) {
-          min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+        if (posting_size > 0) {
+          min_size = std::min(min_size, static_cast<size_t>(posting_size));
         } else {
           min_size = 0;
           break;

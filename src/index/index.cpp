@@ -891,6 +891,11 @@ std::shared_ptr<PostingList> Index::TakePostingSnapshot(std::string_view term) c
   return (iter != term_postings_.end()) ? iter->second : nullptr;
 }
 
+uint64_t Index::EstimatePostingSize(std::string_view term) const {
+  auto snapshot = TakePostingSnapshot(term);
+  return snapshot ? snapshot->Size() : 0;
+}
+
 bool Index::SaveToFile(const std::string& filepath) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
@@ -979,36 +984,41 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
     buffer.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
 
-    uint64_t term_count = 0;
-    // Lock scope: iterate and serialize posting lists
+    // RCU snapshot: Take short shared_lock to copy term->PostingList pairs, then
+    // serialize lock-free. This allows searches to proceed during serialization.
+    std::vector<std::pair<std::string, std::shared_ptr<PostingList>>> snapshot;
     {
-      std::scoped_lock lock(postings_mutex_);
-
-      // Write term count
-      term_count = term_postings_.size();
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      buffer.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
-
-      // Write each term and its posting list
+      std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+      snapshot.reserve(term_postings_.size());
       for (const auto& [term, posting] : term_postings_) {
-        // Write term length and term
-        auto term_len = static_cast<uint32_t>(term.size());
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        buffer.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
-        buffer.write(term.data(), static_cast<std::streamsize>(term_len));
-
-        // Serialize posting list to buffer
-        std::vector<uint8_t> posting_data;
-        posting->Serialize(posting_data);
-
-        // Write posting list size and data
-        uint64_t posting_size = posting_data.size();
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        buffer.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-        buffer.write(reinterpret_cast<const char*>(posting_data.data()),
-                     static_cast<std::streamsize>(posting_size));
+        snapshot.emplace_back(term, posting);
       }
+    }  // Lock released here — searches can proceed
+
+    // Write term count
+    auto term_count = static_cast<uint64_t>(snapshot.size());
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+    buffer.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+
+    // Write each term and its posting list (lock-free)
+    for (const auto& [term, posting] : snapshot) {
+      // Write term length and term
+      auto term_len = static_cast<uint32_t>(term.size());
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      buffer.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+      buffer.write(term.data(), static_cast<std::streamsize>(term_len));
+
+      // Serialize posting list to buffer
+      std::vector<uint8_t> posting_data;
+      posting->Serialize(posting_data);
+
+      // Write posting list size and data
+      uint64_t posting_size = posting_data.size();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      buffer.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      buffer.write(reinterpret_cast<const char*>(posting_data.data()),
+                   static_cast<std::streamsize>(posting_size));
     }
 
     // Get the serialized data and compute CRC32

@@ -1137,6 +1137,30 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
     current_config = &table_config_;
   }
 
+  // Invalidate column names cache on ALTER TABLE DDL to avoid stale column name mappings
+  // (TABLE_MAP_EVENT detects column count/type changes but not column renames)
+  if (event.type == BinlogEventType::DDL) {
+    std::string query_upper = event.text;
+    std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
+    if (query_upper.find("ALTER") != std::string::npos) {
+      std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
+      // Invalidate all cache entries containing this table name
+      for (auto it = column_names_cache_.begin(); it != column_names_cache_.end();) {
+        if (it->first.find(event.table_name) != std::string::npos) {
+          mygram::utils::StructuredLog()
+              .Event("binlog_cache_invalidation")
+              .Field("type", "alter_table_column_names")
+              .Field("table", event.table_name)
+              .Field("cache_key", it->first)
+              .Info();
+          it = column_names_cache_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
                                             server_stats_);

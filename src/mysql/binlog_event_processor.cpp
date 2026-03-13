@@ -43,6 +43,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
     switch (event.type) {
       case BinlogEventType::INSERT: {
+        if (exists) {
+          // Document already exists (replay scenario) — skip to maintain idempotency
+          mygram::utils::StructuredLog()
+              .Event("binlog_insert")
+              .Field("primary_key", event.primary_key)
+              .Field("action", "skipped_duplicate")
+              .Debug();
+          if (stats != nullptr) {
+            stats->IncrementReplInsertSkipped();
+          }
+          break;
+        }
         if (matches_required) {
           // Condition satisfied -> add to index
           auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
@@ -106,9 +118,11 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Transitioned out of required conditions -> DELETE from index
           storage::DocId doc_id = doc_id_opt.value();
 
-          // Extract text to remove from index
-          if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+          // Extract text to remove from index — use before-image (old_text) since
+          // that's what was indexed, falling back to after-image (text) if unavailable
+          const std::string& removal_text = event.old_text.empty() ? event.text : event.old_text;
+          if (!removal_text.empty()) {
+            std::string normalized = utils::NormalizeText(removal_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {

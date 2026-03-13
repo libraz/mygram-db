@@ -48,7 +48,10 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         // Table context not available, fall through to normal execution
       } else {
         // TOCTOU mitigation: Validate a sample of cached DocIds
-        // If any are stale (document deleted since cache population), invalidate and fall through
+        // If any are stale (document deleted since cache population), invalidate and fall through.
+        // Design note: Even after validation, documents may be deleted before response formatting.
+        // This is acceptable (eventual consistency): FormatSearchResponse skips missing docs,
+        // and ResultSorter::SortAndPaginate handles missing docs gracefully via fallback sort keys.
         auto full_results = cached_lookup.value().results;
 
         // Validate sample of cached results with adaptive sample size
@@ -539,12 +542,16 @@ std::vector<SearchHandler::TermInfo> SearchHandler::GenerateTermInfos(const std:
       ngrams = utils::GenerateNgrams(normalized, ngram_size);
     }
 
-    // Estimate result size by checking the smallest posting list
+    // Deduplicate n-grams to avoid redundant PostingList lookups
+    std::sort(ngrams.begin(), ngrams.end());
+    ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+
+    // Estimate result size by checking the smallest posting list (thread-safe)
     size_t min_size = std::numeric_limits<size_t>::max();
     for (const auto& ngram : ngrams) {
-      const auto* posting = current_index->GetPostingList(ngram);
-      if (posting != nullptr) {
-        min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+      uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+      if (posting_size > 0) {
+        min_size = std::min(min_size, static_cast<size_t>(posting_size));
       } else {
         min_size = 0;
         break;

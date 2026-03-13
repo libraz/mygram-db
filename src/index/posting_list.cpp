@@ -308,8 +308,9 @@ size_t PostingList::MemoryUsage() const {
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
-  std::shared_lock lock1(mutex_);        // Protect read access to this
-  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+  std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
+  std::lock(lock1, lock2);  // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
@@ -347,8 +348,9 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 }
 
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
-  std::shared_lock lock1(mutex_);        // Protect read access to this
-  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+  std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
+  std::lock(lock1, lock2);  // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 

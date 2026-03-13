@@ -243,6 +243,13 @@ class Index {
   [[nodiscard]] const PostingList* GetPostingList(std::string_view term) const;
 
   /**
+   * @brief Estimate posting list size for a term (thread-safe)
+   * @param term Search term
+   * @return Estimated size of the posting list, or 0 if term not found
+   */
+  [[nodiscard]] uint64_t EstimatePostingSize(std::string_view term) const;
+
+  /**
    * @brief Get n-gram size for regular text
    * @return N-gram size (0 for hybrid mode)
    */

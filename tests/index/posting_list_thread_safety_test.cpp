@@ -388,4 +388,86 @@ TEST_F(PostingListThreadSafetyTest, ConcurrentReadsAndWrites) {
   EXPECT_EQ(errors.load(), 0) << "Thread safety violation detected";
 }
 
+// =============================================================================
+// Intersect/Union deadlock prevention with reverse order calls
+// =============================================================================
+
+TEST_F(PostingListThreadSafetyTest, IntersectNoDeadlockOnReverseOrder) {
+  auto pl1 = std::make_unique<PostingList>(0.01);
+  auto pl2 = std::make_unique<PostingList>(0.01);
+
+  std::vector<DocId> ids1, ids2;
+  for (DocId i = 0; i < 5000; i++) { ids1.push_back(i); }
+  for (DocId i = 2500; i < 7500; i++) { ids2.push_back(i); }
+  pl1->AddBatch(ids1);
+  pl2->AddBatch(ids2);
+  pl1->Optimize(10000);
+  pl2->Optimize(10000);
+
+  constexpr int kIterations = 1000;
+  std::atomic<bool> start{false};
+  std::atomic<int> errors{0};
+
+  // Thread 1: pl1.Intersect(pl2)
+  std::thread t1([&]() {
+    while (!start.load()) std::this_thread::yield();
+    for (int i = 0; i < kIterations; i++) {
+      auto result = pl1->Intersect(*pl2);
+      if (result->Size() != 2500) errors++;
+    }
+  });
+
+  // Thread 2: pl2.Intersect(pl1) — reverse order
+  std::thread t2([&]() {
+    while (!start.load()) std::this_thread::yield();
+    for (int i = 0; i < kIterations; i++) {
+      auto result = pl2->Intersect(*pl1);
+      if (result->Size() != 2500) errors++;
+    }
+  });
+
+  start.store(true);
+  t1.join();
+  t2.join();
+  EXPECT_EQ(errors.load(), 0);
+}
+
+TEST_F(PostingListThreadSafetyTest, UnionNoDeadlockOnReverseOrder) {
+  auto pl1 = std::make_unique<PostingList>(0.01);
+  auto pl2 = std::make_unique<PostingList>(0.01);
+
+  std::vector<DocId> ids1, ids2;
+  for (DocId i = 0; i < 5000; i++) { ids1.push_back(i); }
+  for (DocId i = 2500; i < 7500; i++) { ids2.push_back(i); }
+  pl1->AddBatch(ids1);
+  pl2->AddBatch(ids2);
+  pl1->Optimize(10000);
+  pl2->Optimize(10000);
+
+  constexpr int kIterations = 1000;
+  std::atomic<bool> start{false};
+  std::atomic<int> errors{0};
+
+  std::thread t1([&]() {
+    while (!start.load()) std::this_thread::yield();
+    for (int i = 0; i < kIterations; i++) {
+      auto result = pl1->Union(*pl2);
+      if (result->Size() != 7500) errors++;
+    }
+  });
+
+  std::thread t2([&]() {
+    while (!start.load()) std::this_thread::yield();
+    for (int i = 0; i < kIterations; i++) {
+      auto result = pl2->Union(*pl1);
+      if (result->Size() != 7500) errors++;
+    }
+  });
+
+  start.store(true);
+  t1.join();
+  t2.join();
+  EXPECT_EQ(errors.load(), 0);
+}
+
 }  // namespace mygramdb::index

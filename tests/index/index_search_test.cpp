@@ -425,3 +425,16 @@ TEST(IndexTest, EmptySearch) {
   results = index.SearchOr({});
   EXPECT_EQ(results.size(), 0);
 }
+
+// =============================================================================
+// Duplicate n-grams produce correct results
+// =============================================================================
+
+TEST(IndexSearchTest, DuplicateNgramsProduceCorrectResults) {
+  Index index(2);
+  index.AddDocument(1, "hello");
+  // Same n-grams duplicated should still produce correct results
+  auto results = index.SearchAnd({"he", "he", "el"});
+  EXPECT_EQ(results.size(), 1u);
+  EXPECT_EQ(results[0], 1u);
+}
