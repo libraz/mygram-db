@@ -1056,8 +1056,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
             .Debug();
 
         // Check if we have data remaining before attempting to decode
-        // If not, this means we've reached the end (e.g., checksum/padding bytes)
-        if (ptr >= end) {
+        // NULL columns consume no buffer space, so ptr >= end is OK for them
+        if (!is_null && ptr >= end) {
           mygram::utils::StructuredLog()
               .Event("binlog_debug")
               .Field("action", "reached_end_before_image")
@@ -1180,7 +1180,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
             .Debug();
 
         // Check if we have data remaining before attempting to decode
-        if (ptr >= end) {
+        // NULL columns consume no buffer space, so ptr >= end is OK for them
+        if (!is_null && ptr >= end) {
           mygram::utils::StructuredLog()
               .Event("binlog_debug")
               .Field("action", "reached_end_after_image")

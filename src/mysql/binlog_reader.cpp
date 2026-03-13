@@ -478,11 +478,19 @@ void BinlogReader::ReaderThreadFunc() {
     rpl.server_id = config_.server_id;  // Use configured server ID for replica
     rpl.flags = MYSQL_RPL_GTID;         // Use GTID mode (allow heartbeat events)
 
-    // Use executed_gtid_set_ (full GTID set) for reconnection, falling back to current_gtid_
+    // Use current_gtid_ (last processed position) for reconnection, falling back to executed_gtid_set_
     std::string current_gtid;
     {
       std::scoped_lock lock(gtid_mutex_);
-      current_gtid = executed_gtid_set_.empty() ? ConvertSingleGtidToRange(current_gtid_) : executed_gtid_set_;
+      // Use current_gtid_ (last *processed* position) for reconnection.
+      // executed_gtid_set_ (from @@GLOBAL.gtid_executed) may include events
+      // the client hasn't processed yet, causing them to be skipped on reconnect.
+      // Fall back to executed_gtid_set_ only on initial connection when current_gtid_ is empty.
+      if (!current_gtid_.empty()) {
+        current_gtid = ConvertSingleGtidToRange(current_gtid_);
+      } else {
+        current_gtid = executed_gtid_set_;
+      }
     }
 
     // Encode GTID set to binary format if we have one
