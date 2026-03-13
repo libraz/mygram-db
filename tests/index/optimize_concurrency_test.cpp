@@ -648,4 +648,158 @@ TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringBatchOptimizeDetectsChange) {
   EXPECT_FALSE(found_50) << "Document 50 (removed during BatchOptimize) must not be searchable";
 }
 
+/**
+ * @brief Regression test: Remove during Optimize() must not resurrect deleted documents
+ *
+ * Bug: When a posting list's version changes during optimization, the old code used
+ * Union(optimized_posting, current_posting) to merge. This resurrected documents
+ * that were removed between Clone() and Phase 2, because the optimized_posting
+ * (cloned before removal) still contained the removed doc IDs.
+ *
+ * Fix: When version mismatch is detected, skip the swap for that term and keep
+ * the current posting as-is (source of truth). The term will be optimized in the
+ * next optimization cycle.
+ */
+TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
+  // Run multiple iterations to increase the chance of hitting the race condition
+  for (int iteration = 0; iteration < 5; ++iteration) {
+    auto test_index = std::make_unique<Index>(2, 1);
+    const uint32_t num_docs = 5000;
+
+    // Populate with documents that share many n-grams (use common prefix text)
+    for (uint32_t i = 0; i < num_docs; ++i) {
+      std::string text =
+          "shared prefix common ngram data " + std::to_string(i);
+      test_index->AddDocument(i, text);
+    }
+
+    // Documents to remove: 100-199
+    const uint32_t remove_start = 100;
+    const uint32_t remove_end = 200;
+
+    std::atomic<bool> optimize_started{false};
+    std::atomic<bool> optimize_finished{false};
+
+    // Thread 1: Run Optimize
+    std::thread optimizer([&]() {
+      optimize_started = true;
+      test_index->Optimize(num_docs);
+      optimize_finished = true;
+    });
+
+    // Thread 2: Aggressively remove documents 100-199
+    std::thread remover([&]() {
+      while (!optimize_started.load()) {
+        std::this_thread::yield();
+      }
+      // Remove immediately, no sleep
+      for (uint32_t id = remove_start; id < remove_end; ++id) {
+        std::string text =
+            "shared prefix common ngram data " + std::to_string(id);
+        test_index->RemoveDocument(id, text);
+      }
+    });
+
+    optimizer.join();
+    remover.join();
+
+    // Verify: ALL removed documents must NOT appear in search results
+    auto results = test_index->SearchAnd({"sh"});  // From "shared"
+    std::set<uint32_t> result_set(results.begin(), results.end());
+
+    for (uint32_t id = remove_start; id < remove_end; ++id) {
+      EXPECT_FALSE(result_set.count(id) > 0)
+          << "Iteration " << iteration << ": Document " << id
+          << " was removed but still found in search results (resurrection bug)";
+    }
+
+    // Verify: Non-removed documents should still be found
+    size_t non_removed_found = 0;
+    for (uint32_t id = 0; id < num_docs; ++id) {
+      if (id >= remove_start && id < remove_end) {
+        continue;
+      }
+      if (result_set.count(id) > 0) {
+        non_removed_found++;
+      }
+    }
+    EXPECT_GT(non_removed_found, 0)
+        << "Iteration " << iteration
+        << ": Non-removed documents should still be searchable";
+  }
+}
+
+/**
+ * @brief Regression test: Remove during OptimizeInBatches() must not resurrect
+ * deleted documents
+ *
+ * Same bug as RemoveDuringOptimizeDoesNotResurrect but targeting the batched
+ * optimization path. Uses small batch sizes to increase the window for
+ * concurrent removals to interleave with batch processing.
+ */
+TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
+  for (int iteration = 0; iteration < 5; ++iteration) {
+    auto test_index = std::make_unique<Index>(2, 1);
+    const uint32_t num_docs = 5000;
+
+    for (uint32_t i = 0; i < num_docs; ++i) {
+      std::string text =
+          "shared prefix common ngram data " + std::to_string(i);
+      test_index->AddDocument(i, text);
+    }
+
+    const uint32_t remove_start = 100;
+    const uint32_t remove_end = 200;
+
+    std::atomic<bool> optimize_started{false};
+    std::atomic<bool> optimize_finished{false};
+
+    // Thread 1: Run OptimizeInBatches with small batches
+    std::thread optimizer([&]() {
+      optimize_started = true;
+      test_index->OptimizeInBatches(num_docs, 10);
+      optimize_finished = true;
+    });
+
+    // Thread 2: Aggressively remove documents 100-199
+    std::thread remover([&]() {
+      while (!optimize_started.load()) {
+        std::this_thread::yield();
+      }
+      for (uint32_t id = remove_start; id < remove_end; ++id) {
+        std::string text =
+            "shared prefix common ngram data " + std::to_string(id);
+        test_index->RemoveDocument(id, text);
+      }
+    });
+
+    optimizer.join();
+    remover.join();
+
+    // Verify: ALL removed documents must NOT appear in search results
+    auto results = test_index->SearchAnd({"sh"});
+    std::set<uint32_t> result_set(results.begin(), results.end());
+
+    for (uint32_t id = remove_start; id < remove_end; ++id) {
+      EXPECT_FALSE(result_set.count(id) > 0)
+          << "Iteration " << iteration << ": Document " << id
+          << " was removed but still found in search results (resurrection bug)";
+    }
+
+    // Verify: Non-removed documents should still be found
+    size_t non_removed_found = 0;
+    for (uint32_t id = 0; id < num_docs; ++id) {
+      if (id >= remove_start && id < remove_end) {
+        continue;
+      }
+      if (result_set.count(id) > 0) {
+        non_removed_found++;
+      }
+    }
+    EXPECT_GT(non_removed_found, 0)
+        << "Iteration " << iteration
+        << ": Non-removed documents should still be searchable";
+  }
+}
+
 }  // namespace mygramdb::index

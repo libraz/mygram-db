@@ -604,7 +604,8 @@ void Index::Optimize(uint64_t total_docs) {
     // This preserves concurrent modifications:
     // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
     // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-    // - Terms modified during Phase 1: merge new additions with optimized version
+    // - Terms modified during Phase 1: keep current version (source of truth),
+    //   skip optimization for this term
     for (auto& [term, optimized_posting] : optimized_postings) {
       auto current_it = term_postings_.find(term);
       if (current_it != term_postings_.end()) {
@@ -616,10 +617,10 @@ void Index::Optimize(uint64_t total_docs) {
         // catches balanced Remove+Add operations where size stays the same but data changed.
         if (snapshot_version_it != snapshot_versions.end() &&
             current_posting->Version() != snapshot_version_it->second) {
-          // Posting list was modified: merge current state with the optimized version
-          auto merged = optimized_posting->Union(*current_posting);
-          merged->Optimize(total_docs);  // Re-optimize after merge
-          term_postings_[term] = std::move(merged);
+          // Posting list was modified during optimization.
+          // Keep current_posting as-is (source of truth) rather than Union,
+          // which would resurrect documents removed during optimization.
+          // This term will be optimized in the next optimization cycle.
           merged_count++;
         } else {
           // No changes: use optimized version as-is
@@ -633,7 +634,7 @@ void Index::Optimize(uint64_t total_docs) {
   if (merged_count > 0) {
     mygram::utils::StructuredLog()
         .Event("index_optimization_merge")
-        .Field("merged_terms", static_cast<uint64_t>(merged_count))
+        .Field("skipped_terms", static_cast<uint64_t>(merged_count))
         .Debug();
   }
 
@@ -754,7 +755,8 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       // This preserves concurrent modifications:
       // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
       // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-      // - Terms modified during Phase 1: merge new additions with optimized version
+      // - Terms modified during Phase 1: keep current version (source of truth),
+      //   skip optimization for this term
       for (size_t j = i; j < batch_end; ++j) {
         const auto& term = terms[j];
         auto opt_it = optimized_postings.find(term);
@@ -772,10 +774,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
           // catches balanced Remove+Add operations where size stays the same but data changed.
           if (snapshot_version_it != batch_snapshot_versions.end() &&
               current_posting->Version() != snapshot_version_it->second) {
-            // Posting list was modified: merge current state with the optimized version
-            auto merged = opt_it->second->Union(*current_posting);
-            merged->Optimize(total_docs);
-            term_postings_[term] = std::move(merged);
+            // Posting list was modified during optimization.
+            // Keep current_posting as-is (source of truth) rather than Union,
+            // which would resurrect documents removed during optimization.
+            // This term will be optimized in the next optimization cycle.
           } else {
             // No changes: use optimized version as-is
             term_postings_[term] = std::move(opt_it->second);
