@@ -1,0 +1,7 @@
+{
+    "p50_ms": 5.0,
+    "p95_ms": 15.0,
+    "p99_ms": 30.0,
+    "qps": 1000.0,
+    "note": "Initial baseline - update after first real benchmark run"
+}

@@ -342,11 +342,18 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
 }
 
 void ConnectionAcceptor::AcceptLoop() {
-  mygram::utils::StructuredLog()
-      .Event("accept_loop_started")
-      .Field("host", config_.host)
-      .Field("port", static_cast<uint64_t>(actual_port_))
-      .Debug();
+  if (IsUnixSocket()) {
+    mygram::utils::StructuredLog()
+        .Event("accept_loop_started")
+        .Field("unix_socket", unix_socket_path_)
+        .Debug();
+  } else {
+    mygram::utils::StructuredLog()
+        .Event("accept_loop_started")
+        .Field("host", config_.host)
+        .Field("port", static_cast<uint64_t>(actual_port_))
+        .Debug();
+  }
 
   while (!should_stop_) {
     int client_fd = -1;

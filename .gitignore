@@ -70,6 +70,7 @@ snapshots/
 # SQL files (may contain sensitive data)
 *.sql
 !support/docker/mysql/init/*.sql
+!e2e/docker/mysql-init/*.sql
 
 # Backup directory
 backup/
@@ -94,3 +95,15 @@ __pycache__/
 .venv/
 .python-version
 dumps/
+
+# E2E test results (generated at runtime)
+e2e/results/reports/*.xml
+e2e/results/metrics/
+e2e/.venv/
+e2e/__pycache__/
+e2e/**/__pycache__/
+e2e/*.egg-info/
+e2e/.mypy_cache/
+e2e/.ruff_cache/
+e2e/.pytest_cache/
+!e2e/results/baselines/baseline.json
