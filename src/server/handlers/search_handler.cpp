@@ -196,7 +196,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Check if ordering by primary key (either empty column or explicit primary key column name)
-  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  // Case-insensitive: MySQL column names are case-insensitive
+  auto equals_ignore_case = [](const std::string& lhs, const std::string& rhs) {
+    return lhs.size() == rhs.size() &&
+           std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                      [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+  };
+  bool is_primary_key_order = order_by.IsPrimaryKey() || equals_ignore_case(order_by.column, primary_key_column);
 
   // Record applied ORDER BY for debug
   if (conn_ctx.debug_mode) {
@@ -387,27 +393,55 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
   if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
     auto cached_lookup = ctx_.cache_manager->LookupWithMetadata(query);
     if (cached_lookup.has_value()) {
-      // Cache hit! Return count from cached result
-      auto cache_lookup_end = std::chrono::high_resolution_clock::now();
-      double cache_lookup_time_ms =
-          std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
+      // Cache hit - validate before returning count
+      storage::DocumentStore* current_doc_store = nullptr;
+      index::Index* dummy_index = nullptr;
+      int dummy_ngram = 0;
+      int dummy_kanji_ngram = 0;
+      std::string error =
+          GetTableContext(query.table, &dummy_index, &current_doc_store, &dummy_ngram, &dummy_kanji_ngram);
+      if (!error.empty() || current_doc_store == nullptr) {
+        // Table context not available, fall through to normal execution
+      } else {
+        // TOCTOU mitigation: Validate a sample of cached DocIds
+        auto full_results = cached_lookup.value().results;
 
-      if (conn_ctx.debug_mode) {
-        query::DebugInfo debug_info;
-        debug_info.query_time_ms = cache_lookup_time_ms;
-        debug_info.final_results = cached_lookup.value().results.size();
+        bool cache_stale = false;
+        if (!full_results.empty()) {
+          size_t sample_size = std::min(full_results.size(), std::max(size_t{10}, full_results.size() / 10));
+          size_t step = std::max(size_t{1}, full_results.size() / sample_size);
+          for (size_t i = 0; i < full_results.size() && i / step < sample_size; i += step) {
+            if (!current_doc_store->GetPrimaryKey(full_results[i]).has_value()) {
+              cache_stale = true;
+              break;
+            }
+          }
+        }
 
-        // Cache hit debug info with actual metadata
-        auto now = std::chrono::steady_clock::now();
-        debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
-        debug_info.cache_info.cache_age_ms =
-            std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
-        debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
+        if (cache_stale) {
+          // Cache contains stale DocIds - fall through to normal execution
+        } else {
+          auto cache_lookup_end = std::chrono::high_resolution_clock::now();
+          double cache_lookup_time_ms =
+              std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
 
-        return ResponseFormatter::FormatCountResponse(cached_lookup.value().results.size(), &debug_info);
+          if (conn_ctx.debug_mode) {
+            query::DebugInfo debug_info;
+            debug_info.query_time_ms = cache_lookup_time_ms;
+            debug_info.final_results = full_results.size();
+
+            auto now = std::chrono::steady_clock::now();
+            debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
+            debug_info.cache_info.cache_age_ms =
+                std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
+            debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
+
+            return ResponseFormatter::FormatCountResponse(full_results.size(), &debug_info);
+          }
+
+          return ResponseFormatter::FormatCountResponse(full_results.size());
+        }
       }
-
-      return ResponseFormatter::FormatCountResponse(cached_lookup.value().results.size());
     }
   }
 

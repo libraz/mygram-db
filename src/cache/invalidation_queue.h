@@ -90,7 +90,8 @@ class InvalidationQueue {
    * @param old_text Previous text content
    * @param new_text New text content
    */
-  void Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text);
+  void Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+               bool filter_columns_changed = false);
 
   /**
    * @brief Start background worker thread for batch processing

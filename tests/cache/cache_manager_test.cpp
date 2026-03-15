@@ -576,4 +576,80 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
   EXPECT_FALSE(after_invalidation.has_value());
 }
 
+/**
+ * @brief Test CacheManager destructor safety with short TTL entries
+ *
+ * Regression test for P0 use-after-free: QueryCache's LRU background thread
+ * could fire eviction callbacks referencing already-destroyed InvalidationManager
+ * during CacheManager destruction. The fix clears the eviction callback and
+ * explicitly destroys QueryCache before InvalidationManager.
+ */
+TEST(CacheManagerTest, DestructorSafeWithShortTTLEntries) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.ttl_seconds = 1;  // Short TTL to increase eviction probability
+
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  {
+    CacheManager mgr(config, table_contexts);
+
+    // Insert many entries with short TTL
+    for (int i = 0; i < 100; ++i) {
+      auto query = CreateQuery("posts", "destructor test query " + std::to_string(i));
+      std::vector<DocId> result;
+      for (int j = 0; j < 50; ++j) {
+        result.push_back(static_cast<DocId>(i * 100 + j));
+      }
+      std::set<std::string> ngrams = {"des", "est", "str", "tru"};
+      mgr.Insert(query, result, ngrams, 15.0);
+    }
+
+    // Wait for some entries to expire via TTL
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // CacheManager destructor runs here - should not crash with use-after-free
+  }
+
+  // If we reach here without crash/ASAN/TSAN error, the fix works
+  SUCCEED();
+}
+
+/**
+ * @brief Test CacheManager destructor safety with small cache triggering evictions
+ *
+ * Regression test for P0: Exercises LRU eviction during destruction by using
+ * a very small cache that has active evictions happening.
+ */
+TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 5 * 1024;  // Very small cache to trigger evictions
+  config.ttl_seconds = 1;
+
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  {
+    CacheManager mgr(config, table_contexts);
+
+    // Flood the cache to ensure constant evictions
+    for (int i = 0; i < 200; ++i) {
+      auto query = CreateQuery("posts", "eviction test " + std::to_string(i));
+      std::vector<DocId> result;
+      for (int j = 0; j < 100; ++j) {
+        result.push_back(static_cast<DocId>(i * 1000 + j));
+      }
+      std::set<std::string> ngrams = {"evi", "vic", "ict"};
+      mgr.Insert(query, result, ngrams, 10.0);
+    }
+
+    // Destructor runs here with eviction callbacks potentially still active
+  }
+
+  SUCCEED();
+}
+
 }  // namespace mygramdb::cache

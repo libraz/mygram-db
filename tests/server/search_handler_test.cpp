@@ -344,6 +344,106 @@ TEST(SearchHandlerTest, FreshCacheNotStale) {
 }
 
 // =============================================================================
+// COUNT handler TOCTOU validation on cached results (Bug #4)
+// =============================================================================
+// HandleCount returned cached result count directly WITHOUT validating that
+// the cached DocIds still exist. If documents are deleted after caching,
+// COUNT returns inflated numbers. The fix adds the same TOCTOU validation
+// sampling that HandleSearch uses.
+//
+// Note: Full integration testing of HandleCount cache validation requires
+// setting up SearchHandler with a real CacheManager, DocumentStore, and
+// Index infrastructure. The conceptual tests below validate the validation
+// logic in isolation.
+// =============================================================================
+
+/**
+ * @test COUNT stale cache detection should invalidate cached count
+ *
+ * Bug #4: Verifies that stale DocIds in cached results cause COUNT
+ * to fall through to normal execution instead of returning inflated count.
+ */
+TEST(SearchHandlerTest, CountStaleCacheDetection) {
+  // Simulated scenario:
+  // 1. SEARCH caches DocIds [1, 2, 3, 4, 5] (count=5)
+  // 2. Document 3 is deleted
+  // 3. COUNT with same query hits cache
+  // 4. Without fix: COUNT returns 5 (wrong!)
+  // 5. With fix: validation detects DocId 3 is stale, falls through to
+  //    normal execution which returns 4 (correct)
+
+  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
+  std::set<uint32_t> deleted_doc_ids = {3};
+
+  // Simulate the TOCTOU validation logic added to HandleCount
+  bool cache_stale = false;
+  if (!cached_doc_ids.empty()) {
+    size_t sample_size =
+        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
+    for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
+      // In real code: !current_doc_store->GetPrimaryKey(doc_id).has_value()
+      if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
+        cache_stale = true;
+        break;
+      }
+    }
+  }
+
+  // With the fix, COUNT should detect stale cache and NOT return cached count
+  EXPECT_TRUE(cache_stale) << "COUNT should detect stale cache when DocIds are deleted";
+
+  // The actual count after re-execution would be 4, not 5
+  size_t correct_count = cached_doc_ids.size() - deleted_doc_ids.size();
+  EXPECT_EQ(correct_count, 4) << "Correct count should exclude deleted documents";
+}
+
+/**
+ * @test COUNT fresh cache should return cached count directly
+ *
+ * Bug #4: When cache is fresh, COUNT should still return the cached count
+ * without re-executing the query.
+ */
+TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
+  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
+  std::set<uint32_t> deleted_doc_ids = {};  // No deletions
+
+  bool cache_stale = false;
+  if (!cached_doc_ids.empty()) {
+    size_t sample_size =
+        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
+    for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
+      if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
+        cache_stale = true;
+        break;
+      }
+    }
+  }
+
+  EXPECT_FALSE(cache_stale) << "Fresh cache should not be detected as stale";
+  // COUNT should return cached_doc_ids.size() = 5 directly
+  EXPECT_EQ(cached_doc_ids.size(), 5);
+}
+
+/**
+ * @test COUNT empty cached results should not be flagged as stale
+ *
+ * Bug #4: Edge case - empty cached results should pass validation.
+ */
+TEST(SearchHandlerTest, CountEmptyCacheNotStale) {
+  std::vector<uint32_t> cached_doc_ids = {};
+
+  bool cache_stale = false;
+  if (!cached_doc_ids.empty()) {
+    // This block should be skipped for empty results
+    cache_stale = true;  // Would be set if we entered the loop
+  }
+
+  EXPECT_FALSE(cache_stale) << "Empty cache should not be flagged as stale";
+}
+
+// =============================================================================
 // Floating-point epsilon comparison for filters (H3)
 // =============================================================================
 

@@ -100,7 +100,8 @@ class CacheManager {
    * @param old_text Previous text content (empty if INSERT)
    * @param new_text New text content (empty if DELETE)
    */
-  void Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text);
+  void Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+                  bool filter_columns_changed = false);
 
   /**
    * @brief Clear all cache entries

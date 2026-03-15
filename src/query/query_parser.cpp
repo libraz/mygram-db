@@ -58,6 +58,18 @@ std::string ToUpper(std::string_view str) {
 }
 
 /**
+ * @brief Convert string to lowercase
+ *
+ * Used to normalize column names (MySQL column names are case-insensitive).
+ */
+std::string ToLower(std::string_view str) {
+  std::string result(str);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) { return std::tolower(character); });
+  return result;
+}
+
+/**
  * @brief Case-insensitive string comparison (optimized, no allocations)
  * @param lhs First string
  * @param rhs Second string
@@ -1063,7 +1075,7 @@ bool QueryParser::ParseFilterArguments(const std::vector<std::string>& tokens, s
       return false;
     }
 
-    filter.column = column_part;
+    filter.column = ToLower(column_part);
     filter.op = filter_op.value();
 
     if (!value_part.empty()) {
@@ -1093,7 +1105,7 @@ bool QueryParser::ParseFilterArguments(const std::vector<std::string>& tokens, s
     return false;
   }
 
-  filter.column = tokens[pos++];
+  filter.column = ToLower(tokens[pos++]);
 
   auto filter_op = ParseFilterOp(tokens[pos++]);
   if (!filter_op.has_value()) {
@@ -1214,7 +1226,8 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   }
 
   // Normal case: SORT <column> [ASC|DESC]
-  order_by.column = tokens[pos++];
+  // Lowercase for case-insensitive matching (MySQL column names are case-insensitive)
+  order_by.column = ToLower(tokens[pos++]);
 
   // Check for comma in column name (multi-column sort attempt)
   if (order_by.column.find(',') != std::string::npos) {

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 
@@ -126,10 +127,10 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
   doc_id_to_pk_[doc_id] = primary_key_str;
   pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
 
-  // Store filters
+  // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
   if (!filters.empty()) {
-    doc_filters_[doc_id] = filters;
     filter_index_->AddDocument(doc_id, filters);
+    doc_filters_[doc_id] = filters;
   }
 
   mygram::utils::StructuredLog()
@@ -497,11 +498,12 @@ void DocumentStore::Compact() {
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                                 const std::string& replication_gtid) const {
+  std::string temp_filepath = filepath + ".tmp";
   try {
-    std::ofstream ofs(filepath, std::ios::binary);
+    std::ofstream ofs(temp_filepath, std::ios::binary);
     if (!ofs) {
       return MakeUnexpected(
-          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open file for writing", filepath));
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open temp file for writing", temp_filepath));
     }
 
     // File format:
@@ -592,20 +594,57 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
 
     ofs.close();
 
-    // Ensure data is flushed to disk to prevent data loss on OS crash
+    // Ensure temp file data is flushed to disk BEFORE rename
 #ifndef _WIN32
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int file_desc = open(filepath.c_str(), O_RDONLY);
+    int file_desc = open(temp_filepath.c_str(), O_RDONLY);
     if (file_desc >= 0) {
       if (fsync(file_desc) != 0) {
         mygram::utils::StructuredLog()
             .Event("storage_warning")
-            .Field("operation", "fsync")
-            .Field("filepath", filepath)
+            .Field("operation", "fsync_temp_file")
+            .Field("filepath", temp_filepath)
             .Field("errno", static_cast<int64_t>(errno))
             .Warn();
       }
       close(file_desc);
+    }
+#endif
+
+    // Atomic rename: temp file -> final path
+    std::error_code rename_error;
+    std::filesystem::rename(temp_filepath, filepath, rename_error);
+    if (rename_error) {
+      mygram::utils::StructuredLog()
+          .Event("storage_error")
+          .Field("operation", "atomic_rename")
+          .Field("filepath", filepath)
+          .Field("error", rename_error.message())
+          .Error();
+      std::filesystem::remove(temp_filepath);
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                    "Failed to rename temp file: " + rename_error.message(), filepath));
+    }
+
+    // Sync the directory to ensure the rename is durable
+#ifndef _WIN32
+    {
+      auto parent_dir = std::filesystem::path(filepath).parent_path();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+      int dir_file_desc =
+          open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
+      if (dir_file_desc >= 0) {
+        if (fsync(dir_file_desc) != 0) {
+          mygram::utils::StructuredLog()
+              .Event("storage_warning")
+              .Field("operation", "fsync_directory")
+              .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
+              .Field("errno", static_cast<int64_t>(errno))
+              .Warn();
+        }
+        close(dir_file_desc);
+      }
     }
 #endif
 
@@ -617,6 +656,9 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
         .Info();
     return {};
   } catch (const std::exception& e) {
+    // Clean up temp file on exception
+    std::error_code ec;
+    std::filesystem::remove(temp_filepath, ec);
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
                                     std::string("Exception while saving document store: ") + e.what(), filepath));
   }

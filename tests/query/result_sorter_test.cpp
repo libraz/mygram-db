@@ -867,6 +867,319 @@ TEST_F(ResultSorterTest, SchwartzianTransformWithMissingPrimaryKeys) {
 }
 
 // =============================================================================
+// Negative floating-point sort key tests
+// =============================================================================
+
+/**
+ * @brief Test sorting negative doubles in ascending order
+ *
+ * Verifies that negative floating-point values are sorted correctly.
+ * Previously, "-1.0" > "-20.0" lexicographically, causing incorrect order.
+ */
+TEST_F(ResultSorterTest, NegativeDoubleSortAsc) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"score", FilterValue(double{-20.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"score", FilterValue(double{-5.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"score", FilterValue(double{-1.0})}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk1");  // -20.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk2");  // -5.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk3");  // -1.0
+}
+
+/**
+ * @brief Test sorting negative doubles in descending order
+ */
+TEST_F(ResultSorterTest, NegativeDoubleSortDesc) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"score", FilterValue(double{-20.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"score", FilterValue(double{-5.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"score", FilterValue(double{-1.0})}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::DESC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk3");  // -1.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk2");  // -5.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk1");  // -20.0
+}
+
+/**
+ * @brief Test sorting mixed positive and negative doubles in ascending order
+ */
+TEST_F(ResultSorterTest, MixedSignDoubleSortAsc) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"score", FilterValue(double{-10.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"score", FilterValue(double{0.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"score", FilterValue(double{5.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk4", {{"score", FilterValue(double{-3.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk5", {{"score", FilterValue(double{100.0})}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 5);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk1");  // -10.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk4");  // -3.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk2");  // 0.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[3]).value(), "pk3");  // 5.0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[4]).value(), "pk5");  // 100.0
+}
+
+/**
+ * @brief Test that negative zero and positive zero are adjacent when sorted
+ */
+TEST_F(ResultSorterTest, NegativeZeroVsPositiveZero) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"score", FilterValue(double{-0.0})}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"score", FilterValue(double{0.0})}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Both zeros should be present and adjacent
+  ASSERT_EQ(sorted.size(), 2);
+
+  // -0.0 should sort <= +0.0
+  auto pk_first = doc_store_.GetPrimaryKey(sorted[0]).value();
+  auto pk_second = doc_store_.GetPrimaryKey(sorted[1]).value();
+  EXPECT_EQ(pk_first, "pk1");   // -0.0
+  EXPECT_EQ(pk_second, "pk2");  // +0.0
+}
+
+// =============================================================================
+// Bug #7: Signed integer sort with extreme values (XOR sign-bit technique)
+// =============================================================================
+
+/**
+ * @brief Test sorting INT64 extreme values (INT64_MIN, -1, 0, 1, INT64_MAX)
+ *
+ * Previously, kSignedOffset = (1LL << 60) caused:
+ * - INT64_MAX + kSignedOffset → signed overflow (undefined behavior)
+ * - INT64_MIN + kSignedOffset → still negative (incorrect sort order)
+ *
+ * Fixed by using XOR with (1ULL << 63) which avoids overflow.
+ */
+TEST_F(ResultSorterTest, SignedInt64SortExtremeValues) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"val", int64_t(INT64_MAX)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"val", int64_t(0)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"val", int64_t(INT64_MIN)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk4", {{"val", int64_t(-1)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk5", {{"val", int64_t(1)}}));
+
+  // ASC: INT64_MIN, -1, 0, 1, INT64_MAX
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 5);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk3");  // INT64_MIN
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk4");  // -1
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk2");  // 0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[3]).value(), "pk5");  // 1
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[4]).value(), "pk1");  // INT64_MAX
+
+  // DESC: INT64_MAX, 1, 0, -1, INT64_MIN
+  query.order_by = OrderByClause{"val", SortOrder::DESC};
+  auto result_desc = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result_desc.has_value()) << result_desc.error().message();
+  auto sorted_desc = result_desc.value();
+
+  ASSERT_EQ(sorted_desc.size(), 5);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[0]).value(), "pk1");  // INT64_MAX
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[1]).value(), "pk5");  // 1
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[2]).value(), "pk2");  // 0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[3]).value(), "pk4");  // -1
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted_desc[4]).value(), "pk3");  // INT64_MIN
+}
+
+/**
+ * @brief Test sorting INT32 extreme values
+ */
+TEST_F(ResultSorterTest, SignedInt32SortExtremeValues) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"val", int32_t(INT32_MAX)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"val", int32_t(0)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"val", int32_t(INT32_MIN)}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk3");  // INT32_MIN
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk2");  // 0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk1");  // INT32_MAX
+}
+
+/**
+ * @brief Test mixed positive and negative integer sort
+ */
+TEST_F(ResultSorterTest, MixedPositiveNegativeIntSort) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk1", {{"val", int64_t(-999)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk2", {{"val", int64_t(50)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk3", {{"val", int64_t(-100)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk4", {{"val", int64_t(999)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk5", {{"val", int64_t(0)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("pk6", {{"val", int64_t(-1)}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 100;
+  query.offset = 0;
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // ASC: -999, -100, -1, 0, 50, 999
+  ASSERT_EQ(sorted.size(), 6);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "pk1");  // -999
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "pk3");  // -100
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "pk6");  // -1
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[3]).value(), "pk5");  // 0
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[4]).value(), "pk2");  // 50
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[5]).value(), "pk4");  // 999
+}
+
+/**
+ * @brief Test signed int sort with Schwartzian Transform (150+ docs)
+ *
+ * Ensures the XOR technique works correctly in the Schwartzian Transform path.
+ */
+TEST_F(ResultSorterTest, SignedIntSortWithSchwartzianTransform) {
+  // Add 160 documents (above kSchwartzianTransformThreshold = 100)
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 160; i++) {
+    // Values from -80 to +79
+    int64_t val = static_cast<int64_t>(i) - 80;
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(i), {{"val", val}}));
+  }
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 160;
+  query.offset = 0;
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 160);
+
+  // Verify strictly ascending order
+  for (size_t i = 1; i < sorted.size(); i++) {
+    auto val_prev = doc_store_.GetFilterValue(sorted[i - 1], "val");
+    auto val_curr = doc_store_.GetFilterValue(sorted[i], "val");
+    ASSERT_TRUE(val_prev.has_value());
+    ASSERT_TRUE(val_curr.has_value());
+    int64_t prev = std::get<int64_t>(val_prev.value());
+    int64_t curr = std::get<int64_t>(val_curr.value());
+    EXPECT_LT(prev, curr) << "Sort order violation at index " << i << ": " << prev << " >= " << curr;
+  }
+}
+
+// =============================================================================
+// Bug #8: Sort column name case sensitivity
+// =============================================================================
+
+/**
+ * @brief Test that sort by primary key column name is case-insensitive
+ *
+ * "SORT ID DESC" and "SORT id DESC" should both recognize PK and sort correctly.
+ */
+TEST_F(ResultSorterTest, SortByPrimaryKeyColumnNameCaseInsensitive) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("100"));
+  doc_ids.push_back(*doc_store_.AddDocument("50"));
+  doc_ids.push_back(*doc_store_.AddDocument("200"));
+
+  // Sort by "ID" (uppercase) with primary_key_column = "id" (lowercase)
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+  query.order_by = OrderByClause{"ID", SortOrder::DESC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query, "id");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  // Should recognize "ID" as PK and sort numerically: 200, 100, 50
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "200");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "100");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "50");
+}
+
+// =============================================================================
 // #6: Schwartzian Transform threshold test
 // =============================================================================
 

@@ -24,11 +24,15 @@
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
 
-// Forward declaration
+// Forward declarations
 namespace mygramdb::server {
 struct TableContext;
 class ServerStats;
 }  // namespace mygramdb::server
+
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
 
 namespace mygramdb::mysql {
 
@@ -268,9 +272,19 @@ class BinlogReader final : public IBinlogReader {
 
   /**
    * @brief Set server statistics tracker
-   * @param stats Server statistics tracker pointer
+   * @param stats Server statistics tracker pointer (non-owning).
+   *        Caller must ensure the pointed-to object outlives this BinlogReader,
+   *        or call Stop() before destroying it.
    */
   void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
+
+  /**
+   * @brief Set cache manager for invalidation during binlog processing
+   * @param cache_manager Cache manager pointer (non-owning, nullable).
+   *        Caller must ensure the pointed-to object outlives this BinlogReader,
+   *        or call Stop() before destroying it.
+   */
+  void SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
 
  private:
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
@@ -308,7 +322,8 @@ class BinlogReader final : public IBinlogReader {
   std::string current_gtid_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
-  server::ServerStats* server_stats_ = nullptr;  // Optional server statistics tracker
+  server::ServerStats* server_stats_ = nullptr;   // Optional server statistics tracker
+  cache::CacheManager* cache_manager_ = nullptr;  // Optional cache manager for invalidation
 
   // Debug log counters (instance-scoped, reset on Start())
   std::atomic<int> no_data_log_count_{0};

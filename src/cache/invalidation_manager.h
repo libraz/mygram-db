@@ -5,9 +5,11 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <shared_mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -41,6 +43,7 @@ struct InvalidationMetadata {
   int ngram_size = 0;                 ///< N-gram size used when entry was created
   int kanji_ngram_size = 0;           ///< Kanji N-gram size used when entry was created
   bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used when entry was created
+  bool has_filters = false;           ///< Whether the cached query used filter conditions
 };
 
 class InvalidationManager {
@@ -85,7 +88,8 @@ class InvalidationManager {
    */
   std::unordered_set<CacheKey> InvalidateAffectedEntries(const std::string& table_name, const std::string& old_text,
                                                          const std::string& new_text, int ngram_size,
-                                                         int kanji_ngram_size, bool cross_boundary_ngrams = true);
+                                                         int kanji_ngram_size, bool cross_boundary_ngrams = true,
+                                                         bool filter_columns_changed = false);
 
   /**
    * @brief Unregister cache entry from invalidation tracking
@@ -136,6 +140,10 @@ class InvalidationManager {
 
   // Map: cache key -> minimal invalidation metadata (table + ngrams only)
   std::unordered_map<CacheKey, InvalidationMetadata> cache_metadata_;
+
+  // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
+  // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
+  std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;
 
   // Thread safety
   mutable std::shared_mutex mutex_;

@@ -11,16 +11,14 @@
 
 namespace mygramdb::cache {
 
-std::string QueryNormalizer::Normalize(const query::Query& query) {
+std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column) {
   std::ostringstream oss;
 
   // Start with command type
   switch (query.type) {
     case query::QueryType::SEARCH:
-      oss << "SEARCH";
-      break;
     case query::QueryType::COUNT:
-      oss << "COUNT";
+      oss << "Q";  // Unified prefix: both SEARCH and COUNT cache full results
       break;
     default:
       // Only SEARCH and COUNT queries are cacheable
@@ -54,7 +52,7 @@ std::string QueryNormalizer::Normalize(const query::Query& query) {
   }
 
   // Add SORT clause (with default if not specified)
-  oss << " " << NormalizeSortClause(query.order_by, query.table);
+  oss << " " << NormalizeSortClause(query.order_by, query.table, primary_key_column);
 
   // Note: LIMIT and OFFSET are intentionally excluded from cache key.
   // The cache stores full results (before pagination), and LIMIT/OFFSET
@@ -207,21 +205,28 @@ std::string QueryNormalizer::NormalizeFilters(const std::vector<query::FilterCon
 }
 
 std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::OrderByClause>& sort,
-                                                 const std::string& /* table */) {
+                                                 const std::string& /* table */,
+                                                 const std::string& primary_key_column) {
   std::ostringstream oss;
   oss << "SORT ";
 
   if (sort.has_value()) {
-    // Use specified sort column
-    if (sort->column.empty()) {
-      oss << "id";  // Primary key default
+    // Normalize PK column name to canonical placeholder (case-insensitive)
+    std::string sort_col_lower = sort->column;
+    std::transform(sort_col_lower.begin(), sort_col_lower.end(), sort_col_lower.begin(),
+                   [](unsigned char chr) { return std::tolower(chr); });
+    std::string pk_col_lower = primary_key_column;
+    std::transform(pk_col_lower.begin(), pk_col_lower.end(), pk_col_lower.begin(),
+                   [](unsigned char chr) { return std::tolower(chr); });
+    if (sort->column.empty() || sort_col_lower == pk_col_lower) {
+      oss << "__pk__";
     } else {
       oss << sort->column;
     }
     oss << " " << (sort->order == query::SortOrder::ASC ? "ASC" : "DESC");
   } else {
     // Default: primary key DESC
-    oss << "id DESC";
+    oss << "__pk__ DESC";
   }
 
   return oss.str();

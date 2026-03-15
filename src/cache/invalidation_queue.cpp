@@ -22,7 +22,7 @@ InvalidationQueue::~InvalidationQueue() {
 }
 
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text,
-                                const std::string& new_text) {
+                                const std::string& new_text, bool filter_columns_changed) {
   // Get ngram settings for this specific table
   int ngram_size = 3;        // Default
   int kanji_ngram_size = 2;  // Default
@@ -38,7 +38,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
     affected_keys = invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size,
-                                                                  kanji_ngram_size, cross_boundary_ngrams);
+                                                                  kanji_ngram_size, cross_boundary_ngrams,
+                                                                  filter_columns_changed);
   }
 
   // Phase 2: Queue for deferred deletion or process immediately

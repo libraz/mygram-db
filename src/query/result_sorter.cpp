@@ -7,8 +7,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <variant>
 
 #include "utils/error.h"
@@ -19,11 +21,24 @@ namespace mygramdb::query {
 
 namespace {
 
+/**
+ * @brief Case-insensitive string comparison for column names
+ *
+ * MySQL column names are case-insensitive, so PK comparisons must ignore case.
+ */
+inline bool EqualsIgnoreCase(const std::string& lhs, const std::string& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  return std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](unsigned char lhs_c, unsigned char rhs_c) {
+    return std::tolower(lhs_c) == std::tolower(rhs_c);
+  });
+}
+
 // Format widths for zero-padded strings
 constexpr int kDocIdWidth = 10;
 constexpr int kNumericWidth = 20;
 constexpr int kDoubleWidth = 20;
-constexpr int kDoublePrecision = 6;
 
 // Buffer sizes for string formatting (width + null terminator + safety margin)
 constexpr size_t kDocIdBufferSize = kDocIdWidth + 2;  // Ensure enough space for width + null
@@ -31,9 +46,6 @@ constexpr size_t kNumericBufferSize = 32;
 
 // Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
 constexpr size_t kToCharsBufferSize = 21;
-
-// Signed integer offset to make all values positive for sorting
-constexpr long long kSignedOffset = (1LL << 60);
 
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;
@@ -84,57 +96,53 @@ inline std::string ToZeroPaddedString(uint32_t num, int width) {
 }
 
 /**
- * @brief Convert signed integer to zero-padded string using std::to_chars
+ * @brief Convert signed integer to zero-padded string using sign-bit XOR
  *
- * This function adds kSignedOffset to make negative values sortable lexicographically,
- * then converts to zero-padded string.
+ * Uses XOR with (1ULL << 63) to flip the sign bit, mapping:
+ *   INT64_MIN → 0x0000000000000000 (smallest)
+ *   -1        → 0x7FFFFFFFFFFFFFFF
+ *   0         → 0x8000000000000000
+ *   INT64_MAX → 0xFFFFFFFFFFFFFFFF (largest)
+ *
+ * This preserves total order and avoids signed overflow (undefined behavior).
  *
  * @param num Signed number to convert
  * @param width Target width (will be zero-padded)
  * @return Zero-padded string
  */
 inline std::string ToZeroPaddedSignedString(int64_t num, int width) {
-  // Add offset to make all values positive for sorting
-  auto adjusted = static_cast<uint64_t>(num + kSignedOffset);
+  auto adjusted = static_cast<uint64_t>(num) ^ (1ULL << 63);
   return ToZeroPaddedString(adjusted, width);
 }
 
 /**
- * @brief Convert double to zero-padded string using std::to_chars (locale-independent)
+ * @brief Convert double to a sort key string using IEEE 754 bit-level transformation
  *
- * Uses std::to_chars for locale-independent conversion, avoiding locale contention
- * in multi-threaded environments.
+ * Uses a bit-level transformation that preserves total order for doubles:
+ * 1. Bit-cast the double to uint64_t via memcpy
+ * 2. If negative (sign bit set): flip all bits (~bits)
+ * 3. If positive (sign bit clear): flip only the sign bit (bits ^ (1ULL << 63))
+ *
+ * This maps negative doubles to lower uint64_t values and positive doubles to
+ * higher values, preserving correct ordering within each group.
  *
  * @param value Double value to convert
- * @param width Target total width (including decimal point and decimals)
- * @param precision Number of digits after decimal point
- * @return Zero-padded string representation
+ * @param width Target total width for zero-padded output
+ * @return Zero-padded string representation that sorts correctly for all doubles
  */
-inline std::string ToZeroPaddedDoubleString(double value, int width, int precision) {
-  // Buffer large enough for reasonable double representation
-  constexpr size_t kDoubleBufferSize = 64;
-  std::array<char, kDoubleBufferSize> buf{};
+inline std::string ToZeroPaddedDoubleString(double value, int width) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
 
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), value, std::chars_format::fixed, precision);
-
-  if (ec != std::errc()) {
-    // Fallback to std::to_string (should rarely happen)
-    return std::to_string(value);
+  if ((bits & (1ULL << 63)) != 0) {
+    // Negative: flip all bits
+    bits = ~bits;
+  } else {
+    // Positive (including +0): flip sign bit
+    bits ^= (1ULL << 63);
   }
 
-  auto num_chars = static_cast<size_t>(ptr - buf.data());
-  auto target_width = static_cast<size_t>(width);
-
-  if (num_chars >= target_width) {
-    return {buf.data(), num_chars};
-  }
-
-  // Zero-pad on the left
-  std::string result(target_width, '0');
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  std::copy(buf.data(), ptr, result.data() + (target_width - num_chars));
-  return result;
+  return ToZeroPaddedString(bits, width);
 }
 
 }  // namespace
@@ -142,7 +150,7 @@ inline std::string ToZeroPaddedDoubleString(double value, int width, int precisi
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
                                      const OrderByClause& order_by, const std::string& primary_key_column) {
   // If ordering by primary key (empty column name or explicit primary key column name)
-  if (order_by.IsPrimaryKey() || order_by.column == primary_key_column) {
+  if (order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column)) {
     // Get primary key as sort key
     auto pk_opt = doc_store.GetPrimaryKey(doc_id);
     if (pk_opt.has_value()) {
@@ -177,7 +185,7 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
   if (!filter_val.has_value()) {
     // Filter column not found - check if the column name matches the primary key column
     // This allows sorting by primary key column name (e.g., SORT id DESC)
-    if (order_by.column == primary_key_column) {
+    if (EqualsIgnoreCase(order_by.column, primary_key_column)) {
       // Treat as primary key sort
       auto pk_opt = doc_store.GetPrimaryKey(doc_id);
       if (pk_opt.has_value()) {
@@ -226,7 +234,7 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
           // This ensures proper numeric ordering
           // Using std::to_chars (locale-independent, no lock contention in parallel sorting)
           if constexpr (std::is_same_v<T, double>) {
-            return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
+            return ToZeroPaddedDoubleString(arg, kDoubleWidth);
           } else if constexpr (std::is_signed_v<T>) {
             // Signed: add offset to make all values positive for sorting
             return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
@@ -270,7 +278,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   }
 
   // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
-  bool is_pk_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  bool is_pk_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
   if (is_pk_order) {
     // Batch primary key lookup: single lock acquisition
     auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
@@ -311,7 +319,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
               } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
                 return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
               } else if constexpr (std::is_same_v<T, double>) {
-                return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
+                return ToZeroPaddedDoubleString(arg, kDoubleWidth);
               } else if constexpr (std::is_signed_v<T>) {
                 return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
               } else {
@@ -377,7 +385,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
 
   // Phase 1: Pre-compute sort keys for all DocIDs
   // Use batch lookup for primary key ordering (single lock acquisition)
-  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  bool is_primary_key_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
 
   if (is_primary_key_order) {
     // Batch primary key lookup: single lock acquisition for all keys
@@ -426,7 +434,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
               } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
                 return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
               } else if constexpr (std::is_same_v<T, double>) {
-                return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
+                return ToZeroPaddedDoubleString(arg, kDoubleWidth);
               } else if constexpr (std::is_signed_v<T>) {
                 return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
               } else {
@@ -461,7 +469,7 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   // Optimization: for primary key ordering, try numeric comparison first
   // This avoids string allocation for numeric primary keys
   // Check both empty column (shorthand) and explicit primary key column name
-  if (order_by_.IsPrimaryKey() || order_by_.column == primary_key_column_) {
+  if (order_by_.IsPrimaryKey() || EqualsIgnoreCase(order_by_.column, primary_key_column_)) {
     auto pk_lhs = doc_store_.GetPrimaryKey(lhs);
     auto pk_rhs = doc_store_.GetPrimaryKey(rhs);
 
@@ -532,7 +540,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   // - Performance: O(min(N, sample_size)) instead of O(N)
   // - Thread safety: uses read lock, but column may be added/removed between check and sort
   //   (This is acceptable - non-existent columns are treated as NULL)
-  bool is_primary_key_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  bool is_primary_key_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
   if (!is_primary_key_order && !results.empty()) {
     // Sample-based validation: check first 100 documents (or all if fewer)
     // This is a heuristic - if column doesn't exist in first 100, likely doesn't exist
@@ -553,7 +561,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     // If not found as filter column, check if the column name matches the primary key column
     // This allows sorting by primary key column name (e.g., SORT id DESC)
     if (!column_found_as_filter) {
-      column_found_as_primary_key = (order_by.column == primary_key_column);
+      column_found_as_primary_key = (EqualsIgnoreCase(order_by.column, primary_key_column));
     }
 
     if (!column_found_as_filter && !column_found_as_primary_key) {

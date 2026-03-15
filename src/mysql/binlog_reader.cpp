@@ -1187,7 +1187,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
-                                            server_stats_);
+                                            server_stats_, cache_manager_);
 }
 
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {

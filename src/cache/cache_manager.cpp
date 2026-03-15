@@ -41,6 +41,16 @@ CacheManager::~CacheManager() {
   if (invalidation_queue_) {
     invalidation_queue_->Stop();
   }
+  // Clear eviction callback before destroying invalidation_mgr_ to prevent
+  // use-after-free: QueryCache's LRU thread may still fire eviction callbacks
+  // that reference invalidation_mgr_ during destruction.
+  if (query_cache_) {
+    query_cache_->SetEvictionCallback(nullptr);
+  }
+  // Explicitly destroy query_cache_ first to join its LRU background thread
+  // before invalidation_mgr_ is destroyed (member destruction order is reverse
+  // declaration order, which would destroy invalidation_mgr_ first).
+  query_cache_.reset();
 }
 
 std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
@@ -155,13 +165,14 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   return inserted;
 }
 
-void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text) {
+void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+                              bool filter_columns_changed) {
   if (!enabled_ || !invalidation_queue_) {
     return;
   }
 
   // Enqueue for asynchronous invalidation
-  invalidation_queue_->Enqueue(table_name, old_text, new_text);
+  invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
 }
 
 void CacheManager::Clear() {
