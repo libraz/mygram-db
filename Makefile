@@ -55,7 +55,9 @@ help:
 	@echo "  make e2e-lint         - Lint E2E Python code"
 	@echo "  make e2e-format       - Format E2E Python code"
 	@echo "  make e2e-fix          - Fix E2E Python code"
-	@echo "  make e2e-benchmark    - Run E2E benchmark"
+	@echo "  make e2e-benchmark            - Quick MygramDB vs MySQL comparison"
+	@echo "  make e2e-benchmark-full       - Full benchmark suite with JSON output"
+	@echo "  make e2e-benchmark-saturation - Saturation test (find QPS ceiling)"
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  make docker-build - Build Docker image"
@@ -214,7 +216,7 @@ quick-test: build
 # E2E Integration Tests
 # ============================================================================
 
-.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark
+.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
 
 # Run full e2e test suite (requires Docker)
 e2e-test:
@@ -252,10 +254,20 @@ e2e-fix:
 	@echo "Fixing E2E Python code..."
 	cd e2e && ruff check --fix . && ruff format .
 
-# Run e2e benchmark
+# Benchmark suite: quick comparison (1, 4, 16 concurrency x 5s)
 e2e-benchmark:
-	@echo "Running E2E benchmark..."
-	cd e2e && python benchmark.py --target=mygramdb --table=articles --words="test,search,data" --concurrency=10
+	@echo "Running benchmark suite (quick mode)..."
+	cd e2e && python benchmark_suite.py --mode quick --compare
+
+# Benchmark suite: full comparison (7 levels x 15s)
+e2e-benchmark-full:
+	@echo "Running full benchmark suite..."
+	cd e2e && python benchmark_suite.py --mode standard --compare --json-output results/benchmark.json
+
+# Benchmark suite: saturation test
+e2e-benchmark-saturation:
+	@echo "Running saturation benchmark..."
+	cd e2e && python benchmark_suite.py --mode saturation --target mygramdb
 
 # Docker targets
 docker-build:

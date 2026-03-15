@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -61,9 +62,9 @@ class BenchmarkResult:
         idx = min(idx, len(sorted_times) - 1)
         return sorted_times[idx]
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         """Return a summary dict."""
-        result = {
+        result: dict[str, Any] = {
             "total_queries": self.total_queries,
             "successful": self.successful,
             "failed": self.failed,
@@ -81,3 +82,58 @@ class BenchmarkResult:
                 "qps": round(self.qps, 1),
             })
         return result
+
+
+@dataclass
+class ComparisonResult:
+    """Result of a MygramDB vs MySQL comparison for a single scenario/concurrency."""
+
+    scenario_name: str = ""
+    concurrency: int = 1
+    mygramdb: BenchmarkResult = field(default_factory=BenchmarkResult)
+    mysql: BenchmarkResult = field(default_factory=BenchmarkResult)
+
+    @property
+    def mg_p50_ms(self) -> float:
+        return self.mygramdb.p50_ms
+
+    @property
+    def my_p50_ms(self) -> float:
+        return self.mysql.p50_ms
+
+    @property
+    def mg_p99_ms(self) -> float:
+        return self.mygramdb.p99_ms
+
+    @property
+    def my_p99_ms(self) -> float:
+        return self.mysql.p99_ms
+
+    @property
+    def qps_ratio(self) -> float:
+        """MygramDB QPS / MySQL QPS. Higher means MygramDB is faster."""
+        if self.mysql.qps <= 0:
+            return 0.0
+        return self.mygramdb.qps / self.mysql.qps
+
+    @property
+    def p50_ratio(self) -> float:
+        """MygramDB p50 / MySQL p50. Lower means MygramDB is faster."""
+        if self.my_p50_ms <= 0:
+            return 0.0
+        return self.mg_p50_ms / self.my_p50_ms
+
+    def summary(self) -> dict[str, Any]:
+        """Return a summary dict."""
+        return {
+            "scenario": self.scenario_name,
+            "concurrency": self.concurrency,
+            "mygramdb": self.mygramdb.summary(),
+            "mysql": self.mysql.summary(),
+            "mg_p50_ms": round(self.mg_p50_ms, 2),
+            "my_p50_ms": round(self.my_p50_ms, 2),
+            "mg_p99_ms": round(self.mg_p99_ms, 2),
+            "my_p99_ms": round(self.my_p99_ms, 2),
+            "qps_ratio": round(self.qps_ratio, 2),
+            "p50_ratio": round(self.p50_ratio, 2),
+        }

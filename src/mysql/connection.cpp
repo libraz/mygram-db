@@ -171,6 +171,13 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     }
 
     mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "ssl_enabled").Debug();
+  } else {
+    // Explicitly disable SSL negotiation for non-SSL connections.
+    // Without this, mysql_real_connect() uses SSL_MODE_PREFERRED by default,
+    // which attempts SSL handshake and can crash in csm_establish_ssl
+    // during concurrent connection establishment.
+    unsigned int ssl_mode = SSL_MODE_DISABLED;
+    mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode);
   }
 
   // Connect to MySQL

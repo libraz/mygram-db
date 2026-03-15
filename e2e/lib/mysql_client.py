@@ -125,3 +125,80 @@ class MysqlClient:
         if where:
             sql += f" AND {where}"
         return self.execute(sql, (query,))
+
+    def fulltext_search_timed(
+        self,
+        table: str,
+        column: str,
+        query: str,
+        where: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        order_by: str | None = None,
+    ) -> tuple[bool, float, str]:
+        """Search using MySQL FULLTEXT index with timing.
+
+        Returns (success, elapsed_ms, result_description).
+        Only returns IDs to match MygramDB behavior and eliminate serialization bias.
+        """
+        import time
+
+        match_clause = f"MATCH({column}) AGAINST(%s IN BOOLEAN MODE)"
+        sql = f"SELECT id FROM {table} WHERE {match_clause}"
+        params: list[Any] = [query]
+        if where:
+            sql += f" AND {where}"
+        if order_by:
+            sql += f" ORDER BY {order_by}"
+        if offset > 0:
+            sql += f" LIMIT {offset}, {limit}"
+        else:
+            sql += f" LIMIT {limit}"
+
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            start = time.perf_counter()
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+            elapsed = (time.perf_counter() - start) * 1000
+            cursor.close()
+            return True, elapsed, f"OK {len(rows)} rows"
+        except Exception as e:
+            return False, 0.0, str(e)
+        finally:
+            conn.close()
+
+    def fulltext_count_timed(
+        self,
+        table: str,
+        column: str,
+        query: str,
+        where: str | None = None,
+    ) -> tuple[bool, float, str]:
+        """Count using MySQL FULLTEXT index with timing.
+
+        Returns (success, elapsed_ms, result_description).
+        """
+        import time
+
+        match_clause = f"MATCH({column}) AGAINST(%s IN BOOLEAN MODE)"
+        sql = f"SELECT COUNT(*) as cnt FROM {table} WHERE {match_clause}"
+        params: list[Any] = [query]
+        if where:
+            sql += f" AND {where}"
+
+        conn = self._connect()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            start = time.perf_counter()
+            cursor.execute(sql, tuple(params))
+            row = cursor.fetchone()
+            elapsed = (time.perf_counter() - start) * 1000
+            cursor.close()
+            count = row["cnt"] if row else 0
+            return True, elapsed, f"OK COUNT {count}"
+        except Exception as e:
+            return False, 0.0, str(e)
+        finally:
+            conn.close()

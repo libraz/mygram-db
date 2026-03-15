@@ -1,0 +1,49 @@
+{
+  "absolute": {
+    "single_term_small": {
+      "p50_ms": 2.0,
+      "p99_ms": 10.0,
+      "min_qps": 500
+    },
+    "single_term_medium": {
+      "p50_ms": 5.0,
+      "p99_ms": 25.0,
+      "min_qps": 200
+    },
+    "single_term_large": {
+      "p50_ms": 15.0,
+      "p99_ms": 50.0,
+      "min_qps": 100
+    },
+    "with_filter": {
+      "p50_ms": 5.0,
+      "p99_ms": 25.0,
+      "min_qps": 200
+    },
+    "with_pagination": {
+      "p50_ms": 5.0,
+      "p99_ms": 25.0,
+      "min_qps": 200
+    },
+    "count_only": {
+      "p50_ms": 3.0,
+      "p99_ms": 15.0,
+      "min_qps": 300
+    },
+    "japanese_search": {
+      "p50_ms": 5.0,
+      "p99_ms": 25.0,
+      "min_qps": 200
+    }
+  },
+  "relative": {
+    "max_p50_ratio": 1.0,
+    "max_p99_ratio": 1.5
+  },
+  "regression": {
+    "p99_warning_pct": 20,
+    "p99_critical_pct": 50,
+    "qps_warning_pct": 20,
+    "qps_critical_pct": 50
+  }
+}

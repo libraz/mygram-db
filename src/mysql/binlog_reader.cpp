@@ -66,6 +66,11 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  // Serialize with Stop() to prevent Start() during cleanup.
+  // This ensures all resources from a previous run are fully released
+  // before creating new connections and threads.
+  std::lock_guard<std::mutex> start_lock(stop_mutex_);
+
   // Check if currently stopping (running_ is true but should_stop_ is also true)
   if (should_stop_.load()) {
     last_error_ = "Binlog reader is stopping, please wait";
@@ -215,6 +220,11 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   // mysql_binlog_fetch() return, so this value bounds the max Stop() latency.
   binlog_conn_config.read_timeout = 5;
   binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
+  binlog_conn_config.ssl_enable = connection_.GetConfig().ssl_enable;
+  binlog_conn_config.ssl_ca = connection_.GetConfig().ssl_ca;
+  binlog_conn_config.ssl_cert = connection_.GetConfig().ssl_cert;
+  binlog_conn_config.ssl_key = connection_.GetConfig().ssl_key;
+  binlog_conn_config.ssl_verify_server_cert = connection_.GetConfig().ssl_verify_server_cert;
 
   binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
   auto connect_result = binlog_connection_->Connect("binlog worker");
@@ -236,6 +246,11 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   metadata_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
   metadata_conn_config.read_timeout = connection_.GetConfig().read_timeout;
   metadata_conn_config.write_timeout = connection_.GetConfig().write_timeout;
+  metadata_conn_config.ssl_enable = connection_.GetConfig().ssl_enable;
+  metadata_conn_config.ssl_ca = connection_.GetConfig().ssl_ca;
+  metadata_conn_config.ssl_cert = connection_.GetConfig().ssl_cert;
+  metadata_conn_config.ssl_key = connection_.GetConfig().ssl_key;
+  metadata_conn_config.ssl_verify_server_cert = connection_.GetConfig().ssl_verify_server_cert;
 
   metadata_connection_ = std::make_unique<Connection>(metadata_conn_config);
   auto metadata_connect_result = metadata_connection_->Connect("metadata");
