@@ -84,7 +84,7 @@ inline void ReadBinary(std::istream& input_stream, T& data) {
 
 }  // namespace
 
-DocumentStore::DocumentStore() : filter_index_(std::make_unique<FilterIndex>()) {}
+DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) {}
 
 DocumentStore::~DocumentStore() = default;
 
@@ -384,7 +384,10 @@ std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(cons
   return results;
 }
 
-const FilterIndex* DocumentStore::GetFilterIndex() const { return filter_index_.get(); }
+std::shared_ptr<const FilterIndex> DocumentStore::GetFilterIndex() const {
+  std::shared_lock lock(mutex_);
+  return filter_index_;
+}
 
 std::vector<DocId> DocumentStore::GetAllDocIds() const {
   std::shared_lock lock(mutex_);
@@ -466,7 +469,7 @@ void DocumentStore::Clear() {
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
-  filter_index_->Clear();
+  filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
@@ -870,12 +873,19 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
     ifs.close();
 
+    // Rebuild filter index from loaded data
+    auto new_filter_index = std::make_shared<FilterIndex>();
+    for (const auto& [doc_id, filters] : new_doc_filters) {
+      new_filter_index->AddDocument(doc_id, filters);
+    }
+
     // Swap the loaded data in with minimal lock time
     {
       std::unique_lock lock(mutex_);
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }
 
@@ -1249,7 +1259,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     }
 
     // Rebuild filter index from loaded data
-    auto new_filter_index = std::make_unique<FilterIndex>();
+    auto new_filter_index = std::make_shared<FilterIndex>();
     for (const auto& [doc_id, filters] : new_doc_filters) {
       new_filter_index->AddDocument(doc_id, filters);
     }

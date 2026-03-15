@@ -10,6 +10,7 @@
 
 #include <roaring/roaring.h>
 
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -22,7 +23,7 @@ namespace mygramdb::storage {
  * @brief Bitmap-based filter index for EQ/NE filter acceleration
  *
  * Maintains per-(column, value) Roaring bitmaps for instant set operations.
- * Called under DocumentStore's exclusive lock, so no independent locking needed.
+ * Thread-safe: uses internal shared_mutex for concurrent reader/writer access.
  *
  * Memory overhead: ~500KB for 100K docs x 5 columns x 10 values.
  */
@@ -61,6 +62,11 @@ class FilterIndex {
   static std::string SerializeFilterValue(const FilterValue& value);
 
  private:
+  /// Protects all bitmap data from concurrent read/write access.
+  /// Readers (GetEqBitmap, MemoryUsage) take shared_lock;
+  /// writers (AddDocument, UpdateDocument, RemoveDocument, Clear) take unique_lock.
+  mutable std::shared_mutex mutex_;
+
   /// column_name -> { serialized_value -> roaring_bitmap_t* }
   std::unordered_map<std::string, std::unordered_map<std::string, roaring_bitmap_t*>> eq_bitmaps_;
 };

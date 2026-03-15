@@ -12,6 +12,7 @@ namespace mygramdb::storage {
 FilterIndex::~FilterIndex() { Clear(); }
 
 void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+  std::unique_lock lock(mutex_);
   for (const auto& [column, value] : filters) {
     // Skip NULL values (monostate)
     if (std::holds_alternative<std::monostate>(value)) {
@@ -32,6 +33,7 @@ void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string
 
 void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
                                   const std::unordered_map<std::string, FilterValue>& new_filters) {
+  std::unique_lock lock(mutex_);
   // Remove from old bitmaps
   for (const auto& [column, value] : old_filters) {
     if (std::holds_alternative<std::monostate>(value)) {
@@ -52,11 +54,26 @@ void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::str
     }
   }
 
-  // Add to new bitmaps
-  AddDocument(doc_id, new_filters);
+  // Add to new bitmaps (inline to avoid re-locking)
+  for (const auto& [column, value] : new_filters) {
+    if (std::holds_alternative<std::monostate>(value)) {
+      continue;
+    }
+    std::string key = SerializeFilterValue(value);
+    auto& column_map = eq_bitmaps_[column];
+    auto it = column_map.find(key);
+    if (it == column_map.end()) {
+      roaring_bitmap_t* bm = roaring_bitmap_create();
+      roaring_bitmap_add(bm, doc_id);
+      column_map[std::move(key)] = bm;
+    } else {
+      roaring_bitmap_add(it->second, doc_id);
+    }
+  }
 }
 
 void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+  std::unique_lock lock(mutex_);
   for (const auto& [column, value] : filters) {
     if (std::holds_alternative<std::monostate>(value)) {
       continue;
@@ -78,6 +95,7 @@ void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::str
 
 const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column,
                                                    const std::string& serialized_value) const {
+  std::shared_lock lock(mutex_);
   auto col_it = eq_bitmaps_.find(column);
   if (col_it == eq_bitmaps_.end()) {
     return nullptr;
@@ -90,6 +108,7 @@ const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column,
 }
 
 void FilterIndex::Clear() {
+  std::unique_lock lock(mutex_);
   for (auto& [column, value_map] : eq_bitmaps_) {
     for (auto& [key, bm] : value_map) {
       roaring_bitmap_free(bm);
@@ -99,6 +118,7 @@ void FilterIndex::Clear() {
 }
 
 size_t FilterIndex::MemoryUsage() const {
+  std::shared_lock lock(mutex_);
   size_t total = 0;
   for (const auto& [column, value_map] : eq_bitmaps_) {
     total += column.size() + column.capacity();

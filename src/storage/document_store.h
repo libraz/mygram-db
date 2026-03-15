@@ -244,8 +244,8 @@ class DocumentStore {
   [[nodiscard]] std::vector<std::optional<FilterValue>> GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
                                                                               const std::string& column) const;
 
-  /// Get the filter index (for bitmap-accelerated filter evaluation)
-  [[nodiscard]] const FilterIndex* GetFilterIndex() const;
+  /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
+  [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 
   /**
    * @brief Get memory usage estimate
@@ -321,7 +321,10 @@ class DocumentStore {
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
-  std::unique_ptr<FilterIndex> filter_index_;
+  // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,
+  // writers replace the pointer under unique_lock. Old index stays alive until
+  // all reader snapshots are released.
+  std::shared_ptr<FilterIndex> filter_index_;
 
   // Mutex for thread-safe access (shared for reads, exclusive for writes)
   mutable std::shared_mutex mutex_;
