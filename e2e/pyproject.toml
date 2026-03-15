@@ -23,6 +23,7 @@ packages = ["lib"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "mysql: MySQL server configuration and connection tests",
     "smoke: Basic connectivity and health checks",
     "replication: MySQL replication verification",
     "search: Search accuracy tests",

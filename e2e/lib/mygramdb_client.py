@@ -164,10 +164,31 @@ class MygramdbClient:
         return result
 
     def sync(self, table: str | None = None, timeout: float = 30.0) -> bool:
-        """Execute SYNC and wait for completion."""
+        """Execute SYNC and wait for completion.
+
+        Sends the SYNC command, then polls SYNC STATUS until the operation
+        reaches COMPLETED or FAILED state, or the timeout expires.
+        """
         cmd = f"SYNC {table}" if table else "SYNC"
         resp = self.tcp_command(cmd, timeout=timeout)
-        return resp is not None and "OK" in resp
+        if resp is None or "OK" not in resp:
+            return False
+
+        # Poll SYNC STATUS until completion
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status_resp = self.tcp_command("SYNC STATUS", timeout=5.0)
+            if status_resp is None:
+                time.sleep(0.5)
+                continue
+            if "COMPLETED" in status_resp:
+                return True
+            if "FAILED" in status_resp or "CANCELLED" in status_resp:
+                return False
+            # Still IN_PROGRESS or STARTING
+            time.sleep(0.5)
+
+        return False
 
     def cache_clear(self) -> bool:
         """Clear the query cache."""

@@ -15,6 +15,21 @@ gtest_discover_tests(gtid_encoder_test
   DISCOVERY_TIMEOUT 30
 )
 
+# RuntimeVariableManager MySQL reconnection callback tests (no MySQL dependency)
+add_executable(runtime_variable_manager_mysql_test
+  runtime_variable_manager_test.cpp
+)
+
+target_link_libraries(runtime_variable_manager_mysql_test
+  mygramdb_config
+  GTest::gtest_main
+)
+
+gtest_discover_tests(runtime_variable_manager_mysql_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 if(USE_MYSQL AND MYSQL_FOUND)
   # Table metadata cache tests (no MySQL connection required)
   add_executable(table_metadata_test
@@ -114,40 +129,36 @@ if(USE_MYSQL AND MYSQL_FOUND)
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
-  # Connection validation tests
-  add_executable(connection_validate_test
-    connection_validate_test.cpp
+  # Connection validation unit tests (no MySQL connection required)
+  add_executable(connection_validate_unit_test
+    connection_validate_unit_test.cpp
   )
 
-  target_link_libraries(connection_validate_test
+  target_link_libraries(connection_validate_unit_test
     mygramdb_mysql
     GTest::gtest_main
     GTest::gmock
   )
 
-  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
-  gtest_discover_tests(connection_validate_test
+  gtest_discover_tests(connection_validate_unit_test
     DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK mysql_connection
+    DISCOVERY_TIMEOUT 30
   )
 
-  # Connection validator tests (failover detection)
-  add_executable(connection_validator_test
-    connection_validator_test.cpp
+  # Connection validator unit tests (no MySQL connection required)
+  add_executable(connection_validator_unit_test
+    connection_validator_unit_test.cpp
   )
 
-  target_link_libraries(connection_validator_test
+  target_link_libraries(connection_validator_unit_test
     mygramdb_mysql
     GTest::gtest_main
     GTest::gmock
   )
 
-  # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts and race conditions
-  gtest_discover_tests(connection_validator_test
+  gtest_discover_tests(connection_validator_unit_test
     DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK mysql_connection
+    DISCOVERY_TIMEOUT 30
   )
 
   # Binlog parsing tests (MySQL 8.0 compatibility)
@@ -214,6 +225,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
+  )
+
+  # Binlog reader resource unit tests (no MySQL connection required)
+  add_executable(binlog_reader_resource_unit_test
+    binlog_reader_resource_unit_test.cpp
+  )
+
+  target_link_libraries(binlog_reader_resource_unit_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(binlog_reader_resource_unit_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
   )
 
   # Binlog event processor tests
