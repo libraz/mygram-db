@@ -229,3 +229,206 @@ TEST(IndexTest, DocumentIdOrdering) {
   EXPECT_EQ(results[1], 2);
   EXPECT_EQ(results[2], 3);
 }
+
+// =============================================================================
+// UpdateDocument empty posting list cleanup (Bug #15)
+// =============================================================================
+
+/**
+ * @test UpdateDocument should remove empty posting lists
+ *
+ * When a document is updated and an n-gram is no longer present in the new text,
+ * the posting list for that n-gram may become empty. Empty posting lists should
+ * be removed to prevent memory leaks.
+ */
+TEST(IndexTest, UpdateDocumentRemovesEmptyPostingLists) {
+  Index index(1);  // Unigram index for simplicity
+
+  // Add a document with text "abc"
+  index.AddDocument(1, "abc");
+
+  // Verify initial term count: a, b, c
+  EXPECT_EQ(index.TermCount(), 3);
+  EXPECT_EQ(index.Count("a"), 1);
+  EXPECT_EQ(index.Count("b"), 1);
+  EXPECT_EQ(index.Count("c"), 1);
+
+  // Update the document: old text "abc", new text "xyz"
+  // This should remove a, b, c and add x, y, z
+  index.UpdateDocument(1, "abc", "xyz");
+
+  // Verify new terms exist
+  EXPECT_EQ(index.Count("x"), 1);
+  EXPECT_EQ(index.Count("y"), 1);
+  EXPECT_EQ(index.Count("z"), 1);
+
+  // Bug #15: Empty posting lists for old terms should be removed
+  // Before fix: term_postings_ would still contain entries for a, b, c with empty lists
+  // After fix: term_postings_ should only contain x, y, z
+  EXPECT_EQ(index.Count("a"), 0) << "Old term 'a' should have count 0";
+  EXPECT_EQ(index.Count("b"), 0) << "Old term 'b' should have count 0";
+  EXPECT_EQ(index.Count("c"), 0) << "Old term 'c' should have count 0";
+
+  // Critical check: TermCount should be 3 (only x, y, z), not 6
+  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting lists should be removed after UpdateDocument";
+}
+
+/**
+ * @test Multiple updates should not cause posting list growth
+ */
+TEST(IndexTest, MultipleUpdatesNoPostingListGrowth) {
+  Index index(1);  // Unigram index
+
+  // Add initial document
+  index.AddDocument(1, "a");
+  EXPECT_EQ(index.TermCount(), 1);
+
+  // Update document multiple times with completely different text
+  // Each update should not increase term count beyond the current terms
+  index.UpdateDocument(1, "a", "b");
+  EXPECT_EQ(index.TermCount(), 1) << "After update a->b, should have 1 term";
+
+  index.UpdateDocument(1, "b", "c");
+  EXPECT_EQ(index.TermCount(), 1) << "After update b->c, should have 1 term";
+
+  index.UpdateDocument(1, "c", "d");
+  EXPECT_EQ(index.TermCount(), 1) << "After update c->d, should have 1 term";
+
+  index.UpdateDocument(1, "d", "e");
+  EXPECT_EQ(index.TermCount(), 1) << "After update d->e, should have 1 term";
+
+  // Final state should only have the current term
+  EXPECT_EQ(index.Count("e"), 1);
+  EXPECT_EQ(index.Count("a"), 0);
+  EXPECT_EQ(index.Count("b"), 0);
+  EXPECT_EQ(index.Count("c"), 0);
+  EXPECT_EQ(index.Count("d"), 0);
+}
+
+/**
+ * @test Update with partial overlap should clean up removed terms (Bug #15)
+ */
+TEST(IndexTest, UpdateDocumentPartialOverlapCleansUp) {
+  Index index(1);  // Unigram index
+
+  // Add document with "abc"
+  index.AddDocument(1, "abc");
+  EXPECT_EQ(index.TermCount(), 3);
+
+  // Update to "bcd" - b and c are shared, a is removed, d is added
+  index.UpdateDocument(1, "abc", "bcd");
+
+  // Verify term counts
+  EXPECT_EQ(index.Count("a"), 0) << "Term 'a' should be removed";
+  EXPECT_EQ(index.Count("b"), 1) << "Term 'b' should still exist";
+  EXPECT_EQ(index.Count("c"), 1) << "Term 'c' should still exist";
+  EXPECT_EQ(index.Count("d"), 1) << "Term 'd' should be added";
+
+  // TermCount should be 3 (b, c, d), not 4 (including empty 'a')
+  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting list for 'a' should be removed";
+}
+
+/**
+ * @test Update document to empty text should remove all postings (Bug #15)
+ */
+TEST(IndexTest, UpdateDocumentToEmptyRemovesAllPostings) {
+  Index index(1);  // Unigram index
+
+  // Add document
+  index.AddDocument(1, "abc");
+  EXPECT_EQ(index.TermCount(), 3);
+
+  // Update to empty text
+  index.UpdateDocument(1, "abc", "");
+
+  // All posting lists should be removed
+  EXPECT_EQ(index.TermCount(), 0) << "Bug #15: All empty posting lists should be removed";
+  EXPECT_EQ(index.Count("a"), 0);
+  EXPECT_EQ(index.Count("b"), 0);
+  EXPECT_EQ(index.Count("c"), 0);
+}
+
+/**
+ * @test Update with multiple documents does partial cleanup (Bug #15)
+ */
+TEST(IndexTest, UpdateDocumentMultiDocsPartialCleanup) {
+  Index index(1);  // Unigram index
+
+  // Add two documents sharing term 'b'
+  index.AddDocument(1, "ab");       // Terms: a, b
+  index.AddDocument(2, "bc");       // Terms: b, c
+  EXPECT_EQ(index.TermCount(), 3);  // a, b, c
+  EXPECT_EQ(index.Count("b"), 2);   // Both docs have 'b'
+
+  // Update doc 1: remove 'a' and 'b', add 'x'
+  index.UpdateDocument(1, "ab", "x");
+
+  // Term 'b' should still exist (doc 2 has it)
+  EXPECT_EQ(index.Count("b"), 1) << "Term 'b' should still have count 1 from doc 2";
+
+  // Term 'a' had only doc 1, so its posting list should be removed
+  EXPECT_EQ(index.Count("a"), 0) << "Term 'a' should have count 0";
+
+  // TermCount should be 3: b (from doc2), c (from doc2), x (from doc1)
+  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting list for 'a' should be removed";
+}
+
+// =============================================================================
+// RemoveDocument empty posting list cleanup (Bug #14)
+// =============================================================================
+
+/**
+ * @test RemoveDocument should remove empty posting lists (Bug #14)
+ */
+TEST(IndexTest, RemoveDocumentRemovesEmptyPostingLists) {
+  Index index(1);  // Unigram index
+
+  // Add a document
+  index.AddDocument(1, "abc");
+  EXPECT_EQ(index.TermCount(), 3);
+
+  // Remove the document
+  index.RemoveDocument(1, "abc");
+
+  // All posting lists should be removed since doc was the only one
+  EXPECT_EQ(index.TermCount(), 0) << "Bug #14: Empty posting lists should be removed after RemoveDocument";
+}
+
+/**
+ * @test RemoveDocument with multiple documents does partial cleanup (Bug #14)
+ */
+TEST(IndexTest, RemoveDocumentPartialCleanup) {
+  Index index(1);  // Unigram index
+
+  // Add two documents
+  index.AddDocument(1, "ab");       // Terms: a, b
+  index.AddDocument(2, "bc");       // Terms: b, c
+  EXPECT_EQ(index.TermCount(), 3);  // a, b, c
+
+  // Remove doc 1
+  index.RemoveDocument(1, "ab");
+
+  // Term 'a' should be completely removed (only doc 1 had it)
+  // Term 'b' should still exist (doc 2 has it)
+  EXPECT_EQ(index.Count("a"), 0);
+  EXPECT_EQ(index.Count("b"), 1);
+  EXPECT_EQ(index.Count("c"), 1);
+
+  // TermCount should be 2: b, c (not 3 including empty 'a')
+  EXPECT_EQ(index.TermCount(), 2) << "Bug #14: Empty posting list for 'a' should be removed";
+}
+
+// =============================================================================
+// EstimatePostingSize
+// =============================================================================
+
+TEST(IndexTest, EstimatePostingSize) {
+  Index index(2);
+  index.AddDocument(1, "hello world");
+  index.AddDocument(2, "hello there");
+
+  // "he" appears in both documents
+  EXPECT_EQ(index.EstimatePostingSize("he"), 2u);
+  // Non-existent term
+  EXPECT_EQ(index.EstimatePostingSize("zz"), 0u);
+}

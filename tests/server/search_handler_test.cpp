@@ -1,10 +1,17 @@
 /**
- * @file search_handler_bug_fixes_test.cpp
- * @brief Unit tests for critical search handler bug fixes
+ * @file search_handler_test.cpp
+ * @brief Unit tests for search handler logic
  *
- * TDD tests for:
- * - Bug #21: Division by zero in search optimization
- * - Bug #22: Wrong total_results after filter application
+ * Tests for:
+ * - Reuse calculation with zero/small/large result sets (Bug #21)
+ * - Total results tracking after filter application (Bug #22)
+ * - Stale cache detection (Bug #25)
+ * - Floating-point epsilon comparison for filters (H3)
+ * - Adaptive cache validation sampling (M1)
+ * - Configurable FilterByNgrams threshold (M6)
+ * - NOT n-gram deduplication
+ * - COUNT FilterByNgrams threshold logic
+ * - ParseFilterValue from_chars parsing
  */
 
 #include <gtest/gtest.h>
@@ -19,7 +26,7 @@ namespace mygramdb {
 namespace server {
 
 // =============================================================================
-// Bug #21: Division by zero in search optimization
+// Reuse calculation with division-by-zero guard (Bug #21)
 // =============================================================================
 // The bug is in search_handler.cpp:205
 //
@@ -36,8 +43,9 @@ namespace server {
  * @brief Test the specific calculation that causes division by zero
  *
  * This test directly validates the problematic calculation at line 205.
+ * Bug #21: Division by zero in search optimization.
  */
-TEST(SearchHandlerBugFixTest, Bug21_ReuseCalculationWithZeroResults) {
+TEST(SearchHandlerTest, ReuseCalculationWithZeroResults) {
   // Simulate the calculation at line 205
   size_t total_results = 0;  // Empty search results
   size_t query_offset = 0;
@@ -81,8 +89,10 @@ TEST(SearchHandlerBugFixTest, Bug21_ReuseCalculationWithZeroResults) {
 
 /**
  * @brief Test edge case: very small result set
+ *
+ * Bug #21: Single result should not cause division issues.
  */
-TEST(SearchHandlerBugFixTest, Bug21_SmallResultSet) {
+TEST(SearchHandlerTest, ReuseCalculationSmallResultSet) {
   size_t total_results = 1;  // Single result
   size_t query_offset = 0;
   size_t query_limit = 10;
@@ -109,8 +119,10 @@ TEST(SearchHandlerBugFixTest, Bug21_SmallResultSet) {
 
 /**
  * @brief Test normal case: large result set
+ *
+ * Bug #21: Large result set should use GetTopN optimization.
  */
-TEST(SearchHandlerBugFixTest, Bug21_LargeResultSet) {
+TEST(SearchHandlerTest, ReuseCalculationLargeResultSet) {
   size_t total_results = 1000;  // Many results
   size_t query_offset = 0;
   size_t query_limit = 10;
@@ -138,10 +150,10 @@ TEST(SearchHandlerBugFixTest, Bug21_LargeResultSet) {
 /**
  * @brief Test that the fix correctly handles zero total_results
  *
- * This test verifies the proposed fix: checking total_results > 0
- * before performing the division.
+ * Bug #21: Verifies the proposed fix (checking total_results > 0
+ * before performing the division) across multiple edge cases.
  */
-TEST(SearchHandlerBugFixTest, Bug21_FixedCodePath) {
+TEST(SearchHandlerTest, ReuseCalculationEdgeCases) {
   // Simulating the fixed code path from search_handler.cpp:195-206
   struct TestCase {
     size_t total_results;
@@ -178,7 +190,7 @@ TEST(SearchHandlerBugFixTest, Bug21_FixedCodePath) {
 }
 
 // =============================================================================
-// Bug #22: Wrong total_results after filter application
+// Total results tracking after filter application (Bug #22)
 // =============================================================================
 // When GetTopN optimization is used, total_results is set before filters are
 // applied. After filtering, the results vector shrinks but total_results
@@ -190,8 +202,10 @@ TEST(SearchHandlerBugFixTest, Bug21_FixedCodePath) {
 
 /**
  * @brief Test that total_results tracking logic is correct
+ *
+ * Bug #22: total_results must be updated after filter application.
  */
-TEST(SearchHandlerBugFixTest, Bug22_TotalResultsLogic) {
+TEST(SearchHandlerTest, TotalResultsUpdatedAfterFilter) {
   // Simulate the problematic code path:
   // 1. can_optimize = true
   // 2. total_results = all_results.size() = 100  (set before filtering)
@@ -216,12 +230,12 @@ TEST(SearchHandlerBugFixTest, Bug22_TotalResultsLogic) {
 /**
  * @brief Test the correct code flow for total_results
  *
- * After the fix at line 274-277:
+ * Bug #22: After the fix at line 274-277:
  * if (!can_optimize) {
  *   total_results = results.size();
  * }
  */
-TEST(SearchHandlerBugFixTest, Bug22_FixedCodePath) {
+TEST(SearchHandlerTest, TotalResultsReflectsFilteredCount) {
   // Simulate the search handler flow
   bool can_optimize = true;
   size_t total_results = 0;
@@ -261,7 +275,7 @@ TEST(SearchHandlerBugFixTest, Bug22_FixedCodePath) {
 }
 
 // =============================================================================
-// Bug #25: TOCTOU race in cache search
+// Stale cache detection (Bug #25)
 // =============================================================================
 // When cache is hit, the cached DocIds might be stale (documents deleted since
 // cache population). The fix validates a sample of cached DocIds before use
@@ -272,12 +286,12 @@ TEST(SearchHandlerBugFixTest, Bug22_FixedCodePath) {
 // =============================================================================
 
 /**
- * @test Bug #25: Conceptual test for stale cache detection
+ * @test Conceptual test for stale cache detection
  *
- * This test verifies the concept that stale DocIds can be detected
+ * Bug #25: Verifies that stale DocIds can be detected
  * by checking if they exist in the document store.
  */
-TEST(SearchHandlerBugFixTest, Bug25_StaleCacheDetectionConcept) {
+TEST(SearchHandlerTest, StaleCacheDetection) {
   // Simulated scenario:
   // 1. Cache stores DocIds [1, 2, 3, 4, 5]
   // 2. Document 3 is deleted
@@ -301,13 +315,15 @@ TEST(SearchHandlerBugFixTest, Bug25_StaleCacheDetectionConcept) {
   }
 
   // Bug #25: Validation should detect the stale cache
-  EXPECT_TRUE(cache_is_stale) << "Bug #25: Should detect stale cache when DocIds are deleted";
+  EXPECT_TRUE(cache_is_stale) << "Should detect stale cache when DocIds are deleted";
 }
 
 /**
- * @test Bug #25: Fresh cache should not be detected as stale
+ * @test Fresh cache should not be detected as stale
+ *
+ * Bug #25: Validates that valid cache entries pass validation.
  */
-TEST(SearchHandlerBugFixTest, Bug25_FreshCacheNotDetectedAsStale) {
+TEST(SearchHandlerTest, FreshCacheNotStale) {
   // Simulated scenario:
   // 1. Cache stores DocIds [1, 2, 3, 4, 5]
   // 2. All documents still exist
@@ -328,15 +344,15 @@ TEST(SearchHandlerBugFixTest, Bug25_FreshCacheNotDetectedAsStale) {
 }
 
 // =============================================================================
-// H3: Floating-point epsilon comparison for FILTER
+// Floating-point epsilon comparison for filters (H3)
 // =============================================================================
 
 /**
  * @brief Test that floating-point filter equality uses epsilon comparison
  *
- * The classic 0.1 + 0.2 != 0.3 problem should be handled gracefully.
+ * H3: The classic 0.1 + 0.2 != 0.3 problem should be handled gracefully.
  */
-TEST(SearchHandlerBugFixTest, H3_FloatFilterEqualityWithEpsilon) {
+TEST(SearchHandlerTest, FloatFilterEpsilonComparison) {
   // Simulate the filter comparison logic
   double stored_value = 0.1 + 0.2;  // = 0.30000000000000004
   double filter_value = 0.3;         // Exact 0.3
@@ -353,8 +369,10 @@ TEST(SearchHandlerBugFixTest, H3_FloatFilterEqualityWithEpsilon) {
 
 /**
  * @brief Test NaN handling in float filter
+ *
+ * H3: NaN comparisons should never match.
  */
-TEST(SearchHandlerBugFixTest, H3_FloatFilterNaNHandling) {
+TEST(SearchHandlerTest, FloatFilterNaNHandling) {
   double nan_val = std::numeric_limits<double>::quiet_NaN();
   double normal_val = 1.0;
 
@@ -368,8 +386,10 @@ TEST(SearchHandlerBugFixTest, H3_FloatFilterNaNHandling) {
 
 /**
  * @brief Test large value epsilon comparison
+ *
+ * H3: Relative epsilon should handle large magnitudes correctly.
  */
-TEST(SearchHandlerBugFixTest, H3_LargeValueEpsilonComparison) {
+TEST(SearchHandlerTest, FloatFilterLargeValueEpsilon) {
   // For large values, absolute epsilon would fail but relative epsilon works
   double large1 = 1e15;
   double large2 = 1e15 + 1.0;  // Difference of 1.0
@@ -392,15 +412,15 @@ TEST(SearchHandlerBugFixTest, H3_LargeValueEpsilonComparison) {
 }
 
 // =============================================================================
-// M1: Adaptive cache validation sampling
+// Adaptive cache validation sampling (M1)
 // =============================================================================
 
 /**
  * @brief Test adaptive sample size calculation
  *
- * Validates the formula: min(n, max(10, n/10))
+ * M1: Validates the formula: min(n, max(10, n/10))
  */
-TEST(SearchHandlerBugFixTest, M1_AdaptiveSampleSize) {
+TEST(SearchHandlerTest, AdaptiveSampleSizeCalculation) {
   // Small result set: check all
   {
     size_t n = 5;
@@ -440,13 +460,15 @@ TEST(SearchHandlerBugFixTest, M1_AdaptiveSampleSize) {
 }
 
 // =============================================================================
-// M6: Configurable FilterByNgrams threshold
+// Configurable FilterByNgrams threshold (M6)
 // =============================================================================
 
 /**
  * @brief Test that filter threshold is configurable
+ *
+ * M6: SearchHandler::GetFilterThreshold/SetFilterThreshold.
  */
-TEST(SearchHandlerBugFixTest, M6_FilterThresholdConfigurable) {
+TEST(SearchHandlerTest, FilterThresholdConfigurable) {
   // Default threshold
   EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
 
@@ -464,7 +486,7 @@ TEST(SearchHandlerBugFixTest, M6_FilterThresholdConfigurable) {
 }
 
 // =============================================================================
-// #1: NOT n-gram deduplication
+// NOT n-gram deduplication
 // =============================================================================
 
 /**
@@ -473,7 +495,7 @@ TEST(SearchHandlerBugFixTest, M6_FilterThresholdConfigurable) {
  * When multiple NOT terms generate overlapping n-grams, duplicates should
  * be removed to avoid redundant PostingList lookups.
  */
-TEST(SearchHandlerBugFixTest, NotNgramDeduplication) {
+TEST(SearchHandlerTest, NotNgramDeduplication) {
   // Simulate multiple NOT terms generating overlapping n-grams
   // e.g., NOT "abc" and NOT "abcd" both generate n-gram "ab", "bc"
   std::vector<std::string> not_ngrams;
@@ -504,7 +526,7 @@ TEST(SearchHandlerBugFixTest, NotNgramDeduplication) {
 /**
  * @brief Test deduplication with no duplicates (no-op case)
  */
-TEST(SearchHandlerBugFixTest, NotNgramDeduplicationNoDuplicates) {
+TEST(SearchHandlerTest, NotNgramDeduplicationNoDuplicates) {
   std::vector<std::string> not_ngrams = {"ab", "cd", "ef"};
 
   std::sort(not_ngrams.begin(), not_ngrams.end());
@@ -514,7 +536,7 @@ TEST(SearchHandlerBugFixTest, NotNgramDeduplicationNoDuplicates) {
 }
 
 // =============================================================================
-// #2: HandleCount FilterByNgrams optimization
+// COUNT FilterByNgrams threshold logic
 // =============================================================================
 
 /**
@@ -523,7 +545,7 @@ TEST(SearchHandlerBugFixTest, NotNgramDeduplicationNoDuplicates) {
  * Verifies the decision logic: when candidate set is small, use FilterByNgrams;
  * when large, use full SearchAnd intersection.
  */
-TEST(SearchHandlerBugFixTest, CountFilterByNgramsThresholdLogic) {
+TEST(SearchHandlerTest, CountFilterThresholdLogic) {
   size_t filter_threshold = 1000;
 
   // Small candidate set -> should use FilterByNgrams
@@ -549,7 +571,7 @@ TEST(SearchHandlerBugFixTest, CountFilterByNgramsThresholdLogic) {
 }
 
 // =============================================================================
-// #7: ParseFilterValue from_chars
+// ParseFilterValue from_chars parsing
 // =============================================================================
 
 /**
@@ -557,7 +579,7 @@ TEST(SearchHandlerBugFixTest, CountFilterByNgramsThresholdLogic) {
  *
  * Validates that from_chars correctly parses various numeric formats.
  */
-TEST(SearchHandlerBugFixTest, FromCharsIntegerParsing) {
+TEST(SearchHandlerTest, FromCharsIntegerParsing) {
   // Valid integer
   {
     int64_t result = 0;
@@ -600,7 +622,7 @@ TEST(SearchHandlerBugFixTest, FromCharsIntegerParsing) {
 /**
  * @brief Test from_chars double parsing behavior
  */
-TEST(SearchHandlerBugFixTest, FromCharsDoubleParsing) {
+TEST(SearchHandlerTest, FromCharsDoubleParsing) {
   // Valid double
   {
     double result = 0.0;

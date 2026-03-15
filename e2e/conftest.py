@@ -105,22 +105,27 @@ def seed_data(mysql: MysqlClient, mygramdb: MygramdbClient) -> None:
     from lib.data_generator import DataGenerator
 
     gen = DataGenerator(seed=42)
+
+    # Seed articles
     rows = gen.generate_articles(count=100)
     mysql.insert_rows("articles", rows)
-
-    # Trigger initial sync (auto_initial_snapshot is false in test config)
     mygramdb.sync("articles")
+
+    # Seed products
+    product_rows = gen.generate_products(count=50)
+    mysql.insert_rows("products", product_rows)
+    mygramdb.sync("products")
 
     def _doc_count() -> bool:
         info = mygramdb.info()
         count = info.get("total_documents", info.get("doc_count", info.get("documents", 0)))
-        return count >= 90  # Some rows filtered by required_filters (enabled=1, deleted_at IS NULL)
+        return count >= 130  # ~100 articles + ~50 products (some filtered by enabled=1)
 
     wait_until(
         _doc_count,
         timeout=30,
         interval=1,
-        description="MygramDB to sync seed data",
+        description="MygramDB to sync seed data (articles + products)",
     )
 
 

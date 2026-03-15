@@ -723,3 +723,42 @@ TEST(IndexConcurrentTest, SaveToStreamConcurrentWithWrite) {
   auto results = loaded_index.SearchAnd({"he"});
   EXPECT_GE(results.size(), 5000u);
 }
+
+// =============================================================================
+// EstimatePostingSize concurrent access
+// =============================================================================
+
+TEST(IndexConcurrentTest, EstimatePostingSizeConcurrentWithRemove) {
+  Index index(2);
+  // Add 1000 documents
+  for (DocId i = 1; i <= 1000; i++) {
+    index.AddDocument(i, "hello world");
+  }
+
+  std::atomic<bool> stop{false};
+
+  // Thread 1: EstimatePostingSize continuously
+  std::thread reader([&]() {
+    while (!stop.load()) {
+      // Must be callable without external locking
+      auto size = index.EstimatePostingSize("he");
+      (void)size;  // No crash = success
+    }
+  });
+
+  // Thread 2: Remove documents causing erase
+  std::thread writer([&]() {
+    for (DocId i = 1; i <= 1000; i++) {
+      index.RemoveDocument(i, "hello world");
+    }
+    stop.store(true);
+  });
+
+  reader.join();
+  writer.join();
+
+  // All removed: size should be 0
+  EXPECT_EQ(index.EstimatePostingSize("he"), 0u);
+  // Non-existent term: size should be 0
+  EXPECT_EQ(index.EstimatePostingSize("zz"), 0u);
+}

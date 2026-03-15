@@ -257,18 +257,4 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
-  # Rows parser bug fix tests (TDD)
-  add_executable(rows_parser_bug_fixes_test
-    rows_parser_bug_fixes_test.cpp
-  )
-
-  target_link_libraries(rows_parser_bug_fixes_test
-    mygramdb_mysql
-    GTest::gtest_main
-  )
-
-  gtest_discover_tests(rows_parser_bug_fixes_test
-    DISCOVERY_MODE POST_BUILD
-    DISCOVERY_TIMEOUT 30
-  )
 endif()

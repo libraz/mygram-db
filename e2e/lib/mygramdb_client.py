@@ -107,7 +107,7 @@ class MygramdbClient:
         cmd = f"SEARCH {table} {query}"
         if filters:
             for key, value in filters.items():
-                cmd += f" FILTER {key} {value}"
+                cmd += f" FILTER {key}={value}"
         if sort:
             cmd += f" SORT {sort}"
         if limit is not None:
@@ -124,7 +124,7 @@ class MygramdbClient:
         cmd = f"COUNT {table} {query}"
         if filters:
             for key, value in filters.items():
-                cmd += f" FILTER {key} {value}"
+                cmd += f" FILTER {key}={value}"
         resp = self.tcp_command(cmd)
         if not resp:
             return 0
