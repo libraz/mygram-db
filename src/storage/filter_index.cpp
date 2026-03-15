@@ -6,6 +6,7 @@
 #include "storage/filter_index.h"
 
 #include <cstring>
+#include <mutex>
 
 namespace mygramdb::storage {
 
