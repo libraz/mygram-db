@@ -5,6 +5,8 @@
 
 #include "server/handlers/search_handler.h"
 
+#include <roaring/roaring.h>
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -13,6 +15,7 @@
 
 #include "cache/cache_manager.h"
 #include "query/result_sorter.h"
+#include "storage/filter_index.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::server {
@@ -213,7 +216,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   constexpr uint32_t kMaxOffsetForOptimization = 10000;
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
+  bool filters_have_bitmap = query.filters.empty() || AllFiltersHaveBitmapSupport(query.filters, current_doc_store);
+  bool can_optimize = term_infos.size() == 1 && query.not_terms.empty() && filters_have_bitmap && query.limit > 0 &&
                       query.offset <= kMaxOffsetForOptimization && is_primary_key_order;
 
   // Calculate total results count
@@ -307,10 +311,10 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     debug_info.after_not = results.size();
   }
 
-  // Apply filter conditions
+  // Apply filter conditions (use bitmap fast path when possible)
   auto filter_start = std::chrono::high_resolution_clock::now();
   if (!query.filters.empty()) {
-    results = ApplyFilters(results, query.filters, current_doc_store);
+    results = ApplyFiltersWithBitmap(results, query.filters, current_doc_store);
     if (conn_ctx.debug_mode) {
       auto filter_end = std::chrono::high_resolution_clock::now();
       debug_info.filter_time_ms = std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
@@ -486,9 +490,9 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
                              current_cross_boundary);
   }
 
-  // Apply filter conditions
+  // Apply filter conditions (use bitmap fast path when possible)
   if (!query.filters.empty()) {
-    results = ApplyFilters(results, query.filters, current_doc_store);
+    results = ApplyFiltersWithBitmap(results, query.filters, current_doc_store);
   }
 
   // Calculate query execution time
@@ -840,6 +844,195 @@ std::vector<storage::DocId> SearchHandler::ApplyFilters(const std::vector<storag
       filtered_results.push_back(doc_id);
     }
   }
+
+  return filtered_results;
+}
+
+bool SearchHandler::AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filters,
+                                                 storage::DocumentStore* doc_store) {
+  if (doc_store->GetFilterIndex() == nullptr) {
+    return false;
+  }
+  for (const auto& filter : filters) {
+    if (filter.op != query::FilterOp::EQ && filter.op != query::FilterOp::NE) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<storage::DocId> SearchHandler::ApplyFiltersWithBitmap(const std::vector<storage::DocId>& results,
+                                                                   const std::vector<query::FilterCondition>& filters,
+                                                                   storage::DocumentStore* doc_store) {
+  const auto* filter_index = doc_store->GetFilterIndex();
+
+  // Check if all filters can use bitmap acceleration
+  if (filter_index == nullptr || !AllFiltersHaveBitmapSupport(filters, doc_store)) {
+    return ApplyFilters(results, filters, doc_store);
+  }
+
+  // Convert results vector to a temporary Roaring bitmap
+  roaring_bitmap_t* result_bm = roaring_bitmap_create();
+  roaring_bitmap_add_many(result_bm, results.size(), results.data());
+
+  for (const auto& filter : filters) {
+    // Parse the filter value string into a FilterValue to serialize for bitmap lookup
+    // We need to find the matching bitmap by trying all type interpretations
+    // Strategy: look up bitmaps for all possible serializations of the filter value string
+
+    if (filter.op == query::FilterOp::EQ) {
+      // For EQ: intersect with the matching bitmap
+      // Try to find a bitmap that matches this (column, value) pair
+      // We need to serialize the filter condition value the same way the stored FilterValue was serialized
+      // Since we don't know the type, we check which bitmap exists for this column
+
+      roaring_bitmap_t* match_bm = roaring_bitmap_create();
+
+      // Check all possible type serializations
+      auto try_add_bitmap = [&](const storage::FilterValue& fv) {
+        std::string key = storage::FilterIndex::SerializeFilterValue(fv);
+        const roaring_bitmap_t* bm = filter_index->GetEqBitmap(filter.column, key);
+        if (bm != nullptr) {
+          roaring_bitmap_or_inplace(match_bm, bm);
+        }
+      };
+
+      // Try string
+      try_add_bitmap(storage::FilterValue{filter.value});
+
+      // Try bool
+      if (filter.value == "1" || filter.value == "true") {
+        try_add_bitmap(storage::FilterValue{true});
+      } else if (filter.value == "0" || filter.value == "false") {
+        try_add_bitmap(storage::FilterValue{false});
+      }
+
+      // Try numeric types
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+      const char* end = filter.value.data() + filter.value.size();
+
+      // Try int64_t
+      {
+        int64_t val = 0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+          // Also try narrower signed types
+          if (val >= INT8_MIN && val <= INT8_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int8_t>(val)});
+          }
+          if (val >= INT16_MIN && val <= INT16_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int16_t>(val)});
+          }
+          if (val >= INT32_MIN && val <= INT32_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int32_t>(val)});
+          }
+        }
+      }
+
+      // Try uint64_t
+      {
+        uint64_t val = 0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+          if (val <= UINT8_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint8_t>(val)});
+          }
+          if (val <= UINT16_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint16_t>(val)});
+          }
+          if (val <= UINT32_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint32_t>(val)});
+          }
+        }
+      }
+
+      // Try double
+      {
+        double val = 0.0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+        }
+      }
+
+      roaring_bitmap_and_inplace(result_bm, match_bm);
+      roaring_bitmap_free(match_bm);
+
+    } else if (filter.op == query::FilterOp::NE) {
+      // For NE: remove matching docs from result
+      roaring_bitmap_t* exclude_bm = roaring_bitmap_create();
+
+      auto try_add_bitmap = [&](const storage::FilterValue& fv) {
+        std::string key = storage::FilterIndex::SerializeFilterValue(fv);
+        const roaring_bitmap_t* bm = filter_index->GetEqBitmap(filter.column, key);
+        if (bm != nullptr) {
+          roaring_bitmap_or_inplace(exclude_bm, bm);
+        }
+      };
+
+      // Same type attempts as EQ
+      try_add_bitmap(storage::FilterValue{filter.value});
+
+      if (filter.value == "1" || filter.value == "true") {
+        try_add_bitmap(storage::FilterValue{true});
+      } else if (filter.value == "0" || filter.value == "false") {
+        try_add_bitmap(storage::FilterValue{false});
+      }
+
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      const char* end = filter.value.data() + filter.value.size();
+      {
+        int64_t val = 0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+          if (val >= INT8_MIN && val <= INT8_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int8_t>(val)});
+          }
+          if (val >= INT16_MIN && val <= INT16_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int16_t>(val)});
+          }
+          if (val >= INT32_MIN && val <= INT32_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<int32_t>(val)});
+          }
+        }
+      }
+      {
+        uint64_t val = 0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+          if (val <= UINT8_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint8_t>(val)});
+          }
+          if (val <= UINT16_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint16_t>(val)});
+          }
+          if (val <= UINT32_MAX) {
+            try_add_bitmap(storage::FilterValue{static_cast<uint32_t>(val)});
+          }
+        }
+      }
+      {
+        double val = 0.0;
+        auto [ptr, ec] = std::from_chars(filter.value.data(), end, val);
+        if (ec == std::errc() && ptr == end) {
+          try_add_bitmap(storage::FilterValue{val});
+        }
+      }
+
+      roaring_bitmap_andnot_inplace(result_bm, exclude_bm);
+      roaring_bitmap_free(exclude_bm);
+    }
+  }
+
+  // Convert bitmap back to sorted vector
+  uint64_t cardinality = roaring_bitmap_get_cardinality(result_bm);
+  std::vector<storage::DocId> filtered_results(cardinality);
+  roaring_bitmap_to_uint32_array(result_bm, filtered_results.data());
+  roaring_bitmap_free(result_bm);
 
   return filtered_results;
 }

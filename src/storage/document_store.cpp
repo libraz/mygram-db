@@ -11,6 +11,9 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <memory>
+
+#include "storage/filter_index.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -81,6 +84,10 @@ inline void ReadBinary(std::istream& input_stream, T& data) {
 
 }  // namespace
 
+DocumentStore::DocumentStore() : filter_index_(std::make_unique<FilterIndex>()) {}
+
+DocumentStore::~DocumentStore() = default;
+
 Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
                                                   const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
@@ -122,6 +129,7 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
   // Store filters
   if (!filters.empty()) {
     doc_filters_[doc_id] = filters;
+    filter_index_->AddDocument(doc_id, filters);
   }
 
   mygram::utils::StructuredLog()
@@ -175,6 +183,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     // Store filters
     if (!doc.filters.empty()) {
       doc_filters_[doc_id] = doc.filters;
+      filter_index_->AddDocument(doc_id, doc.filters);
     }
 
     doc_ids.push_back(doc_id);
@@ -202,8 +211,16 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::s
     return false;
   }
 
+  // Get old filters for bitmap update
+  auto old_filter_it = doc_filters_.find(doc_id);
+  std::unordered_map<std::string, FilterValue> old_filters;
+  if (old_filter_it != doc_filters_.end()) {
+    old_filters = old_filter_it->second;
+  }
+
   // Update filters
   doc_filters_[doc_id] = filters;
+  filter_index_->UpdateDocument(doc_id, old_filters, filters);
 
   mygram::utils::StructuredLog()
       .Event("document_updated")
@@ -225,6 +242,12 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
 
   // Copy the primary key before erasing (avoid use-after-free)
   std::string primary_key = pk_it->second;
+
+  // Remove from filter index before erasing filter data
+  auto filter_it = doc_filters_.find(doc_id);
+  if (filter_it != doc_filters_.end()) {
+    filter_index_->RemoveDocument(doc_id, filter_it->second);
+  }
 
   // Remove mappings
   pk_to_doc_id_.erase(primary_key);
@@ -337,6 +360,32 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
   return results;
 }
 
+std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
+                                                                             const std::string& column) const {
+  std::shared_lock lock(mutex_);
+
+  std::vector<std::optional<FilterValue>> results;
+  results.reserve(doc_ids.size());
+
+  for (const auto& doc_id : doc_ids) {
+    auto doc_it = doc_filters_.find(doc_id);
+    if (doc_it == doc_filters_.end()) {
+      results.emplace_back(std::nullopt);
+      continue;
+    }
+    auto filter_it = doc_it->second.find(column);
+    if (filter_it == doc_it->second.end()) {
+      results.emplace_back(std::nullopt);
+    } else {
+      results.emplace_back(filter_it->second);
+    }
+  }
+
+  return results;
+}
+
+const FilterIndex* DocumentStore::GetFilterIndex() const { return filter_index_.get(); }
+
 std::vector<DocId> DocumentStore::GetAllDocIds() const {
   std::shared_lock lock(mutex_);
   std::vector<DocId> results;
@@ -404,6 +453,9 @@ size_t DocumentStore::MemoryUsage() const {
     }
   }
 
+  // Filter index memory
+  total += filter_index_->MemoryUsage();
+
   return total;
 }
 
@@ -414,6 +466,7 @@ void DocumentStore::Clear() {
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
+  filter_index_->Clear();
 
   next_doc_id_ = 1;
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
@@ -1195,12 +1248,19 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
           MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error while loading document store"));
     }
 
+    // Rebuild filter index from loaded data
+    auto new_filter_index = std::make_unique<FilterIndex>();
+    for (const auto& [doc_id, filters] : new_doc_filters) {
+      new_filter_index->AddDocument(doc_id, filters);
+    }
+
     // Swap the loaded data in with minimal lock time
     {
       std::unique_lock lock(mutex_);
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }
 

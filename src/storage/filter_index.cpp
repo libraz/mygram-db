@@ -1,0 +1,186 @@
+/**
+ * @file filter_index.cpp
+ * @brief Bitmap-based filter index implementation
+ */
+
+#include "storage/filter_index.h"
+
+#include <cstring>
+
+namespace mygramdb::storage {
+
+FilterIndex::~FilterIndex() { Clear(); }
+
+void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+  for (const auto& [column, value] : filters) {
+    // Skip NULL values (monostate)
+    if (std::holds_alternative<std::monostate>(value)) {
+      continue;
+    }
+    std::string key = SerializeFilterValue(value);
+    auto& column_map = eq_bitmaps_[column];
+    auto it = column_map.find(key);
+    if (it == column_map.end()) {
+      roaring_bitmap_t* bm = roaring_bitmap_create();
+      roaring_bitmap_add(bm, doc_id);
+      column_map[std::move(key)] = bm;
+    } else {
+      roaring_bitmap_add(it->second, doc_id);
+    }
+  }
+}
+
+void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
+                                  const std::unordered_map<std::string, FilterValue>& new_filters) {
+  // Remove from old bitmaps
+  for (const auto& [column, value] : old_filters) {
+    if (std::holds_alternative<std::monostate>(value)) {
+      continue;
+    }
+    std::string key = SerializeFilterValue(value);
+    auto col_it = eq_bitmaps_.find(column);
+    if (col_it != eq_bitmaps_.end()) {
+      auto val_it = col_it->second.find(key);
+      if (val_it != col_it->second.end()) {
+        roaring_bitmap_remove(val_it->second, doc_id);
+        // Clean up empty bitmaps
+        if (roaring_bitmap_is_empty(val_it->second)) {
+          roaring_bitmap_free(val_it->second);
+          col_it->second.erase(val_it);
+        }
+      }
+    }
+  }
+
+  // Add to new bitmaps
+  AddDocument(doc_id, new_filters);
+}
+
+void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+  for (const auto& [column, value] : filters) {
+    if (std::holds_alternative<std::monostate>(value)) {
+      continue;
+    }
+    std::string key = SerializeFilterValue(value);
+    auto col_it = eq_bitmaps_.find(column);
+    if (col_it != eq_bitmaps_.end()) {
+      auto val_it = col_it->second.find(key);
+      if (val_it != col_it->second.end()) {
+        roaring_bitmap_remove(val_it->second, doc_id);
+        if (roaring_bitmap_is_empty(val_it->second)) {
+          roaring_bitmap_free(val_it->second);
+          col_it->second.erase(val_it);
+        }
+      }
+    }
+  }
+}
+
+const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column,
+                                                   const std::string& serialized_value) const {
+  auto col_it = eq_bitmaps_.find(column);
+  if (col_it == eq_bitmaps_.end()) {
+    return nullptr;
+  }
+  auto val_it = col_it->second.find(serialized_value);
+  if (val_it == col_it->second.end()) {
+    return nullptr;
+  }
+  return val_it->second;
+}
+
+void FilterIndex::Clear() {
+  for (auto& [column, value_map] : eq_bitmaps_) {
+    for (auto& [key, bm] : value_map) {
+      roaring_bitmap_free(bm);
+    }
+  }
+  eq_bitmaps_.clear();
+}
+
+size_t FilterIndex::MemoryUsage() const {
+  size_t total = 0;
+  for (const auto& [column, value_map] : eq_bitmaps_) {
+    total += column.size() + column.capacity();
+    for (const auto& [key, bm] : value_map) {
+      total += key.size() + key.capacity();
+      total += roaring_bitmap_portable_size_in_bytes(bm);
+    }
+  }
+  return total;
+}
+
+std::string FilterIndex::SerializeFilterValue(const FilterValue& value) {
+  return std::visit(
+      [](const auto& val) -> std::string {
+        using T = std::decay_t<decltype(val)>;
+
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          return {'\x00'};  // NULL tag
+        } else if constexpr (std::is_same_v<T, bool>) {
+          std::string result(2, '\0');
+          result[0] = '\x01';  // bool tag
+          result[1] = val ? '\x01' : '\x00';
+          return result;
+        } else if constexpr (std::is_same_v<T, std::string>) {
+          std::string result;
+          result.reserve(1 + val.size());
+          result += '\x0B';  // string tag
+          result += val;
+          return result;
+        } else if constexpr (std::is_same_v<T, double>) {
+          std::string result(1 + sizeof(double), '\0');
+          result[0] = '\x0C';  // double tag
+          std::memcpy(&result[1], &val, sizeof(double));
+          return result;
+        } else if constexpr (std::is_same_v<T, TimeValue>) {
+          std::string result(1 + sizeof(int64_t), '\0');
+          result[0] = '\x0A';  // TimeValue tag
+          std::memcpy(&result[1], &val.seconds, sizeof(int64_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, int8_t>) {
+          std::string result(1 + sizeof(int8_t), '\0');
+          result[0] = '\x02';
+          result[1] = static_cast<char>(val);
+          return result;
+        } else if constexpr (std::is_same_v<T, uint8_t>) {
+          std::string result(1 + sizeof(uint8_t), '\0');
+          result[0] = '\x03';
+          result[1] = static_cast<char>(val);
+          return result;
+        } else if constexpr (std::is_same_v<T, int16_t>) {
+          std::string result(1 + sizeof(int16_t), '\0');
+          result[0] = '\x04';
+          std::memcpy(&result[1], &val, sizeof(int16_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, uint16_t>) {
+          std::string result(1 + sizeof(uint16_t), '\0');
+          result[0] = '\x05';
+          std::memcpy(&result[1], &val, sizeof(uint16_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+          std::string result(1 + sizeof(int32_t), '\0');
+          result[0] = '\x06';
+          std::memcpy(&result[1], &val, sizeof(int32_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, uint32_t>) {
+          std::string result(1 + sizeof(uint32_t), '\0');
+          result[0] = '\x07';
+          std::memcpy(&result[1], &val, sizeof(uint32_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, int64_t>) {
+          std::string result(1 + sizeof(int64_t), '\0');
+          result[0] = '\x08';
+          std::memcpy(&result[1], &val, sizeof(int64_t));
+          return result;
+        } else if constexpr (std::is_same_v<T, uint64_t>) {
+          std::string result(1 + sizeof(uint64_t), '\0');
+          result[0] = '\x09';
+          std::memcpy(&result[1], &val, sizeof(uint64_t));
+          return result;
+        }
+      },
+      value);
+}
+
+}  // namespace mygramdb::storage

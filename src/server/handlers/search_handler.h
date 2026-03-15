@@ -84,6 +84,20 @@ class SearchHandler : public CommandHandler {
   static std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& results,
                                                   const std::vector<query::FilterCondition>& filters,
                                                   storage::DocumentStore* doc_store);
+
+  /**
+   * @brief Apply filter conditions using bitmap intersection (fast path)
+   *
+   * Converts results to a Roaring bitmap and intersects with pre-built
+   * filter bitmaps. Falls back to ApplyFilters for unsupported operators.
+   */
+  static std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::DocId>& results,
+                                                             const std::vector<query::FilterCondition>& filters,
+                                                             storage::DocumentStore* doc_store);
+
+  /// Check if all filter conditions can be accelerated with bitmap index
+  static bool AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filters,
+                                          storage::DocumentStore* doc_store);
 };
 
 }  // namespace mygramdb::server

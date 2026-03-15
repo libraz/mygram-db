@@ -270,10 +270,58 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   }
 
   // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
-  // GetSortKey() handles both primary keys and filter columns
-  for (const auto& doc_id : results) {
-    std::string sort_key = GetSortKey(doc_id, doc_store, order_by, primary_key_column);
-    entries.push_back({doc_id, std::move(sort_key)});
+  bool is_pk_order = order_by.IsPrimaryKey() || order_by.column == primary_key_column;
+  if (is_pk_order) {
+    // Batch primary key lookup: single lock acquisition
+    auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
+    for (size_t i = 0; i < results.size(); ++i) {
+      std::string sort_key;
+      const auto& pk_str = primary_keys[i];
+      if (!pk_str.empty()) {
+        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+          try {
+            uint64_t num = std::stoull(pk_str);
+            sort_key = ToZeroPaddedString(num, kNumericWidth);
+          } catch (const std::exception&) {
+            sort_key = pk_str;
+          }
+        } else {
+          sort_key = pk_str;
+        }
+      } else {
+        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
+      }
+      entries.push_back({results[i], std::move(sort_key)});
+    }
+  } else {
+    // Batch filter value lookup: single lock acquisition
+    auto batch_values = doc_store.GetFilterValuesBatch(results, order_by.column);
+    for (size_t i = 0; i < results.size(); ++i) {
+      std::string sort_key;
+      if (batch_values[i].has_value()) {
+        sort_key = std::visit(
+            [](auto&& arg) -> std::string {
+              using T = std::decay_t<decltype(arg)>;
+              if constexpr (std::is_same_v<T, std::monostate>) {
+                return "";
+              } else if constexpr (std::is_same_v<T, bool>) {
+                return arg ? "1" : "0";
+              } else if constexpr (std::is_same_v<T, std::string>) {
+                return arg;
+              } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+                return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
+              } else if constexpr (std::is_same_v<T, double>) {
+                return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
+              } else if constexpr (std::is_signed_v<T>) {
+                return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
+              } else {
+                return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
+              }
+            },
+            batch_values[i].value());
+      }
+      entries.push_back({results[i], std::move(sort_key)});
+    }
   }
 
   // Phase 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
@@ -360,10 +408,34 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
       entries.push_back({results[i], std::move(sort_key)});
     }
   } else {
-    // Filter column: individual lookups (still benefits from pre-computation)
-    for (const auto& doc_id : results) {
-      std::string sort_key = GetSortKey(doc_id, doc_store, order_by, primary_key_column);
-      entries.push_back({doc_id, std::move(sort_key)});
+    // Filter column: batch lookup (single lock acquisition)
+    auto batch_values = doc_store.GetFilterValuesBatch(results, order_by.column);
+
+    for (size_t i = 0; i < results.size(); ++i) {
+      std::string sort_key;
+      if (batch_values[i].has_value()) {
+        sort_key = std::visit(
+            [](auto&& arg) -> std::string {
+              using T = std::decay_t<decltype(arg)>;
+              if constexpr (std::is_same_v<T, std::monostate>) {
+                return "";
+              } else if constexpr (std::is_same_v<T, bool>) {
+                return arg ? "1" : "0";
+              } else if constexpr (std::is_same_v<T, std::string>) {
+                return arg;
+              } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+                return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
+              } else if constexpr (std::is_same_v<T, double>) {
+                return ToZeroPaddedDoubleString(arg, kDoubleWidth, kDoublePrecision);
+              } else if constexpr (std::is_signed_v<T>) {
+                return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
+              } else {
+                return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
+              }
+            },
+            batch_values[i].value());
+      }
+      entries.push_back({results[i], std::move(sort_key)});
     }
   }
 
