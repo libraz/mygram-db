@@ -333,6 +333,23 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           index.Clear();
           doc_store.Clear();
           mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
+        } else if (query_upper.find("ALTER") != std::string::npos) {
+          // ALTER TABLE - log warning about potential schema mismatch
+          // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
+          // as a DROP TABLE event
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "alter_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "schema_change_warning")
+              .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
+              .Warn();
+          // Note: We cannot automatically detect what changed (column type, name, etc.)
+          // Users should manually rebuild if text column type or PK changed
         } else if (query_upper.find("DROP") != std::string::npos) {
           // DROP TABLE - clear all data and warn
           mygram::utils::StructuredLog()
@@ -348,21 +365,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Field("type", "table_dropped")
               .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
               .Error();
-        } else if (query_upper.find("ALTER") != std::string::npos) {
-          // ALTER TABLE - log warning about potential schema mismatch
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "alter_table_detected")
-              .Field("table_name", event.table_name)
-              .Field("query", query)
-              .Warn();
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "schema_change_warning")
-              .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
-              .Warn();
-          // Note: We cannot automatically detect what changed (column type, name, etc.)
-          // Users should manually rebuild if text column type or PK changed
         }
         if (stats != nullptr) {
           stats->IncrementReplDdlExecuted();

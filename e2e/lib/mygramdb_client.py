@@ -243,6 +243,21 @@ class MygramdbClient:
         resp = self.http_get("/metrics")
         return resp if isinstance(resp, str) else ""
 
+    def replication_stop(self) -> bool:
+        """Send REPLICATION STOP command."""
+        resp = self.tcp_command("REPLICATION STOP")
+        return resp is not None and "STOPPED" in resp
+
+    def replication_start(self) -> bool:
+        """Send REPLICATION START command."""
+        resp = self.tcp_command("REPLICATION START")
+        return resp is not None and "STARTED" in resp
+
+    def replication_status(self) -> str:
+        """Send REPLICATION STATUS command and return response."""
+        resp = self.tcp_command("REPLICATION STATUS")
+        return resp or ""
+
     def _parse_search_response(self, resp: str | None) -> dict[str, Any]:
         """Parse a SEARCH response into structured data."""
         if not resp:

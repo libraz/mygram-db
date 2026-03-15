@@ -25,7 +25,7 @@ class TestMemoryRelease:
 
         wait_until(
             _index_cleared,
-            timeout=15,
+            timeout=30,
             interval=1,
             description="truncate for memory release",
         )

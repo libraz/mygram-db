@@ -122,7 +122,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       binlog_conn.reset();
       metadata_conn.reset();
 
-      // Clear running flag
+      // Clear state flags - must reset should_stop to allow future Start() calls
+      should_stop = false;
       running_flag = false;
     }
 
@@ -209,10 +210,10 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   binlog_conn_config.password = connection_.GetConfig().password;
   binlog_conn_config.database = connection_.GetConfig().database;
   binlog_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
-  // Use a short read timeout (60 seconds) for the binlog connection
-  // This allows the reader thread to check should_stop_ periodically
-  // and exit gracefully when Stop() is called (within 60 seconds max)
-  binlog_conn_config.read_timeout = 60;  // Heartbeat keeps connection alive
+  // Use a short read timeout for the binlog connection so that Stop()
+  // completes quickly. The reader thread checks should_stop_ after each
+  // mysql_binlog_fetch() return, so this value bounds the max Stop() latency.
+  binlog_conn_config.read_timeout = 5;
   binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
 
   binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
@@ -312,9 +313,9 @@ void BinlogReader::Stop() {
 
   // Note: We cannot call binlog_connection_->Close() from this thread
   // because mysql_close() is not thread-safe when mysql_binlog_fetch()
-  // is blocking in another thread. Instead, the binlog connection is
-  // configured with a short read timeout (5 seconds) so the reader thread
-  // will check should_stop_ periodically and exit gracefully.
+  // is blocking in another thread. Instead, the binlog connection uses
+  // read_timeout=5s so the reader thread checks should_stop_ within 5s
+  // and exits gracefully.
 
   // Wait for threads to finish (reader will exit due to read timeout + should_stop_ check)
   // Always attempt to join regardless of running_ state (#6) - threads may have
@@ -466,10 +467,11 @@ void BinlogReader::ReaderThreadFunc() {
     mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksums_disabled").Debug();
 
     // Configure heartbeat to keep connection alive during idle periods.
-    // Without heartbeat, the read_timeout causes periodic TCP disconnects
-    // and full reconnection cycles, increasing the risk of data loss.
+    // The heartbeat period must be shorter than read_timeout (5s) to avoid
+    // spurious TCP disconnects. Without heartbeat, each read_timeout expiry
+    // causes a full reconnect cycle.
     if (mysql_query(binlog_connection_->GetHandle(),
-                    "SET @master_heartbeat_period = 30000000000") != 0) {
+                    "SET @master_heartbeat_period = 3000000000") != 0) {
       // Non-fatal: heartbeat is optional, log and continue
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -653,7 +655,7 @@ void BinlogReader::ReaderThreadFunc() {
         last_error_ =
             "Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
 
-        // Check if this is a read timeout (expected with 60-second timeout when heartbeat fails)
+        // Check if this is a read timeout (expected with 5-second timeout when heartbeat fails)
         // errno 2013 (CR_SERVER_LOST) can indicate either timeout or actual connection loss
         if (should_stop_) {
           // Timeout while stopping - exit gracefully
