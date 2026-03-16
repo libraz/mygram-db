@@ -10,6 +10,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-03-16
+
+### Added
+
+- **Unix domain socket support** - Local connections via Unix sockets for reduced latency and improved security; supported in server, CLI, and client library
+- **Prometheus cache metrics** - Full cache observability with hit/miss rates, memory accounting, eviction stats, and TTL expiration tracking via `/metrics` endpoint
+- **Structured benchmark suite** - Python-based benchmark framework with anomaly detection, MySQL comparison reports, and connection pool saturation analysis
+- **Python-based end-to-end test suite** - Comprehensive e2e tests covering replication, DDL, cache, concurrency, resilience, memory, and multi-table scenarios
+
+### Fixed
+
+- **Critical: Cache correctness and data integrity** - Resolve invalidation consistency, double-counting stats, query normalization, and result sorter edge cases
+- **Critical: Binlog reconnection and GTID consistency** - Fix reconnection failures, GTID snapshot consistency, and reconnection gap causing event loss
+- **High: FilterIndex thread safety** - Make FilterIndex thread-safe and eliminate bitmap filter use-after-free crashes
+- **High: PostingList deadlocks** - Fix deadlocks in PostingList operations and reduce SaveToStream lock contention
+- **High: Document resurrection on Optimize race** - Fix race condition where removed documents reappear during Optimize
+- **High: Stale connection recovery** - Add automatic recovery for stale MySQL connections in binlog reader
+- **High: Thread safety across components** - Fix thread safety issues in connection handling, config propagation, and multiple modules
+- **High: GTID set handling for reconnection** - Fix GTID set handling and migrate GtidEncoder to Expected<T, Error>
+- **High: V2 rows event parsing** - Fix V2 rows event parsing issues with MySQL 8.4 support
+- **Medium: Cache decompression failure leak** - Fix memory leak on decompression failures and add invalidation queue backpressure
+- **Medium: Security hardening** - Harden HTTP server and dump operations, fix GTID single-to-range conversion
+- **Medium: Cache hit counting** - Fix inaccurate cache hit counting and add TTL expiration statistics
+
+### Performance
+
+- **Bitmap-based filter index** - Roaring bitmap-based FilterIndex for efficient filter evaluation replacing per-document checks
+- **Batch sort key lookups** - Reduce lock acquisitions during result sorting
+
+### Testing
+
+- Python-based e2e integration test suite (replication, DDL, cache, concurrency, resilience, memory, multi-table, edge cases)
+- Consolidated bug-fix tests into main test suites
+- Refactored C++ MySQL tests into unit tests with expanded coverage
+- New tests: FilterIndex, Unix socket, cache metrics, optimize concurrency
+
+**Detailed Release Notes**: [docs/releases/v1.4.0.md](docs/releases/v1.4.0.md)
+
+## [1.3.9] - 2026-01-10
+
+### Fixed
+
+- **Critical: Binlog replication fixes** - Thread premature termination, multi-row events, GTID updates
+- **High: Memory management** - RAII Roaring iterator, PostingList cleanup, N-gram eviction
+- **High: GTID and concurrency** - Race conditions in GTID handling, transaction ID overflow, deadlocks
+- **High: Configuration security** - Path traversal prevention, symlink vulnerability fix, TOCTOU race
+- **Critical: SYNC instance replacement** - Fix broken replication after SYNC cancellation
+- **Medium: Query and search** - Zero-division guard, total_results calculation, filter operators
+
+### Added
+
+- GEOMETRY type support in binlog replication
+- ROW_V1, ROTATE_EVENT, HEARTBEAT_EVENT handling
+- binlog_row_image MINIMAL/NOBLOB support
+- DECIMAL precision handling
+- Environment variable credentials
+- Strong DocId typing
+- BinlogEvent factory pattern
+
+### Performance
+
+- QueryCache lock optimization
+- Heterogeneous lookup for Index and DocumentStore
+- Response string concatenation improvements
+- ApplyFilters variant overhead reduction
+
+### Testing
+
+- 12 new test files across cache, index, mysql, server, and storage modules
+
+**Detailed Release Notes**: [docs/releases/v1.3.9.md](docs/releases/v1.3.9.md)
+
 ## [1.3.8] - 2025-12-21
 
 ### Added
@@ -309,7 +381,9 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.3.8...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/libraz/mygram-db/compare/v1.3.9...v1.4.0
+[1.3.9]: https://github.com/libraz/mygram-db/compare/v1.3.8...v1.3.9
 [1.3.8]: https://github.com/libraz/mygram-db/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/libraz/mygram-db/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/libraz/mygram-db/compare/v1.3.5...v1.3.6
