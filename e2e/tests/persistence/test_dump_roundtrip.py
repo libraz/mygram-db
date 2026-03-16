@@ -3,7 +3,7 @@
 import pytest
 import time
 
-from lib.wait import wait_until
+from lib.wait import wait_until, wait_until_gte
 
 pytestmark = pytest.mark.persistence
 
@@ -43,8 +43,6 @@ class TestDumpRoundtrip:
 
     def test_search_after_dump_load(self, mysql, mygramdb, seed_data):
         """Search should work correctly after DUMP LOAD."""
-        from lib.wait import wait_until_gte
-
         marker = "dump_search_marker"
         mysql.insert_rows("articles", [{
             "title": "Dump Search Test",
@@ -54,20 +52,33 @@ class TestDumpRoundtrip:
             "enabled": 1,
         }])
 
-        wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
-            minimum=1,
-            timeout=10,
-            interval=0.5,
-            description="dump search data",
+        # Sync to ensure marker data is in the index
+        mygramdb.sync("articles", timeout=30)
+        time.sleep(1)
+
+        count_before = mygramdb.count("articles", marker)
+        assert count_before >= 1, f"Marker should exist after sync, got {count_before}"
+
+        # Save dump (async, writes to file then resumes replication)
+        mygramdb.dump_save()
+        time.sleep(15)
+
+        # Load the dump
+        def _try_load():
+            resp = mygramdb.tcp_command("DUMP LOAD mygramdb.dmp", timeout=60.0)
+            return resp is not None and "OK" in resp
+
+        wait_until(
+            _try_load,
+            timeout=30,
+            interval=2,
+            description="dump load after save",
         )
 
-        # Save and load
-        mygramdb.dump_save()
-        time.sleep(10)
-        mygramdb.dump_load()
-        time.sleep(3)
+        # After dump load, sync to ensure index is rebuilt
+        mygramdb.sync("articles", timeout=30)
+        time.sleep(2)
 
         # Search should still work
         count = mygramdb.count("articles", marker)
-        assert count >= 1, "Search should work after DUMP LOAD"
+        assert count >= 1, f"Search should work after DUMP LOAD, got {count}"

@@ -15,18 +15,24 @@ class TestReplicationResilience:
     """Verify replication handles concurrent and stop/start scenarios."""
 
     def _ensure_replication_running(self, mygramdb):
-        """Ensure replication is running (best effort, up to 65s retry)."""
-        for _ in range(130):
-            resp = mygramdb.tcp_command("REPLICATION START")
+        """Ensure replication is running (with retry and sync fallback)."""
+        for attempt in range(30):
+            status = mygramdb.replication_status()
+            if status and "running" in status.lower():
+                return
+            resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
             if resp is None:
-                time.sleep(0.5)
+                time.sleep(1)
                 continue
             if "STARTED" in resp or "already" in resp.lower() or "running" in resp.lower():
+                time.sleep(1)
                 return
             if "stopping" in resp.lower():
-                time.sleep(0.5)
+                time.sleep(2)
                 continue
-            return
+            time.sleep(1)
+        # Last resort: sync to re-establish replication
+        mygramdb.sync("articles", timeout=30)
 
     def test_stop_during_active_writes(self, mysql, mygramdb, seed_data):
         """STOP during active MySQL writes should not lose data after START."""
@@ -88,7 +94,7 @@ class TestReplicationResilience:
 
             # Stop replication (may take up to 60s due to binlog read_timeout)
             resp = mygramdb.tcp_command("REPLICATION STOP", timeout=10.0)
-            assert resp is not None and "STOPPED" in resp
+            assert resp is not None and ("STOPPED" in resp or "stopped" in resp)
             time.sleep(1)
 
             # Server should still be live (liveness != replication)

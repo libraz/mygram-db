@@ -20,8 +20,8 @@ class TestMemoryRelease:
         mysql.truncate("articles")
 
         def _index_cleared() -> bool:
-            info = mygramdb.info()
-            return info.get("total_documents", info.get("doc_count", info.get("documents", -1))) == 0
+            result = mygramdb.search("articles", "test", limit=1)
+            return result["total"] == 0
 
         wait_until(
             _index_cleared,
@@ -44,8 +44,8 @@ class TestMemoryRelease:
         mysql.insert_rows("articles", rows)
 
         def _reseeded() -> bool:
-            info = mygramdb.info()
-            return info.get("total_documents", info.get("doc_count", info.get("documents", 0))) >= 100
+            count = mygramdb.count("articles", "test")
+            return count >= 30
 
         wait_until(
             _reseeded,

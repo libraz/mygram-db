@@ -147,11 +147,25 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
   }
 
-  // Check MySQL connection
+  // Check MySQL connection (reconnect if stale)
   if (!connection_.IsConnected()) {
-    last_error_ = "MySQL connection not established";
-    mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    auto reconnect_result = connection_.Reconnect();
+    if (!reconnect_result) {
+      last_error_ = "MySQL connection not established and reconnect failed";
+      mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    }
+  } else {
+    // Connection appears alive but may be stale; verify with ping
+    auto ping_result = connection_.Ping();
+    if (!ping_result) {
+      auto reconnect_result = connection_.Reconnect();
+      if (!reconnect_result) {
+        last_error_ = "MySQL connection lost and reconnect failed";
+        mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+      }
+    }
   }
 
   // Check if GTID mode is enabled (using main connection)

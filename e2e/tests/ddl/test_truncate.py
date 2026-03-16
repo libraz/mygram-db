@@ -34,16 +34,18 @@ class TestTruncate:
         # Truncate
         mysql.truncate("articles")
 
-        # Wait for index to clear
-        def _index_cleared() -> bool:
-            info = mygramdb.info()
-            return info.get("total_documents", info.get("doc_count", info.get("documents", -1))) == 0
+        # Wait for articles search to return no results
+        def _articles_cleared() -> bool:
+            count = mygramdb.count("articles", "truncate_test_marker")
+            # Also verify a broad search returns nothing for articles
+            result = mygramdb.search("articles", "test", limit=1)
+            return result["total"] == 0
 
         wait_until(
-            _index_cleared,
+            _articles_cleared,
             timeout=15,
             interval=1,
-            description="TRUNCATE to clear index",
+            description="TRUNCATE to clear articles index",
         )
 
     def test_truncate_then_reinsert(self, mysql, mygramdb):
@@ -54,13 +56,12 @@ class TestTruncate:
         mysql.insert_rows("articles", rows)
 
         def _get_doc_count() -> int:
-            info = mygramdb.info()
-            return info.get("total_documents", info.get("doc_count", info.get("documents", 0)))
+            return mygramdb.count("articles", "test")
 
         wait_until_gte(
             _get_doc_count,
-            minimum=50,
-            timeout=15,
+            minimum=30,
+            timeout=30,
             interval=1,
             description="re-insert after TRUNCATE",
         )

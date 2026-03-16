@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Generator
 
@@ -140,3 +141,32 @@ def metrics_snapshot(mygramdb: MygramdbClient) -> Generator[dict, None, None]:
     """Capture metrics before and after a test. Yields the 'before' snapshot."""
     before = MetricsSnapshot.capture(mygramdb)
     yield {"before": before, "after_fn": lambda: MetricsSnapshot.capture(mygramdb)}
+
+
+@pytest.fixture(autouse=True)
+def ensure_replication(mygramdb: MygramdbClient) -> None:
+    """Ensure replication is running before each test.
+
+    Some tests (e.g., resilience) stop/start replication and may leave it
+    in a stopped state. This fixture automatically restarts it.
+    After MySQL restart, REPLICATION START may fail with stale connections,
+    so we fall back to SYNC which creates fresh connections.
+    """
+    status = mygramdb.replication_status()
+    if "running" in status.lower():
+        return
+
+    # Try REPLICATION START first (fast path)
+    for _ in range(5):
+        resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
+        if resp and ("STARTED" in resp or "already" in resp.lower() or "running" in resp.lower()):
+            time.sleep(1)
+            return
+        if resp and "stopping" in resp.lower():
+            time.sleep(3)
+            continue
+        time.sleep(1)
+
+    # REPLICATION START failed (likely stale MySQL connection after restart).
+    # SYNC creates a fresh connection and restarts replication.
+    mygramdb.sync("articles", timeout=30)

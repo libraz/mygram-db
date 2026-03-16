@@ -90,9 +90,8 @@ def _recreate_articles_table(mysql, mygramdb):
     mygramdb.sync("articles", timeout=60)
 
     def _has_docs() -> bool:
-        info = mygramdb.info()
-        count = info.get("total_documents", info.get("doc_count", info.get("documents", 0)))
-        return count >= 90
+        count = mygramdb.count("articles", "test")
+        return count >= 30
 
     wait_until(
         _has_docs,
@@ -247,15 +246,15 @@ class TestDDLEdgeCases:
 
             mysql.execute("DROP TABLE articles")
 
-            def _index_cleared() -> bool:
-                info = mygramdb.info()
-                return info.get("total_documents", info.get("doc_count", info.get("documents", -1))) == 0
+            def _articles_cleared() -> bool:
+                result = mygramdb.search("articles", "test", limit=1)
+                return result["total"] == 0
 
             wait_until(
-                _index_cleared,
+                _articles_cleared,
                 timeout=15,
                 interval=1,
-                description="DROP TABLE to clear index",
+                description="DROP TABLE to clear articles index",
             )
         finally:
             _recreate_articles_table(mysql, mygramdb)

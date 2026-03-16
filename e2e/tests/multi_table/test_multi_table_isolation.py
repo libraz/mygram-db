@@ -99,16 +99,42 @@ def _reseed_table(mysql, mygramdb, table, count=50):
 class TestMultiTableSearch:
     """Verify both tables are independently searchable via SEARCH command."""
 
-    def test_both_tables_searchable(self, mygramdb, seed_data):
+    def test_both_tables_searchable(self, mysql, mygramdb, seed_data):
         """Both articles and products should return SEARCH results."""
-        articles = mygramdb.search("articles", "test", limit=10)
-        products = mygramdb.search("products", "test", limit=10)
+        # Insert identifiable data into both tables
+        art_marker = f"bothsrch_{uuid.uuid4().hex[:8]}"
+        prod_marker = f"bothsrch_{uuid.uuid4().hex[:8]}"
 
-        assert articles["total"] >= 1, (
-            f"articles SEARCH should return results, got total={articles['total']}"
+        mysql.insert_rows("articles", [{
+            "title": "Both Tables Test",
+            "content": f"Article content {art_marker} searchable",
+            "status": 1, "category": "tech", "enabled": 1,
+        }])
+        mysql.insert_rows("products", [{
+            "name": "Both Tables Product",
+            "description": f"Product content {prod_marker} searchable",
+            "status": 1, "category": "tech", "enabled": 1,
+        }])
+
+        # Sync both tables (sequential to avoid SYNC STATUS race)
+        mygramdb.sync("articles", timeout=30)
+        time.sleep(1)
+        mygramdb.sync("products", timeout=30)
+        time.sleep(1)
+
+        wait_until_gte(
+            lambda: mygramdb.count("articles", art_marker),
+            minimum=1,
+            timeout=15,
+            interval=0.5,
+            description="articles searchable",
         )
-        assert products["total"] >= 1, (
-            f"products SEARCH should return results, got total={products['total']}"
+        wait_until_gte(
+            lambda: mygramdb.count("products", prod_marker),
+            minimum=1,
+            timeout=15,
+            interval=0.5,
+            description="products searchable",
         )
 
     def test_no_cross_contamination_search(self, mysql, mygramdb, seed_data):

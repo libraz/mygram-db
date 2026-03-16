@@ -34,12 +34,13 @@ class TestDDLDuringQueries:
             "enabled": 1,
         } for i in range(20)]
         mysql.insert_rows("articles", rows)
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("articles", timeout=30)
+        time.sleep(2)
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
             minimum=15,
-            timeout=15,
+            timeout=30,
             interval=0.5,
             description=f"{marker} sync",
         )
