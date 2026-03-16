@@ -11,6 +11,7 @@
 
 #include "cache/query_cache.h"
 #include "query/cache_key.h"
+#include "query/query_parser.h"
 
 namespace mygramdb::cache {
 
@@ -616,6 +617,656 @@ TEST(InvalidationManagerTest, Bug18_CompleteTextReplacementInvalidatesAll) {
   EXPECT_EQ(2, invalidated.size());
   EXPECT_NE(invalidated.find(key1), invalidated.end());
   EXPECT_NE(invalidated.find(key2), invalidated.end());
+}
+
+// =============================================================================
+// InvalidationMetadata minimal storage tests
+// =============================================================================
+
+/**
+ * @brief Test that InvalidationManager stores only table + ngrams (minimal metadata)
+ */
+TEST(InvalidationManagerTest, MetadataStorageMinimal) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"hel", "ell", "llo"};
+  meta.filters = {{"col", query::FilterOp::EQ, "val"}};
+  meta.access_count = 42;  // Should NOT be stored in InvalidationManager
+  mgr.RegisterCacheEntry(key, meta);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(3, mgr.GetTrackedNgramCount("posts"));
+
+  // Verify invalidation still works correctly
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2);
+  EXPECT_GE(invalidated.size(), 1);
+}
+
+/**
+ * @brief Test register/unregister memory consistency
+ */
+TEST(InvalidationManagerTest, RegisterUnregisterMemoryConsistency) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  size_t base_mem = mgr.MemoryUsage();
+
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"aaa", "bbb", "ccc"};
+  mgr.RegisterCacheEntry(key, meta);
+
+  size_t after_register = mgr.MemoryUsage();
+  EXPECT_GT(after_register, base_mem);
+
+  mgr.UnregisterCacheEntry(key);
+
+  size_t after_unregister = mgr.MemoryUsage();
+  // Memory may not return exactly to base due to bucket retention,
+  // but tracked entry count should be zero
+  EXPECT_EQ(0, mgr.GetTrackedEntryCount());
+  EXPECT_LE(after_unregister, after_register);
+}
+
+// =============================================================================
+// MemoryUsage tests
+// =============================================================================
+
+/**
+ * @brief Test memory usage grows with entries
+ */
+TEST(InvalidationManagerTest, MemoryUsageGrowsWithEntries) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  size_t mem0 = mgr.MemoryUsage();
+
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("q" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "t";
+    meta.ngrams = {"ng" + std::to_string(i)};
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  size_t mem10 = mgr.MemoryUsage();
+  EXPECT_GT(mem10, mem0);
+}
+
+/**
+ * @brief Test memory usage decreases on unregister
+ */
+TEST(InvalidationManagerTest, MemoryUsageDecreasesOnUnregister) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+
+  std::vector<CacheKey> keys;
+  for (int i = 0; i < 20; ++i) {
+    auto key = CacheKeyGenerator::Generate("q" + std::to_string(i));
+    keys.push_back(key);
+    CacheMetadata meta;
+    meta.table = "t";
+    meta.ngrams = {"ng" + std::to_string(i), "xg" + std::to_string(i)};
+    mgr.RegisterCacheEntry(key, meta);
+  }
+
+  size_t mem_full = mgr.MemoryUsage();
+
+  // Remove half
+  for (int i = 0; i < 10; ++i) {
+    mgr.UnregisterCacheEntry(keys[static_cast<size_t>(i)]);
+  }
+
+  size_t mem_half = mgr.MemoryUsage();
+  EXPECT_LT(mem_half, mem_full);
+}
+
+/**
+ * @brief Test entries with more ngrams use more memory
+ */
+TEST(InvalidationManagerTest, MemoryUsageReflectsNgramCount) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr1(&cache);
+  InvalidationManager mgr2(&cache);
+
+  // mgr1: few ngrams
+  auto key1 = CacheKeyGenerator::Generate("q1");
+  CacheMetadata meta1;
+  meta1.table = "t";
+  meta1.ngrams = {"a", "b"};
+  mgr1.RegisterCacheEntry(key1, meta1);
+
+  // mgr2: many ngrams
+  auto key2 = CacheKeyGenerator::Generate("q2");
+  CacheMetadata meta2;
+  meta2.table = "t";
+  for (int i = 0; i < 50; ++i) {
+    meta2.ngrams.push_back("ngram_" + std::to_string(i));
+  }
+  mgr2.RegisterCacheEntry(key2, meta2);
+
+  EXPECT_GT(mgr2.MemoryUsage(), mgr1.MemoryUsage());
+}
+
+// =============================================================================
+// IsCJK consistency - Hiragana/Katakana invalidation
+// =============================================================================
+
+/**
+ * @brief Test that Hiragana text invalidation works correctly
+ *
+ * Verifies that N-gram generation for cache invalidation uses the same
+ * CJK classification as indexing (Hiragana = non-CJK = ascii_ngram_size).
+ */
+TEST(InvalidationManagerTest, HiraganaTextInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);  // min_query_cost=0 to allow all inserts
+  InvalidationManager mgr(&cache);
+
+  // Register a cache entry with bigram ngrams for hiragana text "あいうえお"
+  // Using ascii_ngram_size=2, kanji_ngram_size=1 (hiragana uses ascii_ngram_size)
+  auto key1 = CacheKeyGenerator::Generate("hiragana_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Hiragana bigrams: "あい", "いう", "うえ", "えお"
+  meta1.ngrams = {"あい", "いう", "うえ", "えお"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidate with hiragana text - ExtractNgrams should generate same bigrams
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "あいうえお", 2, 1);
+
+  // Cache entry should be invalidated because N-grams match
+  EXPECT_GE(invalidated.size(), 1) << "Hiragana text should invalidate matching cache entries";
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test that Katakana text invalidation works correctly
+ */
+TEST(InvalidationManagerTest, KatakanaTextInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key1 = CacheKeyGenerator::Generate("katakana_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Katakana bigrams: "アイ", "イウ", "ウエ", "エオ"
+  meta1.ngrams = {"アイ", "イウ", "ウエ", "エオ"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "アイウエオ", 2, 1);
+
+  EXPECT_GE(invalidated.size(), 1) << "Katakana text should invalidate matching cache entries";
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test mixed CJK (Kanji) + Hiragana text invalidation
+ *
+ * "東京の空" has:
+ * - Kanji: 東, 京, 空 (kanji_ngram_size=1 -> unigrams "東", "京", "空")
+ * - Hiragana: の (ascii_ngram_size=2 -> but single char, no bigram possible alone)
+ * - Cross-boundary ngrams may be generated
+ */
+TEST(InvalidationManagerTest, MixedCJKHiraganaInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key1 = CacheKeyGenerator::Generate("mixed_query");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Register with unigrams for kanji characters
+  meta1.ngrams = {"東", "京", "空"};
+  std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidate with the mixed text
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "東京の空", 2, 1);
+
+  // Should invalidate because kanji unigrams match
+  EXPECT_GE(invalidated.size(), 1) << "Mixed CJK+Hiragana should invalidate via kanji unigrams";
+}
+
+// =============================================================================
+// C2: N-gram config change invalidation consistency
+// =============================================================================
+
+/**
+ * @brief Test that ngram settings are stored in InvalidationMetadata
+ *
+ * When cache entries are created with specific ngram settings, those settings
+ * should be preserved so that invalidation can use them if the config changes.
+ */
+TEST(InvalidationManagerTest, NgramSettingsStoredInMetadata) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"he", "el", "ll", "lo"};  // bigrams from "hello"
+  meta.ngram_size = 2;
+  meta.kanji_ngram_size = 1;
+  meta.cross_boundary_ngrams = false;
+  mgr.RegisterCacheEntry(key, meta);
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());
+  EXPECT_EQ(4, mgr.GetTrackedNgramCount("posts"));
+}
+
+/**
+ * @brief Test invalidation with changed ngram_size finds entries created with old settings
+ *
+ * Scenario: Cache entry was created with ngram_size=2 (bigrams).
+ * Config is then changed to ngram_size=3 (trigrams).
+ * When invalidation occurs with the new config, it should still find and
+ * invalidate entries whose reverse index was built with the old bigram settings.
+ */
+TEST(InvalidationManagerTest, C2_ConfigChangeInvalidatesOldEntries) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Register cache entry created with ngram_size=2 (bigrams)
+  auto key1 = CacheKeyGenerator::Generate("query_bigram");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  // Bigrams for "hello": "he", "el", "ll", "lo"
+  meta1.ngrams = {"el", "he", "ll", "lo"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Now config changes to ngram_size=3. Invalidation is called with new settings.
+  // INSERT "hello world" - trigrams would be: "hel", "ell", "llo", "wor", "orl", "rld"
+  // With bigrams (old settings): "he", "el", "ll", "lo", "wo", "or", "rl", "ld"
+  // The reverse index has bigrams, so trigram-based lookup would miss them.
+  // With the fix, historical settings (ngram_size=2) are also checked.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello world", 3, 1, true);
+
+  // key1 should be invalidated because historical bigram generation finds "he", "el", etc.
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
+      << "C2: Entry created with old ngram_size should be invalidated after config change";
+}
+
+/**
+ * @brief Test invalidation with multiple historical ngram settings
+ *
+ * Entries created with different ngram settings should all be properly
+ * invalidated when the config has changed.
+ */
+TEST(InvalidationManagerTest, C2_MultipleHistoricalSettings) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry 1: created with ngram_size=2
+  auto key1 = CacheKeyGenerator::Generate("query_bigram");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"el", "he", "ll", "lo"};  // bigrams for "hello"
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Entry 2: created with ngram_size=3 (maybe after a first config change)
+  auto key2 = CacheKeyGenerator::Generate("query_trigram");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"ell", "hel", "llo"};  // trigrams for "hello"
+  meta2.ngram_size = 3;
+  meta2.kanji_ngram_size = 1;
+  meta2.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Now config changes to ngram_size=4. Invalidation with new settings.
+  // 4-grams for "hello": "hell", "ello"
+  // Neither matches bigrams nor trigrams directly. But with historical settings,
+  // bigrams and trigrams are also generated and matched.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
+
+  EXPECT_EQ(2, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
+      << "C2: Bigram entry should be invalidated";
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
+      << "C2: Trigram entry should be invalidated";
+}
+
+/**
+ * @brief Test that entries with current settings still work normally
+ *
+ * When all entries use the same ngram settings as the current config,
+ * invalidation should work exactly as before (no regression).
+ */
+TEST(InvalidationManagerTest, C2_CurrentSettingsNoRegression) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry with ngram_size=3 matching current config
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"gol", "ola", "lan", "ang"};
+  meta1.ngram_size = 3;
+  meta1.kanji_ngram_size = 2;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidation with same settings
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tips", 3, 2, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+/**
+ * @brief Test that entries with zero ngram_size (legacy) are handled gracefully
+ *
+ * Entries created before this fix will have ngram_size=0. They should not
+ * trigger historical settings lookup (treated as "unknown/current").
+ */
+TEST(InvalidationManagerTest, C2_LegacyZeroNgramSizeHandled) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Legacy entry with ngram_size=0 (not set)
+  auto key1 = CacheKeyGenerator::Generate("query_legacy");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};
+  // ngram_size defaults to 0 (legacy behavior)
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Invalidation with current settings should work via direct ngram match
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+}
+
+// =============================================================================
+// Bug 3: Filter-only changes don't invalidate cache
+// =============================================================================
+
+/**
+ * @brief Test that filter change invalidates entries with filters when text is unchanged
+ *
+ * When only filter columns change (text unchanged), cache entries with filter
+ * conditions should be invalidated because their results may differ.
+ */
+TEST(InvalidationManagerTest, FilterChangeInvalidatesFilteredEntries) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry with filters (simulated by setting has_filters via CacheMetadata)
+  auto key1 = CacheKeyGenerator::Generate("query_with_filter");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};
+  meta1.filters = {{"status", query::FilterOp::EQ, "1"}};  // Has filters
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Entry without filters
+  auto key2 = CacheKeyGenerator::Generate("query_no_filter");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"hel", "ell", "llo"};
+  // No filters
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Filter-only change: same text, filter_columns_changed=true
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2, true, true);
+
+  // Only the entry with filters should be invalidated
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
+      << "Bug 3: Entry with filters should be invalidated on filter-only change";
+  EXPECT_FALSE(invalidated.find(key2) != invalidated.end())
+      << "Bug 3: Entry without filters should NOT be invalidated on filter-only change";
+}
+
+/**
+ * @brief Test that filter change does not invalidate entries without filters
+ */
+TEST(InvalidationManagerTest, FilterChangeDoesNotInvalidateUnfilteredEntries) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Only entries without filters
+  auto key1 = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  auto key2 = CacheKeyGenerator::Generate("query2");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"wor", "orl", "rld"};
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Filter-only change with identical text
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2, true, true);
+
+  // No entries should be invalidated (none have filters)
+  EXPECT_EQ(0, invalidated.size())
+      << "Bug 3: Entries without filters should not be invalidated on filter-only change";
+}
+
+/**
+ * @brief Test that text change with filter change uses normal ngram invalidation
+ *
+ * When both text and filters change, normal ngram-based invalidation handles
+ * the text part, and filter_columns_changed is additive (only matters when
+ * changed_ngrams is empty).
+ */
+TEST(InvalidationManagerTest, TextChangeWithFilterChangeUsesNormalInvalidation) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry for "hello"
+  auto key1 = CacheKeyGenerator::Generate("query_hello");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"hel", "ell", "llo"};
+  meta1.filters = {{"status", query::FilterOp::EQ, "1"}};
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Entry for "world" without filters
+  auto key2 = CacheKeyGenerator::Generate("query_world");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"wor", "orl", "rld"};
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Text changes from "hello" to "world" AND filters changed
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "world", 3, 2, true, true);
+
+  // Both should be invalidated via normal ngram-based invalidation
+  EXPECT_EQ(2, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end());
+}
+
+// =============================================================================
+// P1-2: table_ngram_settings_ auxiliary index consistency
+// =============================================================================
+
+/**
+ * @brief Test that historical settings lookup is consistent after register/unregister cycles
+ *
+ * Regression test for P1-2 optimization: After switching from O(N) scan to
+ * O(1) refcounted lookup via table_ngram_settings_, verify that config change
+ * invalidation still works after entries are unregistered.
+ */
+TEST(InvalidationManagerTest, P1_2_HistoricalSettingsAfterUnregister) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Register two entries with ngram_size=2 (old config)
+  auto key1 = CacheKeyGenerator::Generate("q_bigram1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"he", "el", "ll", "lo"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  auto key2 = CacheKeyGenerator::Generate("q_bigram2");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"wo", "or", "rl", "ld"};
+  meta2.ngram_size = 2;
+  meta2.kanji_ngram_size = 1;
+  meta2.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Unregister one entry - should decrement refcount but keep settings tracked
+  mgr.UnregisterCacheEntry(key1);
+
+  // Invalidation with new config (ngram_size=3) should still find key2
+  // because historical settings (ngram_size=2) are still tracked
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "world", 3, 1, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
+      << "P1-2: Historical settings should survive partial unregister";
+}
+
+/**
+ * @brief Test that historical settings are removed when all entries with those settings are gone
+ */
+TEST(InvalidationManagerTest, P1_2_HistoricalSettingsFullyRemoved) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Register one entry with ngram_size=2
+  auto key1 = CacheKeyGenerator::Generate("q_bigram");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"he", "el"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  // Register one entry with current ngram_size=3
+  auto key2 = CacheKeyGenerator::Generate("q_trigram");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"hel", "ell"};
+  meta2.ngram_size = 3;
+  meta2.kanji_ngram_size = 1;
+  meta2.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Unregister the bigram entry
+  mgr.UnregisterCacheEntry(key1);
+
+  // Now only trigram entries exist. Invalidation with ngram_size=3 should
+  // NOT generate historical bigrams (no entries with old settings remain).
+  // This verifies the refcount properly drops to 0 and the setting is removed.
+  // key2 should still be found via direct trigram match.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 1, true);
+
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end());
+}
+
+/**
+ * @brief Test table_ngram_settings_ consistency through re-registration
+ *
+ * When a cache entry is re-registered with different ngram settings,
+ * the old settings refcount should be decremented and new settings incremented.
+ */
+TEST(InvalidationManagerTest, P1_2_ReRegisterWithDifferentSettings) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto key = CacheKeyGenerator::Generate("query1");
+
+  // Register with ngram_size=2
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"he", "el"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  meta1.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key, meta1);
+
+  // Re-register same key with ngram_size=3
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"hel", "ell"};
+  meta2.ngram_size = 3;
+  meta2.kanji_ngram_size = 1;
+  meta2.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key, meta2);
+
+  // Invalidation with ngram_size=4 should NOT look up historical ngram_size=2
+  // (it was replaced by ngram_size=3). Only ngram_size=3 should be historical.
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
+
+  // key should be found via historical trigram generation
+  EXPECT_EQ(1, invalidated.size());
+  EXPECT_TRUE(invalidated.find(key) != invalidated.end());
+}
+
+/**
+ * @brief Test table_ngram_settings_ consistency through ClearTable
+ */
+TEST(InvalidationManagerTest, P1_2_ClearTableCleansSettings) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Register entries with different settings for "posts"
+  auto key1 = CacheKeyGenerator::Generate("q1");
+  CacheMetadata meta1;
+  meta1.table = "posts";
+  meta1.ngrams = {"he", "el"};
+  meta1.ngram_size = 2;
+  meta1.kanji_ngram_size = 1;
+  mgr.RegisterCacheEntry(key1, meta1);
+
+  auto key2 = CacheKeyGenerator::Generate("q2");
+  CacheMetadata meta2;
+  meta2.table = "posts";
+  meta2.ngrams = {"hel", "ell"};
+  meta2.ngram_size = 3;
+  meta2.kanji_ngram_size = 1;
+  mgr.RegisterCacheEntry(key2, meta2);
+
+  // Register entry for different table
+  auto key3 = CacheKeyGenerator::Generate("q3");
+  CacheMetadata meta3;
+  meta3.table = "comments";
+  meta3.ngrams = {"abc"};
+  meta3.ngram_size = 2;
+  meta3.kanji_ngram_size = 1;
+  mgr.RegisterCacheEntry(key3, meta3);
+
+  // Clear only "posts" table
+  mgr.ClearTable("posts");
+
+  EXPECT_EQ(1, mgr.GetTrackedEntryCount());  // Only comments entry remains
+
+  // Invalidation on posts should find nothing (no historical settings)
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 1, true);
+  EXPECT_EQ(0, invalidated.size());
+
+  // Comments entry should still work
+  auto invalidated2 = mgr.InvalidateAffectedEntries("comments", "", "abc", 3, 1, true);
+  EXPECT_EQ(1, invalidated2.size());
 }
 
 }  // namespace mygramdb::cache

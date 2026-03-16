@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
+.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
 
 # Build directory
 BUILD_DIR := build
@@ -46,6 +46,18 @@ help:
 	@echo "  TEST_JOBS=N        - Number of parallel test jobs (default: 4, use 1 for sequential)"
 	@echo "  TEST_VERBOSE=1     - Enable verbose test output"
 	@echo "  TEST_DEBUG=1       - Enable debug test output"
+	@echo ""
+	@echo "E2E integration tests (MySQL in Docker, MygramDB native):"
+	@echo "  make e2e-test         - Run full E2E test suite"
+	@echo "  make e2e-test-smoke   - Run only smoke tests"
+	@echo "  make e2e-test-load    - Run only load tests"
+	@echo "  make e2e-test-cleanup - Clean up E2E test environment"
+	@echo "  make e2e-lint         - Lint E2E Python code"
+	@echo "  make e2e-format       - Format E2E Python code"
+	@echo "  make e2e-fix          - Fix E2E Python code"
+	@echo "  make e2e-benchmark            - Quick MygramDB vs MySQL comparison"
+	@echo "  make e2e-benchmark-full       - Full benchmark suite with JSON output"
+	@echo "  make e2e-benchmark-saturation - Saturation test (find QPS ceiling)"
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  make docker-build - Build Docker image"
@@ -199,6 +211,63 @@ run: build
 quick-test: build
 	@echo "Running quick test..."
 	cd $(BUILD_DIR) && ctest --output-on-failure --parallel $$(nproc) -R "StringUtils|Config"
+
+# ============================================================================
+# E2E Integration Tests
+# ============================================================================
+
+.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
+
+# Run full e2e test suite (requires Docker)
+e2e-test:
+	@echo "Running E2E test suite..."
+	@bash e2e/run-all.sh
+
+# Run only smoke tests
+e2e-test-smoke:
+	@echo "Running E2E smoke tests..."
+	@bash e2e/run-all.sh -m smoke
+
+# Run only load tests
+e2e-test-load:
+	@echo "Running E2E load tests..."
+	@bash e2e/run-all.sh -m load
+
+# Clean up e2e test environment
+e2e-test-cleanup:
+	@echo "Cleaning up E2E test environment..."
+	docker compose -f e2e/docker/docker-compose.yml down -v 2>/dev/null || true
+	@echo "E2E cleanup complete!"
+
+# Lint e2e Python code
+e2e-lint:
+	@echo "Linting E2E Python code..."
+	cd e2e && ruff check . && mypy .
+
+# Format e2e Python code
+e2e-format:
+	@echo "Formatting E2E Python code..."
+	cd e2e && ruff format .
+
+# Fix e2e Python code
+e2e-fix:
+	@echo "Fixing E2E Python code..."
+	cd e2e && ruff check --fix . && ruff format .
+
+# Benchmark suite: quick comparison (1, 4, 16 concurrency x 5s)
+e2e-benchmark:
+	@echo "Running benchmark suite (quick mode)..."
+	cd e2e && python benchmark_suite.py --mode quick --compare
+
+# Benchmark suite: full comparison (7 levels x 15s)
+e2e-benchmark-full:
+	@echo "Running full benchmark suite..."
+	cd e2e && python benchmark_suite.py --mode standard --compare --json-output results/benchmark.json
+
+# Benchmark suite: saturation test
+e2e-benchmark-saturation:
+	@echo "Running saturation benchmark..."
+	cd e2e && python benchmark_suite.py --mode saturation --target mygramdb
 
 # Docker targets
 docker-build:

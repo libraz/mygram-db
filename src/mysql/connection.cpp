@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -170,6 +171,13 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     }
 
     mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "ssl_enabled").Debug();
+  } else {
+    // Explicitly disable SSL negotiation for non-SSL connections.
+    // Without this, mysql_real_connect() uses SSL_MODE_PREFERRED by default,
+    // which attempts SSL handshake and can crash in csm_establish_ssl
+    // during concurrent connection establishment.
+    unsigned int ssl_mode = SSL_MODE_DISABLED;
+    mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode);
   }
 
   // Connect to MySQL
@@ -293,11 +301,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool s
         .Info();
   }
 
-  // Close existing connection if any
-  if (mysql_ != nullptr) {
-    mysql_close(mysql_);
-    mysql_ = nullptr;
-  }
+  // Close existing connection (mysql_ is guaranteed non-null here by the check above)
+  mysql_close(mysql_);
+  mysql_ = nullptr;
 
   // Reinitialize
   mysql_ = mysql_init(nullptr);
@@ -391,6 +397,8 @@ std::optional<std::string> Connection::GetExecutedGTID() {
   }
 
   std::string gtid(row[0]);
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\n'), gtid.end());
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\r'), gtid.end());
   // result is automatically freed by MySQLResult destructor
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_executed_gtid").Field("gtid", gtid).Debug();
@@ -409,6 +417,8 @@ std::optional<std::string> Connection::GetPurgedGTID() {
   }
 
   std::string gtid(row[0]);
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\n'), gtid.end());
+  gtid.erase(std::remove(gtid.begin(), gtid.end(), '\r'), gtid.end());
   // result is automatically freed by MySQLResult destructor
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_purged_gtid").Field("gtid", gtid).Debug();

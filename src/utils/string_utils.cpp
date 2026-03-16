@@ -355,7 +355,8 @@ bool IsCJKIdeograph(uint32_t codepoint) {
 
 }  // namespace
 
-std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size, int kanji_ngram_size) {
+std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size, int kanji_ngram_size,
+                                              bool cross_boundary_ngrams) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level processing
@@ -370,49 +371,34 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
   for (size_t i = 0; i < codepoints.size(); ++i) {
     uint32_t codepoint = codepoints[i];
 
-    if (IsCJKIdeograph(codepoint)) {
-      // CJK character: use kanji_ngram_size
-      if (i + kanji_ngram_size <= codepoints.size()) {
-        // Check if all next kanji_ngram_size characters are also CJK
-        bool all_cjk = true;
-        for (int j = 0; j < kanji_ngram_size; ++j) {
-          if (!IsCJKIdeograph(codepoints[i + j])) {
-            all_cjk = false;
-            break;
-          }
-        }
+    // Determine n-gram size based on the starting character type
+    bool start_is_cjk = IsCJKIdeograph(codepoint);
+    int ngram_size = start_is_cjk ? kanji_ngram_size : ascii_ngram_size;
 
-        if (all_cjk) {
-          std::vector<uint32_t> ngram_codepoints;
-          ngram_codepoints.reserve(kanji_ngram_size);
-          for (int j = 0; j < kanji_ngram_size; ++j) {
-            ngram_codepoints.push_back(codepoints[i + j]);
-          }
-          ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
+    if (i + ngram_size > codepoints.size()) {
+      continue;
+    }
+
+    if (!cross_boundary_ngrams) {
+      // Legacy behavior: reject N-grams that span CJK/non-CJK boundaries
+      bool boundary_crossed = false;
+      for (int j = 1; j < ngram_size; ++j) {
+        if (IsCJKIdeograph(codepoints[i + j]) != start_is_cjk) {
+          boundary_crossed = true;
+          break;
         }
       }
-    } else {
-      // Non-CJK character: use ascii_ngram_size
-      if (i + ascii_ngram_size <= codepoints.size()) {
-        // Check if all next ascii_ngram_size characters are also non-CJK
-        bool all_non_cjk = true;
-        for (int j = 0; j < ascii_ngram_size; ++j) {
-          if (IsCJKIdeograph(codepoints[i + j])) {
-            all_non_cjk = false;
-            break;
-          }
-        }
-
-        if (all_non_cjk) {
-          std::vector<uint32_t> ngram_codepoints;
-          ngram_codepoints.reserve(ascii_ngram_size);
-          for (int j = 0; j < ascii_ngram_size; ++j) {
-            ngram_codepoints.push_back(codepoints[i + j]);
-          }
-          ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
-        }
+      if (boundary_crossed) {
+        continue;
       }
     }
+
+    std::vector<uint32_t> ngram_codepoints;
+    ngram_codepoints.reserve(ngram_size);
+    for (int j = 0; j < ngram_size; ++j) {
+      ngram_codepoints.push_back(codepoints[i + j]);
+    }
+    ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
   }
 
   return ngrams;

@@ -108,11 +108,25 @@ target_link_libraries(posting_list_test
   GTest::gtest_main
 )
 
-# Note: ContainsPerformanceBenchmark can fail under parallel execution due to resource contention
+# Discover non-performance tests normally
 gtest_discover_tests(posting_list_test
+  TEST_PREFIX "PostingList."
+  TEST_FILTER "-*Performance*"
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
+    RESOURCE_LOCK posting_list_lock
+)
+
+# Performance tests: labeled SLOW so they are excluded from coverage builds
+# (coverage instrumentation makes performance assertions unreliable)
+gtest_discover_tests(posting_list_test
+  TEST_PREFIX "PostingListPerf."
+  TEST_FILTER "*Performance*"
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
     RESOURCE_LOCK posting_list_lock
 )
 
@@ -170,17 +184,32 @@ else()
   )
 endif()
 
-# Index bug fix tests (TDD)
-add_executable(index_bug_fixes_test
-  index_bug_fixes_test.cpp
+# Empty document return value tests
+add_executable(index_empty_doc_test
+  index_empty_doc_test.cpp
 )
 
-target_link_libraries(index_bug_fixes_test
+target_link_libraries(index_empty_doc_test
   mygramdb_index
   GTest::gtest_main
 )
 
-gtest_discover_tests(index_bug_fixes_test
+gtest_discover_tests(index_empty_doc_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# Empty document and SearchOr correctness tests
+add_executable(index_empty_doc_and_search_test
+  index_empty_doc_and_search_test.cpp
+)
+
+target_link_libraries(index_empty_doc_and_search_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(index_empty_doc_and_search_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )

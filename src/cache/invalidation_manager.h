@@ -5,12 +5,14 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
-#include <set>
 #include <shared_mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "cache/cache_entry.h"
 #include "query/cache_key.h"
@@ -29,6 +31,21 @@ class QueryCache;
  * This enables precise invalidation: only queries that actually use changed
  * ngrams are invalidated, unlike MySQL's coarse table-level invalidation.
  */
+/**
+ * @brief Minimal metadata stored by InvalidationManager for invalidation tracking
+ *
+ * Only stores fields needed for reverse index management, avoiding full
+ * CacheMetadata duplication.
+ */
+struct InvalidationMetadata {
+  std::string table;                  ///< Table name
+  std::vector<std::string> ngrams;    ///< Ngrams (sorted) for reverse index cleanup
+  int ngram_size = 0;                 ///< N-gram size used when entry was created
+  int kanji_ngram_size = 0;           ///< Kanji N-gram size used when entry was created
+  bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used when entry was created
+  bool has_filters = false;           ///< Whether the cached query used filter conditions
+};
+
 class InvalidationManager {
  public:
   /**
@@ -71,7 +88,8 @@ class InvalidationManager {
    */
   std::unordered_set<CacheKey> InvalidateAffectedEntries(const std::string& table_name, const std::string& old_text,
                                                          const std::string& new_text, int ngram_size,
-                                                         int kanji_ngram_size);
+                                                         int kanji_ngram_size, bool cross_boundary_ngrams = true,
+                                                         bool filter_columns_changed = false);
 
   /**
    * @brief Unregister cache entry from invalidation tracking
@@ -104,6 +122,12 @@ class InvalidationManager {
    */
   [[nodiscard]] size_t GetTrackedNgramCount(const std::string& table_name) const;
 
+  /**
+   * @brief Estimate memory usage of invalidation tracking structures
+   * @return Estimated memory usage in bytes
+   */
+  [[nodiscard]] size_t MemoryUsage() const;
+
  private:
   QueryCache* cache_;  ///< Pointer to query cache
 
@@ -114,8 +138,12 @@ class InvalidationManager {
                      >
       ngram_to_cache_keys_;
 
-  // Map: cache key -> metadata
-  std::unordered_map<CacheKey, CacheMetadata> cache_metadata_;
+  // Map: cache key -> minimal invalidation metadata (table + ngrams only)
+  std::unordered_map<CacheKey, InvalidationMetadata> cache_metadata_;
+
+  // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
+  // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
+  std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;
 
   // Thread safety
   mutable std::shared_mutex mutex_;
@@ -134,12 +162,9 @@ class InvalidationManager {
    * @param kanji_ngram_size N-gram size (for CJK characters)
    * @return Set of ngrams
    */
-  static std::set<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size);
+  static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size,
+                                                  bool cross_boundary_ngrams = true);
 
-  /**
-   * @brief Check if character is CJK (Chinese, Japanese, Korean)
-   */
-  static bool IsCJK(uint32_t codepoint);
 };
 
 }  // namespace mygramdb::cache

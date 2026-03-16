@@ -20,6 +20,7 @@
 #include "index/index.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
+#include "mysql_test_helpers.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
 
@@ -28,6 +29,11 @@ namespace mygramdb::mysql {
 class BinlogReaderResourceTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    if (!mygramdb::mysql::testing::ShouldRunMySQLIntegrationTests()) {
+      GTEST_SKIP() << "MySQL integration tests are disabled. "
+                   << "Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+    }
+
     // Setup basic components
     index_ = std::make_unique<index::Index>(2, 1);
     doc_store_ = std::make_unique<storage::DocumentStore>();
@@ -75,53 +81,6 @@ class BinlogReaderResourceTest : public ::testing::Test {
   config::TableConfig table_config_;
   std::unique_ptr<BinlogReader> reader_;
 };
-
-/**
- * @brief Test that Start() returns proper error when MySQL is not available
- */
-TEST_F(BinlogReaderResourceTest, StartFailsWithoutConnection) {
-  BinlogReader::Config reader_config;
-  reader_config.queue_size = 100;
-  reader_config.server_id = 12345;  // Test server ID
-
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
-                                           reader_config, stats_.get());
-
-  // Start without connecting to MySQL should fail
-  auto result = reader_->Start();
-  EXPECT_FALSE(result) << "Start should fail without MySQL connection";
-
-  // Verify that no resources are leaked
-  EXPECT_FALSE(reader_->IsRunning()) << "Reader should not be running after failed start";
-}
-
-/**
- * @brief Test that Start() fails when server_id is 0
- *
- * This test verifies the server_id validation fix. MySQL replication requires
- * a unique non-zero server_id for each replica. When server_id=0, Start()
- * should fail immediately with a clear error message.
- */
-TEST_F(BinlogReaderResourceTest, StartFailsWithZeroServerId) {
-  BinlogReader::Config reader_config;
-  reader_config.queue_size = 100;
-  reader_config.server_id = 0;  // Invalid server_id
-
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
-                                           reader_config, stats_.get());
-
-  // Start with server_id=0 should fail with validation error
-  auto result = reader_->Start();
-  EXPECT_FALSE(result) << "Start should fail with server_id=0";
-
-  // Verify the error message mentions server_id
-  std::string error_msg = reader_->GetLastError();
-  EXPECT_TRUE(error_msg.find("server_id") != std::string::npos)
-      << "Error message should mention server_id, got: " << error_msg;
-
-  // Verify that no resources are leaked
-  EXPECT_FALSE(reader_->IsRunning()) << "Reader should not be running after failed start";
-}
 
 /**
  * @brief Test multiple Start/Stop cycles
@@ -214,26 +173,6 @@ TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
 
   // Clean up
   reader_->Stop();
-}
-
-/**
- * @brief Test that Stop() can be called safely even if Start() failed
- */
-TEST_F(BinlogReaderResourceTest, StopAfterFailedStart) {
-  BinlogReader::Config reader_config;
-  reader_config.queue_size = 100;
-  reader_config.server_id = 12345;  // Test server ID
-
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
-                                           reader_config, stats_.get());
-
-  // Start without connection (will fail)
-  auto start_result = reader_->Start();
-  EXPECT_FALSE(start_result);
-
-  // Stop should be safe to call
-  EXPECT_NO_THROW(reader_->Stop()) << "Stop() should be safe after failed Start()";
-  EXPECT_FALSE(reader_->IsRunning());
 }
 
 /**

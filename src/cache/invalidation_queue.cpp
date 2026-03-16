@@ -5,6 +5,8 @@
 
 #include "cache/invalidation_queue.h"
 
+#include <spdlog/spdlog.h>
+
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "server/server_types.h"
@@ -20,49 +22,80 @@ InvalidationQueue::~InvalidationQueue() {
 }
 
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text,
-                                const std::string& new_text) {
+                                const std::string& new_text, bool filter_columns_changed) {
   // Get ngram settings for this specific table
   int ngram_size = 3;        // Default
   int kanji_ngram_size = 2;  // Default
+  bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
     ngram_size = table_iter->second->config.ngram_size;
     kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    cross_boundary_ngrams = table_iter->second->config.cross_boundary_ngrams;
   }
 
   // Phase 1: Immediate invalidation (mark entries)
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
-    affected_keys =
-        invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size, kanji_ngram_size);
+    affected_keys = invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size,
+                                                                  kanji_ngram_size, cross_boundary_ngrams,
+                                                                  filter_columns_changed);
   }
 
   // Phase 2: Queue for deferred deletion or process immediately
+  // Reject enqueues after Stop() to prevent use-after-free
+  if (stopped_.load()) {
+    spdlog::warn(
+        "InvalidationQueue: Enqueue called after Stop(), "
+        "skipping deferred deletion for {} entries",
+        affected_keys.size());
+    return;
+  }
+
   // Check running_ inside lock to prevent TOCTOU race condition
+  bool process_immediately = false;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
     if (!running_.load()) {
-      // If worker not running, process immediately (while holding lock)
-      // This ensures UnregisterCacheEntry is always called
-      for (const auto& key : affected_keys) {
-        // Unregister metadata first to prevent memory leak even if Erase throws
-        invalidation_mgr_->UnregisterCacheEntry(key);
-
-        if (cache_ != nullptr) {
-          cache_->Erase(key);
+      // Worker not running (not yet started), process after releasing lock to avoid
+      // nested lock acquisition (queue_mutex_ -> InvalidationManager::mutex_ -> QueryCache::mutex_)
+      process_immediately = true;
+    } else {
+      // Worker is running, add to queue with backpressure check
+      if (pending_cache_keys_.size() >= max_queue_size_) {
+        // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
+        // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
+        spdlog::warn(
+            "InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
+            pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+      } else {
+        // Always update timestamp even if key exists to ensure proper batch processing
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& key : affected_keys) {
+          const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
+          pending_cache_keys_[composite_key] = now;
+        }
+        if (now < oldest_timestamp_) {
+          oldest_timestamp_ = now;
         }
       }
-      return;
     }
+  }
 
-    // Worker is running, add to queue
-    // Add affected keys to pending set
-    // Always update timestamp even if key exists to ensure proper batch processing
+  if (process_immediately) {
+    // Process outside lock to prevent deadlock from nested lock acquisition
     for (const auto& key : affected_keys) {
-      const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-      pending_ngrams_[composite_key] = std::chrono::steady_clock::now();
+      // Unregister metadata first to prevent memory leak even if Erase fails
+      if (invalidation_mgr_ != nullptr) {
+        invalidation_mgr_->UnregisterCacheEntry(key);
+      }
+
+      if (cache_ != nullptr) {
+        cache_->Erase(key);
+      }
     }
+    return;
   }
 
   // Wake up worker (running_ already verified inside lock)
@@ -80,6 +113,8 @@ void InvalidationQueue::Start() {
 }
 
 void InvalidationQueue::Stop() {
+  stopped_.store(true);
+
   // Atomically check and clear running_ to prevent concurrent Stop() calls
   bool expected = true;
   if (!running_.compare_exchange_strong(expected, false)) {
@@ -98,7 +133,7 @@ void InvalidationQueue::Stop() {
 
 size_t InvalidationQueue::GetPendingCount() const {
   std::lock_guard<std::mutex> lock(queue_mutex_);
-  return pending_ngrams_.size();
+  return pending_cache_keys_.size();
 }
 
 void InvalidationQueue::WorkerLoop() {
@@ -106,19 +141,11 @@ void InvalidationQueue::WorkerLoop() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
 
     // Wait for trigger: batch size reached or max delay elapsed
-    if (!pending_ngrams_.empty()) {
-      // Find oldest entry
-      auto oldest_timestamp = std::chrono::steady_clock::time_point::max();
-      for (const auto& [key, timestamp] : pending_ngrams_) {
-        if (timestamp < oldest_timestamp) {
-          oldest_timestamp = timestamp;
-        }
-      }
-
+    if (!pending_cache_keys_.empty()) {
       const auto now = std::chrono::steady_clock::now();
-      const auto time_since_oldest = now - oldest_timestamp;
+      const auto time_since_oldest = now - oldest_timestamp_;
 
-      if (pending_ngrams_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
+      if (pending_cache_keys_.size() >= batch_size_ || time_since_oldest >= max_delay_) {
         // Check running_ before processing to handle spurious wakeup and shutdown
         if (!running_.load()) {
           break;
@@ -131,7 +158,7 @@ void InvalidationQueue::WorkerLoop() {
         // Wait for signal or timeout
         const auto remaining_delay = max_delay_ - time_since_oldest;
         queue_cv_.wait_for(lock, remaining_delay,
-                           [this] { return !running_.load() || pending_ngrams_.size() >= batch_size_; });
+                           [this] { return !running_.load() || pending_cache_keys_.size() >= batch_size_; });
 
         // After wakeup, check running_ before continuing
         if (!running_.load()) {
@@ -140,7 +167,7 @@ void InvalidationQueue::WorkerLoop() {
       }
     } else {
       // Queue is empty: wait indefinitely for new items
-      queue_cv_.wait(lock, [this] { return !running_.load() || !pending_ngrams_.empty(); });
+      queue_cv_.wait(lock, [this] { return !running_.load() || !pending_cache_keys_.empty(); });
 
       // After wakeup, check running_ before continuing
       if (!running_.load()) {
@@ -155,13 +182,15 @@ void InvalidationQueue::ProcessBatch() {
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (pending_ngrams_.empty()) {
+    if (pending_cache_keys_.empty()) {
       return;
     }
 
     // Move pending items to batch
-    batch = std::move(pending_ngrams_);
-    pending_ngrams_.clear();
+    // std::move leaves pending_cache_keys_ in a valid but empty state for
+    // std::unordered_map, so explicit clear() is unnecessary
+    batch = std::move(pending_cache_keys_);
+    oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
   // Process batch: erase invalidated entries from cache

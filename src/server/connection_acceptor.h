@@ -97,6 +97,12 @@ class ConnectionAcceptor {
    */
   bool IsRunning() const { return running_; }
 
+  /**
+   * @brief Check if this acceptor uses Unix domain socket
+   * @return true if unix socket mode
+   */
+  bool IsUnixSocket() const { return !unix_socket_path_.empty(); }
+
  private:
   /**
    * @brief Accept loop (runs in separate thread)
@@ -128,6 +134,7 @@ class ConnectionAcceptor {
 
   std::set<int> active_fds_;
   std::mutex fds_mutex_;
+  std::string unix_socket_path_;  // Non-empty when UDS mode, used for unlink on Stop
 };
 
 }  // namespace mygramdb::server

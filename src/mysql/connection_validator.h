@@ -21,9 +21,10 @@ class Connection;
  */
 struct ValidationResult {
   bool valid = false;
+  bool failover_detected = false;  ///< True when server UUID changed
   std::string error_message;
   std::vector<std::string> warnings;
-  std::optional<std::string> server_uuid;  // Detected server UUID
+  std::optional<std::string> server_uuid;  ///< Detected server UUID
 
   /**
    * @brief Check if validation passed
@@ -49,7 +50,8 @@ class ConnectionValidator {
    * @return ValidationResult with validation status and details
    */
   static ValidationResult ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
-                                         const std::optional<std::string>& expected_uuid = std::nullopt);
+                                         const std::optional<std::string>& expected_uuid = std::nullopt,
+                                         const std::optional<std::string>& last_gtid = std::nullopt);
 
  private:
   /**
@@ -76,6 +78,47 @@ class ConnectionValidator {
    * This helps detect scenarios where a server has diverged or been reset.
    */
   static bool CheckGTIDConsistency(Connection& conn, const std::optional<std::string>& last_gtid, std::string& error);
+
+  /**
+   * @brief Check if binlog transaction compression is enabled
+   *
+   * TRANSACTION_PAYLOAD_EVENT (type 40) from binlog_transaction_compression=ON
+   * is not supported. Reject connections with compression enabled.
+   */
+  static bool CheckBinlogCompression(Connection& conn, std::string& error);
+
+  /**
+   * @brief Check if binlog_row_image is set to FULL
+   *
+   * MygramDB requires binlog_row_image=FULL because the NULL bitmap and column
+   * data parsing assumes all columns are present. With MINIMAL or NOBLOB, the
+   * bitmap size and indexing are different, causing silent data corruption.
+   */
+  static bool CheckBinlogRowImage(Connection& conn, std::string& error);
+
+  /**
+   * @brief Check if binlog_format is set to ROW
+   *
+   * MygramDB requires binlog_format=ROW because it relies on row-level events
+   * for data replication. STATEMENT or MIXED formats are not supported.
+   */
+  static bool CheckBinlogFormat(Connection& conn, std::string& error);
+
+  /**
+   * @brief Check if partial JSON update mode is enabled
+   *
+   * binlog_row_value_options=PARTIAL_JSON causes PARTIAL_UPDATE_ROWS_EVENT
+   * which is not yet supported. Issue a warning.
+   */
+  static bool CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings);
+
+  /**
+   * @brief Check for tagged GTID usage
+   *
+   * MySQL 8.4+ supports tagged GTIDs (UUID:TAG:GNO).
+   * Detect usage and warn about experimental support.
+   */
+  static bool CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings);
 };
 
 }  // namespace mygramdb::mysql

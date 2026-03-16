@@ -263,6 +263,11 @@
             "minimum": 0,
             "maximum": 10
           },
+          "cross_boundary_ngrams": {
+            "type": "boolean",
+            "description": "Generate N-grams that span CJK/non-CJK character boundaries. When enabled, mixed-boundary N-grams like '字A' are generated at boundaries.",
+            "default": true
+          },
           "posting": {
             "type": "object",
             "description": "Posting list configuration",

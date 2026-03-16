@@ -24,7 +24,7 @@ namespace mygramdb::cache {
  * 3. Search text: Keep as-is (case-sensitive)
  * 4. Clause order: Canonicalize to fixed order
  * 5. Filter order: Sort alphabetically by column name
- * 6. Default values: Include explicit defaults (SORT id DESC)
+ * 6. Default values: Include explicit defaults (SORT __pk__ DESC)
  *
  * Note: LIMIT and OFFSET are intentionally excluded from the normalized form.
  * The cache stores full results (before pagination), and LIMIT/OFFSET are
@@ -36,9 +36,10 @@ class QueryNormalizer {
   /**
    * @brief Normalize query for cache key generation
    * @param query Parsed query object
+   * @param primary_key_column Name of the primary key column for the table
    * @return Normalized query string
    */
-  static std::string Normalize(const query::Query& query);
+  static std::string Normalize(const query::Query& query, const std::string& primary_key_column = "id");
 
  private:
   /**
@@ -65,7 +66,8 @@ class QueryNormalizer {
   /**
    * @brief Normalize SORT clause
    */
-  static std::string NormalizeSortClause(const std::optional<query::OrderByClause>& sort, const std::string& table);
+  static std::string NormalizeSortClause(const std::optional<query::OrderByClause>& sort, const std::string& table,
+                                          const std::string& primary_key_column);
 
   /**
    * @brief Convert filter operator to string

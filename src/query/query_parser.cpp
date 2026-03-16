@@ -58,6 +58,18 @@ std::string ToUpper(std::string_view str) {
 }
 
 /**
+ * @brief Convert string to lowercase
+ *
+ * Used to normalize column names (MySQL column names are case-insensitive).
+ */
+std::string ToLower(std::string_view str) {
+  std::string result(str);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) { return std::tolower(character); });
+  return result;
+}
+
+/**
  * @brief Case-insensitive string comparison (optimized, no allocations)
  * @param lhs First string
  * @param rhs Second string
@@ -1063,7 +1075,7 @@ bool QueryParser::ParseFilterArguments(const std::vector<std::string>& tokens, s
       return false;
     }
 
-    filter.column = column_part;
+    filter.column = ToLower(column_part);
     filter.op = filter_op.value();
 
     if (!value_part.empty()) {
@@ -1093,7 +1105,7 @@ bool QueryParser::ParseFilterArguments(const std::vector<std::string>& tokens, s
     return false;
   }
 
-  filter.column = tokens[pos++];
+  filter.column = ToLower(tokens[pos++]);
 
   auto filter_op = ParseFilterOp(tokens[pos++]);
   if (!filter_op.has_value()) {
@@ -1214,7 +1226,8 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   }
 
   // Normal case: SORT <column> [ASC|DESC]
-  order_by.column = tokens[pos++];
+  // Lowercase for case-insensitive matching (MySQL column names are case-insensitive)
+  order_by.column = ToLower(tokens[pos++]);
 
   // Check for comma in column name (multi-column sort attempt)
   if (order_by.column.find(',') != std::string::npos) {
@@ -1315,12 +1328,60 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
         continue;
       }
 
-      // Outside quotes, split on whitespace
-      if (std::isspace(character) != 0) {
+      // Outside quotes, split on whitespace (ASCII and Unicode spaces)
+      // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      bool is_whitespace = (std::isspace(character) != 0);
+      auto ubyte = static_cast<unsigned char>(character);
+      size_t extra_bytes = 0;
+      if (!is_whitespace && i + 1 < str.length()) {
+        auto next1 = static_cast<unsigned char>(str[i + 1]);
+        // U+00A0 (No-Break Space): 0xC2 0xA0
+        if (ubyte == 0xC2 && next1 == 0xA0) {
+          is_whitespace = true;
+          extra_bytes = 1;
+        }
+        // 3-byte Unicode spaces
+        else if (i + 2 < str.length()) {
+          auto next2 = static_cast<unsigned char>(str[i + 2]);
+          // U+1680 (Ogham Space Mark): 0xE1 0x9A 0x80
+          if (ubyte == 0xE1 && next1 == 0x9A && next2 == 0x80) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+          // U+2000-U+200B: 0xE2 0x80 0x80-0x8B
+          else if (ubyte == 0xE2 && next1 == 0x80 && next2 >= 0x80 && next2 <= 0x8B) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+          // U+2028/U+2029: 0xE2 0x80 0xA8/0xA9
+          else if (ubyte == 0xE2 && next1 == 0x80 && (next2 == 0xA8 || next2 == 0xA9)) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+          // U+202F (Narrow No-Break Space): 0xE2 0x80 0xAF
+          else if (ubyte == 0xE2 && next1 == 0x80 && next2 == 0xAF) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+          // U+205F (Medium Mathematical Space): 0xE2 0x81 0x9F
+          else if (ubyte == 0xE2 && next1 == 0x81 && next2 == 0x9F) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+          // U+3000 (Ideographic Space): 0xE3 0x80 0x80
+          else if (ubyte == 0xE3 && next1 == 0x80 && next2 == 0x80) {
+            is_whitespace = true;
+            extra_bytes = 2;
+          }
+        }
+      }
+      // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (is_whitespace) {
         if (!token.empty()) {
           tokens.push_back(token);
           token.clear();
         }
+        i += extra_bytes;  // Skip extra bytes of multi-byte space
       } else {
         token += character;
       }

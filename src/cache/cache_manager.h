@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -84,10 +85,14 @@ class CacheManager {
    * @param result Search result
    * @param ngrams Ngrams used in query (for invalidation tracking)
    * @param query_cost_ms Query execution time
+   * @param ngram_size N-gram size used for this query (for invalidation consistency)
+   * @param kanji_ngram_size Kanji N-gram size used for this query
+   * @param cross_boundary_ngrams Cross-boundary setting used for this query
    * @return true if cached, false otherwise
    */
   bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::set<std::string>& ngrams,
-              double query_cost_ms);
+              double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0,
+              bool cross_boundary_ngrams = true);
 
   /**
    * @brief Invalidate cache entries affected by data modification
@@ -95,7 +100,8 @@ class CacheManager {
    * @param old_text Previous text content (empty if INSERT)
    * @param new_text New text content (empty if DELETE)
    */
-  void Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text);
+  void Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+                  bool filter_columns_changed = false);
 
   /**
    * @brief Clear all cache entries

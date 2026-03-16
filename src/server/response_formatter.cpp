@@ -410,6 +410,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
     oss << "cache_memory_human: " << utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
+    oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
     oss << "cache_invalidations_deferred: " << cache_stats.invalidations_deferred << "\r\n";
     oss << "cache_invalidations_batches: " << cache_stats.invalidations_batches << "\r\n";
@@ -542,11 +543,11 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
     const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-    mysql::IBinlogReader* binlog_reader
+    mysql::IBinlogReader* binlog_reader,
 #else
-    void* binlog_reader
+    void* binlog_reader,
 #endif
-) {
+    cache::CacheManager* cache_manager) {
   std::ostringstream oss;
 
   // Server info (version as label)
@@ -803,6 +804,56 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 #else
   (void)binlog_reader;  // Suppress unused parameter warning
 #endif
+
+  // Cache statistics
+  if (cache_manager != nullptr && cache_manager->IsEnabled()) {
+    auto cache_stats = cache_manager->GetStatistics();
+
+    oss << "# HELP mygramdb_cache_hits_total Total number of cache hits\n";
+    oss << "# TYPE mygramdb_cache_hits_total counter\n";
+    oss << "mygramdb_cache_hits_total " << cache_stats.cache_hits << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_misses_total Total number of cache misses\n";
+    oss << "# TYPE mygramdb_cache_misses_total counter\n";
+    oss << "mygramdb_cache_misses_total{reason=\"not_found\"} " << cache_stats.cache_misses_not_found << "\n";
+    oss << "mygramdb_cache_misses_total{reason=\"invalidated\"} " << cache_stats.cache_misses_invalidated << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_entries Current number of cache entries\n";
+    oss << "# TYPE mygramdb_cache_entries gauge\n";
+    oss << "mygramdb_cache_entries " << cache_stats.current_entries << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_memory_bytes Current cache memory usage in bytes\n";
+    oss << "# TYPE mygramdb_cache_memory_bytes gauge\n";
+    oss << "mygramdb_cache_memory_bytes{type=\"cache\"} " << cache_stats.current_memory_bytes << "\n";
+    oss << "mygramdb_cache_memory_bytes{type=\"invalidation_index\"} " << cache_stats.invalidation_index_memory_bytes
+        << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_evictions_total Total number of cache evictions\n";
+    oss << "# TYPE mygramdb_cache_evictions_total counter\n";
+    oss << "mygramdb_cache_evictions_total " << cache_stats.evictions << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_ttl_expirations_total Total TTL-expired entries removed\n";
+    oss << "# TYPE mygramdb_cache_ttl_expirations_total counter\n";
+    oss << "mygramdb_cache_ttl_expirations_total " << cache_stats.ttl_expirations << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_invalidations_total Total number of cache invalidations\n";
+    oss << "# TYPE mygramdb_cache_invalidations_total counter\n";
+    oss << "mygramdb_cache_invalidations_total{phase=\"immediate\"} " << cache_stats.invalidations_immediate << "\n";
+    oss << "mygramdb_cache_invalidations_total{phase=\"deferred\"} " << cache_stats.invalidations_deferred << "\n";
+    oss << "mygramdb_cache_invalidations_total{phase=\"batch\"} " << cache_stats.invalidations_batches << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_hit_rate Cache hit rate ratio\n";
+    oss << "# TYPE mygramdb_cache_hit_rate gauge\n";
+    oss << "mygramdb_cache_hit_rate " << std::fixed << std::setprecision(4) << cache_stats.HitRate() << "\n";
+    oss << "\n";
+  }
 
   return oss.str();
 }

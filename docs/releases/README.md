@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.3.9](v1.3.9.md) - Latest release (2026-01-10) - Critical Bug Fixes, Performance & MySQL Compatibility
+- [v1.4.0](v1.4.0.md) - Latest release (2026-03-16) - Unix Socket, Prometheus Metrics, Benchmark Suite & Bug Fixes
+- [v1.3.9](v1.3.9.md) - 2026-01-10 - Critical Bug Fixes, Performance & MySQL Compatibility
 - [v1.3.8](v1.3.8.md) - 2025-12-21 - TCP Protocol CRLF Fix & C API Enhancement
 - [v1.3.7](v1.3.7.md) - 2025-12-02 - Async DUMP SAVE & DUMP STATUS
 - [v1.3.6](v1.3.6.md) - 2025-11-26 - Cache Optimization & Log Cleanup

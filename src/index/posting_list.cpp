@@ -8,7 +8,9 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
+#include <limits>
 
 #include "utils/structured_log.h"
 
@@ -87,7 +89,8 @@ PostingList::PostingList(PostingList&& other) noexcept
     : strategy_(other.strategy_),
       roaring_threshold_(other.roaring_threshold_),
       delta_compressed_(std::move(other.delta_compressed_)),
-      roaring_bitmap_(other.roaring_bitmap_) {
+      roaring_bitmap_(other.roaring_bitmap_),
+      version_(other.version_.load(std::memory_order_relaxed)) {
   other.roaring_bitmap_ = nullptr;
 }
 
@@ -100,6 +103,7 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
     roaring_threshold_ = other.roaring_threshold_;
     delta_compressed_ = std::move(other.delta_compressed_);
     roaring_bitmap_ = other.roaring_bitmap_;
+    version_.store(other.version_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.roaring_bitmap_ = nullptr;
   }
   return *this;
@@ -119,6 +123,7 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
@@ -137,6 +142,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 void PostingList::Remove(DocId doc_id) {
@@ -153,6 +159,7 @@ void PostingList::Remove(DocId doc_id) {
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
   }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 bool PostingList::Contains(DocId doc_id) const {
@@ -170,44 +177,11 @@ bool PostingList::Contains(DocId doc_id) const {
       return false;
     }
 
-    // For small arrays, linear search is faster than repeated accumulation
-    // Threshold chosen based on performance profiling
-    constexpr size_t kLinearSearchThreshold = 16;
-    if (delta_compressed_.size() <= kLinearSearchThreshold) {
-      DocId current = 0;
-      for (const auto& delta : delta_compressed_) {
-        current += delta;
-        if (current == doc_id) {
-          return true;
-        }
-        if (current > doc_id) {
-          return false;
-        }
-      }
-      return false;
-    }
-
-    // Binary search for larger arrays
-    // Cache accumulated values during search to avoid redundant computation
-    // For large posting lists, decode fully first for O(n) + O(log n) instead of O(n log n)
-    // Threshold: 64 elements (empirically determined for best performance)
-    constexpr size_t kDecodeThreshold = 64;
-
-    if (delta_compressed_.size() > kDecodeThreshold) {
-      // Decode delta-compressed array to absolute values
-      std::vector<DocId> decoded;
-      decoded.reserve(delta_compressed_.size());
-      DocId cumulative = 0;
-      for (DocId delta : delta_compressed_) {
-        cumulative += delta;
-        decoded.push_back(cumulative);
-      }
-
-      // Binary search on decoded array (O(log n))
-      return std::binary_search(decoded.begin(), decoded.end(), doc_id);
-    }
-
-    // For small lists, use linear scan (simpler and faster for small sizes)
+    // Streaming decode with early exit - O(n) time, O(1) memory
+    // More efficient than full decode + binary search for all sizes because
+    // it avoids vector allocation and exits early when target is passed.
+    // Since delta values are non-negative and cumulative is monotonically
+    // increasing, we can stop as soon as cumulative exceeds doc_id.
     DocId cumulative = 0;
     for (DocId delta : delta_compressed_) {
       cumulative += delta;
@@ -282,44 +256,37 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   std::vector<DocId> result;
   result.reserve(actual_limit);
 
-  if (reverse) {
-    // For reverse order: use reverse iterator to get last N elements efficiently
-    // CRoaring library requires manual memory management for iterators
-    // Use RAII via unique_ptr with custom deleter for exception safety
-    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-    auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
-    if (raw_iter != nullptr) {
-      // RAII wrapper ensures free() is called even if push_back throws
-      auto deleter = [](roaring_uint32_iterator_t* ptr) {
-        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-        free(ptr);
-      };
-      std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
+  // CRoaring iterator lifecycle: use malloc + init/init_last + free consistently
+  // for both forward and reverse directions. This avoids mixing
+  // roaring_iterator_create()/roaring_uint32_iterator_free() (which uses
+  // roaring_malloc/roaring_free internally) with malloc()/free().
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+  auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
+  if (raw_iter != nullptr) {
+    // RAII wrapper ensures free() is called even if push_back throws
+    auto deleter = [](roaring_uint32_iterator_t* ptr) {
+      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+      free(ptr);
+    };
+    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
 
+    if (reverse) {
       roaring_iterator_init_last(roaring_bitmap_, iter.get());
-      size_t count = 0;
-      while (count < actual_limit && iter->has_value) {
-        result.push_back(iter->current_value);
+    } else {
+      roaring_iterator_init(roaring_bitmap_, iter.get());
+    }
+
+    size_t count = 0;
+    while (count < actual_limit && iter->has_value) {
+      result.push_back(iter->current_value);
+      if (reverse) {
         roaring_uint32_iterator_previous(iter.get());
-        count++;
-      }
-      // iter automatically freed by unique_ptr destructor
-    }
-  } else {
-    // For forward order: use iterator to get first N
-    // Use RAII via unique_ptr with custom deleter for exception safety
-    auto deleter = [](roaring_uint32_iterator_t* ptr) { roaring_uint32_iterator_free(ptr); };
-    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(roaring_iterator_create(roaring_bitmap_),
-                                                                       deleter);
-    if (iter != nullptr) {
-      size_t count = 0;
-      while (count < actual_limit && iter->has_value) {
-        result.push_back(iter->current_value);
+      } else {
         roaring_uint32_iterator_advance(iter.get());
-        count++;
       }
-      // iter automatically freed by unique_ptr destructor
+      count++;
     }
+    // iter automatically freed by unique_ptr destructor
   }
 
   return result;
@@ -342,8 +309,9 @@ size_t PostingList::MemoryUsage() const {
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
-  std::shared_lock lock1(mutex_);        // Protect read access to this
-  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+  std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
+  std::lock(lock1, lock2);  // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
@@ -381,8 +349,9 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 }
 
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
-  std::shared_lock lock1(mutex_);        // Protect read access to this
-  std::shared_lock lock2(other.mutex_);  // Protect read access to other
+  std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
+  std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
+  std::lock(lock1, lock2);  // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
@@ -492,6 +461,14 @@ void PostingList::ConvertToRoaring() {
 
   auto docs = DecodeDelta(delta_compressed_);
   roaring_bitmap_ = roaring_bitmap_create();
+  if (roaring_bitmap_ == nullptr) {
+    // OOM: keep delta-compressed strategy, log error
+    mygram::utils::StructuredLog()
+        .Event("posting_list_roaring_alloc_failed")
+        .Field("doc_count", static_cast<uint64_t>(docs.size()))
+        .Error();
+    return;
+  }
   if (!docs.empty()) {
     roaring_bitmap_add_many(roaring_bitmap_, docs.size(), docs.data());
   }
@@ -507,7 +484,12 @@ void PostingList::ConvertToDelta() {
     return;
   }
 
-  auto docs = GetAll();
+  // Access roaring bitmap directly instead of calling GetAll(),
+  // because the caller (Optimize()) already holds a unique_lock on mutex_.
+  // Calling GetAll() would try to acquire a shared_lock, causing undefined behavior.
+  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  std::vector<DocId> docs(size);
+  roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
   delta_compressed_ = EncodeDelta(docs);
 
   roaring_bitmap_free(roaring_bitmap_);
@@ -519,6 +501,11 @@ std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids
   if (doc_ids.empty()) {
     return {};
   }
+
+  // Debug assertion: input must be strictly sorted (no duplicates)
+  assert(std::is_sorted(doc_ids.begin(), doc_ids.end()) && "EncodeDelta: input must be sorted");
+  assert(std::adjacent_find(doc_ids.begin(), doc_ids.end()) == doc_ids.end() &&
+         "EncodeDelta: input must not contain duplicates");
 
   std::vector<uint32_t> encoded;
   encoded.reserve(doc_ids.size());
@@ -564,6 +551,11 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Write size
+    if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
+      spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})",
+                    delta_compressed_.size());
+      return;
+    }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
     buffer.push_back((size >> kShift24Bits) & kByteMask);
     buffer.push_back((size >> kShift16Bits) & kByteMask);
@@ -581,11 +573,18 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     // Roaring bitmap: serialize using roaring's native format
     size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 
+    if (roaring_size > std::numeric_limits<uint32_t>::max()) {
+      spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})",
+                    roaring_size);
+      return;
+    }
+    auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);
+
     // Write size
-    buffer.push_back((roaring_size >> kShift24Bits) & kByteMask);
-    buffer.push_back((roaring_size >> kShift16Bits) & kByteMask);
-    buffer.push_back((roaring_size >> kBitsPerByte) & kByteMask);
-    buffer.push_back(roaring_size & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kShift24Bits) & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kShift16Bits) & kByteMask);
+    buffer.push_back((roaring_size_u32 >> kBitsPerByte) & kByteMask);
+    buffer.push_back(roaring_size_u32 & kByteMask);
 
     // Write roaring bitmap data
     size_t old_size = buffer.size();
@@ -617,7 +616,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Read delta-compressed data
-    if (offset + (size * 4) > buffer.size()) {
+    if (offset + (static_cast<size_t>(size) * 4) > buffer.size()) {
       return false;
     }
 

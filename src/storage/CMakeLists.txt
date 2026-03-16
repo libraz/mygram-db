@@ -2,6 +2,7 @@ add_library(mygramdb_storage STATIC
   dump_manager.cpp
   document_store.cpp
   dump_format_v1.cpp
+  filter_index.cpp
 )
 
 target_include_directories(mygramdb_storage PUBLIC

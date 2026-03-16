@@ -147,11 +147,11 @@ class ResponseFormatter {
   static std::string FormatPrometheusMetrics(const AggregatedMetrics& metrics, const ServerStats& stats,
                                              const std::unordered_map<std::string, TableContext*>& table_contexts,
 #ifdef USE_MYSQL
-                                             mysql::IBinlogReader* binlog_reader = nullptr
+                                             mysql::IBinlogReader* binlog_reader = nullptr,
 #else
-                                             void* binlog_reader = nullptr
+                                             void* binlog_reader = nullptr,
 #endif
-  );
+                                             cache::CacheManager* cache_manager = nullptr);
 
   /**
    * @brief Format error response

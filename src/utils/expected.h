@@ -26,7 +26,8 @@
 
 #pragma once
 
-#include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -287,27 +288,51 @@ class Expected {
 
   /**
    * @brief Access the contained error (const lvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @note Terminates the program if Expected contains a value
    */
-  [[nodiscard]] const E& error() const& { return std::get<1>(storage_); }
+  [[nodiscard]] const E& error() const& {
+    if (has_value()) {
+      std::fputs("Expected::error() called on a value\n", stderr);
+      std::abort();
+    }
+    return std::get<1>(storage_);
+  }
 
   /**
    * @brief Access the contained error (lvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @note Terminates the program if Expected contains a value
    */
-  [[nodiscard]] E& error() & { return std::get<1>(storage_); }
+  [[nodiscard]] E& error() & {
+    if (has_value()) {
+      std::fputs("Expected::error() called on a value\n", stderr);
+      std::abort();
+    }
+    return std::get<1>(storage_);
+  }
 
   /**
    * @brief Access the contained error (const rvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @note Terminates the program if Expected contains a value
    */
-  [[nodiscard]] const E&& error() const&& { return std::move(std::get<1>(storage_)); }
+  [[nodiscard]] const E&& error() const&& {
+    if (has_value()) {
+      std::fputs("Expected::error() called on a value\n", stderr);
+      std::abort();
+    }
+    return std::move(std::get<1>(storage_));
+  }
 
   /**
    * @brief Access the contained error (rvalue reference)
-   * @warning Undefined behavior if Expected contains a value
+   * @note Terminates the program if Expected contains a value
    */
-  [[nodiscard]] E&& error() && { return std::move(std::get<1>(storage_)); }
+  [[nodiscard]] E&& error() && {
+    if (has_value()) {
+      std::fputs("Expected::error() called on a value\n", stderr);
+      std::abort();
+    }
+    return std::move(std::get<1>(storage_));
+  }
 
   // ========== Monadic operations (C++23 compatibility) ==========
 
@@ -562,41 +587,49 @@ class Expected<void, E> {
 
   /**
    * @brief Access the contained error (const lvalue reference)
-   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
-   *          will trigger an assertion in debug mode.
+   * @note Terminates the program if Expected contains a value
    */
   [[nodiscard]] const E& error() const& {
-    assert(!has_value_ && "error() called on Expected containing a value");
+    if (has_value_) {
+      std::fputs("Expected<void>::error() called on a value\n", stderr);
+      std::abort();
+    }
     return *error_;
   }
 
   /**
    * @brief Access the contained error (lvalue reference)
-   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
-   *          will trigger an assertion in debug mode.
+   * @note Terminates the program if Expected contains a value
    */
   [[nodiscard]] E& error() & {
-    assert(!has_value_ && "error() called on Expected containing a value");
+    if (has_value_) {
+      std::fputs("Expected<void>::error() called on a value\n", stderr);
+      std::abort();
+    }
     return *error_;
   }
 
   /**
    * @brief Access the contained error (const rvalue reference)
-   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
-   *          will trigger an assertion in debug mode.
+   * @note Terminates the program if Expected contains a value
    */
   [[nodiscard]] const E&& error() const&& {
-    assert(!has_value_ && "error() called on Expected containing a value");
+    if (has_value_) {
+      std::fputs("Expected<void>::error() called on a value\n", stderr);
+      std::abort();
+    }
     return std::move(*error_);
   }
 
   /**
    * @brief Access the contained error (rvalue reference)
-   * @warning Behavior is checked in debug builds. Calling error() when has_value() is true
-   *          will trigger an assertion in debug mode.
+   * @note Terminates the program if Expected contains a value
    */
   [[nodiscard]] E&& error() && {
-    assert(!has_value_ && "error() called on Expected containing a value");
+    if (has_value_) {
+      std::fputs("Expected<void>::error() called on a value\n", stderr);
+      std::abort();
+    }
     return std::move(*error_);
   }
 

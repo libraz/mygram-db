@@ -6,6 +6,8 @@
 #include "cache/invalidation_manager.h"
 
 #include <algorithm>
+#include <set>
+#include <tuple>
 
 #include "cache/query_cache.h"
 #include "utils/string_utils.h"
@@ -24,27 +26,45 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
     UnregisterCacheEntryUnlocked(key);
   }
 
-  // Store metadata
-  cache_metadata_[key] = metadata;
+  // Store minimal invalidation metadata (table + ngrams + ngram settings)
+  InvalidationMetadata inv_meta;
+  inv_meta.table = metadata.table;
+  inv_meta.ngrams = metadata.ngrams;
+  inv_meta.ngram_size = metadata.ngram_size;
+  inv_meta.kanji_ngram_size = metadata.kanji_ngram_size;
+  inv_meta.cross_boundary_ngrams = metadata.cross_boundary_ngrams;
+  inv_meta.has_filters = !metadata.filters.empty();
+  cache_metadata_[key] = std::move(inv_meta);
+
+  const auto& stored_meta = cache_metadata_[key];
 
   // Update reverse index: ngram -> cache keys
-  for (const auto& ngram : metadata.ngrams) {
-    ngram_to_cache_keys_[metadata.table][ngram].insert(key);
+  for (const auto& ngram : stored_meta.ngrams) {
+    ngram_to_cache_keys_[stored_meta.table][ngram].insert(key);
+  }
+
+  // Track per-table ngram settings for O(1) lookup during invalidation
+  if (stored_meta.ngram_size > 0) {
+    auto settings_key = std::make_tuple(stored_meta.ngram_size, stored_meta.kanji_ngram_size,
+                                        stored_meta.cross_boundary_ngrams);
+    table_ngram_settings_[stored_meta.table][settings_key]++;
   }
 }
 
 std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(const std::string& table_name,
                                                                             const std::string& old_text,
                                                                             const std::string& new_text, int ngram_size,
-                                                                            int kanji_ngram_size) {
-  // Extract ngrams from old and new text
-  std::set<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size);
-  std::set<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size);
+                                                                            int kanji_ngram_size,
+                                                                            bool cross_boundary_ngrams,
+                                                                            bool filter_columns_changed) {
+  // Extract ngrams from old and new text (both are sorted vectors)
+  std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
-  // Find changed ngrams (symmetric difference)
-  std::set<std::string> changed_ngrams;
+  // Find changed ngrams (symmetric difference on sorted vectors)
+  std::vector<std::string> changed_ngrams;
   std::set_symmetric_difference(old_ngrams.begin(), old_ngrams.end(), new_ngrams.begin(), new_ngrams.end(),
-                                std::inserter(changed_ngrams, changed_ngrams.begin()));
+                                std::back_inserter(changed_ngrams));
 
   // Find affected cache keys
   std::unordered_set<CacheKey> affected_keys;
@@ -57,12 +77,53 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(cons
       return affected_keys;  // No entries for this table
     }
 
+    // Collect distinct historical ngram settings for this table that differ
+    // from the current settings. Uses O(1) lookup via table_ngram_settings_ instead
+    // of O(N) scan over all cache_metadata_ entries.
+    std::set<std::tuple<int, int, bool>> historical_settings;
+    auto tbl_settings_it = table_ngram_settings_.find(table_name);
+    if (tbl_settings_it != table_ngram_settings_.end()) {
+      auto current_key = std::make_tuple(ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      for (const auto& [settings_key, count] : tbl_settings_it->second) {
+        if (settings_key != current_key) {
+          historical_settings.insert(settings_key);
+        }
+      }
+    }
+
+    // Generate changed ngrams with each historical setting and merge
+    for (const auto& [hist_ngram, hist_kanji, hist_cross] : historical_settings) {
+      auto hist_old = ExtractNgrams(old_text, hist_ngram, hist_kanji, hist_cross);
+      auto hist_new = ExtractNgrams(new_text, hist_ngram, hist_kanji, hist_cross);
+      std::vector<std::string> hist_changed;
+      std::set_symmetric_difference(hist_old.begin(), hist_old.end(), hist_new.begin(), hist_new.end(),
+                                    std::back_inserter(hist_changed));
+      // Merge into changed_ngrams (both are sorted)
+      std::vector<std::string> merged;
+      merged.reserve(changed_ngrams.size() + hist_changed.size());
+      std::merge(changed_ngrams.begin(), changed_ngrams.end(), hist_changed.begin(), hist_changed.end(),
+                 std::back_inserter(merged));
+      merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+      changed_ngrams = std::move(merged);
+    }
+
     // For each changed ngram, collect affected cache keys
     for (const auto& ngram : changed_ngrams) {
       auto ngram_it = table_it->second.find(ngram);
       if (ngram_it != table_it->second.end()) {
         for (const auto& cache_key : ngram_it->second) {
           affected_keys.insert(cache_key);
+        }
+      }
+    }
+
+    // When filter columns changed but text didn't change (changed_ngrams is empty),
+    // invalidate all cache entries for this table that have filter conditions.
+    // Queries with filters may return different results even though the text is unchanged.
+    if (filter_columns_changed && changed_ngrams.empty()) {
+      for (const auto& [key, meta] : cache_metadata_) {
+        if (meta.table == table_name && meta.has_filters) {
+          affected_keys.insert(key);
         }
       }
     }
@@ -109,6 +170,24 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
     }
   }
 
+  // Decrement per-table ngram settings reference count
+  if (metadata.ngram_size > 0) {
+    auto settings_key =
+        std::make_tuple(metadata.ngram_size, metadata.kanji_ngram_size, metadata.cross_boundary_ngrams);
+    auto tbl_it = table_ngram_settings_.find(metadata.table);
+    if (tbl_it != table_ngram_settings_.end()) {
+      auto set_it = tbl_it->second.find(settings_key);
+      if (set_it != tbl_it->second.end()) {
+        if (--set_it->second == 0) {
+          tbl_it->second.erase(set_it);
+        }
+        if (tbl_it->second.empty()) {
+          table_ngram_settings_.erase(tbl_it);
+        }
+      }
+    }
+  }
+
   // Remove metadata
   cache_metadata_.erase(metadata_it);
 }
@@ -134,14 +213,16 @@ void InvalidationManager::ClearTable(const std::string& table_name) {
     UnregisterCacheEntryUnlocked(key);
   }
 
-  // Remove table from reverse index (already holding lock)
+  // Remove table from reverse index and settings (already holding lock)
   ngram_to_cache_keys_.erase(table_name);
+  table_ngram_settings_.erase(table_name);
 }
 
 void InvalidationManager::Clear() {
   std::unique_lock lock(mutex_);
   ngram_to_cache_keys_.clear();
   cache_metadata_.clear();
+  table_ngram_settings_.clear();
 }
 
 size_t InvalidationManager::GetTrackedEntryCount() const {
@@ -160,29 +241,68 @@ size_t InvalidationManager::GetTrackedNgramCount(const std::string& table_name) 
   return table_it->second.size();
 }
 
-std::set<std::string> InvalidationManager::ExtractNgrams(const std::string& text, int ngram_size,
-                                                         int kanji_ngram_size) {
+size_t InvalidationManager::MemoryUsage() const {
+  std::shared_lock lock(mutex_);
+
+  size_t total = 0;
+
+  // cache_metadata_ map overhead
+  // Each bucket is a pointer, each entry is a node with key + value + hash + pointer
+  total += cache_metadata_.bucket_count() * sizeof(void*);
+  for (const auto& [key, meta] : cache_metadata_) {
+    total += sizeof(CacheKey) + sizeof(InvalidationMetadata);
+    total += meta.table.capacity();
+    total += meta.ngrams.capacity() * sizeof(std::string);
+    for (const auto& ngram : meta.ngrams) {
+      total += ngram.capacity();
+    }
+    // Node overhead (next pointer + hash)
+    total += sizeof(void*) + sizeof(size_t);
+  }
+
+  // ngram_to_cache_keys_ 3-level map overhead
+  total += ngram_to_cache_keys_.bucket_count() * sizeof(void*);
+  for (const auto& [table_name, ngram_map] : ngram_to_cache_keys_) {
+    // Table-level entry: string key + inner map
+    total += table_name.capacity() + sizeof(void*) + sizeof(size_t);
+    total += ngram_map.bucket_count() * sizeof(void*);
+
+    for (const auto& [ngram, key_set] : ngram_map) {
+      // Ngram-level entry: string key + inner set
+      total += ngram.capacity() + sizeof(void*) + sizeof(size_t);
+      total += key_set.bucket_count() * sizeof(void*);
+
+      // Each CacheKey in the set
+      for (const auto& cache_key : key_set) {
+        (void)cache_key;
+        total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+      }
+    }
+  }
+
+  // table_ngram_settings_ overhead
+  for (const auto& [table_name, settings_map] : table_ngram_settings_) {
+    total += table_name.capacity() + sizeof(std::map<std::tuple<int, int, bool>, size_t>);
+    total += settings_map.size() * (sizeof(std::tuple<int, int, bool>) + sizeof(size_t) + 3 * sizeof(void*));
+  }
+
+  return total;
+}
+
+std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& text, int ngram_size,
+                                                            int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (text.empty()) {
     return {};
   }
 
   // Use existing utility function for ngram generation
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size);
+  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
-  // Convert to set for deduplication
-  return {ngrams.begin(), ngrams.end()};
-}
+  // Sort and deduplicate
+  std::sort(ngrams.begin(), ngrams.end());
+  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
 
-bool InvalidationManager::IsCJK(uint32_t codepoint) {
-  // Unicode ranges for CJK and Japanese characters
-  // CJK Unified Ideographs: U+4E00 - U+9FFF
-  // CJK Extension A: U+3400 - U+4DBF
-  // Hiragana: U+3040 - U+309F
-  // Katakana: U+30A0 - U+30FF
-  // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
-  return (codepoint >= 0x4E00 && codepoint <= 0x9FFF) || (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||
-         (codepoint >= 0x3040 && codepoint <= 0x309F) || (codepoint >= 0x30A0 && codepoint <= 0x30FF);
-  // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+  return ngrams;
 }
 
 }  // namespace mygramdb::cache

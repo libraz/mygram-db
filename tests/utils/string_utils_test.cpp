@@ -614,3 +614,143 @@ TEST(StringUtilsTest, GenerateHybridNgramsTooShort) {
   auto ngrams = GenerateHybridNgrams("a", 2, 1);
   EXPECT_EQ(ngrams.size(), 0);  // Cannot generate bigram from single char
 }
+
+/**
+ * @brief Test cross-boundary N-grams enabled (default): CJK to ASCII boundary
+ *
+ * With cross_boundary_ngrams=true, N-grams spanning CJK/non-CJK boundaries
+ * should be generated using the starting character's ngram_size.
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsEnabled_CJKToASCII) {
+  // "漢字ABC" with kanji_ngram_size=2, ascii_ngram_size=3
+  // Position 0: "漢" (CJK), ngram_size=2 -> "漢字" (both CJK, normal)
+  // Position 1: "字" (CJK), ngram_size=2 -> "字A" (cross-boundary, generated!)
+  // Position 2: "A" (non-CJK), ngram_size=3 -> "ABC" (all non-CJK, normal)
+  auto ngrams = GenerateHybridNgrams("漢字ABC", 3, 2, true);
+
+  ASSERT_EQ(ngrams.size(), 3);
+  EXPECT_EQ(ngrams[0], "漢字");
+  EXPECT_EQ(ngrams[1], "字A");
+  EXPECT_EQ(ngrams[2], "ABC");
+}
+
+/**
+ * @brief Test cross-boundary N-grams enabled: ASCII to CJK boundary
+ *
+ * "Hello世界" with ascii_ngram_size=3 and kanji_ngram_size=2
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsEnabled_ASCIIToCJK) {
+  // Position 0: "H" (non-CJK), ngram_size=3 -> "Hel"
+  // Position 1: "e" (non-CJK), ngram_size=3 -> "ell"
+  // Position 2: "l" (non-CJK), ngram_size=3 -> "llo"
+  // Position 3: "l" (non-CJK), ngram_size=3 -> "lo世" (cross-boundary, generated!)
+  // Position 4: "o" (non-CJK), ngram_size=3 -> "o世界" (cross-boundary, generated!)
+  // Position 5: "世" (CJK), ngram_size=2 -> "世界" (both CJK, normal)
+  auto ngrams = GenerateHybridNgrams("Hello世界", 3, 2, true);
+
+  ASSERT_EQ(ngrams.size(), 6);
+  EXPECT_EQ(ngrams[0], "Hel");
+  EXPECT_EQ(ngrams[1], "ell");
+  EXPECT_EQ(ngrams[2], "llo");
+  EXPECT_EQ(ngrams[3], "lo世");
+  EXPECT_EQ(ngrams[4], "o世界");
+  EXPECT_EQ(ngrams[5], "世界");
+}
+
+/**
+ * @brief Test cross-boundary N-grams disabled: preserves old behavior
+ *
+ * Same inputs as enabled tests should produce no cross-boundary N-grams.
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsDisabled_CJKToASCII) {
+  // "漢字ABC" with kanji_ngram_size=2, ascii_ngram_size=3, cross_boundary=false
+  // Position 1: "字A" would cross boundary -> rejected
+  auto ngrams = GenerateHybridNgrams("漢字ABC", 3, 2, false);
+
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "漢字");
+  EXPECT_EQ(ngrams[1], "ABC");
+}
+
+TEST(StringUtilsTest, CrossBoundaryNgramsDisabled_ASCIIToCJK) {
+  // "Hello世界" with ascii_ngram_size=3, kanji_ngram_size=2, cross_boundary=false
+  // "lo世" and "o世界" would cross boundary -> rejected
+  auto ngrams = GenerateHybridNgrams("Hello世界", 3, 2, false);
+
+  ASSERT_EQ(ngrams.size(), 4);
+  EXPECT_EQ(ngrams[0], "Hel");
+  EXPECT_EQ(ngrams[1], "ell");
+  EXPECT_EQ(ngrams[2], "llo");
+  EXPECT_EQ(ngrams[3], "世界");
+}
+
+/**
+ * @brief Test pure CJK text works the same regardless of cross_boundary setting
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsPureCJK) {
+  auto ngrams_enabled = GenerateHybridNgrams("東方艦隊", 2, 2, true);
+  auto ngrams_disabled = GenerateHybridNgrams("東方艦隊", 2, 2, false);
+
+  ASSERT_EQ(ngrams_enabled.size(), ngrams_disabled.size());
+  ASSERT_EQ(ngrams_enabled.size(), 3);
+  for (size_t i = 0; i < ngrams_enabled.size(); ++i) {
+    EXPECT_EQ(ngrams_enabled[i], ngrams_disabled[i]);
+  }
+}
+
+/**
+ * @brief Test pure ASCII text works the same regardless of cross_boundary setting
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsPureASCII) {
+  auto ngrams_enabled = GenerateHybridNgrams("hello", 2, 1, true);
+  auto ngrams_disabled = GenerateHybridNgrams("hello", 2, 1, false);
+
+  ASSERT_EQ(ngrams_enabled.size(), ngrams_disabled.size());
+  ASSERT_EQ(ngrams_enabled.size(), 4);
+  for (size_t i = 0; i < ngrams_enabled.size(); ++i) {
+    EXPECT_EQ(ngrams_enabled[i], ngrams_disabled[i]);
+  }
+}
+
+/**
+ * @brief Test single CJK char followed by ASCII with cross-boundary enabled
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsSingleCJKThenASCII) {
+  // "字AB" with kanji_ngram_size=2, ascii_ngram_size=2, cross_boundary=true
+  // Position 0: "字" (CJK), ngram_size=2 -> "字A" (cross-boundary, generated!)
+  // Position 1: "A" (non-CJK), ngram_size=2 -> "AB"
+  auto ngrams = GenerateHybridNgrams("字AB", 2, 2, true);
+
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "字A");
+  EXPECT_EQ(ngrams[1], "AB");
+}
+
+/**
+ * @brief Test single ASCII char followed by CJK with cross-boundary enabled
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsSingleASCIIThenCJK) {
+  // "A漢字" with kanji_ngram_size=2, ascii_ngram_size=2, cross_boundary=true
+  // Position 0: "A" (non-CJK), ngram_size=2 -> "A漢" (cross-boundary, generated!)
+  // Position 1: "漢" (CJK), ngram_size=2 -> "漢字" (normal)
+  auto ngrams = GenerateHybridNgrams("A漢字", 2, 2, true);
+
+  ASSERT_EQ(ngrams.size(), 2);
+  EXPECT_EQ(ngrams[0], "A漢");
+  EXPECT_EQ(ngrams[1], "漢字");
+}
+
+/**
+ * @brief Test cross-boundary with kanji_ngram_size=1 (unigrams never cross boundaries)
+ */
+TEST(StringUtilsTest, CrossBoundaryNgramsUnigrams) {
+  // With kanji_ngram_size=1, CJK unigrams can't cross boundaries (size 1)
+  // So enabling/disabling cross_boundary has no effect for CJK chars
+  auto ngrams_enabled = GenerateHybridNgrams("漢字ABC", 3, 1, true);
+  auto ngrams_disabled = GenerateHybridNgrams("漢字ABC", 3, 1, false);
+
+  ASSERT_EQ(ngrams_enabled.size(), ngrams_disabled.size());
+  for (size_t i = 0; i < ngrams_enabled.size(); ++i) {
+    EXPECT_EQ(ngrams_enabled[i], ngrams_disabled[i]);
+  }
+}

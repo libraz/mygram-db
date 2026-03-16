@@ -186,7 +186,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     ctx->config = table_config;
 
     // Create index and document store for this table
-    ctx->index = std::make_unique<index::Index>(table_config.ngram_size, table_config.kanji_ngram_size);
+    ctx->index = std::make_unique<index::Index>(table_config.ngram_size, table_config.kanji_ngram_size,
+                                                   index::kDefaultRoaringThreshold,
+                                                   table_config.cross_boundary_ngrams,
+                                                   deps_.config.memory.normalize.nfkc,
+                                                   deps_.config.memory.normalize.width,
+                                                   deps_.config.memory.normalize.lower);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
     table_contexts_[table_config.name] = std::move(ctx);
@@ -418,6 +423,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   server_config.default_limit = deps_.config.api.default_limit;
   server_config.max_query_length = deps_.config.api.max_query_length;
   server_config.allow_cidrs = deps_.config.network.allow_cidrs;
+  server_config.unix_socket_path = deps_.config.api.unix_socket.path;
 
 #ifdef USE_MYSQL
   tcp_server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config,

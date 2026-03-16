@@ -400,8 +400,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       }
       const auto& ctx = *ctx_opt;
 
-      auto rows_opt =
-          ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
+      auto rows_opt = ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                          ctx.text_column, event_type);
 
       if (!rows_opt || rows_opt->empty()) {
         return {};
@@ -452,8 +452,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto row_pairs_opt =
-          ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
+      auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                                ctx.text_column, event_type);
 
       if (!row_pairs_opt || row_pairs_opt->empty()) {
         return {};
@@ -508,8 +508,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto rows_opt =
-          ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key, ctx.text_column);
+      auto rows_opt = ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                           ctx.text_column, event_type);
 
       if (!rows_opt || rows_opt->empty()) {
         return {};
@@ -595,6 +595,36 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Transaction commit marker
       return {};
 
+    case MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT:
+      // binlog_transaction_compression=ON wraps events in ZSTD-compressed payload.
+      // This is not supported - log error and skip.
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "unsupported_event")
+          .Field("event_type", "TRANSACTION_PAYLOAD_EVENT")
+          .Field("message",
+                 "binlog_transaction_compression=ON is not supported. "
+                 "Disable compression or upgrade MygramDB.")
+          .Error();
+      return {};
+
+    case MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT:
+      // binlog_row_value_options=PARTIAL_JSON causes partial updates.
+      // Not supported - log warning and skip.
+      mygram::utils::StructuredLog()
+          .Event("binlog_warning")
+          .Field("type", "unsupported_event")
+          .Field("event_type", "PARTIAL_UPDATE_ROWS_EVENT")
+          .Field("message",
+                 "PARTIAL_UPDATE_ROWS_EVENT is not supported. "
+                 "JSON column updates may be lost.")
+          .Warn();
+      return {};
+
+    case MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT:
+      // MySQL 8.4+ tagged GTIDs - handled by caller (binlog_reader) like GTID_LOG_EVENT
+      return {};
+
     default:
       // Ignore other event types
       return {};
@@ -636,6 +666,122 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
 
   // Format as "UUID:GNO"
   std::string gtid = uuid_oss.str() + ":" + std::to_string(gno);
+  return gtid;
+}
+
+std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned char* buffer, unsigned long length) {
+  if ((buffer == nullptr) || length < 46) {
+    // Minimum: 19 header + 1 commit_flag + 10 field1 + 2 field2_hdr + 16 UUID
+    //          + 1 tag_len = 49, but 46 is a reasonable lower bound check
+    return {};
+  }
+
+  // GTID_TAGGED_LOG_EVENT uses the MySQL 8.4 serialization framework.
+  // After the 19-byte common header and 1-byte commit_flag, fields are encoded as:
+  //   field_id(1B) + type_id(1B) + data
+  //
+  // type_id=1 (FIELD_TYPE_UINT): fixed 8-byte little-endian uint64
+  // type_id=2 (FIELD_TYPE_VARIABLE_LENGTH): variable-length payload
+  //
+  // Known fields:
+  //   Field 0 (COMMIT_GROUP_TICKET): type=1, uint64
+  //   Field 1 (TSID): type=2, UUID(16B) + tag_len(1B) + tag_bytes
+  //   Field 2 (SPEC): type=1, GNO as uint64
+  //   Field 3 (COMMIT_TIMESTAMP): type=2, original(7B) + immediate(7B)
+
+  const unsigned char* pos = buffer + 19;  // Skip common header
+  const unsigned char* buf_end = buffer + length;
+
+  if (pos >= buf_end) {
+    return {};
+  }
+  pos++;  // Skip commit_flag
+
+  // Parse serialization framework fields
+  const unsigned char* uuid_ptr = nullptr;
+  uint64_t gno = 0;
+  std::string tag;
+  bool found_uuid = false;
+  bool found_gno = false;
+
+  while (pos + 2 <= buf_end) {
+    uint8_t field_id = *pos++;
+    uint8_t type_id = *pos++;
+
+    if (type_id == 1) {
+      // Fixed-size uint64 field (8 bytes)
+      if (pos + 8 > buf_end) {
+        break;
+      }
+      if (field_id == 2) {
+        // SPEC field: GNO
+        gno = 0;
+        for (int i = 0; i < 8; i++) {
+          gno |= static_cast<uint64_t>(pos[i]) << (i * 8);
+        }
+        found_gno = true;
+      }
+      pos += 8;
+    } else if (type_id == 2) {
+      // Variable-length field
+      if (field_id == 1) {
+        // TSID field: UUID(16B) + tag_len(1B) + tag
+        if (pos + 17 > buf_end) {
+          break;
+        }
+        uuid_ptr = pos;
+        found_uuid = true;
+        pos += 16;  // Skip UUID
+        uint8_t tag_len = *pos++;
+        if (tag_len > 0) {
+          if (pos + tag_len > buf_end) {
+            break;
+          }
+          tag = std::string(reinterpret_cast<const char*>(pos), tag_len);
+          pos += tag_len;
+        }
+      } else if (field_id == 3) {
+        // COMMIT_TIMESTAMP: original(7B) + immediate(7B) = 14B
+        if (pos + 14 > buf_end) {
+          break;
+        }
+        pos += 14;
+      } else {
+        // Unknown variable-length field - cannot determine size, stop parsing
+        break;
+      }
+    } else {
+      // Unknown type - stop parsing
+      break;
+    }
+
+    if (found_uuid && found_gno) {
+      break;
+    }
+  }
+
+  if (!found_uuid || !found_gno || uuid_ptr == nullptr) {
+    return {};
+  }
+
+  // Format UUID as string
+  std::ostringstream uuid_oss;
+  uuid_oss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(uuid_ptr[0]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[1]) << std::setw(2) << static_cast<int>(uuid_ptr[2]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[3]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[4]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[5]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[6]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[7]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[8]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[9]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[10]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[11]) << std::setw(2) << static_cast<int>(uuid_ptr[12]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[13]) << std::setw(2) << static_cast<int>(uuid_ptr[14]) << std::setw(2)
+           << static_cast<int>(uuid_ptr[15]);
+
+  // Format as "UUID:TAG:GNO" or "UUID:GNO"
+  std::string gtid = uuid_oss.str();
+  if (!tag.empty()) {
+    gtid += ":" + tag;
+  }
+  gtid += ":" + std::to_string(gno);
   return gtid;
 }
 
@@ -996,8 +1142,20 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   // [db_name (variable length, null-terminated)]
   // [query (variable length)]
 
+  // Detect CRC32 checksum: the event header at bytes 9-12 contains the original
+  // event_length (including 4-byte CRC32). If the server didn't strip the checksum,
+  // length == header_event_length, and we need to subtract 4 bytes.
+  uint32_t header_event_length = buffer[9] | (static_cast<uint32_t>(buffer[10]) << 8) |
+                                 (static_cast<uint32_t>(buffer[11]) << 16) |
+                                 (static_cast<uint32_t>(buffer[12]) << 24);
+  size_t effective_length = length;
+  if (length == header_event_length && length > 4) {
+    // Checksum was NOT stripped by server — exclude 4-byte CRC32
+    effective_length = length - 4;
+  }
+
   const unsigned char* pos = buffer + 19;  // Skip common header
-  size_t remaining = length - 19;
+  size_t remaining = effective_length - 19;
 
   if (remaining < 13) {  // Minimum: 4+4+1+2+2
     return {};

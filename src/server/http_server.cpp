@@ -502,6 +502,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Get ngram sizes for this table
     int current_ngram_size = table_iter->second->config.ngram_size;
     int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -519,24 +520,25 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     term_infos.reserve(all_search_terms.size());
 
     for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
       std::vector<std::string> ngrams;
 
       // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
       if (current_kanji_ngram_size > 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        ngrams =
+            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
       } else if (current_ngram_size == 0) {
         ngrams = utils::GenerateHybridNgrams(normalized);
       } else {
         ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
       }
 
-      // Estimate result size by checking the smallest posting list
+      // Estimate result size by checking the smallest posting list (thread-safe)
       size_t min_size = std::numeric_limits<size_t>::max();
       for (const auto& ngram : ngrams) {
-        const auto* posting = current_index->GetPostingList(ngram);
-        if (posting != nullptr) {
-          min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+        if (posting_size > 0) {
+          min_size = std::min(min_size, static_cast<size_t>(posting_size));
         } else {
           min_size = 0;
           break;
@@ -575,12 +577,13 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     if (!query->not_terms.empty()) {
       std::vector<DocId> not_results_union;
       for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
+        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
         std::vector<std::string> ngrams;
 
         // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
         if (current_kanji_ngram_size > 0) {
-          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
+                                               current_cross_boundary);
         } else if (current_ngram_size == 0) {
           ngrams = utils::GenerateHybridNgrams(normalized);
         } else {
@@ -971,6 +974,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Get ngram sizes for this table
     int current_ngram_size = table_iter->second->config.ngram_size;
     int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
+    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
 
     // Collect all search terms (main + AND terms)
     std::vector<std::string> all_search_terms;
@@ -988,24 +992,25 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     term_infos.reserve(all_search_terms.size());
 
     for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, true, "keep", true);
+      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
       std::vector<std::string> ngrams;
 
       // Use hybrid n-grams if kanji_ngram_size is configured
       if (current_kanji_ngram_size > 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+        ngrams =
+            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
       } else if (current_ngram_size == 0) {
         ngrams = utils::GenerateHybridNgrams(normalized);
       } else {
         ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
       }
 
-      // Estimate result size by checking the smallest posting list
+      // Estimate result size by checking the smallest posting list (thread-safe)
       size_t min_size = std::numeric_limits<size_t>::max();
       for (const auto& ngram : ngrams) {
-        const auto* posting = current_index->GetPostingList(ngram);
-        if (posting != nullptr) {
-          min_size = std::min(min_size, static_cast<size_t>(posting->Size()));
+        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+        if (posting_size > 0) {
+          min_size = std::min(min_size, static_cast<size_t>(posting_size));
         } else {
           min_size = 0;
           break;
@@ -1042,11 +1047,12 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Apply NOT terms if specified
     if (!query->not_terms.empty()) {
       for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, true, "keep", true);
+        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
         std::vector<std::string> not_ngrams;
 
         if (current_kanji_ngram_size > 0) {
-          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size);
+          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
+                                                   current_cross_boundary);
         } else if (current_ngram_size == 0) {
           not_ngrams = utils::GenerateHybridNgrams(normalized);
         } else {
@@ -1435,6 +1441,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
       cache_obj["memory_human"] = utils::FormatBytes(cache_stats.current_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
+      cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
       cache_obj["invalidations_deferred"] = cache_stats.invalidations_deferred;
       cache_obj["invalidations_batches"] = cache_stats.invalidations_batches;
@@ -1664,7 +1671,8 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
 
     // Format response
     std::string metrics = ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, effective_stats,
-                                                                     table_contexts_, binlog_reader_);
+                                                                     table_contexts_, binlog_reader_,
+                                                                     cache_manager_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

@@ -540,18 +540,18 @@ gtest_discover_tests(snapshot_scheduler_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
-# SearchHandler bug fix tests (TDD)
+# SearchHandler tests
 
-add_executable(search_handler_bug_fixes_test
-  search_handler_bug_fixes_test.cpp
+add_executable(search_handler_test
+  search_handler_test.cpp
 )
 
-target_link_libraries(search_handler_bug_fixes_test
+target_link_libraries(search_handler_test
   mygramdb_server
   GTest::gtest_main
 )
 
-gtest_discover_tests(search_handler_bug_fixes_test
+gtest_discover_tests(search_handler_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_state
@@ -572,5 +572,22 @@ target_link_libraries(sync_instance_preservation_test
 gtest_discover_tests(sync_instance_preservation_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+)
+
+# ConnectionAcceptor Unix socket tests
+
+add_executable(connection_acceptor_unix_test
+  connection_acceptor_unix_test.cpp
+)
+
+target_link_libraries(connection_acceptor_unix_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(connection_acceptor_unix_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_socket
 )
 

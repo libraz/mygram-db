@@ -27,8 +27,12 @@ using mygram::utils::MakeUnexpected;
 
 MysqlReconnectionHandler::MysqlReconnectionHandler(mysql::Connection* mysql_connection,
                                                    mysql::BinlogReader* binlog_reader,
-                                                   std::atomic<bool>* reconnecting_flag)
-    : mysql_connection_(mysql_connection), binlog_reader_(binlog_reader), reconnecting_flag_(reconnecting_flag) {}
+                                                   std::atomic<bool>* reconnecting_flag,
+                                                   std::vector<std::string> required_tables)
+    : mysql_connection_(mysql_connection),
+      binlog_reader_(binlog_reader),
+      reconnecting_flag_(reconnecting_flag),
+      required_tables_(std::move(required_tables)) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
   // Set reconnecting flag to block manual REPLICATION START
@@ -68,15 +72,12 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   config.host = new_host;
   config.port = static_cast<uint16_t>(new_port);
 
-  // Close old connection
-  mysql_connection_->Close();
-  mygram::utils::StructuredLog().Event("mysql_reconnection_old_connection_closed").Info();
-
-  // Create new connection with updated config
-  *mysql_connection_ = mysql::Connection(config);
-  auto connect_result = mysql_connection_->Connect("reconnection");
+  // Create new connection in a temporary first, then swap on success (#9)
+  // This preserves the old connection if the new one fails to connect.
+  mysql::Connection new_connection(config);
+  auto connect_result = new_connection.Connect("reconnection");
   if (!connect_result) {
-    // Clear reconnecting flag on error
+    // Clear reconnecting flag on error - old connection is preserved
     if (reconnecting_flag_ != nullptr) {
       reconnecting_flag_->store(false);
     }
@@ -88,6 +89,10 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
         .Error();
     return connect_result;
   }
+
+  // New connection succeeded - replace old connection (old one is closed by move assignment)
+  *mysql_connection_ = std::move(new_connection);
+  mygram::utils::StructuredLog().Event("mysql_reconnection_old_connection_replaced").Info();
 
   // Step 4: Validate new connection
   auto validate_result = ValidateConnection(mysql_connection_);
@@ -131,7 +136,18 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
     } else {
       // Start from latest position
       mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("position", "latest").Info();
-      binlog_reader_->Start();
+      auto start_result = binlog_reader_->Start();
+      if (!start_result) {
+        // Clear reconnecting flag on error
+        if (reconnecting_flag_ != nullptr) {
+          reconnecting_flag_->store(false);
+        }
+        mygram::utils::StructuredLog()
+            .Event("mysql_reconnection_binlog_restart_failed")
+            .Field("error", start_result.error().message())
+            .Error();
+        return start_result;
+      }
     }
 
     mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_restarted").Info();
@@ -152,14 +168,13 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   return {};
 }
 
-Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) {
+Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) const {
   if (connection == nullptr) {
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Connection is null"));
   }
 
-  // Use ConnectionValidator to validate the connection
-  // Note: We don't specify required_tables or expected_uuid here since this is a new connection
-  auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, {}, std::nullopt);
+  // Validate connection including required tables check
+  auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, required_tables_, std::nullopt);
 
   if (!validation_result.valid) {
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, validation_result.error_message));
@@ -179,7 +194,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& /*n
 }
 
 Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(
-    void* /*connection*/) {  // NOLINT(readability-convert-member-functions-to-static)
+    void* /*connection*/) const {
   return MakeUnexpected(MakeError(ErrorCode::kInternalError, "MySQL support not enabled"));
 }
 

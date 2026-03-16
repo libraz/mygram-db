@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "cache/cache_entry.h"
 #include "cache/result_compressor.h"
@@ -43,7 +44,10 @@ struct CacheStatisticsSnapshot {
   // Memory statistics
   uint64_t current_entries = 0;
   uint64_t current_memory_bytes = 0;
+  uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
   uint64_t evictions = 0;
+  uint64_t ttl_expirations = 0;          ///< TTL-expired entries removed
+  uint64_t decompression_failures = 0;   ///< Entries removed due to decompression failure
 
   // Timing statistics
   double total_cache_hit_time_ms = 0.0;
@@ -99,12 +103,24 @@ struct CacheStatistics {
   std::atomic<uint64_t> current_entries{0};
   std::atomic<uint64_t> current_memory_bytes{0};
   std::atomic<uint64_t> evictions{0};
+  std::atomic<uint64_t> ttl_expirations{0};
+  std::atomic<uint64_t> decompression_failures{0};
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
   double total_cache_hit_time_ms{0.0};
   double total_cache_miss_time_ms{0.0};
   double total_query_saved_time_ms{0.0};
+};
+
+/// Reason for cache entry removal (used by RemoveEntryLocked)
+enum class RemovalReason {
+  kLRUEviction,
+  kTTLExpired,
+  kTTLExpiredAlreadyCounted,          ///< TTL expired, stats already counted by Lookup
+  kDecompressionFailure,
+  kDecompressionFailureAlreadyCounted,  ///< Decompression failed, stats already counted by Lookup
+  kTableClear
 };
 
 /**
@@ -126,8 +142,10 @@ class QueryCache {
    * @param max_memory_bytes Maximum memory usage in bytes
    * @param min_query_cost_ms Minimum query cost to cache (ms)
    * @param ttl_seconds Time-to-live for cache entries in seconds (0 = no expiration)
+   * @param compression_enabled Enable LZ4 compression for cached results (default: true)
    */
-  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0);
+  explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0,
+                      bool compression_enabled = true);
 
   /**
    * @brief Destructor - stops background LRU refresh thread
@@ -215,6 +233,8 @@ class QueryCache {
     snapshot.current_entries = stats_.current_entries.load();
     snapshot.current_memory_bytes = stats_.current_memory_bytes.load();
     snapshot.evictions = stats_.evictions.load();
+    snapshot.ttl_expirations = stats_.ttl_expirations.load();
+    snapshot.decompression_failures = stats_.decompression_failures.load();
     {
       std::lock_guard<std::mutex> lock(stats_.timing_mutex_);
       snapshot.total_cache_hit_time_ms = stats_.total_cache_hit_time_ms;
@@ -271,6 +291,11 @@ class QueryCache {
    */
   [[nodiscard]] int GetTtl() const { return ttl_seconds_; }
 
+  /**
+   * @brief Check if compression is enabled for cached results
+   */
+  [[nodiscard]] bool IsCompressionEnabled() const { return compression_enabled_; }
+
  private:
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
@@ -281,7 +306,8 @@ class QueryCache {
   // Configuration
   size_t max_memory_bytes_;
   double min_query_cost_ms_;
-  int ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
+  int ttl_seconds_;              ///< Time-to-live in seconds (0 = no expiration)
+  bool compression_enabled_;     ///< Enable LZ4 compression for cached results
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;
@@ -295,6 +321,13 @@ class QueryCache {
   // Eviction callback
   EvictionCallback eviction_callback_;
 
+  // Keys pending cleanup (collected by Lookup, processed by RefreshLRU)
+  // Using unordered_set for deduplication (same key may expire on multiple Lookups)
+  static constexpr size_t kMaxPendingKeys = 10000;      ///< Max pending keys per category
+  mutable std::mutex expired_keys_mutex_;
+  std::unordered_set<CacheKey> pending_expired_keys_;          ///< TTL-expired keys
+  std::unordered_set<CacheKey> pending_decompression_keys_;    ///< Decompression-failed keys
+
   // Background LRU refresh thread
   std::atomic<bool> should_stop_{false};
   std::thread lru_refresh_thread_;
@@ -307,7 +340,17 @@ class QueryCache {
   bool EvictForSpace(size_t required_bytes);
 
   /**
+   * @brief Remove a single cache entry while holding exclusive lock
+   * @param iter Iterator to entry in cache_map_
+   * @param reason Why the entry is being removed
+   * @pre Caller must hold exclusive lock on mutex_
+   */
+  void RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason);
+
+  /**
    * @brief Move key to front of LRU list (most recently used)
+   * @param key Cache key to move
+   * @pre Caller must hold exclusive lock on mutex_
    */
   void Touch(const CacheKey& key);
 

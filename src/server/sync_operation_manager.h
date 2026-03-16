@@ -147,6 +147,9 @@ class SyncOperationManager {
   mysql::BinlogReader* binlog_reader_;
 
   // State tracking
+  // Lock ordering (acquire in this order to prevent deadlock):
+  //   sync_mutex_ → syncing_tables_mutex_ → loaders_mutex_
+  // sync_mutex_ also protects sync_states_ and sync_threads_
   std::unordered_map<std::string, SyncState> sync_states_;
   mutable std::mutex sync_mutex_;
 

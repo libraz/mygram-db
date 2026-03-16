@@ -15,8 +15,8 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config,
     : enabled_(cache_config.enabled), ttl_seconds_(cache_config.ttl_seconds) {
   if (enabled_) {
     // Create query cache with TTL support
-    query_cache_ =
-        std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms, ttl_seconds_);
+    query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
+                                                ttl_seconds_, cache_config.compression_enabled);
 
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
@@ -41,6 +41,16 @@ CacheManager::~CacheManager() {
   if (invalidation_queue_) {
     invalidation_queue_->Stop();
   }
+  // Clear eviction callback before destroying invalidation_mgr_ to prevent
+  // use-after-free: QueryCache's LRU thread may still fire eviction callbacks
+  // that reference invalidation_mgr_ during destruction.
+  if (query_cache_) {
+    query_cache_->SetEvictionCallback(nullptr);
+  }
+  // Explicitly destroy query_cache_ first to join its LRU background thread
+  // before invalidation_mgr_ is destroyed (member destruction order is reverse
+  // declaration order, which would destroy invalidation_mgr_ first).
+  query_cache_.reset();
 }
 
 std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
@@ -112,7 +122,8 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 }
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
-                          const std::set<std::string>& ngrams, double query_cost_ms) {
+                          const std::set<std::string>& ngrams, double query_cost_ms, int ngram_size,
+                          int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;
   }
@@ -134,8 +145,11 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   CacheMetadata metadata;
   metadata.key = key;
   metadata.table = query.table;
-  metadata.ngrams = ngrams;
+  metadata.ngrams.assign(ngrams.begin(), ngrams.end());
   metadata.filters = query.filters;
+  metadata.ngram_size = ngram_size;
+  metadata.kanji_ngram_size = kanji_ngram_size;
+  metadata.cross_boundary_ngrams = cross_boundary_ngrams;
   metadata.created_at = std::chrono::steady_clock::now();
   metadata.last_accessed = metadata.created_at;
   metadata.access_count = 0;
@@ -151,13 +165,14 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   return inserted;
 }
 
-void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text) {
+void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+                              bool filter_columns_changed) {
   if (!enabled_ || !invalidation_queue_) {
     return;
   }
 
   // Enqueue for asynchronous invalidation
-  invalidation_queue_->Enqueue(table_name, old_text, new_text);
+  invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
 }
 
 void CacheManager::Clear() {
@@ -191,7 +206,14 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
     return CacheStatisticsSnapshot{};
   }
 
-  return query_cache_->GetStatistics();
+  auto snapshot = query_cache_->GetStatistics();
+
+  // Add InvalidationManager memory usage
+  if (invalidation_mgr_) {
+    snapshot.invalidation_index_memory_bytes = invalidation_mgr_->MemoryUsage();
+  }
+
+  return snapshot;
 }
 
 bool CacheManager::Enable() {

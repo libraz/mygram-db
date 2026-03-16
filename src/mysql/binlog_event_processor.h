@@ -14,9 +14,13 @@
 #include "mysql/binlog_reader.h"
 #include "storage/document_store.h"
 
-// Forward declaration
+// Forward declarations
 namespace mygramdb::server {
 class ServerStats;
+}
+
+namespace mygramdb::cache {
+class CacheManager;
 }
 
 namespace mygramdb::mysql {
@@ -40,7 +44,7 @@ class BinlogEventProcessor {
    */
   static bool ProcessEvent(const BinlogEvent& event, index::Index& index, storage::DocumentStore& doc_store,
                            const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
-                           server::ServerStats* stats = nullptr);
+                           server::ServerStats* stats = nullptr, cache::CacheManager* cache_manager = nullptr);
 };
 
 }  // namespace mygramdb::mysql

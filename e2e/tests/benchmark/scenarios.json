@@ -1,0 +1,62 @@
+{
+  "scenarios": [
+    {
+      "name": "single_term_small",
+      "data_count": 1000,
+      "queries": ["test", "search", "data"],
+      "query_type": "search",
+      "limit": 100
+    },
+    {
+      "name": "single_term_medium",
+      "data_count": 10000,
+      "queries": ["test", "search", "data", "content", "article"],
+      "query_type": "search",
+      "limit": 100
+    },
+    {
+      "name": "single_term_large",
+      "data_count": 100000,
+      "queries": ["test", "search", "data"],
+      "query_type": "search",
+      "limit": 100
+    },
+    {
+      "name": "with_filter",
+      "data_count": 10000,
+      "queries": ["test", "search", "data"],
+      "query_type": "search",
+      "filters": {"category": "tech"},
+      "limit": 100
+    },
+    {
+      "name": "with_pagination",
+      "data_count": 10000,
+      "queries": ["test", "search"],
+      "query_type": "search",
+      "sort": "id ASC",
+      "limit": 100,
+      "offset": 50
+    },
+    {
+      "name": "count_only",
+      "data_count": 10000,
+      "queries": ["test", "search", "data"],
+      "query_type": "count"
+    },
+    {
+      "name": "japanese_search",
+      "data_count": 10000,
+      "queries": ["東京", "日本", "技術"],
+      "query_type": "search",
+      "mixed_content": true,
+      "limit": 100
+    },
+    {
+      "name": "connection_cost",
+      "data_count": 0,
+      "queries": ["INFO"],
+      "query_type": "connection_cost"
+    }
+  ]
+}

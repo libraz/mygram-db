@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 // macOS-specific: Define SO_NOSIGPIPE if not already defined (include order issues)
@@ -38,6 +39,10 @@ namespace {
  * This helper centralizes the required reinterpret_cast to a single location.
  */
 inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
+  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
+
+inline struct sockaddr* ToSockaddrUn(struct sockaddr_un* addr) {
   return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 }  // namespace
@@ -71,6 +76,118 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
         .Error();
     return MakeUnexpected(error);
   }
+
+  if (!config_.unix_socket_path.empty()) {
+    // === Unix Domain Socket mode ===
+    unix_socket_path_ = config_.unix_socket_path;
+
+    // Validate path length
+    struct sockaddr_un addr_un{};
+    if (config_.unix_socket_path.size() >= sizeof(addr_un.sun_path)) {
+      auto error = MakeError(ErrorCode::kNetworkUnixSocketPathTooLong,
+                             "Unix socket path too long: " + config_.unix_socket_path);
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "unix_socket_path_validate")
+          .Field("path", config_.unix_socket_path)
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
+    }
+
+    // Stale socket detection
+    if (access(config_.unix_socket_path.c_str(), F_OK) == 0) {
+      int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (probe_fd >= 0) {
+        struct sockaddr_un probe_addr{};
+        probe_addr.sun_family = AF_UNIX;
+        std::strncpy(probe_addr.sun_path, config_.unix_socket_path.c_str(),
+                     sizeof(probe_addr.sun_path) - 1);
+        if (connect(probe_fd, ToSockaddrUn(&probe_addr), sizeof(probe_addr)) == 0) {
+          close(probe_fd);
+          auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
+                                 "Another server is already listening on: " + config_.unix_socket_path);
+          mygram::utils::StructuredLog()
+              .Event("server_error")
+              .Field("operation", "unix_socket_stale_check")
+              .Field("path", config_.unix_socket_path)
+              .Field("error", error.to_string())
+              .Error();
+          return MakeUnexpected(error);
+        }
+        close(probe_fd);
+        // Stale socket file - remove it
+        unlink(config_.unix_socket_path.c_str());
+        mygram::utils::StructuredLog()
+            .Event("unix_socket_stale_removed")
+            .Field("path", config_.unix_socket_path)
+            .Info();
+      }
+    }
+
+    // Create socket
+    server_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server_fd_ < 0) {
+      auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed,
+                             "Failed to create unix socket: " + std::string(strerror(errno)));
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "unix_socket_create")
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
+    }
+
+    // Bind
+    struct sockaddr_un bind_addr{};
+    bind_addr.sun_family = AF_UNIX;
+    std::strncpy(bind_addr.sun_path, config_.unix_socket_path.c_str(),
+                 sizeof(bind_addr.sun_path) - 1);
+
+    if (bind(server_fd_, ToSockaddrUn(&bind_addr), sizeof(bind_addr)) < 0) {
+      close(server_fd_);
+      server_fd_ = -1;
+      auto error = MakeError(ErrorCode::kNetworkBindFailed,
+                             "Failed to bind unix socket " + config_.unix_socket_path +
+                                 ": " + std::string(strerror(errno)));
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "unix_socket_bind")
+          .Field("path", config_.unix_socket_path)
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
+    }
+
+    // Listen
+    if (listen(server_fd_, config_.max_connections) < 0) {
+      close(server_fd_);
+      server_fd_ = -1;
+      unlink(config_.unix_socket_path.c_str());
+      auto error = MakeError(ErrorCode::kNetworkListenFailed,
+                             "Failed to listen on unix socket: " + std::string(strerror(errno)));
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "unix_socket_listen")
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
+    }
+
+    actual_port_ = 0;
+    should_stop_ = false;
+    running_ = true;
+
+    accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
+
+    mygram::utils::StructuredLog()
+        .Event("connection_acceptor_listening")
+        .Field("unix_socket", config_.unix_socket_path)
+        .Debug();
+    return {};
+  }
+
+  // === TCP mode (existing code below unchanged) ===
 
   // Create socket
   server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -196,6 +313,16 @@ void ConnectionAcceptor::Stop() {
     accept_thread_->join();
   }
 
+  // Remove unix socket file
+  if (!unix_socket_path_.empty()) {
+    unlink(unix_socket_path_.c_str());
+    mygram::utils::StructuredLog()
+        .Event("unix_socket_removed")
+        .Field("path", unix_socket_path_)
+        .Debug();
+    unix_socket_path_.clear();
+  }
+
   // Close all active connections
   {
     std::lock_guard<std::mutex> lock(fds_mutex_);
@@ -215,17 +342,31 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
 }
 
 void ConnectionAcceptor::AcceptLoop() {
-  mygram::utils::StructuredLog()
-      .Event("accept_loop_started")
-      .Field("host", config_.host)
-      .Field("port", static_cast<uint64_t>(actual_port_))
-      .Debug();
+  if (IsUnixSocket()) {
+    mygram::utils::StructuredLog()
+        .Event("accept_loop_started")
+        .Field("unix_socket", unix_socket_path_)
+        .Debug();
+  } else {
+    mygram::utils::StructuredLog()
+        .Event("accept_loop_started")
+        .Field("host", config_.host)
+        .Field("port", static_cast<uint64_t>(actual_port_))
+        .Debug();
+  }
 
   while (!should_stop_) {
-    struct sockaddr_in client_addr = {};
-    socklen_t client_len = sizeof(client_addr);
+    int client_fd = -1;
+    if (IsUnixSocket()) {
+      struct sockaddr_un client_addr_un{};
+      socklen_t client_len_un = sizeof(client_addr_un);
+      client_fd = accept(server_fd_, ToSockaddrUn(&client_addr_un), &client_len_un);
+    } else {
+      struct sockaddr_in client_addr{};
+      socklen_t client_len = sizeof(client_addr);
+      client_fd = accept(server_fd_, ToSockaddr(&client_addr), &client_len);
+    }
 
-    int client_fd = accept(server_fd_, ToSockaddr(&client_addr), &client_len);
     if (client_fd < 0) {
       if (!should_stop_) {
         mygram::utils::StructuredLog()
@@ -254,29 +395,36 @@ void ConnectionAcceptor::AcceptLoop() {
       }
     }
 
-    // Convert client IP to string for ACL checks
-    std::string client_ip;
-    // C-style array required by POSIX inet_ntop API
-    // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-    char ip_buffer[INET_ADDRSTRLEN] = {};
-    // Array-to-pointer decay required by POSIX inet_ntop API
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-      // Array-to-pointer decay required by std::string::assign
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-      client_ip.assign(ip_buffer);
-    } else {
-      mygram::utils::StructuredLog().Event("server_warning").Field("type", "client_address_parse_failed").Warn();
-    }
+    if (!IsUnixSocket()) {
+      // Convert client IP to string for ACL checks
+      std::string client_ip;
+      struct sockaddr_in peer_addr{};
+      socklen_t peer_len = sizeof(peer_addr);
+      if (getpeername(client_fd, ToSockaddr(&peer_addr), &peer_len) == 0) {
+        // C-style array required by POSIX inet_ntop API
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+        char ip_buffer[INET_ADDRSTRLEN] = {};
+        // Array-to-pointer decay required by POSIX inet_ntop API
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+        if (inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+          // Array-to-pointer decay required by std::string::assign
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          client_ip.assign(ip_buffer);
+        }
+      }
+      if (client_ip.empty()) {
+        mygram::utils::StructuredLog().Event("server_warning").Field("type", "client_address_parse_failed").Warn();
+      }
 
-    if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "connection_rejected_acl")
-          .Field("client_ip", client_ip.empty() ? "<unknown>" : client_ip)
-          .Warn();
-      close(client_fd);
-      continue;
+      if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "connection_rejected_acl")
+            .Field("client_ip", client_ip.empty() ? "<unknown>" : client_ip)
+            .Warn();
+        close(client_fd);
+        continue;
+      }
     }
 
     // Set receive timeout to avoid blocking indefinitely

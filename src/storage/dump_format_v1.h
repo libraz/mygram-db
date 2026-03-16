@@ -48,6 +48,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -67,6 +68,28 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
+
+/// @name Field-type-specific maximum string lengths for dump deserialization
+/// These limits prevent OOM attacks from malicious dump files that specify
+/// excessively large string lengths for individual fields.
+/// @{
+
+/// Maximum length for identifier fields (table names, column names, filter names/types/ops)
+constexpr uint32_t kMaxIdentifierLength = 1024;  // 1KB
+
+/// Maximum length for short config values (host, bind address, mode, format, CIDR, etc.)
+constexpr uint32_t kMaxConfigValueLength = 4 * 1024;  // 4KB
+
+/// Maximum length for path fields (dump directory, GTID strings)
+constexpr uint32_t kMaxPathLength = 8 * 1024;  // 8KB
+
+/// Maximum length for text content fields (document content in table data section)
+constexpr uint32_t kMaxTextContentLength = 16 * 1024 * 1024;  // 16MB
+
+/// Maximum length for general/fallback string fields
+constexpr uint32_t kMaxGeneralStringLength = 1024 * 1024;  // 1MB
+
+/// @}
 
 /**
  * @brief Version 1 dump header

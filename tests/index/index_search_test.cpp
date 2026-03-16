@@ -425,3 +425,169 @@ TEST(IndexTest, EmptySearch) {
   results = index.SearchOr({});
   EXPECT_EQ(results.size(), 0);
 }
+
+// =============================================================================
+// Duplicate n-grams produce correct results
+// =============================================================================
+
+TEST(IndexSearchTest, DuplicateNgramsProduceCorrectResults) {
+  Index index(2);
+  index.AddDocument(1, "hello");
+  // Same n-grams duplicated should still produce correct results
+  auto results = index.SearchAnd({"he", "he", "el"});
+  EXPECT_EQ(results.size(), 1u);
+  EXPECT_EQ(results[0], 1u);
+}
+
+// =============================================================================
+// SearchAnd optimization (Bug #16)
+// =============================================================================
+
+/**
+ * @test Bug #16: SearchAnd with limit should not materialize all documents
+ *
+ * This test verifies that SearchAnd returns correct results when using
+ * the optimized path (limit > 0, reverse = true, multiple terms).
+ * Note: For small posting lists, SearchAnd returns all results and limit/reverse
+ * is applied by the caller. This test verifies the intersection is correct.
+ */
+TEST(IndexTest, SearchAndWithLimitCorrectResults) {
+  Index index(2);  // Bigram index
+
+  // Add documents with overlapping terms
+  // "hello" has bigrams: "he", "el", "ll", "lo"
+  // "help" has bigrams: "he", "el", "lp"
+  // "yellow" has bigrams: "ye", "el", "ll", "lo", "ow"
+  index.AddDocument(100, "hello");
+  index.AddDocument(200, "help");
+  index.AddDocument(300, "yellow");
+  index.AddDocument(400, "hello world");  // Contains "hello"
+  index.AddDocument(500, "shell");        // "sh", "he", "el", "ll"
+
+  // Search for documents containing both "he" and "el" bigrams
+  // Documents with both: 100(hello), 200(help), 400(hello world), 500(shell)
+  // "yellow" doesn't have "he" but has "el"
+  std::vector<std::string> terms = {"he", "el"};
+
+  // For small lists, SearchAnd returns all matching docs (limit/reverse applied by caller)
+  auto results = index.SearchAnd(terms, 0, false);  // No limit, ascending
+
+  // Should return all 4 documents that have both "he" and "el"
+  ASSERT_EQ(results.size(), 4);
+  // Results should be in ascending order (default)
+  EXPECT_EQ(results[0], 100) << "First result should be DocId 100 (hello)";
+  EXPECT_EQ(results[1], 200) << "Second result should be DocId 200 (help)";
+  EXPECT_EQ(results[2], 400) << "Third result should be DocId 400 (hello world)";
+  EXPECT_EQ(results[3], 500) << "Fourth result should be DocId 500 (shell)";
+}
+
+/**
+ * @test Bug #16: SearchAnd with single term should use GetTopN optimization
+ */
+TEST(IndexTest, SearchAndSingleTermGetTopN) {
+  Index index(1);  // Unigram index
+
+  // Add many documents
+  for (DocId i = 1; i <= 1000; ++i) {
+    index.AddDocument(i, "a");
+  }
+
+  // Search for single term with limit (should use GetTopN directly)
+  std::vector<std::string> terms = {"a"};
+  auto results = index.SearchAnd(terms, 5, true);
+
+  // Should return top 5 by DocId descending: 1000, 999, 998, 997, 996
+  ASSERT_EQ(results.size(), 5);
+  EXPECT_EQ(results[0], 1000);
+  EXPECT_EQ(results[1], 999);
+  EXPECT_EQ(results[2], 998);
+  EXPECT_EQ(results[3], 997);
+  EXPECT_EQ(results[4], 996);
+}
+
+/**
+ * @test Bug #16: SearchAnd with multiple terms returns correct intersection
+ *
+ * Note: For small posting lists (< 10000), SearchAnd returns results in
+ * ascending DocId order. The caller applies limit/reverse as needed.
+ */
+TEST(IndexTest, SearchAndMultipleTermsIntersection) {
+  Index index(1);  // Unigram index
+
+  // Create documents with different term combinations
+  // Doc 1: a, b
+  // Doc 2: b, c
+  // Doc 3: a, b, c
+  // Doc 4: a, c
+  index.AddDocument(1, "ab");
+  index.AddDocument(2, "bc");
+  index.AddDocument(3, "abc");
+  index.AddDocument(4, "ac");
+
+  // Search for documents containing both "a" AND "b"
+  // Should return: 1, 3 (in ascending order for small lists)
+  std::vector<std::string> terms = {"a", "b"};
+  auto results = index.SearchAnd(terms, 0, false);  // No limit, ascending
+
+  ASSERT_EQ(results.size(), 2);
+  EXPECT_EQ(results[0], 1) << "First should be DocId 1 (ab)";
+  EXPECT_EQ(results[1], 3) << "Second should be DocId 3 (abc)";
+
+  // Search for a, b, c (only doc 3 has all three)
+  std::vector<std::string> terms_abc = {"a", "b", "c"};
+  auto results_abc = index.SearchAnd(terms_abc, 0, false);
+
+  ASSERT_EQ(results_abc.size(), 1);
+  EXPECT_EQ(results_abc[0], 3) << "Only DocId 3 has all three terms";
+}
+
+/**
+ * @test Bug #16: SearchAnd should handle non-existent term gracefully
+ */
+TEST(IndexTest, SearchAndNonExistentTermEmpty) {
+  Index index(1);
+
+  index.AddDocument(1, "abc");
+  index.AddDocument(2, "def");
+
+  // Search for term that doesn't exist
+  std::vector<std::string> terms = {"a", "x"};  // "x" doesn't exist
+  auto results = index.SearchAnd(terms, 10, true);
+
+  EXPECT_TRUE(results.empty()) << "Should return empty when any term is missing";
+}
+
+/**
+ * @test Bug #16: SearchAnd with large posting lists should not allocate excessively
+ *
+ * This test creates a scenario where the streaming optimization would be triggered
+ * (high selectivity, large posting lists) and verifies correct behavior.
+ */
+TEST(IndexTest, SearchAndLargePostingListsTopN) {
+  Index index(1);  // Unigram index
+
+  // Create a large number of documents
+  // Most documents have both "a" and "b" (high selectivity)
+  const DocId kNumDocs = 15000;  // Above kMinSizeThreshold (10000)
+
+  for (DocId i = 1; i <= kNumDocs; ++i) {
+    index.AddDocument(i, "ab");  // All docs have "a" and "b"
+  }
+
+  // Add a few documents with only "a" to make lists slightly different
+  for (DocId i = kNumDocs + 1; i <= kNumDocs + 100; ++i) {
+    index.AddDocument(i, "a");
+  }
+
+  std::vector<std::string> terms = {"a", "b"};
+
+  // Request only top 10 results (should not need to materialize all 15000)
+  auto results = index.SearchAnd(terms, 10, true);
+
+  // Should return top 10 documents that have both a and b
+  // The highest DocIds with both are: kNumDocs, kNumDocs-1, ..., kNumDocs-9
+  ASSERT_EQ(results.size(), 10);
+  for (size_t i = 0; i < 10; ++i) {
+    EXPECT_EQ(results[i], kNumDocs - static_cast<DocId>(i)) << "Result[" << i << "] should be " << (kNumDocs - i);
+  }
+}

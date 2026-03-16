@@ -155,6 +155,38 @@ gtest_discover_tests(atomic_write_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# Dump string length limits tests (OOM prevention)
+add_executable(dump_string_limits_test
+  dump_string_limits_test.cpp
+)
+
+target_link_libraries(dump_string_limits_test
+  mygramdb_storage  # Includes mygramdb_config transitively
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(dump_string_limits_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
+)
+
+# FilterIndex tests
+add_executable(filter_index_test
+  filter_index_test.cpp
+)
+
+target_link_libraries(filter_index_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(filter_index_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # Dump save/load integration test (MySQL only)
 # NOTE: This is a manual integration test that requires a running MySQL instance.
 # It is not automatically run by CTest because it depends on external MySQL setup.

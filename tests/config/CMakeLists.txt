@@ -117,6 +117,23 @@ gtest_discover_tests(runtime_variable_manager_test
     RESOURCE_LOCK runtime_variable_manager_lock
 )
 
+# Bind address validation test
+add_executable(bind_address_validation_test
+  bind_address_validation_test.cpp
+)
+
+target_link_libraries(bind_address_validation_test PRIVATE
+  mygramdb_config
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
+gtest_discover_tests(bind_address_validation_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK config_file_io
+)
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

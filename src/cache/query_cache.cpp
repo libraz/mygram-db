@@ -7,11 +7,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 
 namespace mygramdb::cache {
 
-QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds)
-    : max_memory_bytes_(max_memory_bytes), min_query_cost_ms_(min_query_cost_ms), ttl_seconds_(ttl_seconds) {
+QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds, bool compression_enabled)
+    : max_memory_bytes_(max_memory_bytes),
+      min_query_cost_ms_(min_query_cost_ms),
+      ttl_seconds_(ttl_seconds),
+      compression_enabled_(compression_enabled) {
   // Start background LRU refresh thread
   lru_refresh_thread_ = std::thread(&QueryCache::RefreshLRUWorker, this);
 }
@@ -71,9 +75,17 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
     if (age >= ttl_seconds_) {
-      // Entry expired
+      // Entry expired - enqueue for cleanup by RefreshLRU
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        if (pending_expired_keys_.size() < kMaxPendingKeys) {
+          pending_expired_keys_.insert(key);
+        }
+      }
+
       stats_.cache_misses++;
       stats_.cache_misses_not_found++;  // Treat expired as not found
+      stats_.ttl_expirations++;         // Count TTL expiration at detection time
 
       // Record miss latency
       auto end_time = std::chrono::high_resolution_clock::now();
@@ -87,19 +99,43 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     }
   }
 
-  // Cache hit
-  stats_.cache_hits++;
-
-  // Decompress result and copy query_cost_ms before releasing lock
+  // Cache hit - copy data while holding lock, defer stats update until after decompression
+  // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
+  std::vector<uint8_t> compressed_copy = entry.compressed;
+  const size_t original_size = entry.original_size;
+  const double query_cost_ms = entry.query_cost_ms;
+
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+
+  // Release shared lock before decompression
+  lock.unlock();
+
+  // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(entry.compressed, entry.original_size);
+    if (compression_enabled_) {
+      result = ResultCompressor::Decompress(compressed_copy, original_size);
+    } else {
+      // No compression - interpret raw bytes as DocId array
+      result.resize(original_size);
+      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    }
   } catch (const std::exception& e) {
-    // Decompression failed, treat as miss
-    stats_.cache_misses++;
+    // Decompression failed - enqueue for cleanup and treat as miss
+    {
+      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+        pending_decompression_keys_.insert(key);
+      }
+    }
 
-    // Record miss latency
+    stats_.cache_misses++;
+    stats_.decompression_failures++;  // Count failure at detection time
+
     auto end_time = std::chrono::high_resolution_clock::now();
     double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     {
@@ -110,13 +146,8 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     return std::nullopt;
   }
 
-  // Copy query_cost_ms before releasing lock to avoid use-after-free
-  const double query_cost_ms = entry.query_cost_ms;
-
-  // Lock-free access tracking (no lock upgrade needed)
-  // Atomic increment of access count and set dirty flag for background LRU refresh
-  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+  // Decompression succeeded - now count as hit
+  stats_.cache_hits++;
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -177,9 +208,17 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
     if (age >= ttl_seconds_) {
-      // Entry expired
+      // Entry expired - enqueue for cleanup by RefreshLRU
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        if (pending_expired_keys_.size() < kMaxPendingKeys) {
+          pending_expired_keys_.insert(key);
+        }
+      }
+
       stats_.cache_misses++;
       stats_.cache_misses_not_found++;  // Treat expired as not found
+      stats_.ttl_expirations++;         // Count TTL expiration at detection time
 
       // Record miss latency
       auto end_time = std::chrono::high_resolution_clock::now();
@@ -193,19 +232,44 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     }
   }
 
-  // Cache hit
-  stats_.cache_hits++;
-
-  // Decompress result and copy metadata before releasing lock
+  // Cache hit - copy data while holding lock, defer stats update until after decompression
+  // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
+  std::vector<uint8_t> compressed_copy = entry.compressed;
+  const size_t original_size = entry.original_size;
+  metadata.query_cost_ms = entry.query_cost_ms;
+  metadata.created_at = entry.metadata.created_at;
+
+  // Lock-free access tracking (no lock upgrade needed)
+  // Atomic increment of access count and set dirty flag for background LRU refresh
+  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+
+  // Release shared lock before decompression
+  lock.unlock();
+
+  // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   try {
-    result = ResultCompressor::Decompress(entry.compressed, entry.original_size);
+    if (compression_enabled_) {
+      result = ResultCompressor::Decompress(compressed_copy, original_size);
+    } else {
+      // No compression - interpret raw bytes as DocId array
+      result.resize(original_size);
+      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    }
   } catch (const std::exception& e) {
-    // Decompression failed, treat as miss
-    stats_.cache_misses++;
+    // Decompression failed - enqueue for cleanup and treat as miss
+    {
+      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+        pending_decompression_keys_.insert(key);
+      }
+    }
 
-    // Record miss latency
+    stats_.cache_misses++;
+    stats_.decompression_failures++;  // Count failure at detection time
+
     auto end_time = std::chrono::high_resolution_clock::now();
     double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     {
@@ -216,14 +280,8 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     return std::nullopt;
   }
 
-  // Copy metadata before releasing lock to avoid use-after-free
-  metadata.query_cost_ms = entry.query_cost_ms;
-  metadata.created_at = entry.metadata.created_at;
-
-  // Lock-free access tracking (no lock upgrade needed)
-  // Atomic increment of access count and set dirty flag for background LRU refresh
-  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+  // Decompression succeeded - now count as hit
+  stats_.cache_hits++;
 
   // Record hit latency and saved time
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -244,10 +302,16 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     return false;
   }
 
-  // Compress result
+  // Compress result (if enabled)
   std::vector<uint8_t> compressed;
   try {
-    compressed = ResultCompressor::Compress(result);
+    if (compression_enabled_) {
+      compressed = ResultCompressor::Compress(result);
+    } else {
+      // Store raw bytes without compression
+      compressed.resize(result.size() * sizeof(DocId));
+      std::memcpy(compressed.data(), result.data(), compressed.size());
+    }
   } catch (const std::exception& e) {
     return false;
   }
@@ -306,6 +370,9 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 }
 
 bool QueryCache::MarkInvalidated(const CacheKey& key) {
+  // Uses shared_lock intentionally for performance: invalidation can be high-frequency
+  // and only updates atomic fields (invalidated flag + atomic counter).
+  // Snapshot consistency with non-atomic stats fields is not required here.
   std::shared_lock lock(mutex_);
 
   auto iter = cache_map_.find(key);
@@ -369,21 +436,9 @@ void QueryCache::ClearTable(const std::string& table) {
   for (const auto& key : to_erase) {
     auto iter = cache_map_.find(key);
     if (iter != cache_map_.end()) {
-      // Notify eviction callback BEFORE deletion
-      // This allows the callback to access entry data if needed
-      if (eviction_callback_) {
-        eviction_callback_(key);
-      }
-
-      // Remove entry (after callback has been notified)
-      lru_list_.erase(iter->second.second);
-      const size_t entry_memory = iter->second.first.MemoryUsage();
-      total_memory_bytes_ -= entry_memory;
-      stats_.current_entries--;
-      cache_map_.erase(iter);
+      RemoveEntryLocked(iter, RemovalReason::kTableClear);
     }
   }
-
   stats_.current_memory_bytes = total_memory_bytes_;
 }
 
@@ -411,27 +466,55 @@ bool QueryCache::EvictForSpace(size_t required_bytes) {
       continue;
     }
 
-    // Notify eviction callback BEFORE deletion
-    // This allows the callback to access entry data if needed
-    if (eviction_callback_) {
-      eviction_callback_(lru_key);
-    }
-
-    // Remove entry (after callback has been notified)
-    const size_t entry_memory = iter->second.first.MemoryUsage();
-    lru_list_.pop_back();
-    cache_map_.erase(iter);
-
-    // Update memory tracking
-    total_memory_bytes_ -= entry_memory;
-    stats_.current_entries--;
-    stats_.evictions++;
+    RemoveEntryLocked(iter, RemovalReason::kLRUEviction);
   }
 
   stats_.current_memory_bytes = total_memory_bytes_;
 
   // Check if enough space was freed
   return total_memory_bytes_ + required_bytes <= max_memory_bytes_;
+}
+
+void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason) {
+  const CacheKey& key = iter->first;
+
+  // Notify eviction callback before deletion (metadata cleanup)
+  if (eviction_callback_) {
+    eviction_callback_(key);
+  }
+
+  // Remove from LRU list
+  lru_list_.erase(iter->second.second);
+
+  // Update memory tracking
+  const size_t entry_memory = iter->second.first.MemoryUsage();
+  total_memory_bytes_ -= entry_memory;
+  stats_.current_entries--;
+
+  // Update reason-specific stats
+  switch (reason) {
+    case RemovalReason::kLRUEviction:
+      stats_.evictions++;
+      break;
+    case RemovalReason::kTTLExpired:
+      stats_.ttl_expirations++;
+      break;
+    case RemovalReason::kTTLExpiredAlreadyCounted:
+      // Stats already incremented by Lookup() at detection time
+      break;
+    case RemovalReason::kDecompressionFailure:
+      stats_.decompression_failures++;
+      break;
+    case RemovalReason::kDecompressionFailureAlreadyCounted:
+      // Stats already incremented by Lookup() at detection time
+      break;
+    case RemovalReason::kTableClear:
+      // No additional counter (existing behavior)
+      break;
+  }
+
+  // Remove from cache map
+  cache_map_.erase(iter);
 }
 
 void QueryCache::Touch(const CacheKey& key) {
@@ -461,18 +544,70 @@ void QueryCache::RefreshLRUWorker() {
 }
 
 void QueryCache::RefreshLRU() {
+  // Drain pending keys from Lookup() before acquiring main lock
+  std::unordered_set<CacheKey> lookup_expired_keys;
+  std::unordered_set<CacheKey> decomp_failed_keys;
+  {
+    std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+    lookup_expired_keys.swap(pending_expired_keys_);
+    decomp_failed_keys.swap(pending_decompression_keys_);
+  }
+
   std::unique_lock lock(mutex_);
 
   auto now = std::chrono::steady_clock::now();
 
+  // Track keys detected as expired during Lookup (stats already counted)
+  // Scan-detected expired keys will be collected separately
+  std::unordered_set<CacheKey> scan_expired_keys;
+
   // Update LRU for entries that were accessed since last refresh
   for (auto& [key, entry_pair] : cache_map_) {
+    // Check TTL expiration
+    if (ttl_seconds_ > 0) {
+      auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
+      if (age >= ttl_seconds_) {
+        // Only add to scan set if not already detected by Lookup
+        if (lookup_expired_keys.find(key) == lookup_expired_keys.end()) {
+          scan_expired_keys.insert(key);
+        }
+        continue;  // Skip LRU update for expired entries
+      }
+    }
+
     if (entry_pair.first.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
       // Entry was accessed, move to front of LRU list
       Touch(key);
       entry_pair.first.metadata.last_accessed = now;
     }
   }
+
+  // Remove Lookup-detected expired entries (stats already counted by Lookup)
+  for (const auto& key : lookup_expired_keys) {
+    auto iter = cache_map_.find(key);
+    if (iter != cache_map_.end()) {
+      RemoveEntryLocked(iter, RemovalReason::kTTLExpiredAlreadyCounted);
+    }
+  }
+
+  // Remove scan-detected expired entries (stats not yet counted)
+  for (const auto& key : scan_expired_keys) {
+    auto iter = cache_map_.find(key);
+    if (iter != cache_map_.end()) {
+      RemoveEntryLocked(iter, RemovalReason::kTTLExpired);
+    }
+  }
+
+  // Remove decompression-failed entries (stats already counted by Lookup)
+  for (const auto& key : decomp_failed_keys) {
+    auto iter = cache_map_.find(key);
+    if (iter != cache_map_.end()) {
+      RemoveEntryLocked(iter, RemovalReason::kDecompressionFailureAlreadyCounted);
+    }
+  }
+
+  // Always sync stats with actual memory tracking
+  stats_.current_memory_bytes = total_memory_bytes_;
 }
 
 }  // namespace mygramdb::cache

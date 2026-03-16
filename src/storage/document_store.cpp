@@ -10,7 +10,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+
+#include "storage/filter_index.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -81,6 +85,10 @@ inline void ReadBinary(std::istream& input_stream, T& data) {
 
 }  // namespace
 
+DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) {}
+
+DocumentStore::~DocumentStore() = default;
+
 Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
                                                   const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
@@ -119,8 +127,9 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
   doc_id_to_pk_[doc_id] = primary_key_str;
   pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
 
-  // Store filters
+  // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
   if (!filters.empty()) {
+    filter_index_->AddDocument(doc_id, filters);
     doc_filters_[doc_id] = filters;
   }
 
@@ -175,6 +184,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     // Store filters
     if (!doc.filters.empty()) {
       doc_filters_[doc_id] = doc.filters;
+      filter_index_->AddDocument(doc_id, doc.filters);
     }
 
     doc_ids.push_back(doc_id);
@@ -202,8 +212,16 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::s
     return false;
   }
 
+  // Get old filters for bitmap update
+  auto old_filter_it = doc_filters_.find(doc_id);
+  std::unordered_map<std::string, FilterValue> old_filters;
+  if (old_filter_it != doc_filters_.end()) {
+    old_filters = old_filter_it->second;
+  }
+
   // Update filters
   doc_filters_[doc_id] = filters;
+  filter_index_->UpdateDocument(doc_id, old_filters, filters);
 
   mygram::utils::StructuredLog()
       .Event("document_updated")
@@ -225,6 +243,12 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
 
   // Copy the primary key before erasing (avoid use-after-free)
   std::string primary_key = pk_it->second;
+
+  // Remove from filter index before erasing filter data
+  auto filter_it = doc_filters_.find(doc_id);
+  if (filter_it != doc_filters_.end()) {
+    filter_index_->RemoveDocument(doc_id, filter_it->second);
+  }
 
   // Remove mappings
   pk_to_doc_id_.erase(primary_key);
@@ -337,6 +361,35 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
   return results;
 }
 
+std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
+                                                                             const std::string& column) const {
+  std::shared_lock lock(mutex_);
+
+  std::vector<std::optional<FilterValue>> results;
+  results.reserve(doc_ids.size());
+
+  for (const auto& doc_id : doc_ids) {
+    auto doc_it = doc_filters_.find(doc_id);
+    if (doc_it == doc_filters_.end()) {
+      results.emplace_back(std::nullopt);
+      continue;
+    }
+    auto filter_it = doc_it->second.find(column);
+    if (filter_it == doc_it->second.end()) {
+      results.emplace_back(std::nullopt);
+    } else {
+      results.emplace_back(filter_it->second);
+    }
+  }
+
+  return results;
+}
+
+std::shared_ptr<const FilterIndex> DocumentStore::GetFilterIndex() const {
+  std::shared_lock lock(mutex_);
+  return filter_index_;
+}
+
 std::vector<DocId> DocumentStore::GetAllDocIds() const {
   std::shared_lock lock(mutex_);
   std::vector<DocId> results;
@@ -404,6 +457,9 @@ size_t DocumentStore::MemoryUsage() const {
     }
   }
 
+  // Filter index memory
+  total += filter_index_->MemoryUsage();
+
   return total;
 }
 
@@ -414,6 +470,7 @@ void DocumentStore::Clear() {
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
+  filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
@@ -441,11 +498,12 @@ void DocumentStore::Compact() {
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                                 const std::string& replication_gtid) const {
+  std::string temp_filepath = filepath + ".tmp";
   try {
-    std::ofstream ofs(filepath, std::ios::binary);
+    std::ofstream ofs(temp_filepath, std::ios::binary);
     if (!ofs) {
       return MakeUnexpected(
-          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open file for writing", filepath));
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open temp file for writing", temp_filepath));
     }
 
     // File format:
@@ -536,20 +594,57 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
 
     ofs.close();
 
-    // Ensure data is flushed to disk to prevent data loss on OS crash
+    // Ensure temp file data is flushed to disk BEFORE rename
 #ifndef _WIN32
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int file_desc = open(filepath.c_str(), O_RDONLY);
+    int file_desc = open(temp_filepath.c_str(), O_RDONLY);
     if (file_desc >= 0) {
       if (fsync(file_desc) != 0) {
         mygram::utils::StructuredLog()
             .Event("storage_warning")
-            .Field("operation", "fsync")
-            .Field("filepath", filepath)
+            .Field("operation", "fsync_temp_file")
+            .Field("filepath", temp_filepath)
             .Field("errno", static_cast<int64_t>(errno))
             .Warn();
       }
       close(file_desc);
+    }
+#endif
+
+    // Atomic rename: temp file -> final path
+    std::error_code rename_error;
+    std::filesystem::rename(temp_filepath, filepath, rename_error);
+    if (rename_error) {
+      mygram::utils::StructuredLog()
+          .Event("storage_error")
+          .Field("operation", "atomic_rename")
+          .Field("filepath", filepath)
+          .Field("error", rename_error.message())
+          .Error();
+      std::filesystem::remove(temp_filepath);
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                    "Failed to rename temp file: " + rename_error.message(), filepath));
+    }
+
+    // Sync the directory to ensure the rename is durable
+#ifndef _WIN32
+    {
+      auto parent_dir = std::filesystem::path(filepath).parent_path();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+      int dir_file_desc =
+          open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
+      if (dir_file_desc >= 0) {
+        if (fsync(dir_file_desc) != 0) {
+          mygram::utils::StructuredLog()
+              .Event("storage_warning")
+              .Field("operation", "fsync_directory")
+              .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
+              .Field("errno", static_cast<int64_t>(errno))
+              .Warn();
+        }
+        close(dir_file_desc);
+      }
     }
 #endif
 
@@ -561,6 +656,9 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
         .Info();
     return {};
   } catch (const std::exception& e) {
+    // Clean up temp file on exception
+    std::error_code ec;
+    std::filesystem::remove(temp_filepath, ec);
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
                                     std::string("Exception while saving document store: ") + e.what(), filepath));
   }
@@ -817,12 +915,19 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
     ifs.close();
 
+    // Rebuild filter index from loaded data
+    auto new_filter_index = std::make_shared<FilterIndex>();
+    for (const auto& [doc_id, filters] : new_doc_filters) {
+      new_filter_index->AddDocument(doc_id, filters);
+    }
+
     // Swap the loaded data in with minimal lock time
     {
       std::unique_lock lock(mutex_);
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }
 
@@ -1195,12 +1300,19 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
           MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error while loading document store"));
     }
 
+    // Rebuild filter index from loaded data
+    auto new_filter_index = std::make_shared<FilterIndex>();
+    for (const auto& [doc_id, filters] : new_doc_filters) {
+      new_filter_index->AddDocument(doc_id, filters);
+    }
+
     // Swap the loaded data in with minimal lock time
     {
       std::unique_lock lock(mutex_);
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }
 

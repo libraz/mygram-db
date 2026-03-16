@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -1585,5 +1586,95 @@ TEST_F(DumpHandlerAsyncTest, ConcurrentAsyncSaveBlocked) {
   // Clean up
   dump_progress_->JoinWorker();
 }
+
+#ifdef USE_MYSQL
+// ===========================================================================
+// P2: DUMP SAVE stops replication before capturing GTID
+// ===========================================================================
+
+/**
+ * @brief Mock BinlogReader that tracks call order for DUMP SAVE verification
+ */
+class MockBinlogReaderForDumpTest : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    call_log_.push_back("Start");
+    running_ = true;
+    return {};
+  }
+  void Stop() override {
+    call_log_.push_back("Stop");
+    running_ = false;
+  }
+  bool IsRunning() const override { return running_; }
+  std::string GetCurrentGTID() const override {
+    call_log_.push_back("GetCurrentGTID");
+    return gtid_;
+  }
+  void SetCurrentGTID(const std::string& gtid) override { gtid_ = gtid; }
+  size_t GetQueueSize() const override { return 0; }
+  uint64_t GetProcessedEvents() const override { return 0; }
+  const std::string& GetLastError() const override {
+    static const std::string empty;
+    return empty;
+  }
+
+  void SetRunningForTest(bool running) { running_ = running; }
+  void SetGtidForTest(const std::string& gtid) { gtid_ = gtid; }
+  const std::vector<std::string>& GetCallLog() const { return call_log_; }
+
+ private:
+  bool running_ = false;
+  std::string gtid_ = "uuid:100";
+  mutable std::vector<std::string> call_log_;
+};
+
+/**
+ * @brief P2: Verify DumpSaveWorker stops replication before capturing GTID
+ *
+ * Previously, GetCurrentGTID() was called before Stop(), creating a race
+ * condition where the worker thread could process events between GTID
+ * capture and Stop(), making the captured GTID stale.
+ */
+TEST_F(DumpHandlerTest, DumpSaveStopsReplicationBeforeCapturingGtid) {
+  // Add test documents
+  auto doc_id_result = table_ctx_->doc_store->AddDocument("doc1", {});
+  ASSERT_TRUE(doc_id_result.has_value());
+  table_ctx_->index->AddDocument(*doc_id_result, "test document");
+
+  // Create and configure mock binlog reader
+  auto mock_reader = std::make_unique<MockBinlogReaderForDumpTest>();
+  mock_reader->SetRunningForTest(true);
+  mock_reader->SetGtidForTest("uuid:100");
+
+  // Set binlog reader in handler context
+  handler_ctx_->binlog_reader = mock_reader.get();
+
+  // Create handler and execute DUMP SAVE
+  DumpHandler handler(*handler_ctx_);
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  ConnectionContext conn_ctx;
+  handler.Handle(query, conn_ctx);
+
+  // Verify call order: Stop must come before the GTID capture call.
+  // The handler calls GetCurrentGTID() twice: once for validation (before Stop)
+  // and once for capture (after Stop). We verify the capture call follows Stop.
+  const auto& log = mock_reader->GetCallLog();
+
+  auto stop_it = std::find(log.begin(), log.end(), "Stop");
+  ASSERT_NE(stop_it, log.end()) << "Stop() should have been called";
+
+  // Find GetCurrentGTID() call AFTER Stop - this is the capture call
+  auto gtid_after_stop = std::find(stop_it, log.end(), "GetCurrentGTID");
+  ASSERT_NE(gtid_after_stop, log.end())
+      << "GetCurrentGTID() should have been called after Stop()";
+  EXPECT_LT(stop_it, gtid_after_stop)
+      << "Stop() must be called before the GTID capture call";
+
+  // Cleanup
+  handler_ctx_->binlog_reader = nullptr;
+}
+#endif  // USE_MYSQL
 
 }  // namespace mygramdb::server

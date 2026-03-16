@@ -24,11 +24,15 @@
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
 
-// Forward declaration
+// Forward declarations
 namespace mygramdb::server {
 struct TableContext;
 class ServerStats;
 }  // namespace mygramdb::server
+
+namespace mygramdb::cache {
+class CacheManager;
+}  // namespace mygramdb::cache
 
 namespace mygramdb::mysql {
 
@@ -268,13 +272,24 @@ class BinlogReader final : public IBinlogReader {
 
   /**
    * @brief Set server statistics tracker
-   * @param stats Server statistics tracker pointer
+   * @param stats Server statistics tracker pointer (non-owning).
+   *        Caller must ensure the pointed-to object outlives this BinlogReader,
+   *        or call Stop() before destroying it.
    */
   void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
 
+  /**
+   * @brief Set cache manager for invalidation during binlog processing
+   * @param cache_manager Cache manager pointer (non-owning, nullable).
+   *        Caller must ensure the pointed-to object outlives this BinlogReader,
+   *        or call Stop() before destroying it.
+   */
+  void SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
+
  private:
-  Connection& connection_;  // Reference to main connection (used for metadata queries, externally owned)
-  std::unique_ptr<Connection> binlog_connection_;  // Dedicated connection for binlog reading (internally owned)
+  Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
+  std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
+  std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
 
   // Multi-table support
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
@@ -290,6 +305,7 @@ class BinlogReader final : public IBinlogReader {
 
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
+  std::mutex stop_mutex_;  ///< Serializes Stop() calls to prevent concurrent join races
 
   // Event queue (using unique_ptr to avoid copying large BinlogEvent objects)
   std::queue<std::unique_ptr<BinlogEvent>> event_queue_;
@@ -304,8 +320,14 @@ class BinlogReader final : public IBinlogReader {
   // Statistics
   std::atomic<uint64_t> processed_events_{0};
   std::string current_gtid_;
+  std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
-  server::ServerStats* server_stats_ = nullptr;  // Optional server statistics tracker
+  server::ServerStats* server_stats_ = nullptr;   // Optional server statistics tracker
+  cache::CacheManager* cache_manager_ = nullptr;  // Optional cache manager for invalidation
+
+  // Debug log counters (instance-scoped, reset on Start())
+  std::atomic<int> no_data_log_count_{0};
+  std::atomic<int> skip_log_count_{0};
 
   std::string last_error_;
 
@@ -329,6 +351,19 @@ class BinlogReader final : public IBinlogReader {
    * @param packet_gtid_set Buffer to write encoded GTID data
    */
   static void FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set);
+
+  /**
+   * @brief Convert a single GTID "uuid:N" to range "uuid:1-N"
+   *
+   * COM_BINLOG_DUMP_GTID semantics: "send events NOT in this set".
+   * A single GTID "uuid:101" means interval [101,102), so the server
+   * sends transactions 1-100 and 102+, causing duplicate delivery.
+   * Converting to "uuid:1-101" excludes all transactions 1 through 101.
+   *
+   * @param gtid GTID string to convert
+   * @return Converted GTID string (unchanged if already a range or multi-UUID)
+   */
+  static std::string ConvertSingleGtidToRange(const std::string& gtid);
 
   /**
    * @brief Reader thread function
@@ -368,6 +403,12 @@ class BinlogReader final : public IBinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
+
+  /**
+   * @brief Refresh executed GTID set from server
+   * @return true if successful
+   */
+  bool RefreshExecutedGtidSet();
 
   /**
    * @brief Validate binlog connection after (re)connect

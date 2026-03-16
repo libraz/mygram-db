@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -22,6 +23,8 @@
 #include "utils/hash_utils.h"
 
 namespace mygramdb::storage {
+
+class FilterIndex;  // Forward declaration (defined in filter_index.h)
 
 using mygram::utils::Error;
 using mygram::utils::Expected;
@@ -96,8 +99,8 @@ struct Document {
  */
 class DocumentStore {
  public:
-  DocumentStore() = default;
-  ~DocumentStore() = default;
+  DocumentStore();
+  ~DocumentStore();
 
   // Non-copyable and non-movable (due to std::shared_mutex)
   DocumentStore(const DocumentStore&) = delete;
@@ -232,6 +235,19 @@ class DocumentStore {
   }
 
   /**
+   * @brief Get filter values for multiple DocIDs in a single lock acquisition
+   *
+   * @param doc_ids Vector of document IDs
+   * @param column Filter column name
+   * @return Vector of filter values (nullopt if doc_id or column not found)
+   */
+  [[nodiscard]] std::vector<std::optional<FilterValue>> GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
+                                                                              const std::string& column) const;
+
+  /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
+  [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
+
+  /**
    * @brief Get memory usage estimate
    */
   [[nodiscard]] size_t MemoryUsage() const;
@@ -303,6 +319,12 @@ class DocumentStore {
 
   // DocID -> Filter values
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
+
+  // Bitmap-based filter index for fast EQ/NE filter evaluation
+  // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,
+  // writers replace the pointer under unique_lock. Old index stays alive until
+  // all reader snapshots are released.
+  std::shared_ptr<FilterIndex> filter_index_;
 
   // Mutex for thread-safe access (shared for reads, exclusive for writes)
   mutable std::shared_mutex mutex_;

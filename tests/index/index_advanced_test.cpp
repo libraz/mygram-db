@@ -5,7 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <fstream>
 #include <unordered_set>
+#include <vector>
 
 #include "index/index.h"
 #include "utils/string_utils.h"
@@ -348,4 +351,136 @@ TEST(IndexTest, StreamSerializationNgramConfig) {
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
+}
+
+// ============================================================================
+// CRC32 Checksum Tests (V2 format)
+// ============================================================================
+
+/**
+ * @brief Test corrupted serialized data is detected by CRC32 checksum
+ */
+TEST(IndexSerializationTest, CorruptedDataDetected) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+  index.AddDocument(2, "test document");
+
+  // Serialize to file
+  std::string filepath = "/tmp/test_index_corruption.bin";
+  ASSERT_TRUE(index.SaveToFile(filepath));
+
+  // Read file, corrupt 1 byte in the middle, write back
+  std::ifstream ifs(filepath, std::ios::binary);
+  std::vector<uint8_t> data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  ifs.close();
+
+  ASSERT_GT(data.size(), 10U);
+  data[data.size() / 2] ^= 0xFF;  // Flip bits in middle byte
+
+  std::ofstream ofs(filepath, std::ios::binary);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+  ofs.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+  ofs.close();
+
+  // Load should fail due to checksum mismatch
+  Index index2(2, 1);
+  EXPECT_FALSE(index2.LoadFromFile(filepath));
+
+  // Cleanup
+  std::remove(filepath.c_str());
+}
+
+/**
+ * @brief Test valid data passes CRC32 checksum verification
+ */
+TEST(IndexSerializationTest, ValidDataPassesChecksum) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+  index.AddDocument(2, "test document");
+  index.AddDocument(3, "another test");
+
+  std::string filepath = "/tmp/test_index_valid.bin";
+  ASSERT_TRUE(index.SaveToFile(filepath));
+
+  Index index2(2, 1);
+  EXPECT_TRUE(index2.LoadFromFile(filepath));
+
+  // Verify data integrity
+  auto results = index2.SearchAnd({"he", "ll"});
+  EXPECT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0], 1U);
+
+  // Cleanup
+  std::remove(filepath.c_str());
+}
+
+/**
+ * @brief Test stream-based serialization with CRC32 checksum
+ */
+TEST(IndexSerializationTest, StreamRoundtripWithChecksum) {
+  Index index1(2, 1);
+  index1.AddDocument(1, "hello world");
+  index1.AddDocument(2, "test document");
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index1.SaveToStream(stream));
+
+  // Deserialize from stringstream
+  Index index2(2, 1);
+  ASSERT_TRUE(index2.LoadFromStream(stream));
+
+  // Verify term count and search results match
+  EXPECT_EQ(index1.TermCount(), index2.TermCount());
+
+  auto results1 = index1.SearchAnd({"he", "ll"});
+  auto results2 = index2.SearchAnd({"he", "ll"});
+  EXPECT_EQ(results1, results2);
+}
+
+/**
+ * @brief Test corrupted stream data is detected by CRC32 checksum
+ */
+TEST(IndexSerializationTest, CorruptedStreamDetected) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+  index.AddDocument(2, "test document");
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index.SaveToStream(stream));
+
+  // Corrupt a byte in the middle of the stream data
+  std::string data = stream.str();
+  ASSERT_GT(data.size(), 10U);
+  data[data.size() / 2] ^= 0xFF;
+
+  std::istringstream corrupted_stream(data, std::ios::binary);
+
+  // Load should fail due to checksum mismatch
+  Index index2(2, 1);
+  EXPECT_FALSE(index2.LoadFromStream(corrupted_stream));
+}
+
+/**
+ * @brief Test truncated data is detected
+ */
+TEST(IndexSerializationTest, TruncatedDataDetected) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+
+  // Serialize to stringstream
+  std::stringstream stream;
+  ASSERT_TRUE(index.SaveToStream(stream));
+
+  // Truncate the data (remove last 10 bytes including CRC32)
+  std::string data = stream.str();
+  ASSERT_GT(data.size(), 10U);
+  data.resize(data.size() - 10);
+
+  std::istringstream truncated_stream(data, std::ios::binary);
+
+  // Load should fail
+  Index index2(2, 1);
+  EXPECT_FALSE(index2.LoadFromStream(truncated_stream));
 }

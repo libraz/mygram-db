@@ -11,6 +11,7 @@
 
 #include <algorithm>
 
+#include "cache/cache_manager.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/tcp_server.h"  // For ServerStats
 #include "utils/string_utils.h"
@@ -20,7 +21,8 @@ namespace mygramdb::mysql {
 
 bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
-                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats) {
+                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats,
+                                        cache::CacheManager* cache_manager) {
   try {
     // Debug: log doc_store instance address and document count to verify correct instance is used
     // This helps diagnose BUG where replication uses different instance than SYNC populated
@@ -43,6 +45,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
     switch (event.type) {
       case BinlogEventType::INSERT: {
+        if (exists) {
+          // Document already exists (replay scenario) — skip to maintain idempotency
+          mygram::utils::StructuredLog()
+              .Event("binlog_insert")
+              .Field("primary_key", event.primary_key)
+              .Field("action", "skipped_duplicate")
+              .Debug();
+          if (stats != nullptr) {
+            stats->IncrementReplInsertSkipped();
+          }
+          break;
+        }
         if (matches_required) {
           // Condition satisfied -> add to index
           auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
@@ -58,7 +72,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           }
           storage::DocId doc_id = *doc_id_result;
 
-          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -87,6 +101,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           if (stats != nullptr) {
             stats->IncrementReplInsertApplied();
           }
+          if (cache_manager != nullptr) {
+            cache_manager->Invalidate(event.table_name, "", event.text);
+          }
         } else {
           // Condition not satisfied -> do not index
           mygram::utils::StructuredLog()
@@ -106,9 +123,11 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Transitioned out of required conditions -> DELETE from index
           storage::DocId doc_id = doc_id_opt.value();
 
-          // Extract text to remove from index
-          if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          // Extract text to remove from index — use before-image (old_text) since
+          // that's what was indexed, falling back to after-image (text) if unavailable
+          const std::string& removal_text = event.old_text.empty() ? event.text : event.old_text;
+          if (!removal_text.empty()) {
+            std::string normalized = utils::NormalizeText(removal_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {
@@ -124,7 +143,15 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             }
           }
 
-          doc_store.RemoveDocument(doc_id);
+          if (!doc_store.RemoveDocument(doc_id)) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "document_store_remove_not_found")
+                .Field("event_type", "update_remove")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Warn();
+          }
 
           mygram::utils::StructuredLog()
               .Event("binlog_update_removed")
@@ -133,6 +160,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateRemoved();
+          }
+          if (cache_manager != nullptr) {
+            const std::string& old_text_for_cache = event.old_text.empty() ? event.text : event.old_text;
+            cache_manager->Invalidate(event.table_name, old_text_for_cache, "");
           }
 
         } else if (!exists && matches_required) {
@@ -150,7 +181,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           }
           storage::DocId doc_id = *doc_id_result;
 
-          std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -178,10 +209,20 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           if (stats != nullptr) {
             stats->IncrementReplUpdateAdded();
           }
+          if (cache_manager != nullptr) {
+            cache_manager->Invalidate(event.table_name, "", event.text);
+          }
 
         } else if (exists && matches_required) {
           // Still matches conditions -> UPDATE
           storage::DocId doc_id = doc_id_opt.value();
+
+          // Save old filters for rollback in case index update fails
+          auto old_doc = doc_store.GetDocument(doc_id);
+          std::unordered_map<std::string, storage::FilterValue> old_filters;
+          if (old_doc.has_value()) {
+            old_filters = std::move(old_doc->filters);
+          }
 
           // Update document store filters (check return value for race condition)
           if (!doc_store.UpdateDocument(doc_id, event.filters)) {
@@ -192,7 +233,8 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
                 .Field("primary_key", event.primary_key)
                 .Field("doc_id", static_cast<uint64_t>(doc_id))
                 .Warn();
-            // Continue with index update since the document may have been removed concurrently
+            // Document was concurrently removed - skip index update
+            break;
           }
 
           // Update full-text index if text has changed
@@ -201,28 +243,32 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             try {
               // Use Index::UpdateDocument for atomic update when both texts are available
               if (!event.old_text.empty() && !event.text.empty()) {
-                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
-                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.UpdateDocument(doc_id, old_normalized, new_normalized);
                 text_changed = true;
               } else if (!event.old_text.empty()) {
                 // Only old text available - remove from index
-                std::string old_normalized = utils::NormalizeText(event.old_text, true, "keep", true);
+                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.RemoveDocument(doc_id, old_normalized);
                 text_changed = true;
               } else if (!event.text.empty()) {
                 // Only new text available - add to index
-                std::string new_normalized = utils::NormalizeText(event.text, true, "keep", true);
+                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.AddDocument(doc_id, new_normalized);
                 text_changed = true;
               }
             } catch (const std::exception& e) {
+              // Rollback doc_store filters to maintain consistency
+              doc_store.UpdateDocument(doc_id, old_filters);
               mygram::utils::StructuredLog()
                   .Event("mysql_binlog_error")
                   .Field("type", "index_update_failed")
                   .Field("event_type", "update")
                   .Field("primary_key", event.primary_key)
                   .Field("doc_id", static_cast<uint64_t>(doc_id))
+                  .Field("filter_rollback", "rolled_back")
+                  .Field("index_state", "partially_updated")
                   .Field("error", e.what())
                   .Error();
               return false;
@@ -237,6 +283,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Debug();
           if (stats != nullptr) {
             stats->IncrementReplUpdateModified();
+          }
+          if (cache_manager != nullptr) {
+            bool filter_changed = (old_filters != event.filters);
+            cache_manager->Invalidate(event.table_name, event.old_text, event.text, filter_changed);
           }
 
         } else {
@@ -261,7 +311,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // For deletion, we extract text from binlog DELETE event (before image)
           // The rows_parser provides the deleted row data including text column
           if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, true, "keep", true);
+            std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {
@@ -278,7 +328,15 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           }
 
           // Remove from document store
-          doc_store.RemoveDocument(doc_id);
+          if (!doc_store.RemoveDocument(doc_id)) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_warning")
+                .Field("type", "document_store_remove_not_found")
+                .Field("event_type", "delete")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Warn();
+          }
 
           mygram::utils::StructuredLog()
               .Event("binlog_delete")
@@ -287,6 +345,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Debug();
           if (stats != nullptr) {
             stats->IncrementReplDeleteApplied();
+          }
+          if (cache_manager != nullptr) {
+            cache_manager->Invalidate(event.table_name, event.text, "");
           }
         } else {
           // Not in index, nothing to do
@@ -318,24 +379,14 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Warn();
           index.Clear();
           doc_store.Clear();
+          if (cache_manager != nullptr) {
+            cache_manager->ClearTable(event.table_name);
+          }
           mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
-        } else if (query_upper.find("DROP") != std::string::npos) {
-          // DROP TABLE - clear all data and warn
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "drop_table_detected")
-              .Field("table_name", event.table_name)
-              .Field("query", query)
-              .Error();
-          index.Clear();
-          doc_store.Clear();
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "table_dropped")
-              .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
-              .Error();
         } else if (query_upper.find("ALTER") != std::string::npos) {
           // ALTER TABLE - log warning about potential schema mismatch
+          // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
+          // as a DROP TABLE event
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_warning")
               .Field("type", "alter_table_detected")
@@ -349,6 +400,24 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Warn();
           // Note: We cannot automatically detect what changed (column type, name, etc.)
           // Users should manually rebuild if text column type or PK changed
+        } else if (query_upper.find("DROP") != std::string::npos) {
+          // DROP TABLE - clear all data and warn
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "drop_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Error();
+          index.Clear();
+          doc_store.Clear();
+          if (cache_manager != nullptr) {
+            cache_manager->ClearTable(event.table_name);
+          }
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "table_dropped")
+              .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
+              .Error();
         }
         if (stats != nullptr) {
           stats->IncrementReplDdlExecuted();

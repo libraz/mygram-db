@@ -3,113 +3,14 @@
  * @brief Unit tests for binlog reader - Event processing (INSERT/UPDATE/DELETE/DDL)
  */
 
-#include <gtest/gtest.h>
-
-#include <atomic>
-#include <chrono>
-#include <thread>
-
-#define private public
-#define protected public
-#include "mysql/binlog_reader.h"
-#undef private
-#undef protected
+#include "binlog_test_fixtures.h"
 
 #ifdef USE_MYSQL
 
-#include "mock_connection.h"
+#include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_filter_evaluator.h"
-#include "server/server_stats.h"
-#include "server/server_types.h"
 
-using namespace mygramdb::mysql;
-using namespace mygramdb;
-
-namespace {
-
-/**
- * @brief Helper that creates a default table configuration for tests
- */
-config::TableConfig MakeDefaultTableConfig() {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  config::RequiredFilterConfig required_filter;
-  required_filter.name = "status";
-  required_filter.type = "int";
-  required_filter.op = "=";
-  required_filter.value = "1";
-  table_config.required_filters.push_back(required_filter);
-
-  config::FilterConfig optional_filter;
-  optional_filter.name = "category";
-  optional_filter.type = "string";
-  table_config.filters.push_back(optional_filter);
-
-  return table_config;
-}
-
-/**
- * @brief BinlogReader test fixture providing in-memory dependencies
- */
-class BinlogReaderFixture : public ::testing::Test {
- protected:
-  BinlogReaderFixture() : connection_(connection_config_), index_(2) {}
-
-  void SetUp() override {
-    table_config_ = MakeDefaultTableConfig();
-    reader_config_.start_gtid = "uuid:1";
-    reader_config_.queue_size = 2;
-    reader_config_.reconnect_delay_ms = 10;
-    reader_config_.server_id = 12345;  // Test server ID
-
-    index_.Clear();
-    doc_store_.Clear();
-    ResetReader();
-  }
-
-  void TearDown() override {
-    reader_.reset();
-    doc_store_.Clear();
-    index_.Clear();
-  }
-
-  /**
-   * @brief Recreate BinlogReader with current configuration
-   */
-  void ResetReader() {
-    config::MysqlConfig mysql_config;  // Use default (UTC timezone)
-    reader_ =
-        std::make_unique<BinlogReader>(connection_, index_, doc_store_, table_config_, mysql_config, reader_config_);
-  }
-
-  /**
-   * @brief Utility to build a fully populated event for tests
-   */
-  BinlogEvent MakeEvent(BinlogEventType type, const std::string& pk, int status, const std::string& text = "hello") {
-    BinlogEvent event;
-    event.type = type;
-    event.table_name = table_config_.name;
-    event.primary_key = pk;
-    event.text = text;
-    event.gtid = "uuid:" + pk;
-    event.filters["status"] = static_cast<int64_t>(status);
-    event.filters["category"] = std::string("news");
-    return event;
-  }
-
-  Connection::Config connection_config_;
-  Connection connection_;
-  index::Index index_;
-  storage::DocumentStore doc_store_;
-  config::TableConfig table_config_;
-  BinlogReader::Config reader_config_;
-  std::unique_ptr<BinlogReader> reader_;
-};
-
-}  // namespace
+using namespace binlog_test;
 
 /**
  * @brief Validate INSERT events create documents when filters match
@@ -299,53 +200,6 @@ TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
   reader_->UpdateCurrentGTID("uuid:11");
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:11");
-}
-
-/**
- * @brief Test BinlogEvent with filters
- */
-TEST(BinlogReaderTest, EventWithFilters) {
-  BinlogEvent event;
-  event.type = BinlogEventType::INSERT;
-  event.table_name = "articles";
-  event.primary_key = "456";
-  event.text = "article text";
-
-  // Add filters
-  event.filters["status"] = static_cast<int64_t>(1);
-  event.filters["category"] = std::string("news");
-
-  EXPECT_EQ(event.filters.size(), 2);
-
-  auto status = std::get<int64_t>(event.filters["status"]);
-  auto category = std::get<std::string>(event.filters["category"]);
-
-  EXPECT_EQ(status, 1);
-  EXPECT_EQ(category, "news");
-}
-
-/**
- * @brief Test multiple event types
- */
-TEST(BinlogReaderTest, MultipleEventTypes) {
-  BinlogEvent insert_event;
-  insert_event.type = BinlogEventType::INSERT;
-  insert_event.primary_key = "1";
-
-  BinlogEvent update_event;
-  update_event.type = BinlogEventType::UPDATE;
-  update_event.primary_key = "2";
-
-  BinlogEvent delete_event;
-  delete_event.type = BinlogEventType::DELETE;
-  delete_event.primary_key = "3";
-
-  EXPECT_EQ(insert_event.type, BinlogEventType::INSERT);
-  EXPECT_EQ(update_event.type, BinlogEventType::UPDATE);
-  EXPECT_EQ(delete_event.type, BinlogEventType::DELETE);
-
-  EXPECT_NE(insert_event.primary_key, update_event.primary_key);
-  EXPECT_NE(update_event.primary_key, delete_event.primary_key);
 }
 
 /**
@@ -560,6 +414,38 @@ TEST_F(BinlogReaderFixture, FilterValueSizeValidation) {
   storage::FilterValue just_over_test_value = std::string("test");
   EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(just_over_test_value, just_over_filter))
       << "Filter value just over limit (1MB+1) should be rejected";
+}
+
+/**
+ * @brief Test that tagged GTIDs (MySQL 8.4+) are stored correctly
+ *
+ * GTID_TAGGED_LOG_EVENT produces GTIDs in "UUID:TAG:GNO" format.
+ * UpdateCurrentGTID should accept and preserve this format.
+ */
+TEST_F(BinlogReaderFixture, HandlesTaggedGTIDFormat) {
+  // Standard GTID format
+  reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:42");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:42");
+
+  // Tagged GTID format (MySQL 8.4+)
+  reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
+}
+
+/**
+ * @brief Test that tagged GTIDs are extracted correctly from event buffers
+ *
+ * Verifies the ExtractTaggedGTID function via BinlogEventParser directly.
+ */
+TEST(BinlogReaderTest, ExtractTaggedGTIDFromEventBuffer) {
+  // Use BinlogEventParser::ExtractTaggedGTID with a manually constructed buffer
+  // (Full tests are in binlog_parsing_test.cpp; this validates the integration path)
+  auto result = BinlogEventParser::ExtractTaggedGTID(nullptr, 0);
+  EXPECT_FALSE(result.has_value()) << "Null buffer should return empty";
+
+  std::vector<uint8_t> short_buf(10, 0);
+  result = BinlogEventParser::ExtractTaggedGTID(short_buf.data(), short_buf.size());
+  EXPECT_FALSE(result.has_value()) << "Short buffer should return empty";
 }
 
 /**

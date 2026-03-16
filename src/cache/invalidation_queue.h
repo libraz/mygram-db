@@ -90,7 +90,8 @@ class InvalidationQueue {
    * @param old_text Previous text content
    * @param new_text New text content
    */
-  void Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text);
+  void Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+               bool filter_columns_changed = false);
 
   /**
    * @brief Start background worker thread for batch processing
@@ -109,7 +110,7 @@ class InvalidationQueue {
 
   /**
    * @brief Set batch size threshold
-   * @param batch_size Process after N unique (table, ngram) pairs
+   * @param batch_size Process after N unique (table, cache_key) pairs
    */
   void SetBatchSize(size_t batch_size) { batch_size_ = batch_size; }
 
@@ -118,6 +119,12 @@ class InvalidationQueue {
    * @param max_delay_ms Max delay in milliseconds
    */
   void SetMaxDelay(int max_delay_ms) { max_delay_ = std::chrono::milliseconds(max_delay_ms); }
+
+  /**
+   * @brief Set maximum queue size for backpressure
+   * @param max_queue_size Max pending entries before dropping new ones
+   */
+  void SetMaxQueueSize(size_t max_queue_size) { max_queue_size_ = max_queue_size; }
 
   /**
    * @brief Get pending invalidation count
@@ -130,23 +137,30 @@ class InvalidationQueue {
   const std::unordered_map<std::string, server::TableContext*>&
       table_contexts_;  ///< Reference to table contexts for per-table ngram settings
 
-  // Pending invalidations: (table, ngram) -> first seen timestamp
+  // Pending invalidations: (table, cache_key_hex) -> first seen timestamp
   // Using map to automatically deduplicate
-  std::unordered_map<std::string,  // Composite key: "table:ngram"
+  std::unordered_map<std::string,  // Composite key: "table:cache_key_hex"
                      std::chrono::steady_clock::time_point>
-      pending_ngrams_;
+      pending_cache_keys_;
 
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> stopped_{false};  ///< Set by Stop(), prevents post-shutdown enqueues
 
   // Configuration defaults (match CacheConfig::invalidation defaults)
   static constexpr size_t kDefaultBatchSize = 1000;
   static constexpr int kDefaultMaxDelayMs = 100;
+  static constexpr size_t kDefaultMaxQueueSize = 100000;  ///< Max pending entries before dropping
 
-  size_t batch_size_ = kDefaultBatchSize;                    ///< Process after N ngrams
+  size_t batch_size_ = kDefaultBatchSize;                    ///< Process after N cache keys
   std::chrono::milliseconds max_delay_{kDefaultMaxDelayMs};  ///< Max delay before processing
+
+  size_t max_queue_size_ = kDefaultMaxQueueSize;  ///< Max pending entries (backpressure)
+
+  /// Oldest timestamp in pending_cache_keys_ (avoids O(n) scan in WorkerLoop)
+  std::chrono::steady_clock::time_point oldest_timestamp_{std::chrono::steady_clock::time_point::max()};
 
   /**
    * @brief Worker thread main loop

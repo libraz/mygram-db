@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <sstream>
 #include <thread>
 
@@ -29,7 +30,10 @@ class DocumentStoreSerializationTest : public ::testing::Test {
     test_file_ = ss.str();
   }
 
-  void TearDown() override { std::remove((test_file_ + ".docs").c_str()); }
+  void TearDown() override {
+    std::remove((test_file_ + ".docs").c_str());
+    std::remove((test_file_ + ".docs.tmp").c_str());
+  }
 
   std::string test_file_;
 };
@@ -633,4 +637,109 @@ TEST_F(DocumentStoreSerializationTest, CorruptedStreamTruncatedDocCount) {
 
   DocumentStore store;
   EXPECT_FALSE(store.LoadFromStream(stream));
+}
+
+/**
+ * @brief Test that SaveToFile uses atomic write pattern (no .tmp file remains)
+ */
+TEST_F(DocumentStoreSerializationTest, SaveToFileAtomicWritePattern) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["id"] = static_cast<int32_t>(42);
+  filters["name"] = std::string("atomic_test");
+
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
+
+  std::string filepath = test_file_ + ".docs";
+  ASSERT_TRUE(store1.SaveToFile(filepath));
+
+  // Verify no temp file remains after successful save
+  EXPECT_FALSE(std::filesystem::exists(filepath + ".tmp"));
+
+  // Verify the final file exists and data loads correctly
+  EXPECT_TRUE(std::filesystem::exists(filepath));
+
+  DocumentStore store2;
+  ASSERT_TRUE(store2.LoadFromFile(filepath));
+
+  auto doc = store2.GetDocument(1);
+  ASSERT_TRUE(doc.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc->filters["id"]), 42);
+  EXPECT_EQ(std::get<std::string>(doc->filters["name"]), "atomic_test");
+}
+
+/**
+ * @brief Test that original file is preserved when rename fails
+ */
+TEST_F(DocumentStoreSerializationTest, SaveToFilePreservesOriginalOnFailure) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["id"] = static_cast<int32_t>(1);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
+
+  // Save a valid file first
+  std::string filepath = test_file_ + ".docs";
+  ASSERT_TRUE(store1.SaveToFile(filepath));
+
+  // Try to save to a path inside a non-existent subdirectory (rename will fail)
+  std::string existing_dir = test_file_ + "_rename_fail_dir";
+  std::filesystem::create_directories(existing_dir);
+  std::string bad_filepath = existing_dir + "/nonexistent_subdir/snapshot.docs";
+
+  // The temp file can be created in existing_dir, but rename to
+  // nonexistent_subdir/snapshot.docs will fail
+  DocumentStore store2;
+  filters["id"] = static_cast<int32_t>(2);
+  EXPECT_TRUE(store2.AddDocument("doc2", filters));
+
+  auto result = store2.SaveToFile(bad_filepath);
+  EXPECT_FALSE(result.has_value());
+
+  // Verify the temp file is cleaned up
+  EXPECT_FALSE(std::filesystem::exists(bad_filepath + ".tmp"));
+
+  // Verify the original file is still intact
+  DocumentStore store3;
+  ASSERT_TRUE(store3.LoadFromFile(filepath));
+  auto doc = store3.GetDocument(1);
+  ASSERT_TRUE(doc.has_value());
+  EXPECT_EQ(std::get<int32_t>(doc->filters["id"]), 1);
+
+  // Clean up
+  std::filesystem::remove_all(existing_dir);
+}
+
+/**
+ * @brief Test that temp file is cleaned up after a failed save attempt
+ */
+TEST_F(DocumentStoreSerializationTest, SaveToFileTempFileCleanedOnError) {
+  DocumentStore store1;
+
+  std::unordered_map<std::string, FilterValue> filters;
+  filters["id"] = static_cast<int32_t>(42);
+  EXPECT_TRUE(store1.AddDocument("doc1", filters));
+
+  // Create a directory for the temp file write
+  std::string temp_dir = test_file_ + "_temp_cleanup_dir";
+  std::filesystem::create_directories(temp_dir);
+  std::string filepath_in_temp = temp_dir + "/snapshot.docs";
+
+  // Save successfully and verify no .tmp file lingers
+  ASSERT_TRUE(store1.SaveToFile(filepath_in_temp));
+  EXPECT_TRUE(std::filesystem::exists(filepath_in_temp));
+  EXPECT_FALSE(std::filesystem::exists(filepath_in_temp + ".tmp"));
+
+  // Now try saving to a path where temp file write will fail
+  // (directory does not exist, so ofstream open fails)
+  std::string bad_filepath = temp_dir + "/no_such_subdir/snapshot.docs";
+  auto result = store1.SaveToFile(bad_filepath);
+  EXPECT_FALSE(result.has_value());
+
+  // Verify no temp file remains
+  EXPECT_FALSE(std::filesystem::exists(bad_filepath + ".tmp"));
+
+  // Clean up
+  std::filesystem::remove_all(temp_dir);
 }

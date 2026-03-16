@@ -103,84 +103,35 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Start transaction with consistent snapshot for GTID consistency
-  // To ensure GTID matches the snapshot, we capture GTID before and after
-  // transaction start. If they differ, another transaction committed in between,
-  // so we retry to get a consistent state.
-  constexpr int kMaxRetries = 3;
-  int retry_count = 0;
-
-  while (retry_count < kMaxRetries) {
-    // Capture GTID before starting transaction
-    std::string gtid_before;
-    auto gtid_before_exp = connection_.Execute("SELECT @@global.gtid_executed");
-    if (gtid_before_exp) {
-      MYSQL_ROW row = mysql_fetch_row(gtid_before_exp->get());
-      if (row != nullptr && row[0] != nullptr) {
-        gtid_before = std::string(row[0]);
-        gtid_before.erase(
-            std::remove_if(gtid_before.begin(), gtid_before.end(), [](unsigned char chr) { return std::isspace(chr); }),
-            gtid_before.end());
-      }
-    }
-
+  // Start transaction with consistent snapshot for GTID consistency.
+  // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
+  // read inside the transaction reflects the snapshot point.
+  mygram::utils::StructuredLog()
+      .Event("consistent_snapshot_starting")
+      .Info();
+  if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
+    std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
     mygram::utils::StructuredLog()
-        .Event("consistent_snapshot_starting")
-        .Field("attempt", static_cast<int64_t>(retry_count + 1))
-        .Info();
-    if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
-      std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
-      mygram::utils::StructuredLog()
-          .Event("loader_error")
-          .Field("operation", "initial_load")
-          .Field("type", "transaction_start_failed")
-          .Field("error", error_msg)
-          .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-    }
-
-    // Capture GTID after starting transaction
-    std::string gtid_after;
-    auto gtid_after_exp = connection_.Execute("SELECT @@global.gtid_executed");
-    if (gtid_after_exp) {
-      MYSQL_ROW row = mysql_fetch_row(gtid_after_exp->get());
-      if (row != nullptr && row[0] != nullptr) {
-        gtid_after = std::string(row[0]);
-        gtid_after.erase(
-            std::remove_if(gtid_after.begin(), gtid_after.end(), [](unsigned char chr) { return std::isspace(chr); }),
-            gtid_after.end());
-      }
-    }
-
-    // If GTID changed between before and after, another transaction committed
-    // Rollback and retry to get a consistent snapshot
-    if (gtid_before != gtid_after) {
-      mygram::utils::StructuredLog()
-          .Event("consistent_snapshot_retry")
-          .Field("reason", "gtid_changed_during_snapshot")
-          .Field("gtid_before", gtid_before)
-          .Field("gtid_after", gtid_after)
-          .Field("attempt", static_cast<int64_t>(retry_count + 1))
-          .Warn();
-      connection_.ExecuteUpdate("ROLLBACK");
-      retry_count++;
-      continue;
-    }
-
-    // GTID is consistent - use this value
-    start_gtid_ = gtid_after;
-    break;
+        .Event("loader_error")
+        .Field("operation", "initial_load")
+        .Field("type", "transaction_start_failed")
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  if (retry_count >= kMaxRetries) {
-    // After max retries, use the last captured GTID and proceed
-    // This is acceptable as duplicates will be handled during replication
-    mygram::utils::StructuredLog()
-        .Event("consistent_snapshot_warning")
-        .Field("type", "max_retries_exceeded")
-        .Field("message", "Could not capture consistent GTID after retries, proceeding with last value")
-        .Field("gtid", start_gtid_)
-        .Warn();
+  // Capture GTID inside the transaction — consistent with the snapshot
+  auto gtid_exp = connection_.Execute("SELECT @@global.gtid_executed");
+  if (gtid_exp) {
+    MYSQL_ROW row = mysql_fetch_row(gtid_exp->get());
+    if (row != nullptr && row[0] != nullptr) {
+      start_gtid_ = std::string(row[0]);
+      // Remove whitespace (MySQL may include newlines in multi-UUID sets)
+      start_gtid_.erase(
+          std::remove_if(start_gtid_.begin(), start_gtid_.end(),
+                          [](unsigned char chr) { return std::isspace(chr); }),
+          start_gtid_.end());
+    }
   }
 
   // GTID must not be empty for replication to work
@@ -199,7 +150,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
         .Field("type", "gtid_empty")
         .Field("error", error_msg)
         .Error();
-    connection_.ExecuteUpdate("ROLLBACK");
+    auto rollback_result_gtid = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result_gtid) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -215,7 +173,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   auto result_exp = connection_.Execute(query);
   if (!result_exp) {
     std::string error_msg = "Failed to execute SELECT query: " + connection_.GetLastError();
-    connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
+    auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
+    if (!rollback_result_query) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -258,7 +223,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("error", error_msg)
           .Error();
       // result automatically freed by MySQLResult destructor
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -274,7 +246,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     }
 
     // Normalize text
-    std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+    std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
 
     // Extract filters
     auto filters = ExtractFilters(row, fields, num_fields);
@@ -296,7 +268,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
-        connection_.ExecuteUpdate("ROLLBACK");
+        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -318,7 +297,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
-        connection_.ExecuteUpdate("ROLLBACK");
+        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -367,7 +353,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
           .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
           .Error();
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -389,7 +382,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
           .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
           .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
           .Error();
-      connection_.ExecuteUpdate("ROLLBACK");
+      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback")
+            .Field("error", connection_.GetLastError())
+            .Warn();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -554,7 +554,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   }
 
   // Normalize text
-  std::string normalized_text = utils::NormalizeText(text, true, "keep", true);
+  std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
 
   // Extract filters
   auto filters = ExtractFilters(row, fields, num_fields);

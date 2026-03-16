@@ -72,9 +72,12 @@ class ResultSorter {
    * Beyond this, fall back to traditional sorting.
    *
    * Memory estimate: ~100 bytes per entry (DocId + string + overhead)
-   * 5M entries ≈ 500MB temporary memory
+   * 50M entries ≈ 5GB temporary memory (acceptable for large servers)
+   *
+   * Raised from 5M to 50M to avoid lock contention in SortComparator
+   * fallback path during parallel query execution.
    */
-  static constexpr size_t kSchwartzianTransformMaxSize = 5'000'000;
+  static constexpr size_t kSchwartzianTransformMaxSize = 50'000'000;
 
   /**
    * @brief Entry for Schwartzian Transform (pre-computed sort key)

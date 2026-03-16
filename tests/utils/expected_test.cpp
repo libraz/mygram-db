@@ -103,27 +103,16 @@ TEST(ExpectedVoidTest, ValueAccess) {
 }
 
 /**
- * @brief Test error accessor behavior on Expected<void, E>
+ * @brief Test that calling error() on a successful Expected<void, E> aborts
  *
- * This test verifies that accessing error() on a successful Expected<void, E>
- * is properly handled. In debug builds, this should trigger an assertion.
- * In release builds, the behavior is undefined but should not cause memory issues
- * thanks to the std::optional<E> implementation.
+ * The error() method terminates the program in all build modes (debug and
+ * release) when called on an Expected that contains a value.
  */
-TEST(ExpectedVoidTest, ErrorAccessorOnSuccess) {
+TEST(ExpectedVoidDeathTest, ErrorAccessorOnSuccessAborts) {
   Expected<void, Error> success;
   EXPECT_TRUE(success.has_value());
 
-  // In debug builds (when NDEBUG is not defined), accessing error() on success
-  // will trigger an assertion. In release builds, this test documents that
-  // callers must check has_value() before calling error().
-#ifdef NDEBUG
-  // Release build: behavior is undefined but won't crash thanks to std::optional
-  // We document this but don't test it to avoid undefined behavior in tests
-#else
-  // Debug build: This would trigger assertion, so we don't call it in tests.
-  // The assertion is: assert(!has_value_ && "error() called on Expected containing a value");
-#endif
+  EXPECT_DEATH({ (void)success.error(); }, "error\\(\\) called on a value");
 }
 
 /**
@@ -409,4 +398,70 @@ TEST(ExpectedTest, BadExpectedAccessException) {
     EXPECT_EQ(e.error().code(), ErrorCode::kTimeout);
     EXPECT_STREQ(e.what(), "Bad Expected access: contains error");
   }
+}
+
+// ========== Death tests for misuse of value()/error() ==========
+
+/**
+ * @brief Test that calling error() on a success Expected<T, E> aborts
+ */
+TEST(ExpectedDeathTest, ErrorOnSuccessAborts) {
+  Expected<int, Error> success(42);
+  EXPECT_DEATH({ (void)success.error(); }, "error\\(\\) called on a value");
+}
+
+/**
+ * @brief Test that calling error() on a success Expected<T, E> via rvalue aborts
+ */
+TEST(ExpectedDeathTest, ErrorOnSuccessRvalueAborts) {
+  Expected<int, Error> success(42);
+  EXPECT_DEATH({ (void)std::move(success).error(); }, "error\\(\\) called on a value");
+}
+
+/**
+ * @brief Test that calling error() on a success Expected<void, E> via rvalue aborts
+ */
+TEST(ExpectedVoidDeathTest, ErrorOnSuccessRvalueAborts) {
+  Expected<void, Error> success;
+  EXPECT_DEATH({ (void)std::move(success).error(); }, "error\\(\\) called on a value");
+}
+
+/**
+ * @brief Test that value() works correctly on success Expected<T, E>
+ */
+TEST(ExpectedTest, ValueOnSuccessWorks) {
+  Expected<int, Error> success(42);
+  EXPECT_EQ(success.value(), 42);
+
+  const Expected<int, Error> const_success(99);
+  EXPECT_EQ(const_success.value(), 99);
+
+  Expected<int, Error> movable(7);
+  EXPECT_EQ(std::move(movable).value(), 7);
+}
+
+/**
+ * @brief Test that error() works correctly on error Expected<T, E>
+ */
+TEST(ExpectedTest, ErrorOnFailureWorks) {
+  Expected<int, Error> failure(MakeUnexpected(MakeError(ErrorCode::kTimeout, "Timed out")));
+  EXPECT_EQ(failure.error().code(), ErrorCode::kTimeout);
+  EXPECT_EQ(failure.error().message(), "Timed out");
+
+  const Expected<int, Error> const_failure(
+      MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
+  EXPECT_EQ(const_failure.error().code(), ErrorCode::kNotFound);
+}
+
+/**
+ * @brief Test that error() works correctly on error Expected<void, E>
+ */
+TEST(ExpectedVoidTest, ErrorOnFailureWorks) {
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kTimeout, "Timed out")));
+  EXPECT_EQ(failure.error().code(), ErrorCode::kTimeout);
+  EXPECT_EQ(failure.error().message(), "Timed out");
+
+  const Expected<void, Error> const_failure(
+      MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
+  EXPECT_EQ(const_failure.error().code(), ErrorCode::kNotFound);
 }

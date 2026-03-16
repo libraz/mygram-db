@@ -201,4 +201,24 @@ TEST_F(CacheMetricsTest, HitRateEdgeCases) {
   EXPECT_DOUBLE_EQ(stats.HitRate(), 0.0);  // 0%
 }
 
+// Test: InvalidationManager memory is reflected in statistics
+TEST_F(CacheMetricsTest, InvalidationIndexMemoryInStatistics) {
+  CacheManager manager(cache_config_, table_contexts_);
+
+  // Insert a cache entry to generate invalidation tracking data
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test_table";
+  query.search_text = "golang";
+
+  std::vector<DocId> result = {1, 2, 3};
+  std::set<std::string> ngrams = {"gol", "ola", "lan", "ang"};
+
+  manager.Insert(query, result, ngrams, 10.0);
+
+  auto stats = manager.GetStatistics();
+  // InvalidationManager should report non-zero memory usage after tracking an entry
+  EXPECT_GT(stats.invalidation_index_memory_bytes, 0);
+}
+
 }  // namespace mygramdb::cache

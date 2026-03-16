@@ -9,13 +9,17 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
+
 #include "mysql/connection.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
 
 ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
-                                                     const std::optional<std::string>& expected_uuid) {
+                                                     const std::optional<std::string>& expected_uuid,
+                                                     const std::optional<std::string>& last_gtid) {
   ValidationResult result;
 
   // Check connection status
@@ -45,6 +49,47 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
   result.server_uuid = actual_uuid;
 
+  // Detect failover (server UUID changed)
+  if (expected_uuid && *expected_uuid != actual_uuid) {
+    result.failover_detected = true;
+
+    // Verify current GTID position is valid on the new server
+    if (last_gtid && !last_gtid->empty()) {
+      // Validate GTID format before using in SQL
+      const std::string& gtid_str = *last_gtid;
+      bool valid_format = true;
+      for (char chr : gtid_str) {
+        if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' &&
+            chr != ' ' && chr != '\n' && chr != '\r') {
+          valid_format = false;
+          break;
+        }
+      }
+
+      if (valid_format) {
+        std::string query = "SELECT GTID_SUBSET('" + gtid_str + "', @@GLOBAL.gtid_executed) AS is_subset";
+        auto subset_result = conn.Execute(query);
+        if (subset_result) {
+          MYSQL_ROW row = mysql_fetch_row(subset_result->get());
+          if (row != nullptr && row[0] != nullptr && std::string(row[0]) == "0") {
+            result.error_message =
+                "Failover detected but current GTID position is not a subset of new server's gtid_executed. "
+                "GTID position: " +
+                gtid_str +
+                ". "
+                "Manual intervention required: run SYNC command to establish a new position.";
+            mygram::utils::StructuredLog()
+                .Event("connection_validation_failed")
+                .Field("reason", "failover_gtid_mismatch")
+                .Field("gtid", gtid_str)
+                .Error();
+            return result;
+          }
+        }
+      }
+    }
+  }
+
   // 3. Check required tables exist
   std::vector<std::string> missing_tables;
   if (!CheckTablesExist(conn, required_tables, missing_tables)) {
@@ -65,9 +110,48 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
 
   // 4. Check GTID consistency (if we have an expected state)
   std::string gtid_consistency_error;
-  if (!CheckGTIDConsistency(conn, std::nullopt, gtid_consistency_error)) {
+  if (!CheckGTIDConsistency(conn, last_gtid, gtid_consistency_error)) {
     result.warnings.push_back("GTID consistency check: " + gtid_consistency_error);
   }
+
+  // 5. Check binlog compression (TRANSACTION_PAYLOAD_EVENT not supported)
+  std::string compression_error;
+  if (!CheckBinlogCompression(conn, compression_error)) {
+    result.error_message = compression_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_compression_enabled")
+        .Error();
+    return result;
+  }
+
+  // 6. Check binlog_row_image=FULL (required for correct NULL bitmap parsing)
+  std::string row_image_error;
+  if (!CheckBinlogRowImage(conn, row_image_error)) {
+    result.error_message = row_image_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_row_image_not_full")
+        .Error();
+    return result;
+  }
+
+  // 7. Check binlog_format=ROW (required for row-level replication)
+  std::string format_error;
+  if (!CheckBinlogFormat(conn, format_error)) {
+    result.error_message = format_error;
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_format_not_row")
+        .Error();
+    return result;
+  }
+
+  // 8. Check partial JSON mode (warning only)
+  CheckPartialJsonMode(conn, result.warnings);
+
+  // 9. Check tagged GTID support (warning only)
+  CheckTaggedGTIDSupport(conn, result.warnings);
 
   // All checks passed
   result.valid = true;
@@ -95,6 +179,25 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
   missing_tables.clear();
 
   for (const auto& table : tables) {
+    // Validate table name to prevent SQL injection
+    // MySQL table names can contain: letters, digits, underscore, dollar sign, hyphen
+    bool valid_name = !table.empty();
+    for (char chr : table) {
+      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+        valid_name = false;
+        break;
+      }
+    }
+    if (!valid_name) {
+      mygram::utils::StructuredLog()
+          .Event("connection_validation_warning")
+          .Field("reason", "invalid_table_name")
+          .Field("table", table)
+          .Warn();
+      missing_tables.push_back(table);
+      continue;
+    }
+
     // Query INFORMATION_SCHEMA to check if table exists
     std::string query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" +
                         table + "' LIMIT 1";
@@ -157,16 +260,193 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
     return false;
   }
 
-  // If we have a last GTID, check if it's in the purged set
-  // This would indicate we can't continue replication from where we left off
-  if (last_gtid && !purged_gtid->empty() && !last_gtid->empty()) {
-    // Simple check: if purged set is not empty, warn that some GTIDs may be unavailable
-    // A more sophisticated check would parse the GTID sets and compare ranges
-    mygram::utils::StructuredLog()
-        .Event("gtid_consistency_check")
-        .Field("executed_gtid", *executed_gtid)
-        .Field("purged_gtid", *purged_gtid)
-        .Debug();
+  // If we have a last GTID, check if it has been purged using MySQL's GTID_SUBSET function
+  if (last_gtid && !last_gtid->empty() && !purged_gtid->empty()) {
+    // Validate GTID format to prevent SQL injection
+    // Valid GTID format: UUID:GNO or UUID:TAG:GNO or UUID:GNO-GNO2
+    // Characters allowed: hex digits, hyphens, colons, commas, spaces, newlines
+    const std::string& gtid_str = *last_gtid;
+    for (char chr : gtid_str) {  // NOLINT(readability-identifier-length)
+      if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' && chr != ' ' &&
+          chr != '\n' && chr != '\r') {
+        error = "Invalid GTID format: contains illegal character '" + std::string(1, chr) + "'";
+        return false;
+      }
+    }
+
+    // Use GTID_SUBSET to check if our start position has been purged
+    std::string query = "SELECT GTID_SUBSET('" + gtid_str + "', @@GLOBAL.gtid_purged) AS is_purged";
+    auto result = conn.Execute(query);
+    if (result) {
+      MYSQL_ROW row = mysql_fetch_row(result->get());
+      if (row != nullptr && row[0] != nullptr && std::string(row[0]) == "1") {
+        error = "Start GTID '" + gtid_str +
+                "' has been purged from server binlog. "
+                "Available positions start after purged set: " +
+                *purged_gtid +
+                ". "
+                "Run SYNC command to establish a new position.";
+        return false;
+      }
+    }
+  }
+
+  // Log for debugging
+  mygram::utils::StructuredLog()
+      .Event("gtid_consistency_check")
+      .Field("executed_gtid", *executed_gtid)
+      .Field("purged_gtid", *purged_gtid)
+      .Debug();
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogCompression(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
+  if (!result) {
+    // Variable doesn't exist (MySQL < 8.0.20) - OK
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - OK (MySQL < 8.0.20)
+    return true;
+  }
+
+  // row[0] = variable name, row[1] = value
+  if (row[1] != nullptr && std::string(row[1]) == "ON") {
+    error =
+        "binlog_transaction_compression=ON is not supported. "
+        "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
+        "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
+    return false;
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_image'");
+  if (!result) {
+    // Cannot determine - assume FULL (variable always exists in MySQL 5.6+)
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - shouldn't happen but assume FULL
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value != "FULL") {
+      error =
+          "binlog_row_image=" + value + " is not supported. "
+          "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
+          "Set it with: SET GLOBAL binlog_row_image=FULL";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_format'");
+  if (!result) {
+    // Cannot determine - assume ROW (variable always exists in MySQL 5.6+)
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    // Variable not found - shouldn't happen but assume ROW
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value != "ROW") {
+      error =
+          "binlog_format=" + value + " is not supported. "
+          "MygramDB requires binlog_format=ROW for row-level replication. "
+          "Set it with: SET GLOBAL binlog_format=ROW";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_value_options'");
+  if (!result) {
+    return true;
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    return true;
+  }
+
+  if (row[1] != nullptr) {
+    std::string value(row[1]);
+    // Check if PARTIAL_JSON is in the value (case-insensitive)
+    std::string upper_value = value;
+    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+    if (upper_value.find("PARTIAL_JSON") != std::string::npos) {
+      warnings.emplace_back(
+          "binlog_row_value_options contains PARTIAL_JSON. "
+          "PARTIAL_UPDATE_ROWS_EVENT is not supported and will be skipped. "
+          "JSON column updates may be lost. Consider: "
+          "SET GLOBAL binlog_row_value_options=''");
+    }
+  }
+
+  return true;
+}
+
+bool ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings) {
+  auto executed = conn.GetExecutedGTID();
+  if (!executed) {
+    return true;
+  }
+
+  // Tagged GTIDs use format UUID:TAG:GNO where TAG contains no hyphens
+  // The '::' pattern indicates tag separator in GTID sets (empty tag)
+  // MySQL 8.4 tagged GTID format: UUID:tag:GNO
+  // Non-tagged format: UUID:GNO or UUID:GNO-GNO2
+
+  // Check if the server version supports tagged GTIDs (MySQL 8.4+)
+  auto result = conn.Execute("SELECT VERSION()");
+  if (result) {
+    MYSQL_ROW row = mysql_fetch_row(result->get());
+    if (row != nullptr && row[0] != nullptr) {
+      std::string version(row[0]);
+      // MySQL 8.4+ supports tagged GTIDs
+      int major = 0;
+      int minor = 0;
+      // NOLINTNEXTLINE(cert-err34-c,cppcoreguidelines-pro-type-vararg)
+      if (sscanf(version.c_str(), "%d.%d", &major, &minor) == 2) {
+        constexpr int kMinMajorVersion = 8;
+        constexpr int kMinMinorVersion = 4;
+        if (major > kMinMajorVersion || (major == kMinMajorVersion && minor >= kMinMinorVersion)) {
+          // MySQL 8.4+ - tagged GTIDs are possible
+          // Check if any are actually in use
+          if (executed->find("::") != std::string::npos) {
+            warnings.emplace_back(
+                "Tagged GTIDs detected in executed GTID set. "
+                "Tagged GTID support is experimental.");
+          }
+        }
+      }
+    }
   }
 
   return true;

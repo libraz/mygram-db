@@ -51,6 +51,18 @@ class BinlogEventParser {
   static std::optional<std::string> ExtractGTID(const unsigned char* buffer, unsigned long length);
 
   /**
+   * @brief Extract tagged GTID from GTID_TAGGED_LOG_EVENT (MySQL 8.4+)
+   *
+   * MySQL 8.4 uses a serialization framework format for tagged GTIDs.
+   * Returns GTID in "UUID:TAG:GNO" or "UUID:GNO" format.
+   *
+   * @param buffer Event buffer
+   * @param length Buffer length
+   * @return GTID string if found
+   */
+  static std::optional<std::string> ExtractTaggedGTID(const unsigned char* buffer, unsigned long length);
+
+  /**
    * @brief Parse TABLE_MAP_EVENT
    * @param buffer Event buffer (post-header)
    * @param length Buffer length

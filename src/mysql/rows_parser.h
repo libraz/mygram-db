@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "config/config.h"
+#include "mysql/binlog_event_types.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
 
@@ -40,7 +41,8 @@ struct RowData {
 std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                         const TableMetadata* table_metadata,
                                                         const std::string& pk_column_name,
-                                                        const std::string& text_column_name);
+                                                        const std::string& text_column_name,
+                                                        MySQLBinlogEventType event_type);
 
 /**
  * @brief Parse UPDATE_ROWS event
@@ -52,11 +54,9 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
  * @param text_column_name Text column name for search
  * @return Vector of (old_row, new_row) pairs if parsed successfully
  */
-std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(const unsigned char* buffer,
-                                                                             unsigned long length,
-                                                                             const TableMetadata* table_metadata,
-                                                                             const std::string& pk_column_name,
-                                                                             const std::string& text_column_name);
+std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
 
 /**
  * @brief Parse DELETE_ROWS event
@@ -71,7 +71,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(con
 std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer, unsigned long length,
                                                          const TableMetadata* table_metadata,
                                                          const std::string& pk_column_name,
-                                                         const std::string& text_column_name);
+                                                         const std::string& text_column_name,
+                                                         MySQLBinlogEventType event_type);
 
 /**
  * @brief Extract filter values from row data

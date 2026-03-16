@@ -63,6 +63,7 @@ struct ServerConfig {
   int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
   std::vector<std::string> allow_cidrs;
   std::vector<utils::CIDR> parsed_allow_cidrs;
+  std::string unix_socket_path;  // Empty = TCP mode, non-empty = UDS mode
 };
 
 /**
@@ -200,7 +201,7 @@ struct HandlerContext {
   TableCatalog* table_catalog = nullptr;
 
   // Direct table access (maintained for backward compatibility)
-  std::unordered_map<std::string, TableContext*>& table_contexts;
+  const std::unordered_map<std::string, TableContext*>& table_contexts;
 
   ServerStats& stats;
   const config::Config* full_config;

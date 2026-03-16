@@ -163,6 +163,7 @@ struct TableConfig {
   std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
   int ngram_size = 2;                                  // N-gram size for ASCII/alphanumeric characters
   int kanji_ngram_size = 0;  // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
+  bool cross_boundary_ngrams = true;  // Generate N-grams that span CJK/non-CJK boundaries
   PostingConfig posting;
 };
 
@@ -201,8 +202,8 @@ struct MemoryConfig {
 
   struct {
     bool nfkc = true;
-    std::string width = "narrow";
-    bool lower = false;
+    std::string width = "keep";
+    bool lower = true;
   } normalize;
 };
 
@@ -239,6 +240,10 @@ struct ApiConfig {
     bool enable_cors = false;
     std::string cors_allow_origin;
   } http;
+
+  struct {
+    std::string path;  // Unix socket path (empty = disabled)
+  } unix_socket;
 
   /**
    * @brief Default LIMIT for SEARCH queries when not explicitly specified

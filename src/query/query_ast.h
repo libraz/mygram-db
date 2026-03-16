@@ -179,9 +179,12 @@ class QueryASTParser {
   [[nodiscard]] const std::string& GetError() const { return error_; }
 
  private:
+  static constexpr int kMaxRecursionDepth = 32;
+
   std::vector<Token> tokens_;
   size_t pos_ = 0;
   std::string error_;
+  int recursion_depth_ = 0;
 
   /**
    * @brief Get current token
