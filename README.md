@@ -201,7 +201,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - OS: Linux or macOS
 
 **MySQL:**
-- Version: 5.7.6+ or 8.0+
+- Version: 8.0+
 - GTID mode enabled (`gtid_mode=ON`)
 - Binary log format: ROW (`binlog_format=ROW`)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`

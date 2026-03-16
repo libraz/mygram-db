@@ -7,7 +7,7 @@ MygramDB はデータ一貫性を保証した GTID ベースの binlog ストリ
 ### MySQL サーバー要件
 
 MygramDB には以下が必要です:
-- **MySQL バージョン**: 5.7.6+ または 8.0+（MySQL 8.0 および 8.4 でテスト済み）
+- **MySQL バージョン**: 8.0+（MySQL 8.4 でテスト済み）
 - **GTID モード**: 有効化必須
 - **バイナリログ形式**: ROW 形式が必要
 - **権限**: レプリケーションユーザーに特定の権限が必要
@@ -23,7 +23,7 @@ SHOW VARIABLES LIKE 'gtid_mode';
 GTID モードが OFF の場合は有効化：
 
 ```sql
--- GTID モードを有効化（MySQL 5.7 ではサーバー再起動が必要）
+-- GTID モードを有効化
 SET GLOBAL gtid_mode = ON;
 SET GLOBAL enforce_gtid_consistency = ON;
 ```

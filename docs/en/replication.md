@@ -7,7 +7,7 @@ MygramDB supports real-time replication from MySQL using GTID-based binlog strea
 ### MySQL Server Requirements
 
 MygramDB requires:
-- **MySQL Version**: 5.7.6+ or 8.0+ (tested with MySQL 8.0 and 8.4)
+- **MySQL Version**: 8.0+ (tested with MySQL 8.4)
 - **GTID Mode**: Must be enabled
 - **Binary Log Format**: ROW format required
 - **Privileges**: Replication user needs specific privileges
@@ -23,7 +23,7 @@ SHOW VARIABLES LIKE 'gtid_mode';
 If GTID mode is OFF, enable it:
 
 ```sql
--- Enable GTID mode (requires server restart in MySQL 5.7)
+-- Enable GTID mode
 SET GLOBAL gtid_mode = ON;
 SET GLOBAL enforce_gtid_consistency = ON;
 ```
