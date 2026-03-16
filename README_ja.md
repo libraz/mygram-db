@@ -195,7 +195,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - OS: Linux または macOS
 
 **MySQL:**
-- バージョン: 5.7.6+ または 8.0+
+- バージョン: 8.0+
 - GTID モード有効化 (`gtid_mode=ON`)
 - バイナリログ形式: ROW (`binlog_format=ROW`)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
