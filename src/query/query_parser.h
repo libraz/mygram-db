@@ -245,6 +245,17 @@ class QueryParser {
    */
   [[nodiscard]] size_t GetMaxQueryLength() const { return max_query_length_; }
 
+  /**
+   * @brief Parse filter operator string to FilterOp enum
+   *
+   * Supports symbolic operators (=, ==, !=, <>, >, >=, <, <=, ≥, ≤)
+   * and named operators (EQ, NE, GT, GTE, LT, LTE, case-insensitive).
+   *
+   * @param op_str Operator string
+   * @return std::optional<FilterOp> - Parsed operator or nullopt if invalid
+   */
+  static std::optional<FilterOp> ParseFilterOp(std::string_view op_str);
+
  private:
   std::string error_;
   size_t max_query_length_ = config::defaults::kDefaultQueryLengthLimit;  // Default upper bound
@@ -299,11 +310,6 @@ class QueryParser {
    * @brief Tokenize query string
    */
   std::vector<std::string> Tokenize(std::string_view str);
-
-  /**
-   * @brief Parse filter operator
-   */
-  static std::optional<FilterOp> ParseFilterOp(std::string_view op_str);
 
   /**
    * @brief Set error message

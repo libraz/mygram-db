@@ -59,7 +59,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
         if (matches_required) {
           // Condition satisfied -> add to index
-          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
           if (!doc_id_result) {
             mygram::utils::StructuredLog()
                 .Event("mysql_binlog_error")
@@ -71,8 +73,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             return false;
           }
           storage::DocId doc_id = *doc_id_result;
-
-          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -168,7 +168,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
-          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
           if (!doc_id_result) {
             mygram::utils::StructuredLog()
                 .Event("mysql_binlog_error")
@@ -180,8 +182,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             return false;
           }
           storage::DocId doc_id = *doc_id_result;
-
-          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -246,16 +246,19 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
                 std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.UpdateDocument(doc_id, old_normalized, new_normalized);
+                doc_store.SetNormalizedText(doc_id, new_normalized);
                 text_changed = true;
               } else if (!event.old_text.empty()) {
                 // Only old text available - remove from index
                 std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.RemoveDocument(doc_id, old_normalized);
+                doc_store.SetNormalizedText(doc_id, "");
                 text_changed = true;
               } else if (!event.text.empty()) {
                 // Only new text available - add to index
                 std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
                 index.AddDocument(doc_id, new_normalized);
+                doc_store.SetNormalizedText(doc_id, new_normalized);
                 text_changed = true;
               }
             } catch (const std::exception& e) {

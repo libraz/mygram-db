@@ -8,7 +8,6 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -19,6 +18,7 @@
 #include <unistd.h>
 #endif
 
+#include "utils/crc32.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -33,51 +33,6 @@ constexpr uint32_t kCurrentFormatVersion = kFormatVersionV2;
 
 // Size of the CRC32 checksum trailer (4 bytes)
 constexpr size_t kCRC32Size = 4;
-
-// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-
-/**
- * @brief Compute CRC32 checksum using standard lookup table (polynomial 0xEDB88320)
- * @param data Pointer to data buffer
- * @param length Length of data in bytes
- * @return CRC32 checksum value
- */
-uint32_t ComputeCRC32(const uint8_t* data, size_t length) {
-  static constexpr uint32_t kCRC32Table[256] = {
-      0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3,
-      0x0EDB8832, 0x79DCB8A4, 0xE0D5E91B, 0x97D2D988, 0x09B64C2B, 0x7EB17CBE, 0xE7B82D09, 0x90BF1D91,
-      0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7,
-      0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5,
-      0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB,
-      0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7A23,
-      0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F,
-      0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81, 0xB7BD5C3B, 0xC0BA6CFD,
-      0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A, 0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683,
-      0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8, 0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1,
-      0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB, 0x196C3671, 0x6E6B06E7,
-      0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5,
-      0xD6D6A3E8, 0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B,
-      0xD80D2BDA, 0xAF0A1B4A, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF, 0x4669BE79,
-      0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236, 0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F,
-      0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D,
-      0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713,
-      0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21,
-      0x86D3D2D4, 0xF1D4E242, 0x68DDB3F6, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777,
-      0x88085AE6, 0xFF0F6B18, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45,
-      0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7, 0x4969474D, 0x3E6E77DB,
-      0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9,
-      0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD706FF, 0x54DE5729, 0x23D967BF,
-      0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
-  };
-
-  uint32_t crc = 0xFFFFFFFF;
-  for (size_t i = 0; i < length; ++i) {
-    crc = kCRC32Table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-  }
-  return crc ^ 0xFFFFFFFF;
-}
-
-// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace
 
@@ -96,8 +51,7 @@ bool Index::AddDocument(DocId doc_id, std::string_view text) {
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-  std::sort(ngrams.begin(), ngrams.end());
-  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+  utils::DeduplicateSorted(ngrams);
 
   // Warn when empty text produces no index entries (document will exist in
   // DocumentStore but will never appear in search results)
@@ -147,8 +101,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
     // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-    std::sort(ngrams.begin(), ngrams.end());
-    ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+    utils::DeduplicateSorted(ngrams);
 
     // Build term->docs mapping
     for (const auto& ngram : ngrams) {
@@ -177,11 +130,8 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
   std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Sort and remove duplicates (more efficient than unordered_set)
-  std::sort(old_ngrams.begin(), old_ngrams.end());
-  old_ngrams.erase(std::unique(old_ngrams.begin(), old_ngrams.end()), old_ngrams.end());
-
-  std::sort(new_ngrams.begin(), new_ngrams.end());
-  new_ngrams.erase(std::unique(new_ngrams.begin(), new_ngrams.end()), new_ngrams.end());
+  utils::DeduplicateSorted(old_ngrams);
+  utils::DeduplicateSorted(new_ngrams);
 
   // Calculate set differences using sorted arrays
   std::vector<std::string> to_remove;
@@ -228,8 +178,7 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-  std::sort(ngrams.begin(), ngrams.end());
-  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+  utils::DeduplicateSorted(ngrams);
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
@@ -1023,8 +972,7 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
     // Get the serialized data and compute CRC32
     std::string data = buffer.str();
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for CRC32 computation
-    uint32_t crc = ComputeCRC32(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    uint32_t crc = utils::ComputeCRC32(data.data(), data.size());
 
     // Write data followed by CRC32 trailer to the actual output stream
     output_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
@@ -1167,8 +1115,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       std::memcpy(&stored_crc, all_data.data() + payload_size, sizeof(stored_crc));
 
       // Compute CRC32 over the payload
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for CRC32 computation
-      uint32_t computed_crc = ComputeCRC32(reinterpret_cast<const uint8_t*>(all_data.data()), payload_size);
+      uint32_t computed_crc = utils::ComputeCRC32(all_data.data(), payload_size);
 
       if (stored_crc != computed_crc) {
         mygram::utils::StructuredLog()

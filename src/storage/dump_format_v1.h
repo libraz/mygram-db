@@ -304,21 +304,6 @@ Expected<void, Error> ReadDumpV1(
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error);
 
 /**
- * @brief Calculate CRC32 checksum for data
- * @param data Data pointer
- * @param length Data length in bytes
- * @return CRC32 checksum
- */
-uint32_t CalculateCRC32(const void* data, size_t length);
-
-/**
- * @brief Calculate CRC32 checksum for string
- * @param str String data
- * @return CRC32 checksum
- */
-uint32_t CalculateCRC32(const std::string& str);
-
-/**
  * @brief Rebuild index from document store (for compact mode)
  * @param doc_store Document store containing all documents
  * @param index Index to rebuild

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "server/handlers/command_handler.h"
+#include "server/search_pipeline.h"
 
 namespace mygramdb::server {
 
@@ -16,7 +17,8 @@ namespace mygramdb::server {
  * @brief Handler for SEARCH and COUNT queries
  *
  * Handles full-text search with n-gram generation, optimization,
- * filtering, sorting, and pagination.
+ * filtering, sorting, and pagination. Delegates core search logic
+ * to the shared search_pipeline functions.
  */
 class SearchHandler : public CommandHandler {
  public:
@@ -36,16 +38,25 @@ class SearchHandler : public CommandHandler {
    */
   static size_t GetFilterThreshold() { return filter_threshold_; }
 
+  /**
+   * @brief Post-filter candidates by verifying normalized text contains all search terms
+   *
+   * Forwards to search_pipeline::PostFilterByText for backward compatibility.
+   *
+   * @param candidates Candidate DocIDs from bitmap intersection
+   * @param normalized_terms Normalized search terms to verify
+   * @param doc_store Document store with normalized text
+   * @return Verified DocIDs where all terms appear as substrings
+   */
+  static std::vector<storage::DocId> PostFilterByText(const std::vector<storage::DocId>& candidates,
+                                                       const std::vector<std::string>& normalized_terms,
+                                                       storage::DocumentStore* doc_store) {
+    return search_pipeline::PostFilterByText(candidates, normalized_terms, doc_store);
+  }
+
  private:
   /// Candidate count threshold: at or below this, use FilterByNgrams; above, use full SearchAnd intersection
   static inline size_t filter_threshold_ = 1000;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-  /**
-   * @brief Internal structure for term information
-   */
-  struct TermInfo {
-    std::vector<std::string> ngrams;
-    size_t estimated_size;
-  };
 
   /**
    * @brief Handle SEARCH query
@@ -56,48 +67,6 @@ class SearchHandler : public CommandHandler {
    * @brief Handle COUNT query
    */
   std::string HandleCount(const query::Query& query, ConnectionContext& conn_ctx);
-
-  /**
-   * @brief Generate n-grams for search terms
-   * @param search_terms Search terms to process
-   * @param current_index Index to use for estimation
-   * @param ngram_size N-gram size
-   * @param kanji_ngram_size Kanji n-gram size
-   * @param debug_info Optional debug info to populate
-   * @return Vector of term information with n-grams and size estimates
-   */
-  static std::vector<TermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms,
-                                                 index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                                 query::DebugInfo* debug_info, bool cross_boundary_ngrams = true);
-
-  /**
-   * @brief Apply NOT filter to results
-   */
-  static std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
-                                                    const std::vector<std::string>& not_terms,
-                                                    index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                                    bool cross_boundary_ngrams = true);
-
-  /**
-   * @brief Apply filter conditions to results
-   */
-  static std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& results,
-                                                  const std::vector<query::FilterCondition>& filters,
-                                                  storage::DocumentStore* doc_store);
-
-  /**
-   * @brief Apply filter conditions using bitmap intersection (fast path)
-   *
-   * Converts results to a Roaring bitmap and intersects with pre-built
-   * filter bitmaps. Falls back to ApplyFilters for unsupported operators.
-   */
-  static std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::DocId>& results,
-                                                             const std::vector<query::FilterCondition>& filters,
-                                                             storage::DocumentStore* doc_store);
-
-  /// Check if all filter conditions can be accelerated with bitmap index
-  static bool AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filters,
-                                          storage::DocumentStore* doc_store);
 };
 
 }  // namespace mygramdb::server

@@ -252,7 +252,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     auto filters = ExtractFilters(row, fields, num_fields);
 
     // Add to batch
-    doc_batch.push_back({primary_key, filters});
+    doc_batch.push_back({primary_key, filters, normalized_text});
     index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
 
     // Process batch when full
@@ -560,7 +560,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   auto filters = ExtractFilters(row, fields, num_fields);
 
   // Add to document store
-  auto doc_id_result = doc_store_.AddDocument(primary_key, filters);
+  auto doc_id_result = doc_store_.AddDocument(primary_key, filters, normalized_text);
   if (!doc_id_result) {
     return MakeUnexpected(doc_id_result.error());
   }

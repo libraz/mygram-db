@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
+.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
 
 # Build directory
 BUILD_DIR := build
@@ -25,8 +25,11 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make build          - Build the project (default)"
-	@echo "  make test           - Run all tests (configurable with TEST_JOBS, TEST_VERBOSE, TEST_DEBUG)"
-	@echo "  make test-full      - Run tests with full parallelism (same as TEST_JOBS=\$$(nproc))"
+	@echo "  make test           - Run tests excluding SLOW (configurable with TEST_JOBS, TEST_VERBOSE, TEST_DEBUG)"
+	@echo "  make test-fast      - Run tests excluding SLOW label (same as test, explicit name)"
+	@echo "  make test-slow      - Run only SLOW-labeled tests"
+	@echo "  make test-all       - Run ALL tests including SLOW"
+	@echo "  make test-full      - Run all tests with full parallelism (same as TEST_JOBS=\$$(nproc))"
 	@echo "  make test-sequential - Run tests sequentially (same as TEST_JOBS=1)"
 	@echo "  make test-verbose   - Run tests with verbose output (same as TEST_VERBOSE=1)"
 	@echo "  make clean          - Clean build directory"
@@ -129,12 +132,23 @@ test-all: build
 		ctest $$CTEST_FLAGS
 	@echo "All tests complete!"
 
-# Run only SLOW tests
+# Run tests excluding SLOW and LOAD labels (fast feedback during development)
+test-fast: build
+	@echo "Running fast tests (excluding SLOW/LOAD, jobs=$(TEST_JOBS))..."
+	@cd $(BUILD_DIR) && ctest -LE "SLOW|LOAD" --output-on-failure --parallel $(TEST_JOBS)
+	@echo "Fast tests complete!"
+
+# Run SLOW tests (concurrency/thread-safety unit tests, ~1-2 min total)
 test-slow: build
-	@echo "Running only SLOW tests (jobs=$(TEST_JOBS))..."
-	@cd $(BUILD_DIR) && \
-		ctest --output-on-failure --parallel $(TEST_JOBS) --label-regex SLOW
+	@echo "Running SLOW tests (jobs=$(TEST_JOBS))..."
+	@cd $(BUILD_DIR) && ctest -L SLOW -LE LOAD --output-on-failure --parallel $(TEST_JOBS)
 	@echo "SLOW tests complete!"
+
+# Run LOAD tests (load/stress/benchmark tests, ~5-10 min total)
+test-load: build
+	@echo "Running LOAD tests..."
+	@cd $(BUILD_DIR) && ctest -L LOAD --output-on-failure
+	@echo "LOAD tests complete!"
 
 # Convenience aliases for common test scenarios
 test-full:

@@ -299,8 +299,7 @@ std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& t
   std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
   // Sort and deduplicate
-  std::sort(ngrams.begin(), ngrams.end());
-  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+  utils::DeduplicateSorted(ngrams);
 
   return ngrams;
 }

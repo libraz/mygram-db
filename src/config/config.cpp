@@ -661,6 +661,9 @@ Config ParseConfigFromJson(const json& root) {
         config.memory.normalize.lower = norm["lower"].get<bool>();
       }
     }
+    if (mem.contains("verify_text")) {
+      config.memory.verify_text = mem["verify_text"].get<std::string>();
+    }
   }
 
   // Parse dump config

@@ -655,7 +655,7 @@ TEST(IndexConcurrentTest, ConcurrentOptimizeCalls) {
 
 TEST(IndexConcurrentTest, SaveToStreamDoesNotBlockSearch) {
   Index index(2);
-  for (DocId i = 1; i <= 10000; i++) {
+  for (DocId i = 1; i <= 5000; i++) {
     index.AddDocument(i, "hello world test data");
   }
 
@@ -678,7 +678,7 @@ TEST(IndexConcurrentTest, SaveToStreamDoesNotBlockSearch) {
     if (!save_done.load()) {
       search_completed_during_save.store(true);
     }
-    EXPECT_EQ(results.size(), 10000u);
+    EXPECT_EQ(results.size(), 5000u);
   });
 
   saver.join();

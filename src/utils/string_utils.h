@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -107,5 +108,12 @@ bool IsValidUtf8(std::string_view text);
  * @return Sanitized UTF-8 string
  */
 std::string SanitizeUtf8(std::string_view text);
+
+/// @brief Sort and remove duplicate elements from a vector in-place.
+template <typename T>
+inline void DeduplicateSorted(std::vector<T>& vec) {
+  std::sort(vec.begin(), vec.end());
+  vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+}
 
 }  // namespace mygramdb::utils

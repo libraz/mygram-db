@@ -114,6 +114,7 @@ class DocumentStore {
   struct DocumentItem {
     std::string primary_key;
     std::unordered_map<std::string, FilterValue> filters;
+    std::string normalized_text;  ///< Normalized text for n-gram verification
   };
 
   /**
@@ -124,7 +125,8 @@ class DocumentStore {
    * @return Expected<DocId, Error> Assigned DocID or error (e.g., DocID exhausted)
    */
   [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key,
-                                                   const std::unordered_map<std::string, FilterValue>& filters = {});
+                                                   const std::unordered_map<std::string, FilterValue>& filters = {},
+                                                   std::string_view normalized_text = "");
 
   /**
    * @brief Add multiple documents (batch operation, thread-safe)
@@ -244,6 +246,22 @@ class DocumentStore {
   [[nodiscard]] std::vector<std::optional<FilterValue>> GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
                                                                               const std::string& column) const;
 
+  /**
+   * @brief Set normalized text for a document (for n-gram verification)
+   *
+   * @param doc_id Document ID
+   * @param text Normalized text to store
+   */
+  void SetNormalizedText(DocId doc_id, std::string_view text);
+
+  /**
+   * @brief Get normalized text for a document (for n-gram verification)
+   *
+   * @param doc_id Document ID
+   * @return Normalized text if stored, std::nullopt otherwise
+   */
+  [[nodiscard]] std::optional<std::string> GetNormalizedText(DocId doc_id) const;
+
   /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 
@@ -319,6 +337,9 @@ class DocumentStore {
 
   // DocID -> Filter values
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
+
+  // DocID -> Normalized text (for n-gram post-filter verification)
+  std::unordered_map<DocId, std::string> doc_texts_;
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
   // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,

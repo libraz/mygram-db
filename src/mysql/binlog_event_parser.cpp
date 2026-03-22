@@ -21,6 +21,7 @@
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "server/tcp_server.h"  // For TableContext definition
+#include "utils/sql_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -169,182 +170,6 @@ inline std::string GetRowText(const RowData& row, const RowsEventContext& ctx) {
     return ConcatenateTextColumns(row, ctx.current_config->text_source.concat);
   }
   return row.text;
-}
-
-// ============================================================================
-// SQL parsing helper functions
-// ============================================================================
-
-/**
- * @brief Strip SQL comments from a query string
- *
- * Removes:
- * - Block comments: / * ... * / (without spaces)
- * - Line comments: -- ... (to end of line)
- *
- * @param query SQL query string
- * @return Query with comments stripped
- */
-std::string StripSQLComments(const std::string& query) {
-  std::string result;
-  result.reserve(query.length());
-
-  size_t pos = 0;
-  while (pos < query.length()) {
-    // Check for block comment start
-    if (pos + 1 < query.length() && query[pos] == '/' && query[pos + 1] == '*') {
-      // Skip until end of block comment
-      pos += 2;
-      while (pos + 1 < query.length()) {
-        if (query[pos] == '*' && query[pos + 1] == '/') {
-          pos += 2;
-          break;
-        }
-        pos++;
-      }
-      // Add a space to preserve word boundaries
-      if (!result.empty() && result.back() != ' ') {
-        result += ' ';
-      }
-      continue;
-    }
-
-    // Check for line comment start
-    if (pos + 1 < query.length() && query[pos] == '-' && query[pos + 1] == '-') {
-      // Skip until end of line
-      pos += 2;
-      while (pos < query.length() && query[pos] != '\n' && query[pos] != '\r') {
-        pos++;
-      }
-      // Skip the newline if present
-      if (pos < query.length()) {
-        pos++;
-      }
-      continue;
-    }
-
-    result += query[pos];
-    pos++;
-  }
-
-  return result;
-}
-
-/**
- * @brief Normalize whitespace in a string by replacing consecutive spaces with a single space
- * @param str Input string
- * @return Normalized string
- */
-std::string NormalizeWhitespace(const std::string& str) {
-  std::string result;
-  result.reserve(str.length());
-
-  bool prev_was_space = false;
-  for (char cur_char : str) {
-    bool is_space = std::isspace(static_cast<unsigned char>(cur_char)) != 0;
-    if (is_space) {
-      if (!prev_was_space) {
-        result += ' ';
-        prev_was_space = true;
-      }
-    } else {
-      result += cur_char;
-      prev_was_space = false;
-    }
-  }
-
-  return result;
-}
-
-/**
- * @brief Skip whitespace characters starting from a given position
- * @param str Input string
- * @param pos Starting position (updated to position after whitespace)
- * @return true if position is valid after skipping, false otherwise
- */
-bool SkipWhitespace(const std::string& str, size_t& pos) {
-  while (pos < str.length() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
-    ++pos;
-  }
-  return pos < str.length();
-}
-
-/**
- * @brief Case-insensitive keyword matching at a given position
- * @param str Input string (should be uppercase)
- * @param pos Starting position (updated to position after keyword if matched)
- * @param keyword Keyword to match (should be uppercase)
- * @return true if keyword matches, false otherwise
- */
-bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keyword) {
-  // Check if there's enough space for the keyword
-  if (pos + keyword.length() > str.length()) {
-    return false;
-  }
-
-  // Check if keyword matches
-  if (str.compare(pos, keyword.length(), keyword) != 0) {
-    return false;
-  }
-
-  // Check that keyword is followed by whitespace, backtick, or end of string
-  size_t next_pos = pos + keyword.length();
-  if (next_pos < str.length()) {
-    char next_char = str[next_pos];
-    if (std::isspace(static_cast<unsigned char>(next_char)) == 0 && next_char != '`') {
-      return false;
-    }
-  }
-
-  pos = next_pos;
-  return true;
-}
-
-/**
- * @brief Match table name at a given position (with optional backticks)
- * @param str Input string (should be uppercase)
- * @param pos Starting position (updated to position after table name if matched)
- * @param table_name Table name to match (should be uppercase)
- * @return true if table name matches, false otherwise
- */
-bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name) {
-  // Skip optional backtick
-  bool has_backtick = false;
-  if (pos < str.length() && str[pos] == '`') {
-    has_backtick = true;
-    ++pos;
-  }
-
-  // Match table name
-  if (pos + table_name.length() > str.length()) {
-    return false;
-  }
-
-  if (str.compare(pos, table_name.length(), table_name) != 0) {
-    return false;
-  }
-
-  pos += table_name.length();
-
-  // Skip optional closing backtick
-  if (has_backtick && pos < str.length() && str[pos] == '`') {
-    ++pos;
-  }
-
-  // Ensure the match is a complete word (not a prefix of a longer identifier)
-  // After the table name (and optional backtick), the next character must be:
-  // - End of string
-  // - Whitespace
-  // - Semicolon
-  // - Not an identifier character (alphanumeric or underscore)
-  if (pos < str.length()) {
-    char next_char = str[pos];
-    if (std::isalnum(static_cast<unsigned char>(next_char)) != 0 || next_char == '_') {
-      return false;  // Table name is a prefix of a longer identifier
-    }
-  }
-
-  return true;
 }
 
 }  // namespace
@@ -1217,15 +1042,15 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   size_t pos = 0;
 
   // Skip leading whitespace
-  if (!SkipWhitespace(query_upper, pos) && query_upper.empty()) {
+  if (!mygramdb::utils::SkipWhitespace(query_upper, pos) && query_upper.empty()) {
     return false;
   }
 
   // Check for TRUNCATE TABLE
   size_t saved_start = pos;
-  if (MatchKeyword(query_upper, pos, "TRUNCATE")) {
-    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-      if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+  if (mygramdb::utils::MatchKeyword(query_upper, pos, "TRUNCATE")) {
+    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }
@@ -1233,14 +1058,14 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
   // Reset position and check for DROP TABLE [IF EXISTS]
   pos = saved_start;
-  if (MatchKeyword(query_upper, pos, "DROP")) {
-    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-      if (SkipWhitespace(query_upper, pos)) {
+  if (mygramdb::utils::MatchKeyword(query_upper, pos, "DROP")) {
+    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygramdb::utils::SkipWhitespace(query_upper, pos)) {
         // Check for optional "IF EXISTS"
         size_t saved_pos = pos;
-        if (MatchKeyword(query_upper, pos, "IF")) {
-          if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "EXISTS")) {
-            SkipWhitespace(query_upper, pos);
+        if (mygramdb::utils::MatchKeyword(query_upper, pos, "IF")) {
+          if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
+            mygramdb::utils::SkipWhitespace(query_upper, pos);
           } else {
             // "IF" without "EXISTS" - restore position
             pos = saved_pos;
@@ -1248,7 +1073,7 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
         }
 
         // Match table name
-        if (MatchTableName(query_upper, pos, table_upper)) {
+        if (mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
           return true;
         }
       }
@@ -1257,9 +1082,9 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
   // Reset position and check for ALTER TABLE
   pos = saved_start;
-  if (MatchKeyword(query_upper, pos, "ALTER")) {
-    if (SkipWhitespace(query_upper, pos) && MatchKeyword(query_upper, pos, "TABLE")) {
-      if (SkipWhitespace(query_upper, pos) && MatchTableName(query_upper, pos, table_upper)) {
+  if (mygramdb::utils::MatchKeyword(query_upper, pos, "ALTER")) {
+    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }
@@ -1270,7 +1095,7 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
 bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {
   // Strip SQL comments first
-  std::string stripped_query = StripSQLComments(query);
+  std::string stripped_query = mygramdb::utils::StripSQLComments(query);
 
   // Convert to uppercase for case-insensitive matching
   std::string query_upper = stripped_query;
@@ -1279,7 +1104,7 @@ bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std:
   std::transform(table_upper.begin(), table_upper.end(), table_upper.begin(), ::toupper);
 
   // Normalize whitespace (replace consecutive spaces with single space)
-  query_upper = NormalizeWhitespace(query_upper);
+  query_upper = mygramdb::utils::NormalizeWhitespace(query_upper);
 
   // Split by semicolon and check each statement
   size_t start = 0;

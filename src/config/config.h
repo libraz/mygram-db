@@ -205,6 +205,7 @@ struct MemoryConfig {
     std::string width = "keep";
     bool lower = true;
   } normalize;
+  std::string verify_text = "off";  ///< N-gram post-filter: "off", "ascii", "all"
 };
 
 /**

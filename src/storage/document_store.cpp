@@ -15,12 +15,7 @@
 #include <memory>
 
 #include "storage/filter_index.h"
-
-#ifndef _WIN32
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
+#include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
 #include "utils/constants.h"
 #include "utils/structured_log.h"
@@ -90,7 +85,8 @@ DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) 
 DocumentStore::~DocumentStore() = default;
 
 Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
-                                                  const std::unordered_map<std::string, FilterValue>& filters) {
+                                                  const std::unordered_map<std::string, FilterValue>& filters,
+                                                  std::string_view normalized_text) {
   std::unique_lock lock(mutex_);
 
   // Check if primary key already exists (convert string_view to string for unordered_map lookup)
@@ -131,6 +127,11 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
   if (!filters.empty()) {
     filter_index_->AddDocument(doc_id, filters);
     doc_filters_[doc_id] = filters;
+  }
+
+  // Store normalized text for n-gram post-filter verification
+  if (!normalized_text.empty()) {
+    doc_texts_[doc_id] = std::string(normalized_text);
   }
 
   mygram::utils::StructuredLog()
@@ -185,6 +186,11 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     if (!doc.filters.empty()) {
       doc_filters_[doc_id] = doc.filters;
       filter_index_->AddDocument(doc_id, doc.filters);
+    }
+
+    // Store normalized text for n-gram post-filter verification
+    if (!doc.normalized_text.empty()) {
+      doc_texts_[doc_id] = doc.normalized_text;
     }
 
     doc_ids.push_back(doc_id);
@@ -257,6 +263,9 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
   // Remove filters
   doc_filters_.erase(doc_id);
 
+  // Remove normalized text
+  doc_texts_.erase(doc_id);
+
   mygram::utils::StructuredLog()
       .Event("document_removed")
       .Field("doc_id", static_cast<uint64_t>(doc_id))
@@ -264,6 +273,24 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
       .Debug();
 
   return true;
+}
+
+void DocumentStore::SetNormalizedText(DocId doc_id, std::string_view text) {
+  std::unique_lock lock(mutex_);
+  if (text.empty()) {
+    doc_texts_.erase(doc_id);
+  } else {
+    doc_texts_[doc_id] = std::string(text);
+  }
+}
+
+std::optional<std::string> DocumentStore::GetNormalizedText(DocId doc_id) const {
+  std::shared_lock lock(mutex_);
+  auto it = doc_texts_.find(doc_id);
+  if (it == doc_texts_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
@@ -457,6 +484,12 @@ size_t DocumentStore::MemoryUsage() const {
     }
   }
 
+  // doc_texts_ (normalized text for n-gram verification)
+  total += doc_texts_.bucket_count() * kPointerSize;
+  for (const auto& [doc_id, text] : doc_texts_) {
+    total += sizeof(DocId) + text.size() + text.capacity();
+  }
+
   // Filter index memory
   total += filter_index_->MemoryUsage();
 
@@ -470,6 +503,7 @@ void DocumentStore::Clear() {
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
   std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
+  std::unordered_map<DocId, std::string>().swap(doc_texts_);
   filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
@@ -484,6 +518,7 @@ void DocumentStore::Compact() {
   doc_id_to_pk_.rehash(doc_id_to_pk_.size());
   pk_to_doc_id_.rehash(pk_to_doc_id_.size());
   doc_filters_.rehash(doc_filters_.size());
+  doc_texts_.rehash(doc_texts_.size());
 
   // Also compact inner filter maps
   for (auto& [doc_id, filters] : doc_filters_) {
@@ -498,7 +533,8 @@ void DocumentStore::Compact() {
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                                 const std::string& replication_gtid) const {
-  std::string temp_filepath = filepath + ".tmp";
+  mygram::utils::AtomicFileWriter writer(filepath);
+  const auto& temp_filepath = writer.GetTempPath();
   try {
     std::ofstream ofs(temp_filepath, std::ios::binary);
     if (!ofs) {
@@ -511,12 +547,13 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
     // [4 bytes: gtid_length] [gtid_length bytes: GTID string]
     // [8 bytes: doc_count] [doc_id -> pk mappings...]
     // [filters...]
+    // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
 
     // Write magic number
     ofs.write("MGDS", 4);
 
     // Write version
-    uint32_t version = 1;
+    uint32_t version = 2;
     WriteBinary(ofs, version);
 
     uint32_t next_id = 0;
@@ -589,64 +626,26 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                 value);
           }
         }
+
+        // Write normalized text (v2+)
+        auto text_it = doc_texts_.find(doc_id);
+        if (text_it != doc_texts_.end()) {
+          auto text_len = static_cast<uint32_t>(text_it->second.size());
+          WriteBinary(ofs, text_len);
+          ofs.write(text_it->second.data(), static_cast<std::streamsize>(text_len));
+        } else {
+          uint32_t text_len = 0;
+          WriteBinary(ofs, text_len);
+        }
       }
     }
 
     ofs.close();
 
-    // Ensure temp file data is flushed to disk BEFORE rename
-#ifndef _WIN32
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int file_desc = open(temp_filepath.c_str(), O_RDONLY);
-    if (file_desc >= 0) {
-      if (fsync(file_desc) != 0) {
-        mygram::utils::StructuredLog()
-            .Event("storage_warning")
-            .Field("operation", "fsync_temp_file")
-            .Field("filepath", temp_filepath)
-            .Field("errno", static_cast<int64_t>(errno))
-            .Warn();
-      }
-      close(file_desc);
+    // Atomic commit: fsync temp file, rename to final path, fsync directory
+    if (auto result = writer.Commit(); !result) {
+      return result;
     }
-#endif
-
-    // Atomic rename: temp file -> final path
-    std::error_code rename_error;
-    std::filesystem::rename(temp_filepath, filepath, rename_error);
-    if (rename_error) {
-      mygram::utils::StructuredLog()
-          .Event("storage_error")
-          .Field("operation", "atomic_rename")
-          .Field("filepath", filepath)
-          .Field("error", rename_error.message())
-          .Error();
-      std::filesystem::remove(temp_filepath);
-      return MakeUnexpected(
-          MakeError(mygram::utils::ErrorCode::kStorageWriteError,
-                    "Failed to rename temp file: " + rename_error.message(), filepath));
-    }
-
-    // Sync the directory to ensure the rename is durable
-#ifndef _WIN32
-    {
-      auto parent_dir = std::filesystem::path(filepath).parent_path();
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-      int dir_file_desc =
-          open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
-      if (dir_file_desc >= 0) {
-        if (fsync(dir_file_desc) != 0) {
-          mygram::utils::StructuredLog()
-              .Event("storage_warning")
-              .Field("operation", "fsync_directory")
-              .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
-              .Field("errno", static_cast<int64_t>(errno))
-              .Warn();
-        }
-        close(dir_file_desc);
-      }
-    }
-#endif
 
     mygram::utils::StructuredLog()
         .Event("document_store_saved")
@@ -656,9 +655,7 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
         .Info();
     return {};
   } catch (const std::exception& e) {
-    // Clean up temp file on exception
-    std::error_code ec;
-    std::filesystem::remove(temp_filepath, ec);
+    // writer destructor will clean up temp file
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
                                     std::string("Exception while saving document store: ") + e.what(), filepath));
   }
@@ -683,7 +680,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
     // Read version
     uint32_t version = 0;
     ReadBinary(ifs, version);
-    if (version != 1) {
+    if (version < 1 || version > 2) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                       "Unsupported document store file version: " + std::to_string(version), filepath));
     }
@@ -740,6 +737,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
     absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
+    std::unordered_map<DocId, std::string> new_doc_texts;
 
     // Read doc_id -> pk mappings and filters
     for (uint64_t i = 0; i < doc_count; ++i) {
@@ -911,6 +909,28 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
         new_doc_filters[doc_id] = filters;
       }
+
+      // Read normalized text (v2+)
+      if (version >= 2) {
+        constexpr uint32_t kMaxNormalizedTextLength = 16 * 1024 * 1024;  // 16MB
+        uint32_t text_len = 0;
+        ReadBinary(ifs, text_len);
+        if (text_len > kMaxNormalizedTextLength) {
+          return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                          "Normalized text length " + std::to_string(text_len) +
+                                              " exceeds maximum allowed " + std::to_string(kMaxNormalizedTextLength)));
+        }
+        if (text_len > 0) {
+          std::string text(text_len, '\0');
+          ifs.read(text.data(), static_cast<std::streamsize>(text_len));
+          if (!ifs.good()) {
+            return MakeUnexpected(
+                MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                          "Stream error while reading normalized text for doc_id " + std::to_string(doc_id)));
+          }
+          new_doc_texts[doc_id] = std::move(text);
+        }
+      }
     }
 
     ifs.close();
@@ -927,6 +947,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      doc_texts_ = std::move(new_doc_texts);
       filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }
@@ -952,12 +973,13 @@ Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
     // [4 bytes: gtid_length] [gtid_length bytes: GTID string]
     // [8 bytes: doc_count] [doc_id -> pk mappings...]
     // [filters...]
+    // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
 
     // Write magic number
     output_stream.write("MGDS", 4);
 
-    // Write version
-    uint32_t version = 1;
+    // Write version (v2 adds doc_texts_ serialization)
+    uint32_t version = 2;
     WriteBinary(output_stream, version);
 
     uint32_t next_id = 0;
@@ -1036,6 +1058,17 @@ Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
                 value);
           }
         }
+
+        // Write normalized text (v2+)
+        auto text_it = doc_texts_.find(doc_id);
+        if (text_it != doc_texts_.end()) {
+          auto text_len = static_cast<uint32_t>(text_it->second.size());
+          WriteBinary(output_stream, text_len);
+          output_stream.write(text_it->second.data(), static_cast<std::streamsize>(text_len));
+        } else {
+          uint32_t text_len = 0;
+          WriteBinary(output_stream, text_len);
+        }
       }
     }
 
@@ -1062,10 +1095,10 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
                                       "Invalid document store stream format (bad magic number)"));
     }
 
-    // Read version
+    // Read version (v1: base, v2: adds doc_texts_)
     uint32_t version = 0;
     ReadBinary(input_stream, version);
-    if (version != 1) {
+    if (version < 1 || version > 2) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                       "Unsupported document store stream version: " + std::to_string(version)));
     }
@@ -1112,6 +1145,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
     std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
+    std::unordered_map<DocId, std::string> new_doc_texts;
 
     // Read doc_id -> pk mappings and filters
     for (uint64_t i = 0; i < doc_count; ++i) {
@@ -1293,6 +1327,28 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
 
         new_doc_filters[doc_id] = filters;
       }
+
+      // Read normalized text (v2+)
+      if (version >= 2) {
+        constexpr uint32_t kMaxNormalizedTextLength = 16 * 1024 * 1024;  // 16MB
+        uint32_t text_len = 0;
+        ReadBinary(input_stream, text_len);
+        if (text_len > kMaxNormalizedTextLength) {
+          return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                          "Normalized text length " + std::to_string(text_len) +
+                                              " exceeds maximum allowed " + std::to_string(kMaxNormalizedTextLength)));
+        }
+        if (text_len > 0) {
+          std::string text(text_len, '\0');
+          input_stream.read(text.data(), static_cast<std::streamsize>(text_len));
+          if (!input_stream.good()) {
+            return MakeUnexpected(
+                MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                          "Stream error while reading normalized text for doc_id " + std::to_string(doc_id)));
+          }
+          new_doc_texts[doc_id] = std::move(text);
+        }
+      }
     }
 
     if (!input_stream.good()) {
@@ -1312,6 +1368,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       doc_id_to_pk_ = std::move(new_doc_id_to_pk);
       pk_to_doc_id_ = std::move(new_pk_to_doc_id);
       doc_filters_ = std::move(new_doc_filters);
+      doc_texts_ = std::move(new_doc_texts);
       filter_index_ = std::move(new_filter_index);
       next_doc_id_ = next_id;
     }

@@ -76,6 +76,7 @@ services:
       MEMORY_NORMALIZE_NFKC: ${MEMORY_NORMALIZE_NFKC:-true}
       MEMORY_NORMALIZE_WIDTH: ${MEMORY_NORMALIZE_WIDTH:-narrow}
       MEMORY_NORMALIZE_LOWER: ${MEMORY_NORMALIZE_LOWER:-false}
+      MEMORY_VERIFY_TEXT: ${MEMORY_VERIFY_TEXT:-off}
 
       # Snapshot Configuration
       SNAPSHOT_DIR: ${SNAPSHOT_DIR:-/var/lib/mygramdb/snapshots}

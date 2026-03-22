@@ -88,7 +88,8 @@
       "nfkc": true,
       "width": "narrow",
       "lower": false
-    }
+    },
+    "verify_text": "off"
   },
   "dump": {
     "dir": "/var/lib/mygramdb/dumps",

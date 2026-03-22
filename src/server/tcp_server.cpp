@@ -280,6 +280,9 @@ void TcpServer::Stop() {
     unix_acceptor_->Stop();
   }
 
+  // Join dump worker thread if still running
+  dump_progress_.JoinWorker();
+
   // Shutdown thread pool (completes pending tasks)
   if (thread_pool_) {
     thread_pool_->Shutdown();
