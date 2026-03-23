@@ -495,6 +495,7 @@ if(ENABLE_COVERAGE)
       COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
       COMMENT "Generating code coverage report (excluding SLOW and LOAD tests)"
+      VERBATIM
     )
 
     # Add target to generate coverage report with ALL tests (including SLOW)

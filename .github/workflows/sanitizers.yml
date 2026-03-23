@@ -1,11 +1,7 @@
 name: Sanitizers
 
 on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches: [ develop ]
-  pull_request:
-    branches: [ develop ]
+  workflow_dispatch:  # Manual trigger only
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
