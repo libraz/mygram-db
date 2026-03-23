@@ -92,14 +92,14 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       }
 
       // Check memory health before optimization
-      auto memory_health = utils::GetMemoryHealthStatus();
-      if (memory_health == utils::MemoryHealthStatus::CRITICAL) {
-        auto sys_info = utils::GetSystemMemoryInfo();
+      auto memory_health = mygram::utils::GetMemoryHealthStatus();
+      if (memory_health == mygram::utils::MemoryHealthStatus::CRITICAL) {
+        auto sys_info = mygram::utils::GetSystemMemoryInfo();
         std::ostringstream oss;
         oss << "Memory critically low: ";
         if (sys_info) {
-          oss << "available=" << utils::FormatBytes(sys_info->available_physical_bytes)
-              << " total=" << utils::FormatBytes(sys_info->total_physical_bytes);
+          oss << "available=" << mygram::utils::FormatBytes(sys_info->available_physical_bytes)
+              << " total=" << mygram::utils::FormatBytes(sys_info->total_physical_bytes);
         }
         mygram::utils::StructuredLog()
             .Event("server_warning")
@@ -114,15 +114,15 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       uint64_t index_memory = current_index->MemoryUsage();
       uint64_t total_docs = current_doc_store->Size();
       constexpr size_t kDefaultBatchSize = 1000;
-      uint64_t estimated_memory = utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize);
+      uint64_t estimated_memory = mygram::utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize);
 
       // Check if estimated memory is available (with 10% safety margin)
-      if (!utils::CheckMemoryAvailability(estimated_memory, utils::kDefaultMemorySafetyMargin)) {
-        auto sys_info = utils::GetSystemMemoryInfo();
+      if (!mygram::utils::CheckMemoryAvailability(estimated_memory, mygram::utils::kDefaultMemorySafetyMargin)) {
+        auto sys_info = mygram::utils::GetSystemMemoryInfo();
         std::ostringstream oss;
-        oss << "Insufficient memory: estimated=" << utils::FormatBytes(estimated_memory);
+        oss << "Insufficient memory: estimated=" << mygram::utils::FormatBytes(estimated_memory);
         if (sys_info) {
-          oss << " available=" << utils::FormatBytes(sys_info->available_physical_bytes);
+          oss << " available=" << mygram::utils::FormatBytes(sys_info->available_physical_bytes);
         }
         mygram::utils::StructuredLog()
             .Event("server_warning")
@@ -135,9 +135,9 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 
       mygram::utils::StructuredLog()
           .Event("index_optimization_starting")
-          .Field("memory_health", utils::MemoryHealthStatusToString(memory_health))
-          .Field("estimated_memory", utils::FormatBytes(estimated_memory))
-          .Field("index_size", utils::FormatBytes(index_memory))
+          .Field("memory_health", mygram::utils::MemoryHealthStatusToString(memory_health))
+          .Field("estimated_memory", mygram::utils::FormatBytes(estimated_memory))
+          .Field("index_size", mygram::utils::FormatBytes(index_memory))
           .Field("docs", total_docs)
           .Info();
 
@@ -148,7 +148,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         auto stats = current_index->GetStatistics();
         std::ostringstream oss;
         oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-            << " roaring=" << stats.roaring_bitmap_lists << " memory=" << utils::FormatBytes(stats.memory_usage_bytes);
+            << " roaring=" << stats.roaring_bitmap_lists << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
         return oss.str();
       }
       return ResponseFormatter::FormatError("Failed to start optimization");

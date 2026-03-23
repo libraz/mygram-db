@@ -238,7 +238,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     uint64_t val = std::get<uint64_t>(value);
 
     // Parse target value: support both epoch seconds and ISO8601 format
-    auto target_opt = mygramdb::utils::ParseDatetimeValue(filter.value, datetime_timezone);
+    auto target_opt = mygram::utils::ParseDatetimeValue(filter.value, datetime_timezone);
     if (!target_opt) {
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
@@ -295,7 +295,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       if (pos != filter.value.length()) {
         // Not a pure integer, try HH:MM:SS format using DateTimeProcessor
         // TimeToSeconds is a static method that doesn't require timezone
-        auto seconds_result = utils::DateTimeProcessor::TimeToSeconds(filter.value);
+        auto seconds_result = mygram::utils::DateTimeProcessor::TimeToSeconds(filter.value);
         if (seconds_result) {
           target = *seconds_result;
         } else {

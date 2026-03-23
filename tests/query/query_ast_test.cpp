@@ -608,16 +608,16 @@ TEST(QueryASTEvaluationTest, JapaneseTextNormalization) {
 
   // Add documents with Japanese text (normalized before indexing)
   auto doc1 = *doc_store.AddDocument("1");
-  idx.AddDocument(doc1, utils::NormalizeText("二次創作", true, "keep", true));  // "Derivative work"
+  idx.AddDocument(doc1, mygram::utils::NormalizeText("二次創作", true, "keep", true));  // "Derivative work"
 
   auto doc2 = *doc_store.AddDocument("2");
-  idx.AddDocument(doc2, utils::NormalizeText("東方Project", true, "keep", true));  // "Touhou Project"
+  idx.AddDocument(doc2, mygram::utils::NormalizeText("東方Project", true, "keep", true));  // "Touhou Project"
 
   auto doc3 = *doc_store.AddDocument("3");
-  idx.AddDocument(doc3, utils::NormalizeText("艦これ", true, "keep", true));  // "KanColle"
+  idx.AddDocument(doc3, mygram::utils::NormalizeText("艦これ", true, "keep", true));  // "KanColle"
 
   auto doc4 = *doc_store.AddDocument("4");
-  idx.AddDocument(doc4, utils::NormalizeText("test", true, "keep", true));  // English control
+  idx.AddDocument(doc4, mygram::utils::NormalizeText("test", true, "keep", true));  // English control
 
   QueryASTParser parser;
 
@@ -666,7 +666,7 @@ TEST(QueryASTEvaluationTest, HybridNgramConsistency) {
 
   // Add document with mixed text (normalized before indexing)
   auto doc1 = *doc_store.AddDocument("1");
-  idx.AddDocument(doc1, utils::NormalizeText("東方project", true, "keep", true));  // Mixed: CJK + ASCII
+  idx.AddDocument(doc1, mygram::utils::NormalizeText("東方project", true, "keep", true));  // Mixed: CJK + ASCII
 
   QueryASTParser parser;
 
@@ -705,15 +705,15 @@ TEST(QueryASTEvaluationTest, NormalizationParameterConsistency) {
   // NOTE: In production, text is normalized before being added to index (snapshot_builder.cpp)
   // We must do the same in tests
   auto doc1 = *doc_store.AddDocument("1");
-  std::string normalized1 = utils::NormalizeText("Test", true, "keep", true);  // -> "test"
+  std::string normalized1 = mygram::utils::NormalizeText("Test", true, "keep", true);  // -> "test"
   idx.AddDocument(doc1, normalized1);
 
   auto doc2 = *doc_store.AddDocument("2");
-  std::string normalized2 = utils::NormalizeText("テスト", true, "keep", true);  // Full-width katakana
+  std::string normalized2 = mygram::utils::NormalizeText("テスト", true, "keep", true);  // Full-width katakana
   idx.AddDocument(doc2, normalized2);
 
   auto doc3 = *doc_store.AddDocument("3");
-  std::string normalized3 = utils::NormalizeText("ﾃｽﾄ", true, "keep", true);  // Half-width katakana
+  std::string normalized3 = mygram::utils::NormalizeText("ﾃｽﾄ", true, "keep", true);  // Half-width katakana
   idx.AddDocument(doc3, normalized3);
 
   QueryASTParser parser;

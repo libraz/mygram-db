@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <string>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /// @brief Compute CRC32 checksum using zlib.
 /// @param data Pointer to the data buffer
@@ -25,6 +25,6 @@ inline uint32_t ComputeCRC32(const std::string& str) {
   return ComputeCRC32(str.data(), str.size());
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils
 
 #endif  // MYGRAMDB_UTILS_CRC32_H_

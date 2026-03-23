@@ -9,7 +9,7 @@
 
 #include "utils/string_utils.h"
 
-using namespace mygramdb::utils;
+using namespace mygram::utils;
 
 /**
  * @brief Test getting system memory info

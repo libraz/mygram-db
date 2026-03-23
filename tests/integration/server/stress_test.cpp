@@ -76,7 +76,7 @@ TEST_F(StressTest, DISABLED_LargeScale100K) {
 
   // Search performance - need to n-gram化 the search terms first
   std::string search_term = "test";
-  auto search_ngrams = utils::GenerateHybridNgrams(search_term, 3, 2);
+  auto search_ngrams = mygram::utils::GenerateHybridNgrams(search_term, 3, 2);
 
   start = std::chrono::high_resolution_clock::now();
   auto results = index_->SearchAnd(search_ngrams);
@@ -298,8 +298,8 @@ TEST_F(StressTest, SearchPerformanceDegradation) {
     index_->AddDocumentBatch(batch);
 
     // Measure search time - need to n-gram化 search terms first
-    auto test_ngrams = utils::GenerateHybridNgrams("test", 3, 2);
-    auto search_ngrams = utils::GenerateHybridNgrams("search", 3, 2);
+    auto test_ngrams = mygram::utils::GenerateHybridNgrams("test", 3, 2);
+    auto search_ngrams = mygram::utils::GenerateHybridNgrams("search", 3, 2);
 
     // Combine all ngrams from both terms for AND search
     std::vector<std::string> combined_ngrams;

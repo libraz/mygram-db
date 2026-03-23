@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-using namespace mygramdb::utils;
+using namespace mygram::utils;
 
 /**
  * @brief Test UTF-8 to codepoints conversion

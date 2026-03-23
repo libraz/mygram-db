@@ -407,7 +407,7 @@ void ConnectionAcceptor::AcceptLoop() {
         mygram::utils::StructuredLog().Event("server_warning").Field("type", "client_address_parse_failed").Warn();
       }
 
-      if (!utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
+      if (!mygram::utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
         mygram::utils::StructuredLog()
             .Event("server_warning")
             .Field("type", "connection_rejected_acl")
@@ -456,7 +456,7 @@ void ConnectionAcceptor::AcceptLoop() {
       bool submitted = thread_pool_->Submit([this, client_fd]() {
         // RAII guard to ensure connection is removed from active set
         // even if connection_handler_ throws an exception
-        mygramdb::utils::ScopeGuard cleanup([this, client_fd]() { RemoveConnection(client_fd); });
+        mygram::utils::ScopeGuard cleanup([this, client_fd]() { RemoveConnection(client_fd); });
 
         connection_handler_(client_fd);
         // Note: cleanup will call RemoveConnection on scope exit

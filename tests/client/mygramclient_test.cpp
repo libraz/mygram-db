@@ -94,15 +94,15 @@ class MygramClientTest : public ::testing::Test {
     // Add documents with filters
     // Note: Normalize text before adding to index (server does this on search)
     doc_store_->AddDocument("1", filters_active);
-    std::string text1 = utils::NormalizeText("Hello world example", true, "keep", true);
+    std::string text1 = mygram::utils::NormalizeText("Hello world example", true, "keep", true);
     index_->AddDocument(1, text1);
 
     doc_store_->AddDocument("2", filters_active);
-    std::string text2 = utils::NormalizeText("Hello programming", true, "keep", true);
+    std::string text2 = mygram::utils::NormalizeText("Hello programming", true, "keep", true);
     index_->AddDocument(2, text2);
 
     doc_store_->AddDocument("3", filters_inactive);
-    std::string text3 = utils::NormalizeText("World news today", true, "keep", true);
+    std::string text3 = mygram::utils::NormalizeText("World news today", true, "keep", true);
     index_->AddDocument(3, text3);
   }
 
@@ -521,15 +521,15 @@ TEST_F(MygramClientTest, MoveSemantics) {
 TEST_F(MygramClientTest, EmojiInSearch) {
   // Add documents with emojis
   doc_store_->AddDocument("1", {});
-  std::string text1 = utils::NormalizeText("Hello😀World", true, "keep", true);
+  std::string text1 = mygram::utils::NormalizeText("Hello😀World", true, "keep", true);
   index_->AddDocument(1, text1);
 
   doc_store_->AddDocument("2", {});
-  std::string text2 = utils::NormalizeText("😀🎉👍", true, "keep", true);
+  std::string text2 = mygram::utils::NormalizeText("😀🎉👍", true, "keep", true);
   index_->AddDocument(2, text2);
 
   doc_store_->AddDocument("3", {});
-  std::string text3 = utils::NormalizeText("Tutorial😀学習", true, "keep", true);
+  std::string text3 = mygram::utils::NormalizeText("Tutorial😀学習", true, "keep", true);
   index_->AddDocument(3, text3);
 
   ASSERT_TRUE(client_->Connect());
@@ -550,11 +550,11 @@ TEST_F(MygramClientTest, EmojiInSearch) {
 TEST_F(MygramClientTest, MultipleEmojisInSearch) {
   // Add documents
   doc_store_->AddDocument("1", {});
-  std::string text1 = utils::NormalizeText("😀🎉", true, "keep", true);
+  std::string text1 = mygram::utils::NormalizeText("😀🎉", true, "keep", true);
   index_->AddDocument(1, text1);
 
   doc_store_->AddDocument("2", {});
-  std::string text2 = utils::NormalizeText("😀👍", true, "keep", true);
+  std::string text2 = mygram::utils::NormalizeText("😀👍", true, "keep", true);
   index_->AddDocument(2, text2);
 
   ASSERT_TRUE(client_->Connect());
@@ -578,11 +578,11 @@ TEST_F(MygramClientTest, MultipleEmojisInSearch) {
 TEST_F(MygramClientTest, EmojiWithAndSearch) {
   // Add documents
   doc_store_->AddDocument("1", {});
-  std::string text1 = utils::NormalizeText("😀ABC", true, "keep", true);
+  std::string text1 = mygram::utils::NormalizeText("😀ABC", true, "keep", true);
   index_->AddDocument(1, text1);
 
   doc_store_->AddDocument("2", {});
-  std::string text2 = utils::NormalizeText("😀XYZ", true, "keep", true);
+  std::string text2 = mygram::utils::NormalizeText("😀XYZ", true, "keep", true);
   index_->AddDocument(2, text2);
 
   ASSERT_TRUE(client_->Connect());
@@ -620,7 +620,7 @@ TEST_F(MygramClientTest, LargeResponseHandling) {
     doc_store_->AddDocument("doc_" + std::to_string(i), filters);
 
     // Add same search term to all documents so they all match
-    std::string text = utils::NormalizeText("test document " + std::to_string(i), true, "keep", true);
+    std::string text = mygram::utils::NormalizeText("test document " + std::to_string(i), true, "keep", true);
     index_->AddDocument(static_cast<uint64_t>(i), text);
   }
 

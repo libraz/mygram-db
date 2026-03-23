@@ -69,8 +69,8 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
   }
 
   // Check memory health
-  auto health = utils::GetMemoryHealthStatus();
-  if (health == utils::MemoryHealthStatus::CRITICAL) {
+  auto health = mygram::utils::GetMemoryHealthStatus();
+  if (health == mygram::utils::MemoryHealthStatus::CRITICAL) {
     return ResponseFormatter::FormatError("Memory critically low. Cannot start SYNC.");
   }
 

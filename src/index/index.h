@@ -18,6 +18,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "index/posting_list.h"
 #include "utils/hash_utils.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::index {
 
@@ -274,6 +275,11 @@ class Index {
 
   /** @brief Get lowercase normalization setting */
   [[nodiscard]] bool GetNormalizeLower() const { return normalize_lower_; }
+
+  /** @brief Normalize text using this index's normalization settings */
+  [[nodiscard]] std::string NormalizeText(std::string_view text) const {
+    return mygram::utils::NormalizeText(text, normalize_nfkc_, normalize_width_, normalize_lower_);
+  }
 
  private:
   int ngram_size_;

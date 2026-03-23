@@ -10,7 +10,7 @@
 #include <optional>
 #include <string>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /**
  * @brief System memory information
@@ -100,6 +100,6 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status);
  */
 uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size);
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils
 
 #endif  // MYGRAMDB_UTILS_MEMORY_UTILS_H_

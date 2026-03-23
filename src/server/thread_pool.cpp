@@ -221,7 +221,7 @@ void ThreadPool::WorkerThread() {
       // RAII guard to ensure active_workers_ is properly managed
       // even if task() throws an exception that escapes the catch blocks
       active_workers_++;
-      mygramdb::utils::ScopeGuard worker_guard([this]() { active_workers_--; });
+      mygram::utils::ScopeGuard worker_guard([this]() { active_workers_--; });
 
       try {
         task();

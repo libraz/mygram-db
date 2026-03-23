@@ -90,12 +90,12 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
   return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<utils::CIDR> parsed;
+std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<mygram::utils::CIDR> parsed;
   parsed.reserve(allow_cidrs.size());
 
   for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = utils::CIDR::Parse(cidr_str);
+    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
     if (!cidr) {
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -290,7 +290,7 @@ void TcpServer::Stop() {
 
 void TcpServer::HandleConnection(int client_fd) {
   // RAII guard to ensure FD is closed even if exceptions occur
-  mygramdb::utils::FDGuard fd_guard(client_fd);
+  mygram::utils::FDGuard fd_guard(client_fd);
 
   // Get client IP address for rate limiting
   std::string client_ip;
@@ -339,7 +339,7 @@ void TcpServer::HandleConnection(int client_fd) {
   stats_.IncrementTotalConnections();
 
   // RAII guard to ensure stats are decremented even if exceptions occur
-  mygramdb::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
+  mygram::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
 
   // Create I/O handler config
   IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),

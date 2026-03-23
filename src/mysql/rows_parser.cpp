@@ -191,7 +191,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT, MEDIUMTEXT, LONGTEXT)
@@ -243,7 +243,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
     }
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
@@ -278,7 +278,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     // JSON type
@@ -325,7 +325,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
     }
 
     // Date/Time types (simple representation as strings)
@@ -1481,7 +1481,7 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
         filters[filter_config.name] = std::stod(value_str);
       } else if (filter_config.type == "datetime" || filter_config.type == "date") {
         // DATETIME/DATE: Convert to epoch seconds using timezone
-        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, datetime_timezone);
+        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, datetime_timezone);
         if (epoch_opt) {
           filters[filter_config.name] = *epoch_opt;
         } else {

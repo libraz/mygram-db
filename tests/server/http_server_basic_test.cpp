@@ -225,10 +225,20 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
   ASSERT_TRUE(restricted_server->Start());
 
   httplib::Client client("http://127.0.0.1:18082");
-  auto res = client.Get("/health");
 
+  // Non-health endpoints should be rejected by CIDR
+  auto res = client.Get("/info");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 403);
+
+  // Health endpoints bypass CIDR restrictions (required for Docker HEALTHCHECK, load balancers)
+  auto health_res = client.Get("/health");
+  ASSERT_TRUE(health_res);
+  EXPECT_EQ(health_res->status, 200);
+
+  auto live_res = client.Get("/health/live");
+  ASSERT_TRUE(live_res);
+  EXPECT_EQ(live_res->status, 200);
 
   restricted_server->Stop();
 }

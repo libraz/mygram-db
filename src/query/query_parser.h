@@ -213,6 +213,9 @@ struct Query {
  */
 class QueryParser {
  public:
+  static constexpr size_t kMaxFilterColumnNameLength = 128;
+  static constexpr size_t kMaxFilterValueLength = 1024;
+
   QueryParser() = default;
   ~QueryParser() = default;
 

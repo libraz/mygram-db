@@ -57,6 +57,9 @@ DUMP_RETAIN=${DUMP_RETAIN:-3}
 
 API_BIND=${API_BIND:-0.0.0.0}
 API_PORT=${API_PORT:-11016}
+API_HTTP_ENABLE=${API_HTTP_ENABLE:-true}
+API_HTTP_BIND=${API_HTTP_BIND:-0.0.0.0}
+API_HTTP_PORT=${API_HTTP_PORT:-8080}
 
 NETWORK_ALLOW_CIDRS=${NETWORK_ALLOW_CIDRS:-""}
 
@@ -135,6 +138,10 @@ api:
   tcp:
     bind: "${API_BIND}"
     port: ${API_PORT}
+  http:
+    enable: ${API_HTTP_ENABLE}
+    bind: "${API_HTTP_BIND}"
+    port: ${API_HTTP_PORT}
 
 # Logging
 logging:
@@ -161,6 +168,7 @@ EOF
   done
 fi
 
+chmod 600 "$CONFIG_FILE"
 echo "Configuration file generated at: $CONFIG_FILE"
 echo "MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}"
 echo "Table: ${TABLE_NAME} (primary_key: ${TABLE_PRIMARY_KEY}, text_column: ${TABLE_TEXT_COLUMN})"

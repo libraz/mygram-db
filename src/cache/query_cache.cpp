@@ -116,34 +116,34 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
 
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
-  try {
-    if (compression_enabled_) {
-      result = ResultCompressor::Decompress(compressed_copy, original_size);
-    } else {
-      // No compression - interpret raw bytes as DocId array
-      result.resize(original_size);
-      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
-    }
-  } catch (const std::exception& e) {
-    // Decompression failed - enqueue for cleanup and treat as miss
-    {
-      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
-        pending_decompression_keys_.insert(key);
+  if (compression_enabled_) {
+    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_size);
+    if (!decompress_result) {
+      // Decompression failed - enqueue for cleanup and treat as miss
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+          pending_decompression_keys_.insert(key);
+        }
       }
+
+      stats_.cache_misses++;
+      stats_.decompression_failures++;  // Count failure at detection time
+
+      auto end_time = std::chrono::high_resolution_clock::now();
+      double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      {
+        std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+        stats_.total_cache_miss_time_ms += miss_time_ms;
+      }
+
+      return std::nullopt;
     }
-
-    stats_.cache_misses++;
-    stats_.decompression_failures++;  // Count failure at detection time
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    {
-      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_cache_miss_time_ms += miss_time_ms;
-    }
-
-    return std::nullopt;
+    result = std::move(*decompress_result);
+  } else {
+    // No compression - interpret raw bytes as DocId array
+    result.resize(original_size);
+    std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
   }
 
   // Decompression succeeded - now count as hit
@@ -250,34 +250,34 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
 
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
-  try {
-    if (compression_enabled_) {
-      result = ResultCompressor::Decompress(compressed_copy, original_size);
-    } else {
-      // No compression - interpret raw bytes as DocId array
-      result.resize(original_size);
-      std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
-    }
-  } catch (const std::exception& e) {
-    // Decompression failed - enqueue for cleanup and treat as miss
-    {
-      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-      if (pending_decompression_keys_.size() < kMaxPendingKeys) {
-        pending_decompression_keys_.insert(key);
+  if (compression_enabled_) {
+    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_size);
+    if (!decompress_result) {
+      // Decompression failed - enqueue for cleanup and treat as miss
+      {
+        std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+        if (pending_decompression_keys_.size() < kMaxPendingKeys) {
+          pending_decompression_keys_.insert(key);
+        }
       }
+
+      stats_.cache_misses++;
+      stats_.decompression_failures++;  // Count failure at detection time
+
+      auto end_time = std::chrono::high_resolution_clock::now();
+      double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      {
+        std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+        stats_.total_cache_miss_time_ms += miss_time_ms;
+      }
+
+      return std::nullopt;
     }
-
-    stats_.cache_misses++;
-    stats_.decompression_failures++;  // Count failure at detection time
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    {
-      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_cache_miss_time_ms += miss_time_ms;
-    }
-
-    return std::nullopt;
+    result = std::move(*decompress_result);
+  } else {
+    // No compression - interpret raw bytes as DocId array
+    result.resize(original_size);
+    std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
   }
 
   // Decompression succeeded - now count as hit
@@ -304,16 +304,16 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
   // Compress result (if enabled)
   std::vector<uint8_t> compressed;
-  try {
-    if (compression_enabled_) {
-      compressed = ResultCompressor::Compress(result);
-    } else {
-      // Store raw bytes without compression
-      compressed.resize(result.size() * sizeof(DocId));
-      std::memcpy(compressed.data(), result.data(), compressed.size());
+  if (compression_enabled_) {
+    auto compress_result = ResultCompressor::Compress(result);
+    if (!compress_result) {
+      return false;
     }
-  } catch (const std::exception& e) {
-    return false;
+    compressed = std::move(*compress_result);
+  } else {
+    // Store raw bytes without compression
+    compressed.resize(result.size() * sizeof(DocId));
+    std::memcpy(compressed.data(), result.data(), compressed.size());
   }
 
   // Create cache entry to calculate accurate memory usage

@@ -58,6 +58,23 @@ class MygramDBClient:
         count = resp.count("VALUE ")
         return count, elapsed
 
+    def search_ids(self, table: str, query: str, sort: str = "id", limit: int = 100) -> list[int]:
+        """SEARCH and return list of matching IDs."""
+        cmd = f"SEARCH {table} {query} SORT {sort} LIMIT {limit}"
+        resp, _ = self._query(cmd)
+        # Response format: "OK RESULTS <total> <id1> <id2> ...\r\n"
+        ids = []
+        for line in resp.split("\r\n"):
+            if line.startswith("OK RESULTS "):
+                parts = line.split()
+                # parts[0]="OK", parts[1]="RESULTS", parts[2]=total_count, parts[3:]=ids
+                for p in parts[3:]:
+                    try:
+                        ids.append(int(p))
+                    except ValueError:
+                        pass
+        return ids
+
     def count(self, table: str, query: str) -> tuple[int, float]:
         """COUNT and return (count, elapsed_ms)."""
         cmd = f"COUNT {table} {query}"
@@ -462,9 +479,71 @@ def main():
             "speedup": speedup, "mysql_error": mysql_r.get("error"),
         }
 
-    # ── 4. Concurrent Throughput ──────────────────────────────
+    # ── 4. Result Consistency ─────────────────────────────────
+    consistency_queries = [
+        ("quantum", "EN medium"),
+        ("algorithm", "EN rare"),
+        ("日本", "JA common"),
+        ("科学", "JA rare"),
+    ]
+    print(section_header("4. RESULT CONSISTENCY  (MygramDB vs MySQL, total match count)"))
+    print()
+    print("  Compares total match counts between both engines.")
+    print("  N-gram indexes may produce false positives (matches on partial n-gram overlap).")
+    print()
+    print(f"  {'Query':<14} {'MySQL':>10} {'MygramDB':>10} {'Diff':>8} {'Note':>30}")
+    print(f"  {'─' * 14} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 30}")
+
+    mg_client = MygramDBClient(args.mygramdb_host, args.mygramdb_port)
+
+    for query, label in consistency_queries:
+        print(f"  Running '{query}'...{' ' * 60}", end="\r", flush=True)
+        # MySQL COUNT
+        try:
+            conn = _mysql_connect(args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_db)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM articles WHERE MATCH(content) AGAINST(%s IN BOOLEAN MODE)",
+                (query,),
+            )
+            mysql_count = cursor.fetchone()[0]
+            cursor.close()
+            conn.close()
+        except Exception:
+            mysql_count = -1
+
+        # MygramDB COUNT
+        mg_count, _ = mg_client.count("articles", query)
+
+        if mysql_count < 0:
+            diff_str = "N/A"
+            note = "MySQL error"
+        else:
+            diff = mg_count - mysql_count
+            diff_pct = (diff / mysql_count * 100) if mysql_count > 0 else 0
+            diff_str = f"{diff:+,}"
+            if diff == 0:
+                note = "\033[32mexact match\033[0m"
+            elif diff > 0:
+                note = f"\033[33m+{diff_pct:.1f}% false positives (n-gram)\033[0m"
+            else:
+                note = f"\033[31m{diff_pct:.1f}% missing\033[0m"
+
+        mysql_str = f"{mysql_count:,}" if mysql_count >= 0 else "Error"
+        print(f"  {label:<14} {mysql_str:>10} {mg_count:>10,} {diff_str:>8} {note:>30}")
+
+        results["tests"][f"consistency_{label}"] = {
+            "query": query,
+            "mysql_count": mysql_count,
+            "mygramdb_count": mg_count,
+        }
+
+    print()
+    print("  N-gram false positives are expected. Enable verify_text (v1.5+) to eliminate them.")
+
+    # ── 5. Concurrent Throughput ──────────────────────────────
     query_for_concurrent = "algorithm"
-    print(section_header(f"4. CONCURRENT THROUGHPUT  (query: '{query_for_concurrent}', {args.concurrent_duration}s per level)"))
+    print(section_header(f"5. CONCURRENT THROUGHPUT  (query: '{query_for_concurrent}', {args.concurrent_duration}s per level)"))
     print()
     print(f"  {'Connections':<14} {'MySQL QPS':>12} {'MygramDB QPS':>14} {'MySQL p50':>10} {'MG p50':>10} {'QPS ratio':>12}")
     print(f"  {'─' * 14} {'─' * 12} {'─' * 14} {'─' * 10} {'─' * 10} {'─' * 12}")

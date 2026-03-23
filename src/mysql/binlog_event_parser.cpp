@@ -1041,16 +1041,16 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   size_t pos = 0;
 
   // Skip leading whitespace
-  if (!mygramdb::utils::SkipWhitespace(query_upper, pos) && query_upper.empty()) {
+  if (!mygram::utils::SkipWhitespace(query_upper, pos) && query_upper.empty()) {
     return false;
   }
 
   // Check for TRUNCATE TABLE
   size_t saved_start = pos;
-  if (mygramdb::utils::MatchKeyword(query_upper, pos, "TRUNCATE")) {
-    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
-      if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
-          mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
+  if (mygram::utils::MatchKeyword(query_upper, pos, "TRUNCATE")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygram::utils::SkipWhitespace(query_upper, pos) &&
+          mygram::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }
@@ -1058,15 +1058,15 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
   // Reset position and check for DROP TABLE [IF EXISTS]
   pos = saved_start;
-  if (mygramdb::utils::MatchKeyword(query_upper, pos, "DROP")) {
-    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
-      if (mygramdb::utils::SkipWhitespace(query_upper, pos)) {
+  if (mygram::utils::MatchKeyword(query_upper, pos, "DROP")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygram::utils::SkipWhitespace(query_upper, pos)) {
         // Check for optional "IF EXISTS"
         size_t saved_pos = pos;
-        if (mygramdb::utils::MatchKeyword(query_upper, pos, "IF")) {
-          if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
-              mygramdb::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
-            mygramdb::utils::SkipWhitespace(query_upper, pos);
+        if (mygram::utils::MatchKeyword(query_upper, pos, "IF")) {
+          if (mygram::utils::SkipWhitespace(query_upper, pos) &&
+              mygram::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
+            mygram::utils::SkipWhitespace(query_upper, pos);
           } else {
             // "IF" without "EXISTS" - restore position
             pos = saved_pos;
@@ -1074,7 +1074,7 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
         }
 
         // Match table name
-        if (mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
+        if (mygram::utils::MatchTableName(query_upper, pos, table_upper)) {
           return true;
         }
       }
@@ -1083,10 +1083,10 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
   // Reset position and check for ALTER TABLE
   pos = saved_start;
-  if (mygramdb::utils::MatchKeyword(query_upper, pos, "ALTER")) {
-    if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
-      if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
-          mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
+  if (mygram::utils::MatchKeyword(query_upper, pos, "ALTER")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      if (mygram::utils::SkipWhitespace(query_upper, pos) &&
+          mygram::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }
@@ -1097,7 +1097,7 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
 
 bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {
   // Strip SQL comments first
-  std::string stripped_query = mygramdb::utils::StripSQLComments(query);
+  std::string stripped_query = mygram::utils::StripSQLComments(query);
 
   // Convert to uppercase for case-insensitive matching
   std::string query_upper = stripped_query;
@@ -1106,7 +1106,7 @@ bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std:
   std::transform(table_upper.begin(), table_upper.end(), table_upper.begin(), ::toupper);
 
   // Normalize whitespace (replace consecutive spaces with single space)
-  query_upper = mygramdb::utils::NormalizeWhitespace(query_upper);
+  query_upper = mygram::utils::NormalizeWhitespace(query_upper);
 
   // Split by semicolon and check each statement
   size_t start = 0;

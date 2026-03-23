@@ -244,7 +244,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
     // Normalize text
     std::string normalized_text =
-        utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
+        index_.NormalizeText(text);
 
     // Extract filters
     auto filters = ExtractFilters(row, fields, num_fields);
@@ -552,8 +552,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   }
 
   // Normalize text
-  std::string normalized_text =
-      utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
+  std::string normalized_text = index_.NormalizeText(text);
 
   // Extract filters
   auto filters = ExtractFilters(row, fields, num_fields);
@@ -689,7 +688,7 @@ std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilt
       // Date/time types (convert to epoch seconds)
       else if (type == "datetime" || type == "date") {
         // DATETIME/DATE: Convert using configured timezone
-        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
+        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
         if (epoch_opt) {
           filters[filter_config.name] = *epoch_opt;
         } else {

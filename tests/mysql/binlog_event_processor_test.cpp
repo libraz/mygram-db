@@ -680,7 +680,7 @@ TEST_F(BinlogEventProcessorTest, UpdateSkipsIndexWhenDocumentRemoved) {
   auto doc2_id = *doc_store_->GetDocId("pk2");
 
   // Manually remove doc1 from both index and doc_store
-  std::string normalized = utils::NormalizeText("alpha beta gamma", index_->GetNormalizeNfkc(),
+  std::string normalized = mygram::utils::NormalizeText("alpha beta gamma", index_->GetNormalizeNfkc(),
                                                 index_->GetNormalizeWidth(), index_->GetNormalizeLower());
   index_->RemoveDocument(doc1_id, normalized);
   doc_store_->RemoveDocument(doc1_id);

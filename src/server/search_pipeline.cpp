@@ -26,22 +26,20 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
   term_infos.reserve(search_terms.size());
 
   for (const auto& search_term : search_terms) {
-    std::string normalized =
-        utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(),
-                             current_index->GetNormalizeLower());
+    std::string normalized = current_index->NormalizeText(search_term);
     std::vector<std::string> ngrams;
 
     // Always use hybrid n-grams if kanji_ngram_size is configured
     if (kanji_ngram_size > 0) {
-      ngrams = utils::GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      ngrams = mygram::utils::GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
     } else if (ngram_size == 0) {
-      ngrams = utils::GenerateHybridNgrams(normalized);
+      ngrams = mygram::utils::GenerateHybridNgrams(normalized);
     } else {
-      ngrams = utils::GenerateNgrams(normalized, ngram_size);
+      ngrams = mygram::utils::GenerateNgrams(normalized, ngram_size);
     }
 
     // Deduplicate n-grams to avoid redundant PostingList lookups
-    utils::DeduplicateSorted(ngrams);
+    mygram::utils::DeduplicateSorted(ngrams);
 
     // Estimate result size by checking the smallest posting list (thread-safe)
     size_t min_size = std::numeric_limits<size_t>::max();
@@ -115,21 +113,20 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
   // Generate NOT term n-grams
   std::vector<std::string> not_ngrams;
   for (const auto& not_term : not_terms) {
-    std::string norm_not = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(),
-                                                current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
+    std::string norm_not = current_index->NormalizeText(not_term);
     std::vector<std::string> ngrams;
     if (kanji_ngram_size > 0) {
-      ngrams = utils::GenerateHybridNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      ngrams = mygram::utils::GenerateHybridNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
     } else if (ngram_size == 0) {
-      ngrams = utils::GenerateHybridNgrams(norm_not);
+      ngrams = mygram::utils::GenerateHybridNgrams(norm_not);
     } else {
-      ngrams = utils::GenerateNgrams(norm_not, ngram_size);
+      ngrams = mygram::utils::GenerateNgrams(norm_not, ngram_size);
     }
     not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
   }
 
   // Deduplicate n-grams to avoid redundant PostingList lookups in SearchNot
-  utils::DeduplicateSorted(not_ngrams);
+  mygram::utils::DeduplicateSorted(not_ngrams);
 
   return current_index->SearchNot(results, not_ngrams);
 }
@@ -551,9 +548,7 @@ std::vector<storage::DocId> ApplyVerifyTextFilter(const std::vector<storage::Doc
   std::vector<std::string> normalized_terms;
   normalized_terms.reserve(search_terms.size());
   for (const auto& term : search_terms) {
-    normalized_terms.push_back(utils::NormalizeText(term, current_index->GetNormalizeNfkc(),
-                                                    current_index->GetNormalizeWidth(),
-                                                    current_index->GetNormalizeLower()));
+    normalized_terms.push_back(current_index->NormalizeText(term));
   }
   return PostFilterByText(results, normalized_terms, doc_store);
 }

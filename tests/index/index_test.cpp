@@ -12,7 +12,7 @@
 #include "utils/string_utils.h"
 
 using namespace mygramdb::index;
-using namespace mygramdb::utils;
+using namespace mygram::utils;
 
 /**
  * @brief Test basic document addition

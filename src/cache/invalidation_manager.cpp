@@ -293,10 +293,10 @@ std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& t
 
   // Use existing utility function for ngram generation
   std::vector<std::string> ngrams =
-      utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      mygram::utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
   // Sort and deduplicate
-  utils::DeduplicateSorted(ngrams);
+  mygram::utils::DeduplicateSorted(ngrams);
 
   return ngrams;
 }

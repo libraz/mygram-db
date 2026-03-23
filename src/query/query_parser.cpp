@@ -1039,6 +1039,15 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
     return false;
   }
 
+  if (filter.column.size() > kMaxFilterColumnNameLength) {
+    SetError("FILTER column name exceeds maximum length (" + std::to_string(kMaxFilterColumnNameLength) + ")");
+    return false;
+  }
+  if (filter.value.size() > kMaxFilterValueLength) {
+    SetError("FILTER value exceeds maximum length (" + std::to_string(kMaxFilterValueLength) + ")");
+    return false;
+  }
+
   query.filters.push_back(filter);
   return true;
 }

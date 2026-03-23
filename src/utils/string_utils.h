@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /**
  * @brief Normalize text according to configuration
@@ -116,4 +116,4 @@ inline void DeduplicateSorted(std::vector<T>& vec) {
   vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

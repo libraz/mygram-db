@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /**
  * @brief CIDR (Classless Inter-Domain Routing) representation
@@ -65,4 +65,4 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allo
  */
 std::string IPv4ToString(uint32_t ip_addr);
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

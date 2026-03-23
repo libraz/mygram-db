@@ -12,7 +12,7 @@
 #include <optional>
 #include <sstream>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 constexpr int kIPv4BitCount = 32;
 
@@ -132,4 +132,4 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allo
   return false;
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

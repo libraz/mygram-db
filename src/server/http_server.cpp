@@ -56,12 +56,12 @@ constexpr int kHttpServiceUnavailable = 503;
 // Server startup delay (milliseconds)
 constexpr int kStartupDelayMs = 100;
 
-std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<utils::CIDR> parsed;
+std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<mygram::utils::CIDR> parsed;
   parsed.reserve(allow_cidrs.size());
 
   for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = utils::CIDR::Parse(cidr_str);
+    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
     if (!cidr) {
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -197,8 +197,15 @@ void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
 
+    // Health check endpoints bypass CIDR and rate limit restrictions
+    // (required for Docker HEALTHCHECK, load balancers, and orchestrator probes)
+    if (req.path == "/health" || req.path == "/health/live" || req.path == "/health/ready" ||
+        req.path == "/health/detail") {
+      return httplib::Server::HandlerResponse::Unhandled;
+    }
+
     // Check CIDR-based access control first
-    if (!utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       stats_.IncrementRequests();
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -853,7 +860,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       table_obj["postings"] = idx_stats.total_postings;
       table_obj["ngram_size"] = ctx->config.ngram_size;
       table_obj["memory_bytes"] = index_mem + doc_mem;
-      table_obj["memory_human"] = utils::FormatBytes(index_mem + doc_mem);
+      table_obj["memory_human"] = mygram::utils::FormatBytes(index_mem + doc_mem);
       tables_obj[table_name] = table_obj;
     }
 
@@ -868,19 +875,19 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     json memory_obj;
     memory_obj["used_memory_bytes"] = total_memory;
-    memory_obj["used_memory_human"] = utils::FormatBytes(total_memory);
+    memory_obj["used_memory_human"] = mygram::utils::FormatBytes(total_memory);
     memory_obj["peak_memory_bytes"] = effective_stats.GetPeakMemoryUsage();
-    memory_obj["peak_memory_human"] = utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
-    memory_obj["used_memory_index"] = utils::FormatBytes(total_index_memory);
-    memory_obj["used_memory_documents"] = utils::FormatBytes(total_doc_memory);
+    memory_obj["peak_memory_human"] = mygram::utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
+    memory_obj["used_memory_index"] = mygram::utils::FormatBytes(total_index_memory);
+    memory_obj["used_memory_documents"] = mygram::utils::FormatBytes(total_doc_memory);
 
     // System memory information
-    auto sys_info = utils::GetSystemMemoryInfo();
+    auto sys_info = mygram::utils::GetSystemMemoryInfo();
     if (sys_info) {
       memory_obj["total_system_memory"] = sys_info->total_physical_bytes;
-      memory_obj["total_system_memory_human"] = utils::FormatBytes(sys_info->total_physical_bytes);
+      memory_obj["total_system_memory_human"] = mygram::utils::FormatBytes(sys_info->total_physical_bytes);
       memory_obj["available_system_memory"] = sys_info->available_physical_bytes;
-      memory_obj["available_system_memory_human"] = utils::FormatBytes(sys_info->available_physical_bytes);
+      memory_obj["available_system_memory_human"] = mygram::utils::FormatBytes(sys_info->available_physical_bytes);
       if (sys_info->total_physical_bytes > 0) {
         double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
                                        static_cast<double>(sys_info->total_physical_bytes);
@@ -889,17 +896,17 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     }
 
     // Process memory information
-    auto proc_info = utils::GetProcessMemoryInfo();
+    auto proc_info = mygram::utils::GetProcessMemoryInfo();
     if (proc_info) {
       memory_obj["process_rss"] = proc_info->rss_bytes;
-      memory_obj["process_rss_human"] = utils::FormatBytes(proc_info->rss_bytes);
+      memory_obj["process_rss_human"] = mygram::utils::FormatBytes(proc_info->rss_bytes);
       memory_obj["process_rss_peak"] = proc_info->peak_rss_bytes;
-      memory_obj["process_rss_peak_human"] = utils::FormatBytes(proc_info->peak_rss_bytes);
+      memory_obj["process_rss_peak_human"] = mygram::utils::FormatBytes(proc_info->peak_rss_bytes);
     }
 
     // Memory health status
-    auto health = utils::GetMemoryHealthStatus();
-    memory_obj["memory_health"] = utils::MemoryHealthStatusToString(health);
+    auto health = mygram::utils::GetMemoryHealthStatus();
+    memory_obj["memory_health"] = mygram::utils::MemoryHealthStatusToString(health);
 
     response["memory"] = memory_obj;
 
@@ -931,7 +938,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["hit_rate"] = cache_stats.HitRate();
       cache_obj["current_entries"] = cache_stats.current_entries;
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
-      cache_obj["memory_human"] = utils::FormatBytes(cache_stats.current_memory_bytes);
+      cache_obj["memory_human"] = mygram::utils::FormatBytes(cache_stats.current_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
       cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;

@@ -143,3 +143,99 @@ gtest_discover_tests(datetime_converter_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+add_executable(fd_guard_test
+  fd_guard_test.cpp
+)
+
+target_link_libraries(fd_guard_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(fd_guard_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(binary_io_test
+  binary_io_test.cpp
+)
+
+target_include_directories(binary_io_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(binary_io_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(binary_io_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(crc32_test
+  crc32_test.cpp
+)
+
+target_link_libraries(crc32_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(crc32_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(hash_utils_test
+  hash_utils_test.cpp
+)
+
+target_include_directories(hash_utils_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(hash_utils_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(hash_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(sql_utils_test
+  sql_utils_test.cpp
+)
+
+target_link_libraries(sql_utils_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(sql_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(endian_utils_test
+  endian_utils_test.cpp
+)
+
+target_include_directories(endian_utils_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(endian_utils_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(endian_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

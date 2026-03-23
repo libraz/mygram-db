@@ -7,7 +7,9 @@
 
 #include <unistd.h>
 
-namespace mygramdb::utils {
+#include <utility>
+
+namespace mygram::utils {
 
 /**
  * @brief RAII guard for file descriptors
@@ -146,4 +148,4 @@ class ScopeGuard {
   bool released_ = false;
 };
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

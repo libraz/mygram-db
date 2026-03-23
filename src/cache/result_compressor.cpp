@@ -7,11 +7,14 @@
 
 #include <lz4.h>
 
-#include <stdexcept>
+using mygram::utils::ErrorCode;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
 
 namespace mygramdb::cache {
 
-std::vector<uint8_t> ResultCompressor::Compress(const std::vector<DocId>& result) {
+mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> ResultCompressor::Compress(
+    const std::vector<DocId>& result) {
   if (result.empty()) {
     return {};
   }
@@ -24,7 +27,7 @@ std::vector<uint8_t> ResultCompressor::Compress(const std::vector<DocId>& result
   // Calculate maximum compressed size
   const int max_dst_size = LZ4_compressBound(static_cast<int>(src_size));
   if (max_dst_size <= 0) {
-    throw std::runtime_error("LZ4_compressBound failed");
+    return MakeUnexpected(MakeError(ErrorCode::kCacheCompressionFailed, "LZ4_compressBound failed"));
   }
 
   std::vector<uint8_t> compressed(static_cast<size_t>(max_dst_size));
@@ -36,7 +39,7 @@ std::vector<uint8_t> ResultCompressor::Compress(const std::vector<DocId>& result
       static_cast<int>(src_size), max_dst_size);
 
   if (compressed_size <= 0) {
-    throw std::runtime_error("LZ4 compression failed");
+    return MakeUnexpected(MakeError(ErrorCode::kCacheCompressionFailed, "LZ4 compression failed"));
   }
 
   // Resize to actual compressed size
@@ -44,7 +47,8 @@ std::vector<uint8_t> ResultCompressor::Compress(const std::vector<DocId>& result
   return compressed;
 }
 
-std::vector<DocId> ResultCompressor::Decompress(const std::vector<uint8_t>& compressed, size_t original_size) {
+mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultCompressor::Decompress(
+    const std::vector<uint8_t>& compressed, size_t original_size) {
   if (compressed.empty() || original_size == 0) {
     return {};
   }
@@ -63,12 +67,13 @@ std::vector<DocId> ResultCompressor::Decompress(const std::vector<uint8_t>& comp
       static_cast<int>(compressed.size()), static_cast<int>(original_bytes));
 
   if (decompressed_size < 0) {
-    throw std::runtime_error("LZ4 decompression failed");
+    return MakeUnexpected(MakeError(ErrorCode::kCacheDecompressionFailed, "LZ4 decompression failed"));
   }
 
   if (static_cast<size_t>(decompressed_size) != original_bytes) {
-    throw std::runtime_error("LZ4 decompression size mismatch: expected " + std::to_string(original_bytes) +
-                             " bytes, got " + std::to_string(decompressed_size) + " bytes");
+    return MakeUnexpected(MakeError(ErrorCode::kCacheDecompressionFailed,
+                                    "LZ4 decompression size mismatch: expected " + std::to_string(original_bytes) +
+                                        " bytes, got " + std::to_string(decompressed_size) + " bytes"));
   }
 
   return result;

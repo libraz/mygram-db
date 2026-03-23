@@ -13,7 +13,7 @@
 #include "utils/expected.h"
 
 // Forward declarations
-namespace mygramdb::utils {
+namespace mygram::utils {
 class DateTimeProcessor;
 }
 
@@ -95,7 +95,7 @@ struct MysqlConfig {
    * @brief Create DateTimeProcessor from configured timezone
    * @return DateTimeProcessor or Error if timezone is invalid
    */
-  mygram::utils::Expected<mygramdb::utils::DateTimeProcessor, mygram::utils::Error> CreateDateTimeProcessor() const;
+  mygram::utils::Expected<mygram::utils::DateTimeProcessor, mygram::utils::Error> CreateDateTimeProcessor() const;
 };
 
 /**

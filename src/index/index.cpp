@@ -49,10 +49,10 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, boo
 bool Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
   std::vector<std::string> ngrams =
-      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+      mygram::utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-  utils::DeduplicateSorted(ngrams);
+  mygram::utils::DeduplicateSorted(ngrams);
 
   // Warn when empty text produces no index entries (document will exist in
   // DocumentStore but will never appear in search results)
@@ -99,10 +99,10 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   for (const auto& doc : documents) {
     // Generate n-grams
     std::vector<std::string> ngrams;
-    ngrams = utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+    ngrams = mygram::utils::GenerateHybridNgrams(doc.text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
     // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-    utils::DeduplicateSorted(ngrams);
+    mygram::utils::DeduplicateSorted(ngrams);
 
     // Build term->docs mapping
     for (const auto& ngram : ngrams) {
@@ -128,13 +128,13 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_view new_text) {
   // Generate n-grams for both texts (no lock needed for CPU-intensive operation)
   std::vector<std::string> old_ngrams =
-      utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+      mygram::utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
   std::vector<std::string> new_ngrams =
-      utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+      mygram::utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Sort and remove duplicates (more efficient than unordered_set)
-  utils::DeduplicateSorted(old_ngrams);
-  utils::DeduplicateSorted(new_ngrams);
+  mygram::utils::DeduplicateSorted(old_ngrams);
+  mygram::utils::DeduplicateSorted(new_ngrams);
 
   // Calculate set differences using sorted arrays
   std::vector<std::string> to_remove;
@@ -179,10 +179,10 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
 void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
   std::vector<std::string> ngrams =
-      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+      mygram::utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
-  utils::DeduplicateSorted(ngrams);
+  mygram::utils::DeduplicateSorted(ngrams);
 
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
@@ -975,7 +975,7 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
     // Get the serialized data and compute CRC32
     std::string data = buffer.str();
-    uint32_t crc = utils::ComputeCRC32(data.data(), data.size());
+    uint32_t crc = mygram::utils::ComputeCRC32(data.data(), data.size());
 
     // Write data followed by CRC32 trailer to the actual output stream
     output_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
@@ -1118,7 +1118,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       std::memcpy(&stored_crc, all_data.data() + payload_size, sizeof(stored_crc));
 
       // Compute CRC32 over the payload
-      uint32_t computed_crc = utils::ComputeCRC32(all_data.data(), payload_size);
+      uint32_t computed_crc = mygram::utils::ComputeCRC32(all_data.data(), payload_size);
 
       if (stored_crc != computed_crc) {
         mygram::utils::StructuredLog()

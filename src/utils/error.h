@@ -289,6 +289,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Snapshot build failed";
     case ErrorCode::kStorageDocIdExhausted:
       return "DocID exhausted";
+    case ErrorCode::kStorageDumpReadError:
+      return "Storage dump read error";
+    case ErrorCode::kStorageDumpWriteError:
+      return "Storage dump write error";
 
     // Network
     case ErrorCode::kNetworkBindFailed:

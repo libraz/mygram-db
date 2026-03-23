@@ -2078,3 +2078,47 @@ TEST(QueryParserTest, TokenizeOghamSpaceMark) {
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->search_text, "hello world");
 }
+
+TEST(QueryParserTest, FilterColumnNameTooLong) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(0);  // Disable query length limit for this test
+  std::string long_column(129, 'x');
+  auto query = parser.Parse("SEARCH articles hello FILTER " + long_column + " = 1");
+
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("column name exceeds maximum length"), std::string::npos);
+}
+
+TEST(QueryParserTest, FilterValueTooLong) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(0);  // Disable query length limit for this test
+  std::string long_value(1025, 'y');
+  auto query = parser.Parse("SEARCH articles hello FILTER status = " + long_value);
+
+  EXPECT_FALSE(query);
+  EXPECT_NE(query.error().message().find("value exceeds maximum length"), std::string::npos);
+}
+
+TEST(QueryParserTest, FilterColumnNameAtLimit) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(0);  // Disable query length limit for this test
+  std::string column_at_limit(128, 'x');
+  auto query = parser.Parse("SEARCH articles hello FILTER " + column_at_limit + " = 1");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, column_at_limit);
+  EXPECT_EQ(query->filters[0].value, "1");
+}
+
+TEST(QueryParserTest, FilterValueAtLimit) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(0);  // Disable query length limit for this test
+  std::string value_at_limit(1024, 'y');
+  auto query = parser.Parse("SEARCH articles hello FILTER status = " + value_at_limit);
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, "status");
+  EXPECT_EQ(query->filters[0].value, value_at_limit);
+}
