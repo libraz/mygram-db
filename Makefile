@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
+.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
 
 # Build directory
 BUILD_DIR := build
@@ -68,6 +68,11 @@ help:
 	@echo "  make docker-down  - Stop services with docker-compose"
 	@echo "  make docker-logs  - View docker-compose logs"
 	@echo "  make docker-test  - Test Docker environment"
+	@echo ""
+	@echo "Benchmark targets (1.1M Wikipedia dataset):"
+	@echo "  make bench-up     - Start benchmark environment (downloads 203MB seed)"
+	@echo "  make bench-down   - Stop benchmark environment and remove volumes"
+	@echo "  make bench-logs   - View MySQL logs (monitor seed loading progress)"
 	@echo ""
 	@echo "Linux CI testing (Docker-based):"
 	@echo "  make docker-dev-build       - Build Linux development image"
@@ -324,6 +329,36 @@ docker-test:
 	@echo ""
 	@echo "Docker environment test completed!"
 	@echo "Run 'make docker-up' to start the full environment"
+
+# ============================================================================
+# Benchmark Environment (1.1M Wikipedia dataset)
+# ============================================================================
+
+bench-up:
+	@docker compose version >/dev/null 2>&1 || { echo "Error: 'docker compose' is required. Install Docker Desktop: https://docs.docker.com/get-docker/"; exit 1; }
+	@echo "Starting benchmark environment (1.1M Wikipedia dataset)..."
+	@echo "First run downloads a 225MB seed file. This may take a few minutes."
+	@echo ""
+	docker compose -f docker-compose.bench.yml up -d
+	@echo ""
+	@echo "MySQL is loading seed data in the background."
+	@echo "Run 'make bench-logs' to monitor progress."
+
+bench-run:
+	@command -v uv >/dev/null 2>&1 || { echo "Error: 'uv' is required. Install via: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
+	@echo "Running benchmark (MygramDB vs MySQL FULLTEXT)..."
+	uv run --with mysql-connector-python python support/seed/benchmark.py \
+		--mysql-host 127.0.0.1 --mysql-port 3306 \
+		--mysql-user root --mysql-password mygramdb --mysql-db mydb \
+		--mygramdb-host 127.0.0.1 --mygramdb-port 11016
+
+bench-down:
+	@echo "Stopping benchmark environment..."
+	docker compose -f docker-compose.bench.yml down -v
+	@echo "Benchmark environment stopped and volumes removed."
+
+bench-logs:
+	docker compose -f docker-compose.bench.yml logs -f mysql
 
 # ============================================================================
 # Linux CI Testing (Docker-based)
