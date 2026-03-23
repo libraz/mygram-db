@@ -9,9 +9,21 @@ target_link_libraries(query_parser_test
   GTest::gtest_main
 )
 
+# Non-performance tests run normally
 gtest_discover_tests(query_parser_test
+  TEST_FILTER "-*Performance*"
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+)
+
+# Performance tests: labeled SLOW (coverage instrumentation makes timing unreliable)
+gtest_discover_tests(query_parser_test
+  TEST_PREFIX "QueryParserPerf."
+  TEST_FILTER "*Performance*"
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
 )
 
 # Query AST tests

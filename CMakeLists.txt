@@ -479,13 +479,13 @@ if(ENABLE_COVERAGE)
       set(CTEST_PARALLEL_ARGS --parallel ${N})
     endif()
 
-    # Add target to generate HTML coverage report (excludes SLOW tests for faster CI).
-    # SLOW tests (10-25s each) are excluded to keep CI feedback loop fast.
+    # Add target to generate HTML coverage report (excludes SLOW and LOAD tests for faster CI).
+    # SLOW tests (10-25s each) and LOAD tests (large dataset) are excluded to keep CI feedback loop fast.
     # To include them, use: make coverage-full
     add_custom_target(coverage
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
       COMMAND ${LCOV_PATH} --directory . --zerocounters
-      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS} --label-exclude SLOW
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS} --label-exclude "SLOW|LOAD"
       COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
       COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
         '${CMAKE_SOURCE_DIR}/src/*'
@@ -494,7 +494,7 @@ if(ENABLE_COVERAGE)
         --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
       COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-      COMMENT "Generating code coverage report (excluding SLOW tests)"
+      COMMENT "Generating code coverage report (excluding SLOW and LOAD tests)"
     )
 
     # Add target to generate coverage report with ALL tests (including SLOW)

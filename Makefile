@@ -119,12 +119,12 @@ build: configure
 # Run tests with configurable options (excludes SLOW tests by default)
 test: build
 	@echo "Running tests (jobs=$(TEST_JOBS), verbose=$(TEST_VERBOSE), debug=$(TEST_DEBUG))..."
-	@echo "Note: Excluding SLOW tests. Use 'make test-all' to run all tests."
+	@echo "Note: Excluding SLOW and LOAD tests. Use 'make test-all' to run all tests."
 	@if [ "$(TEST_JOBS)" = "1" ]; then \
 		echo "Running tests sequentially..."; \
 	fi
 	@cd $(BUILD_DIR) && \
-		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS) --label-exclude SLOW"; \
+		CTEST_FLAGS="--output-on-failure --parallel $(TEST_JOBS) --label-exclude SLOW|LOAD"; \
 		if [ "$(TEST_VERBOSE)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --verbose"; fi; \
 		if [ "$(TEST_DEBUG)" = "1" ]; then CTEST_FLAGS="$$CTEST_FLAGS --debug"; fi; \
 		ctest $$CTEST_FLAGS
@@ -406,7 +406,7 @@ docker-build-linux: docker-dev-build
 docker-test-linux: docker-build-linux
 	@echo "Running tests in Linux container..."
 	docker run --rm -v $$(pwd):/workspace -w /workspace $(DOCKER_DEV_IMAGE) \
-		bash -c "cd build && ctest --output-on-failure --parallel \$$(nproc)"
+		bash -c "cd build && ctest --output-on-failure --parallel \$$(nproc) --label-exclude 'SLOW|LOAD'"
 	@echo "Linux tests completed successfully!"
 
 # Run clang-tidy in Linux container

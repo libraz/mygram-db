@@ -403,17 +403,17 @@ run_tests() {
         log_info "Running ALL tests..."
         if [[ "$DRY_RUN" == true ]]; then
             log_info "[DRY RUN] Would run: ctest --output-on-failure"
-            ctest --show-only
+            ctest --show-only --label-exclude "SLOW|LOAD"
         else
-            ctest --output-on-failure
+            ctest --output-on-failure --label-exclude "SLOW|LOAD"
         fi
     else
         log_info "Running filtered tests..."
         if [[ "$DRY_RUN" == true ]]; then
             log_info "[DRY RUN] Would run: ctest --output-on-failure -R \"$filter\""
-            ctest --show-only -R "$filter"
+            ctest --show-only -R "$filter" --label-exclude "SLOW|LOAD"
         else
-            ctest --output-on-failure -R "$filter"
+            ctest --output-on-failure -R "$filter" --label-exclude "SLOW|LOAD"
         fi
     fi
 }

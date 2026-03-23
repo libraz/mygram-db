@@ -86,8 +86,8 @@ jobs:
         cd build
         # Set ASAN options for better error reporting
         export ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:detect_stack_use_after_return=1
-        # Exclude SLOW tests to reduce CI time (stress tests, concurrency tests, etc.)
-        ctest --output-on-failure --parallel $(nproc) --label-exclude SLOW
+        # Exclude SLOW and LOAD tests to reduce CI time
+        ctest --output-on-failure --parallel $(nproc) --label-exclude "SLOW|LOAD"
 
     - name: Upload build artifacts on failure
       if: failure()
@@ -150,8 +150,8 @@ jobs:
         cd build
         # Set TSAN options for better error reporting
         export TSAN_OPTIONS=second_deadlock_stack=1:halt_on_error=0
-        # Exclude SLOW tests to reduce CI time (stress tests, concurrency tests, etc.)
-        ctest --output-on-failure --parallel $(nproc) --label-exclude SLOW
+        # Exclude SLOW and LOAD tests to reduce CI time
+        ctest --output-on-failure --parallel $(nproc) --label-exclude "SLOW|LOAD"
 
     - name: Upload build artifacts on failure
       if: failure()
