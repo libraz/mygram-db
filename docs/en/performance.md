@@ -4,58 +4,91 @@ This guide provides detailed performance benchmarks, optimization tips, and best
 
 ## Benchmark Environment
 
-- **Dataset**: 1,696,904 rows (real production data)
-- **Configuration**: Bigram indexing (ngram_size=2), kanji unigram (kanji_ngram_size=1)
-- **MySQL Version**: 8.4.6 with FULLTEXT ngram index (Docker, default settings)
-- **MygramDB**: Query cache disabled (`cache.enabled: false`)
-- **Test Methodology**: Cold cache (after MySQL restart) vs warm cache vs MygramDB
+- **Dataset**: 1,100,000 rows (Wikipedia EN 1M + JA 100K, CirrusSearch CC BY-SA 3.0)
+  - Average content length: 666 characters (700 bytes), range: 50–9,998 characters
+  - MySQL data size: 858MB (data) + 115MB (FULLTEXT index) = 973MB on disk
+- **Configuration**: Bigram indexing (ngram_size=2), kanji unigram (kanji_ngram_size=1), verify_text=all
+- **MySQL Version**: 8.4.7 with FULLTEXT ngram parser (Docker, default settings)
+- **MygramDB Version**: v1.5.0 (native build, query cache disabled)
+  - Memory usage: 2.34GB (index 813MB + documents 1.54GB), RSS peak 3.50GB
+  - Unique n-grams: 209,381 terms, 213M postings
+- **Hardware**: Apple M4 Max (arm64), 128GB unified memory
+- **Test Methodology**: p50 latency over 10 iterations, warm cache for both systems
+- **Reproducible**: `make bench-up && make bench-run`
+
+> **Note on hardware**: Apple Silicon uses unified memory with higher bandwidth than typical server DDR4/DDR5 configurations. On x86 servers with discrete memory, absolute latency numbers may be several times higher for both MySQL and MygramDB. However, the relative speedup between the two engines remains consistent since both are affected equally. MygramDB's sub-millisecond results demonstrate that in-memory n-gram search is fundamentally faster than disk-based FULLTEXT, regardless of hardware.
 
 ## Performance Benchmarks
 
-### Typical Use Case: ORDER BY id LIMIT 100
+### Search Latency (SORT id LIMIT 100, p50)
 
-This is the most common real-world query pattern for paginated search results:
-
-| Query Type | Result Set | MySQL (Cold) | MySQL (Warm) | MygramDB | Speedup |
-|------------|------------|--------------|--------------|----------|---------|
-| Ultra high-freq term | 1.28M rows (75.2%) | 3,530ms | 2,980ms | 92ms | **38x / 32x** |
-| High-freq term | 807K rows (47.5%) | 2,296ms | 1,876ms | 76ms | **30x / 25x** |
-| Medium-freq term | 375K rows (22%) | 1,177ms | 908ms | 49ms | **24x / 19x** |
-| Low-freq term | 42K rows (2.5%) | 396ms | 132ms | 22ms | **18x / 6x** |
+| Query Type | Matches | MySQL | MygramDB | Speedup |
+|------------|---------|-------|----------|---------|
+| Multi-word ("quantum physics") | 104 | 2,566ms | 0.09ms | 27,600x |
+| Medium frequency ("quantum") | 1,961 | 1,874ms | 0.28ms | 6,700x |
+| Low frequency ("algorithm") | 2,498 | 507ms | 0.42ms | 1,200x |
+| Rare term ("fibonacci") | 84 | 936ms | 0.08ms | 11,600x |
 
 **Key Findings:**
 
-- Higher hit rates show greater MygramDB advantage
-- MygramDB maintains sub-100ms response times even for 1.28M matches
-- Consistent 19-38x speedup across all query types
+- MygramDB delivers sub-millisecond latency across all query types
+- Multi-word queries benefit the most from bitmap intersection
+- Even low-frequency terms show a 1,200x difference due to MySQL's ngram overhead
 
-### COUNT Queries
+### CJK Search Latency (Japanese bi-gram, SORT id LIMIT 100, p50)
 
-Counting matches without retrieving IDs:
-
-| Query Type | Result Set | MySQL (Cold) | MySQL (Warm) | MygramDB | Speedup |
-|------------|------------|--------------|--------------|----------|---------|
-| Ultra high-freq term | 1.28M rows (75.2%) | 3,430ms | 2,891ms | 6.7ms | **512x / 431x** |
-| High-freq term | 807K rows (47.5%) | 2,148ms | 1,796ms | 16ms | **134x / 112x** |
-| Medium-freq term | 375K rows (22%) | 1,142ms | 853ms | 14ms | **82x / 61x** |
-| Low-freq term | 42K rows (2.5%) | 392ms | 124ms | 0.3ms | **1,307x / 413x** |
+| Query Type | Matches | MySQL | MygramDB | Speedup |
+|------------|---------|-------|----------|---------|
+| JA high-freq ("日本") | 32,282 | 1,204ms | 1.1ms | 1,100x |
+| JA medium-freq ("東京") | 6,989 | 300ms | 3.9ms | 77x |
+| JA low-freq ("科学") | 1,551 | 4.2ms | 2.2ms | 1.9x |
 
 **Key Findings:**
 
-- MygramDB delivers 82-1,307x faster COUNT queries in production (cold cache)
-- Even with warm cache, MygramDB is 61-431x faster
-- Low-frequency terms show massive performance gains due to smaller bitmap cardinality
+- High-frequency CJK terms show a large gap similar to English queries
+- For low-frequency CJK terms with few matches (e.g., "科学"), MySQL can short-circuit early, narrowing the gap significantly
+- MygramDB maintains consistent sub-4ms latency regardless of term frequency
 
-### SEARCH with LIMIT (No ORDER BY, Warm Cache)
+### COUNT Performance (p50)
 
-| Query Type | Result Set | MySQL | MygramDB | Winner |
-|------------|------------|-------|----------|---------|
-| Medium-freq term | 78K rows (4.6%) | 19ms | 67ms | MySQL 3.6x faster* |
-| High-freq term | 807K rows (47.5%) | 18ms | 7.2ms | **MygramDB 2.5x faster** |
-| Ultra high-freq term | 1.27M rows (74.9%) | 18ms | 4.9ms | **MygramDB 3.6x faster** |
-| Two terms AND | 6.3K rows | 18ms | 12.6ms | **MygramDB 1.4x faster** |
+| Query Type | Count | MySQL | MygramDB | Speedup |
+|------------|-------|-------|----------|---------|
+| Medium frequency ("quantum") | 1,961 | 1,797ms | 0.08ms | 21,600x |
+| Low frequency ("algorithm") | 2,498 | 416ms | 0.08ms | 5,500x |
 
-\* MySQL can exit early when result set is small (<5% matches) and no sorting is required.
+**Key Findings:**
+
+- COUNT queries show the largest performance gap
+- MygramDB resolves counts via bitmap cardinality in microseconds
+- MySQL must scan the full posting list even for a simple count
+
+### Result Consistency (v1.5.0 verify_text=all)
+
+v1.5.0 introduces `verify_text`, a post-filter that verifies each candidate against the original text, eliminating n-gram false positives entirely.
+
+| Query | MySQL Count | MygramDB Count | Match |
+|-------|------------|----------------|-------|
+| quantum | 1,961 | 1,961 | exact |
+| algorithm | 2,498 | 2,498 | exact |
+| 日本 | 32,282 | 32,282 | exact |
+| 科学 | 1,551 | 1,551 | exact |
+
+With `verify_text=all`, MygramDB returns the same result set as MySQL FULLTEXT with zero precision loss.
+
+### Concurrent Throughput
+
+Query: "algorithm", 10 seconds per concurrency level:
+
+| Connections | MySQL QPS | MygramDB QPS | MySQL p50 | MG p50 | QPS ratio |
+|-------------|-----------|-------------|-----------|--------|-----------|
+| 1 | 2 | 2,634 | 470ms | 0.35ms | 1,200x |
+| 4 | 8 | 11,766 | 495ms | 0.32ms | 1,400x |
+
+**Key Findings:**
+
+- MygramDB scales linearly with additional connections
+- MySQL FULLTEXT with ngram parser struggles under concurrent load in Docker environments
+- At 4 connections, MygramDB sustains nearly 12,000 QPS while MySQL delivers single-digit throughput
 
 ## Performance Analysis
 
@@ -63,72 +96,9 @@ Counting matches without retrieving IDs:
 
 1. **Disk-based B-tree**: FULLTEXT index requires disk I/O for each query
 2. **No compression**: Posting lists are not compressed, requiring more disk reads
-3. **Cache dependency**: Performance varies 2-3x between cold and warm cache
-4. **ORDER BY overhead**: Sorting requires additional processing and I/O
-5. **High-frequency terms**: Short, common terms result in large posting list scans
-6. **Concurrency bottleneck**: Under heavy concurrent load, disk I/O serialization causes request queuing
-
-### High Concurrency Performance
-
-**MySQL FULLTEXT under load:**
-- Single query: 600-3,000ms
-- Moderate load: Queries start queuing due to disk I/O contention
-- Heavy load: Response times degrade to 10+ seconds as queue grows
-- Cascading failures: Slow queries block connection pool, causing timeouts
-
-**MygramDB under load:**
-- Single query: 31-78ms
-- Moderate load: Maintains sub-80ms latencies (in-memory, no I/O wait)
-- Heavy load: Still responsive with thread pool architecture
-- Predictable: No queue buildup, no cascading delays
-
-### Deep OFFSET (Ultra high-freq term, 75.2%)
-
-| OFFSET | MySQL (Cold) | MySQL (Warm) | MygramDB | Speedup (Cold) | Speedup (Warm) |
-|--------|--------------|--------------|----------|----------------|----------------|
-| 10,000 | 3,492ms | 3,032ms | 100ms | **35x** | **30x** |
-| 50,000 | 3,499ms | 3,064ms | 139ms | **25x** | **22x** |
-
-**Key Findings:**
-
-- MySQL requires full scan regardless of OFFSET depth
-- MygramDB maintains sub-140ms even at OFFSET 50,000
-
-### Parallel Query Performance
-
-**10 Concurrent (SORT id LIMIT 100):**
-
-| System | Total | Success | Failed | Avg | P50 | P95 | QPS | Notes |
-|--------|-------|---------|--------|-----|-----|-----|-----|-------|
-| MySQL | 80 | 8 | 72 | 4,641ms | 4,636ms | - | 0.4 | **90% failed** (Lost connection) |
-| MygramDB | 80 | 80 | 0 | **32ms** | **35ms** | **53ms** | **288** | **100% success** |
-
-**QPS: 720x faster than MySQL** (0.4 → 288)
-
-**100 Concurrent (MygramDB only):**
-
-| System | Total | Success | Failed | Avg | P50 | P95 | P99 | QPS |
-|--------|-------|---------|--------|-----|-----|-----|-----|-----|
-| MySQL | - | - | - | - | - | - | - | N/A (cannot execute) |
-| MygramDB | 200 | 200 | 0 | **190ms** | **218ms** | **280ms** | **290ms** | **372** |
-
-**Deep OFFSET + 20 Concurrent (OFFSET 10000):**
-
-| System | Total | Success | Failed | Avg | QPS | Notes |
-|--------|-------|---------|--------|-----|-----|-------|
-| MySQL | 5 | 5 | 0 | 16,869ms | 0.3 | Extremely slow |
-| MygramDB | 5 | 5 | 0 | **52ms** | **94** | **324x faster** |
-
-**Key Findings:**
-
-- MySQL FULLTEXT fails 90% of connections under 10 concurrent load
-- MygramDB handles 100 concurrent queries with **100% success rate and QPS 372**
-- Deep OFFSET + 20 concurrent: MySQL ~17s, MygramDB **52ms (324x faster)**
-
-**Note:** MySQL was running in a Docker container with default settings. Results may vary with proper MySQL tuning. However, this scenario demonstrates the resource-intensive nature of FULLTEXT queries under concurrent load.
-
-**Real-world scenario:**
-Production web applications often experience burst traffic during peak hours. MySQL FULLTEXT struggles with concurrent search requests, while MygramDB handles the same load effortlessly with **QPS 372**.
+3. **ORDER BY overhead**: Sorting requires additional processing and I/O
+4. **High-frequency terms**: Short, common terms result in large posting list scans
+5. **Concurrency bottleneck**: Under concurrent load, disk I/O serialization causes request queuing
 
 ### Why MygramDB is Fast
 
@@ -136,7 +106,8 @@ Production web applications often experience burst traffic during peak hours. My
 2. **Compressed posting lists**: Hybrid Delta encoding + Roaring bitmaps
 3. **Optimized intersections**: SIMD-accelerated bitmap operations
 4. **Primary key index**: ORDER BY id uses native index order (no external sort)
-5. **No cache warmup**: Always ready, consistent performance
+5. **verify_text**: Post-filter eliminates false positives without sacrificing speed
+6. **No cache warmup**: Always ready, consistent performance
 
 ## Performance Characteristics
 
@@ -175,7 +146,17 @@ tables:
 - **Unigram (1)** for CJK: Each character is meaningful
 - **Trigram (3)**: More precise but larger index and slower queries
 
-### 2. Memory Configuration
+### 2. Enable verify_text
+
+```yaml
+tables:
+  - name: "articles"
+    verify_text: "all"     # Eliminate n-gram false positives
+```
+
+With `verify_text=all`, MygramDB verifies every candidate against the original text. This guarantees exact match results with negligible overhead (sub-millisecond latency is maintained).
+
+### 3. Memory Configuration
 
 ```yaml
 memory:
@@ -189,7 +170,7 @@ memory:
 - Set `soft_target_mb` to 50% of `hard_limit_mb`
 - Leave `roaring_threshold` at default (0.18) unless memory is tight
 
-### 3. Use Filters for Selective Queries
+### 4. Use Filters for Selective Queries
 
 ```yaml
 tables:
@@ -206,7 +187,7 @@ Filter early to reduce result set:
 SEARCH articles tech FILTER status=1 AND category_id=5 LIMIT 100
 ```
 
-### 4. Optimize Query Patterns
+### 5. Optimize Query Patterns
 
 **Fast queries:**
 - `SEARCH table term ORDER BY id LIMIT 100` - Uses primary key index
@@ -217,7 +198,7 @@ SEARCH articles tech FILTER status=1 AND category_id=5 LIMIT 100
 - `SEARCH table term LIMIT 100` without ORDER BY - Still fast, but may scan more
 - Very high LIMIT values (>1000) - More IDs to return
 
-### 5. Use OPTIMIZE Command
+### 6. Use OPTIMIZE Command
 
 Run periodically to optimize posting list storage:
 
@@ -328,11 +309,10 @@ Schedule regular snapshots:
 
 **MygramDB advantages:**
 
-- 19-720x faster for typical queries
-- Consistent performance (no cache warmup)
-- Better ORDER BY performance
-- No disk I/O
-- Stable under concurrent load (MySQL fails 90% at 10 concurrent, MygramDB achieves QPS 372)
+- Sub-millisecond latency for most queries (vs hundreds of milliseconds to seconds for MySQL)
+- Exact result consistency with `verify_text` (zero false positives)
+- Consistent performance regardless of cache state
+- Scales under concurrent load (11,766 QPS at 4 connections vs 8 QPS for MySQL)
 
 **MySQL advantages:**
 
@@ -356,7 +336,15 @@ Schedule regular snapshots:
 
 ## Benchmarking Your Own Data
 
-To benchmark MygramDB with your data:
+The benchmark suite is reproducible. To run the same benchmark on your hardware:
+
+```bash
+# Run the included benchmark (requires Docker)
+make bench-up    # Start MySQL with Wikipedia dataset
+make bench-run   # Execute benchmark suite
+```
+
+To benchmark with your own data:
 
 ```bash
 # 1. Start MygramDB with your MySQL
@@ -379,12 +367,13 @@ mysql -e "SELECT id FROM table WHERE MATCH(column) AGAINST('common_term') ORDER 
 
 ## Conclusion
 
-MygramDB provides 19-720x faster full-text search compared to MySQL FULLTEXT for typical production workloads. The performance advantage is most significant for:
+MygramDB delivers consistent sub-millisecond search latency across a range of query types, compared to hundreds of milliseconds or seconds for MySQL FULLTEXT with the ngram parser. The performance difference is most pronounced for:
 
-1. Parallel query execution (MySQL fails 90%, MygramDB achieves **QPS 372**)
-2. COUNT operations (413-431x faster)
-3. Queries with ORDER BY (19-32x faster)
-4. Deep OFFSET + parallel (324x faster)
-5. Cold cache scenarios (common in production)
+1. **COUNT queries** (5,500-21,600x faster) - bitmap cardinality vs full scan
+2. **Multi-word searches** (27,600x faster) - efficient bitmap intersection
+3. **Concurrent throughput** (1,200-1,400x higher QPS) - in-memory index scales with connections
+4. **Rare and medium-frequency terms** (1,200-11,600x faster) - MySQL's ngram overhead dominates
 
-For read-heavy workloads with millions of documents, MygramDB offers dramatic performance improvements with minimal operational complexity.
+With `verify_text` in v1.5.0, MygramDB eliminates n-gram false positives entirely, producing exact match results with no precision loss. The gap narrows for CJK queries with very few matches, where MySQL can short-circuit early.
+
+For read-heavy workloads with millions of documents, MygramDB offers significant performance improvements with minimal operational complexity. The benchmark is fully reproducible via `make bench-up && make bench-run`.

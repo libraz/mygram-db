@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-03-23
+
+### Added
+
+- **verify_text post-filter** — Eliminates n-gram false positives by verifying matches against original document text; configurable globally or per-table (`memory.verify_text: on`)
+- **Docker benchmark environment** — One-command setup (`make bench-up`) with 1.1M Wikipedia dataset for MygramDB vs MySQL FULLTEXT comparison
+- **Atomic file writer** — Crash-safe snapshot writes using write-to-temp + atomic rename
+- **Search pipeline extraction** — Composable search pipeline for cleaner feature insertion
+
+### Changed
+
+- **Namespace rename** — `mygramdb::utils` → `mygram::utils` across all source and test files (internal only, no public API change)
+- **MySQL 8.0+ required** — Dropped MySQL 5.7 support
+
+### Code Quality
+
+- Applied `clang-format` (Google style) across all source and test files
+
+**Detailed Release Notes**: [docs/releases/v1.5.0.md](docs/releases/v1.5.0.md)
+
 ## [1.4.0] - 2026-03-16
 
 ### Added
@@ -381,7 +401,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/libraz/mygram-db/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mygram-db/compare/v1.3.9...v1.4.0
 [1.3.9]: https://github.com/libraz/mygram-db/compare/v1.3.8...v1.3.9
 [1.3.8]: https://github.com/libraz/mygram-db/compare/v1.3.7...v1.3.8
