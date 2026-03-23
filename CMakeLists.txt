@@ -488,7 +488,7 @@ if(ENABLE_COVERAGE)
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS} --label-exclude "SLOW|LOAD"
       COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
       COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
-        '${CMAKE_SOURCE_DIR}/src/*'
+        ${CMAKE_SOURCE_DIR}/src/**
         --output-file ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info --ignore-errors inconsistent,format,mismatch,negative,unused,source --rc derive_function_end_line=0
       COMMAND ${GENHTML_PATH} ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info
         --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
@@ -505,13 +505,14 @@ if(ENABLE_COVERAGE)
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure ${CTEST_PARALLEL_ARGS}
       COMMAND ${LCOV_PATH} --directory . --capture --output-file ${CMAKE_BINARY_DIR}/coverage/coverage.info --ignore-errors inconsistent,format,mismatch,negative --rc derive_function_end_line=0
       COMMAND ${LCOV_PATH} --extract ${CMAKE_BINARY_DIR}/coverage/coverage.info
-        '${CMAKE_SOURCE_DIR}/src/*'
+        ${CMAKE_SOURCE_DIR}/src/**
         --output-file ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info --ignore-errors inconsistent,format,mismatch,negative,unused,source --rc derive_function_end_line=0
       COMMAND ${GENHTML_PATH} ${CMAKE_BINARY_DIR}/coverage/coverage_filtered.info
         --output-directory ${CMAKE_BINARY_DIR}/coverage/html --ignore-errors source,inconsistent,corrupt,category --rc derive_function_end_line=0
       COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated: ${CMAKE_BINARY_DIR}/coverage/html/index.html"
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
       COMMENT "Generating code coverage report (including ALL tests)"
+      VERBATIM
     )
 
     # Add target to clean coverage data
