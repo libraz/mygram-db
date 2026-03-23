@@ -29,7 +29,7 @@
 #include <unistd.h>
 #endif
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 namespace {
 
@@ -348,4 +348,4 @@ uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_si
   return index_memory_usage + batch_memory + overhead;
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

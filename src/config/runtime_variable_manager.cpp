@@ -90,6 +90,7 @@ static const std::map<std::string, bool> kVariableMutability = {
     {"memory.normalize.nfkc", false},
     {"memory.normalize.width", false},
     {"memory.normalize.lower", false},
+    {"memory.verify_text", false},
 
     // Replication (all immutable)
     {"replication.enable", false},
@@ -641,6 +642,9 @@ std::string RuntimeVariableManager::GetVariableInternal(const std::string& varia
   }
   if (variable_name == "memory.soft_target_mb") {
     return std::to_string(base_config_.memory.soft_target_mb);
+  }
+  if (variable_name == "memory.verify_text") {
+    return base_config_.memory.verify_text;
   }
 
   // Add more as needed...

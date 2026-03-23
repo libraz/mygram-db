@@ -567,7 +567,7 @@ TEST(ConfigTest, MysqlSslPartialConfiguration) {
  * @brief Test cache memory exceeding 50% of physical memory
  */
 TEST(ConfigTest, CacheMemoryExceedsPhysicalMemoryLimit) {
-  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  auto system_info = mygram::utils::GetSystemMemoryInfo();
   if (!system_info) {
     GTEST_SKIP() << "Cannot get system memory info, skipping test";
   }
@@ -604,7 +604,7 @@ TEST(ConfigTest, CacheMemoryExceedsPhysicalMemoryLimit) {
  * @brief Test cache memory within 50% of physical memory
  */
 TEST(ConfigTest, CacheMemoryWithinPhysicalMemoryLimit) {
-  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  auto system_info = mygram::utils::GetSystemMemoryInfo();
   if (!system_info) {
     GTEST_SKIP() << "Cannot get system memory info, skipping test";
   }
@@ -640,7 +640,7 @@ TEST(ConfigTest, CacheMemoryWithinPhysicalMemoryLimit) {
  * @brief Test cache disabled does not trigger memory validation
  */
 TEST(ConfigTest, CacheDisabledNoMemoryValidation) {
-  auto system_info = mygramdb::utils::GetSystemMemoryInfo();
+  auto system_info = mygram::utils::GetSystemMemoryInfo();
   if (!system_info) {
     GTEST_SKIP() << "Cannot get system memory info, skipping test";
   }

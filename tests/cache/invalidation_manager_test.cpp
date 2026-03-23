@@ -935,10 +935,8 @@ TEST(InvalidationManagerTest, C2_MultipleHistoricalSettings) {
   auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
 
   EXPECT_EQ(2, invalidated.size());
-  EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
-      << "C2: Bigram entry should be invalidated";
-  EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
-      << "C2: Trigram entry should be invalidated";
+  EXPECT_TRUE(invalidated.find(key1) != invalidated.end()) << "C2: Bigram entry should be invalidated";
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end()) << "C2: Trigram entry should be invalidated";
 }
 
 /**
@@ -1058,8 +1056,7 @@ TEST(InvalidationManagerTest, FilterChangeDoesNotInvalidateUnfilteredEntries) {
   auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2, true, true);
 
   // No entries should be invalidated (none have filters)
-  EXPECT_EQ(0, invalidated.size())
-      << "Bug 3: Entries without filters should not be invalidated on filter-only change";
+  EXPECT_EQ(0, invalidated.size()) << "Bug 3: Entries without filters should not be invalidated on filter-only change";
 }
 
 /**

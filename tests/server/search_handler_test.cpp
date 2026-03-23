@@ -14,13 +14,15 @@
  * - ParseFilterValue from_chars parsing
  */
 
+#include "server/handlers/search_handler.h"
+
 #include <gtest/gtest.h>
 
 #include <charconv>
 #include <cmath>
 #include <limits>
 
-#include "server/handlers/search_handler.h"
+#include "storage/document_store.h"
 
 namespace mygramdb {
 namespace server {
@@ -378,8 +380,7 @@ TEST(SearchHandlerTest, CountStaleCacheDetection) {
   // Simulate the TOCTOU validation logic added to HandleCount
   bool cache_stale = false;
   if (!cached_doc_ids.empty()) {
-    size_t sample_size =
-        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
     size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
     for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
       // In real code: !current_doc_store->GetPrimaryKey(doc_id).has_value()
@@ -410,8 +411,7 @@ TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
 
   bool cache_stale = false;
   if (!cached_doc_ids.empty()) {
-    size_t sample_size =
-        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
     size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
     for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
       if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
@@ -455,7 +455,7 @@ TEST(SearchHandlerTest, CountEmptyCacheNotStale) {
 TEST(SearchHandlerTest, FloatFilterEpsilonComparison) {
   // Simulate the filter comparison logic
   double stored_value = 0.1 + 0.2;  // = 0.30000000000000004
-  double filter_value = 0.3;         // Exact 0.3
+  double filter_value = 0.3;        // Exact 0.3
 
   // Exact comparison fails
   EXPECT_NE(stored_value, filter_value) << "Exact comparison should fail (demonstrates the problem)";
@@ -742,6 +742,87 @@ TEST(SearchHandlerTest, FromCharsDoubleParsing) {
     EXPECT_EQ(ec, std::errc());
     EXPECT_EQ(result, UINT64_MAX);
   }
+}
+
+// =============================================================================
+// PostFilterByText: nullopt text includes document (fail-open behavior)
+// =============================================================================
+
+/**
+ * @brief PostFilterByText includes documents when normalized text is unavailable
+ *
+ * After snapshot restore, doc_texts_ may be empty. PostFilterByText should
+ * include such documents rather than dropping them (false positive > false negative).
+ */
+TEST(SearchHandlerTest, PostFilterByText_NulloptTextIncludesDocument) {
+  storage::DocumentStore doc_store;
+  // Add document but do NOT set normalized text
+  auto doc_id = doc_store.AddDocument("pk1", {{"content", storage::FilterValue("hello world")}});
+  ASSERT_TRUE(doc_id.has_value());
+
+  // GetNormalizedText should return nullopt (no text stored)
+  EXPECT_FALSE(doc_store.GetNormalizedText(*doc_id).has_value());
+
+  std::vector<storage::DocId> candidates = {*doc_id};
+  std::vector<std::string> terms = {"hello"};
+  auto result = SearchHandler::PostFilterByText(candidates, terms, &doc_store);
+
+  // Document should be INCLUDED (not filtered out) when text is unavailable
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], *doc_id);
+}
+
+/**
+ * @brief PostFilterByText correctly filters documents with stored normalized text
+ */
+TEST(SearchHandlerTest, PostFilterByText_WithTextFiltersCorrectly) {
+  storage::DocumentStore doc_store;
+  auto doc_id1 = doc_store.AddDocument("pk1", {{"content", storage::FilterValue("hello world")}});
+  auto doc_id2 = doc_store.AddDocument("pk2", {{"content", storage::FilterValue("goodbye world")}});
+  ASSERT_TRUE(doc_id1.has_value());
+  ASSERT_TRUE(doc_id2.has_value());
+
+  doc_store.SetNormalizedText(*doc_id1, "hello world");
+  doc_store.SetNormalizedText(*doc_id2, "goodbye world");
+
+  std::vector<storage::DocId> candidates = {*doc_id1, *doc_id2};
+  std::vector<std::string> terms = {"hello"};
+  auto result = SearchHandler::PostFilterByText(candidates, terms, &doc_store);
+
+  // Only doc_id1 contains "hello"
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], *doc_id1);
+}
+
+/**
+ * @brief PostFilterByText with mixed text and nullopt uses fail-open for nullopt
+ *
+ * Documents with stored text are filtered normally, while documents without
+ * stored text (nullopt) are included to avoid false negatives.
+ */
+TEST(SearchHandlerTest, PostFilterByText_MixedTextAndNullopt) {
+  storage::DocumentStore doc_store;
+  auto doc_id1 = doc_store.AddDocument("pk1", {{"content", storage::FilterValue("hello world")}});
+  auto doc_id2 = doc_store.AddDocument("pk2", {{"content", storage::FilterValue("goodbye world")}});
+  auto doc_id3 = doc_store.AddDocument("pk3", {{"content", storage::FilterValue("test data")}});
+  ASSERT_TRUE(doc_id1.has_value());
+  ASSERT_TRUE(doc_id2.has_value());
+  ASSERT_TRUE(doc_id3.has_value());
+
+  // Only set text for doc1 and doc2, not doc3
+  doc_store.SetNormalizedText(*doc_id1, "hello world");
+  doc_store.SetNormalizedText(*doc_id2, "goodbye world");
+
+  std::vector<storage::DocId> candidates = {*doc_id1, *doc_id2, *doc_id3};
+  std::vector<std::string> terms = {"hello"};
+  auto result = SearchHandler::PostFilterByText(candidates, terms, &doc_store);
+
+  // doc_id1: has text, contains "hello" -> included
+  // doc_id2: has text, doesn't contain "hello" -> excluded
+  // doc_id3: no text (nullopt) -> included (fail-open)
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], *doc_id1);
+  EXPECT_EQ(result[1], *doc_id3);
 }
 
 }  // namespace server

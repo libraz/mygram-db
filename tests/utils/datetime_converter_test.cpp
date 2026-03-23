@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 // ============================================================================
 // TimezoneOffset Tests
@@ -288,4 +288,4 @@ TEST(DateTimeProcessorTest, CompareTimeValues) {
   EXPECT_LT(*time3, 0);       // Negative time
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

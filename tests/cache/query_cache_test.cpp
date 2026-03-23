@@ -1588,8 +1588,8 @@ TEST(QueryCacheTest, StatsInvariantHitsPlusMissesEqualsTotal) {
 
   auto stats = cache.GetStatistics();
   EXPECT_EQ(stats.total_queries, stats.cache_hits + stats.cache_misses)
-      << "Invariant violated: total=" << stats.total_queries
-      << " hits=" << stats.cache_hits << " misses=" << stats.cache_misses;
+      << "Invariant violated: total=" << stats.total_queries << " hits=" << stats.cache_hits
+      << " misses=" << stats.cache_misses;
   EXPECT_EQ(stats.cache_hits, 3);
   EXPECT_EQ(stats.cache_misses, 2);
 }
@@ -1621,8 +1621,7 @@ TEST(QueryCacheTest, TTLExpirationStats) {
   auto stats_after = cache.GetStatistics();
   EXPECT_EQ(stats_after.current_entries, 0);
   EXPECT_EQ(stats_after.ttl_expirations, 5);
-  EXPECT_EQ(stats_after.evictions, 0)
-      << "TTL expirations should not increment evictions counter";
+  EXPECT_EQ(stats_after.evictions, 0) << "TTL expirations should not increment evictions counter";
 
   // Verify invariant still holds
   EXPECT_EQ(stats_after.total_queries, stats_after.cache_hits + stats_after.cache_misses);
@@ -1657,8 +1656,7 @@ TEST(QueryCacheTest, DecompressionFailureStatInitialized) {
   EXPECT_EQ(result, cached.value());
 
   stats = cache.GetStatistics();
-  EXPECT_EQ(stats.decompression_failures, 0)
-      << "Valid decompression should not increment decompression_failures";
+  EXPECT_EQ(stats.decompression_failures, 0) << "Valid decompression should not increment decompression_failures";
   EXPECT_EQ(stats.cache_hits, 1);
 }
 
@@ -1691,8 +1689,7 @@ TEST(QueryCacheTest, M4_TTLExpirationCountedAtLookupTime) {
 
   // Check stats immediately after Lookup (before RefreshLRU processes it)
   auto stats = cache.GetStatistics();
-  EXPECT_GE(stats.ttl_expirations, 1)
-      << "M4: ttl_expirations should be incremented at Lookup detection time";
+  EXPECT_GE(stats.ttl_expirations, 1) << "M4: ttl_expirations should be incremented at Lookup detection time";
   EXPECT_EQ(stats.cache_misses, 1);
 }
 
@@ -1717,8 +1714,7 @@ TEST(QueryCacheTest, M4_TTLExpirationCountedAtLookupWithMetadataTime) {
   EXPECT_FALSE(result.has_value());
 
   auto stats = cache.GetStatistics();
-  EXPECT_GE(stats.ttl_expirations, 1)
-      << "M4: LookupWithMetadata should also increment ttl_expirations";
+  EXPECT_GE(stats.ttl_expirations, 1) << "M4: LookupWithMetadata should also increment ttl_expirations";
 }
 
 /**
@@ -1755,9 +1751,8 @@ TEST(QueryCacheTest, M4_TTLExpirationNoDoubleCounting) {
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
   auto stats = cache.GetStatistics();
-  EXPECT_EQ(stats.ttl_expirations, 3)
-      << "Each expired entry should be counted exactly once: "
-      << "2 by Lookup + 1 by RefreshLRU scan = 3 total";
+  EXPECT_EQ(stats.ttl_expirations, 3) << "Each expired entry should be counted exactly once: "
+                                      << "2 by Lookup + 1 by RefreshLRU scan = 3 total";
   EXPECT_EQ(stats.current_entries, 0);
 }
 

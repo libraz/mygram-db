@@ -17,7 +17,7 @@
 
 #include "utils/structured_log.h"
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 bool Daemonize() {
 #ifdef _WIN32
@@ -111,4 +111,4 @@ bool Daemonize() {
 #endif
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "cache/cache_manager.h"
 #include "server/sync_operation_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/structured_log.h"
@@ -446,6 +447,10 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 #endif
 
   if (result) {
+    // Clear search cache after successful load — cached results reference old data
+    if (ctx_.cache_manager != nullptr) {
+      ctx_.cache_manager->Clear();
+    }
     mygram::utils::StructuredLog().Event("dump_load_completed").Field("path", filepath).Field("gtid", gtid).Info();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }

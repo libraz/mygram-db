@@ -58,6 +58,7 @@ RUN apt-get update && apt-get install -y \
     libicu70 \
     libreadline8 \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for running the application
@@ -84,12 +85,12 @@ USER mygramdb
 # Set working directory
 WORKDIR /var/lib/mygramdb
 
-# Expose default port (adjust as needed)
-EXPOSE 11016
+# Expose default ports (TCP API + HTTP API)
+EXPOSE 11016 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD pgrep -x mygramdb || exit 1
+# Health check via HTTP API (health endpoints bypass CIDR restrictions)
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD curl -sf http://localhost:8080/health/live || exit 1
 
 # Entrypoint script handles configuration generation from env vars
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

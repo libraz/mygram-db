@@ -11,7 +11,7 @@
 #include <regex>
 #include <sstream>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 using mygram::utils::ErrorCode;
 
@@ -515,4 +515,4 @@ std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::stri
   return ConvertToEpoch(value_str, *offset_opt);
 }
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

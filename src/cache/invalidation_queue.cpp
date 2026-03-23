@@ -21,11 +21,11 @@ InvalidationQueue::~InvalidationQueue() {
   Stop();
 }
 
-void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text,
-                                const std::string& new_text, bool filter_columns_changed) {
+void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
+                                bool filter_columns_changed) {
   // Get ngram settings for this specific table
-  int ngram_size = 3;        // Default
-  int kanji_ngram_size = 2;  // Default
+  int ngram_size = 3;                 // Default
+  int kanji_ngram_size = 2;           // Default
   bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
@@ -37,9 +37,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   // Phase 1: Immediate invalidation (mark entries)
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
-    affected_keys = invalidation_mgr_->InvalidateAffectedEntries(table_name, old_text, new_text, ngram_size,
-                                                                  kanji_ngram_size, cross_boundary_ngrams,
-                                                                  filter_columns_changed);
+    affected_keys = invalidation_mgr_->InvalidateAffectedEntries(
+        table_name, old_text, new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams, filter_columns_changed);
   }
 
   // Phase 2: Queue for deferred deletion or process immediately
@@ -66,9 +65,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       if (pending_cache_keys_.size() >= max_queue_size_) {
         // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
         // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
-        spdlog::warn(
-            "InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
-            pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+        spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
+                     pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
       } else {
         // Always update timestamp even if key exists to ensure proper batch processing
         auto now = std::chrono::steady_clock::now();

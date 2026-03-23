@@ -90,12 +90,12 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
   return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<utils::CIDR> parsed;
+std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<mygram::utils::CIDR> parsed;
   parsed.reserve(allow_cidrs.size());
 
   for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = utils::CIDR::Parse(cidr_str);
+    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
     if (!cidr) {
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -236,10 +236,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
       return MakeUnexpected(uds_result.error());
     }
 
-    mygram::utils::StructuredLog()
-        .Event("unix_socket_acceptor_started")
-        .Field("path", config_.unix_socket_path)
-        .Info();
+    mygram::utils::StructuredLog().Event("unix_socket_acceptor_started").Field("path", config_.unix_socket_path).Info();
   }
 
   mygram::utils::StructuredLog()
@@ -280,6 +277,9 @@ void TcpServer::Stop() {
     unix_acceptor_->Stop();
   }
 
+  // Join dump worker thread if still running
+  dump_progress_.JoinWorker();
+
   // Shutdown thread pool (completes pending tasks)
   if (thread_pool_) {
     thread_pool_->Shutdown();
@@ -290,16 +290,17 @@ void TcpServer::Stop() {
 
 void TcpServer::HandleConnection(int client_fd) {
   // RAII guard to ensure FD is closed even if exceptions occur
-  mygramdb::utils::FDGuard fd_guard(client_fd);
+  mygram::utils::FDGuard fd_guard(client_fd);
 
   // Get client IP address for rate limiting
   std::string client_ip;
-  struct sockaddr_storage addr_storage{};
+  struct sockaddr_storage addr_storage {};
   socklen_t addr_len = sizeof(addr_storage);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
   if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0) {
     if (addr_storage.ss_family == AF_INET) {
-      auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      auto* addr_in =
+          reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
       char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
       inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
@@ -338,7 +339,7 @@ void TcpServer::HandleConnection(int client_fd) {
   stats_.IncrementTotalConnections();
 
   // RAII guard to ensure stats are decremented even if exceptions occur
-  mygramdb::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
+  mygram::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
 
   // Create I/O handler config
   IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),

@@ -1,0 +1,99 @@
+# MygramDB Benchmark Environment
+# Downloads and loads 1.1M Wikipedia articles for benchmarking.
+#
+# Usage:
+#   make bench-up      # Start (first run downloads 203MB seed)
+#   make bench-down    # Stop and remove volumes
+#   make bench-logs    # Monitor seed loading progress
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: mygramdb_bench_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: mygramdb
+      MYSQL_DATABASE: mydb
+      MYSQL_USER: repl_user
+      MYSQL_PASSWORD: mygramdb
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --mysql-native-password=ON
+      - --local-infile=ON
+    ports:
+      - "3306:3306"
+    volumes:
+      - bench_mysql_data:/var/lib/mysql
+      - ./support/docker/mysql/init/01-create-tables.sql:/docker-entrypoint-initdb.d/01-create-tables.sql:ro
+      - ./support/docker/mysql/bench-init/02-load-seed.sh:/docker-entrypoint-initdb.d/02-load-seed.sh:ro
+    healthcheck:
+      test: ["CMD", "mysql", "-u", "root", "-pmygramdb", "-h", "127.0.0.1", "-P", "3306", "-e", "SELECT COUNT(*) FROM mydb.articles HAVING COUNT(*) >= 1100000"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    networks:
+      - bench_network
+
+  mygramdb:
+    image: ghcr.io/libraz/mygram-db:latest
+    container_name: mygramdb_bench_app
+    restart: unless-stopped
+    entrypoint: ["/bench-entrypoint.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: repl_user
+      MYSQL_PASSWORD: mygramdb
+      MYSQL_DATABASE: mydb
+      MYSQL_USE_GTID: "true"
+      TABLE_NAME: articles
+      TABLE_PRIMARY_KEY: id
+      TABLE_TEXT_COLUMN: content
+      TABLE_NGRAM_SIZE: "2"
+      TABLE_KANJI_NGRAM_SIZE: "1"
+      REPLICATION_ENABLE: "true"
+      REPLICATION_SERVER_ID: "12345"
+      REPLICATION_START_FROM: snapshot
+      REPLICATION_AUTO_INITIAL_SNAPSHOT: "true"
+      MEMORY_NORMALIZE_NFKC: "true"
+      MEMORY_NORMALIZE_WIDTH: narrow
+      MEMORY_NORMALIZE_LOWER: "false"
+      NETWORK_ALLOW_CIDRS: 0.0.0.0/0
+      API_BIND: 0.0.0.0
+      API_PORT: "11016"
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+    ports:
+      - "11016:11016"
+    volumes:
+      - bench_mygramdb_data:/var/lib/mygramdb
+      - ./support/docker/bench-entrypoint.sh:/bench-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "mygramdb"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - bench_network
+
+volumes:
+  bench_mysql_data:
+    driver: local
+  bench_mygramdb_data:
+    driver: local
+
+networks:
+  bench_network:
+    driver: bridge

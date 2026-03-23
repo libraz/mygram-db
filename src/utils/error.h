@@ -109,20 +109,20 @@ enum class ErrorCode : std::uint16_t {
   kStorageDumpWriteError = 5012,       ///< Failed to write to dump file
 
   // ===== Network/Server Errors (6000-6999) =====
-  kNetworkBindFailed = 6000,            ///< Failed to bind to port
-  kNetworkListenFailed = 6001,          ///< Failed to listen on socket
-  kNetworkAcceptFailed = 6002,          ///< Failed to accept connection
-  kNetworkConnectionRefused = 6003,     ///< Connection refused
-  kNetworkConnectionClosed = 6004,      ///< Connection closed by peer
-  kNetworkSendFailed = 6005,            ///< Failed to send data
-  kNetworkReceiveFailed = 6006,         ///< Failed to receive data
-  kNetworkInvalidRequest = 6007,        ///< Invalid request received
-  kNetworkProtocolError = 6008,         ///< Protocol error
-  kNetworkIPNotAllowed = 6009,          ///< IP address not in allowed CIDRs
-  kNetworkServerNotStarted = 6010,      ///< Server not started
-  kNetworkAlreadyRunning = 6011,        ///< Server already running
-  kNetworkSocketCreationFailed = 6012,  ///< Failed to create socket
-  kNetworkInvalidBindAddress = 6013,    ///< Invalid bind address
+  kNetworkBindFailed = 6000,             ///< Failed to bind to port
+  kNetworkListenFailed = 6001,           ///< Failed to listen on socket
+  kNetworkAcceptFailed = 6002,           ///< Failed to accept connection
+  kNetworkConnectionRefused = 6003,      ///< Connection refused
+  kNetworkConnectionClosed = 6004,       ///< Connection closed by peer
+  kNetworkSendFailed = 6005,             ///< Failed to send data
+  kNetworkReceiveFailed = 6006,          ///< Failed to receive data
+  kNetworkInvalidRequest = 6007,         ///< Invalid request received
+  kNetworkProtocolError = 6008,          ///< Protocol error
+  kNetworkIPNotAllowed = 6009,           ///< IP address not in allowed CIDRs
+  kNetworkServerNotStarted = 6010,       ///< Server not started
+  kNetworkAlreadyRunning = 6011,         ///< Server already running
+  kNetworkSocketCreationFailed = 6012,   ///< Failed to create socket
+  kNetworkInvalidBindAddress = 6013,     ///< Invalid bind address
   kNetworkUnixSocketPathTooLong = 6014,  ///< Unix socket path exceeds limit
   kNetworkUnixSocketStale = 6015,        ///< Unix socket already in use by another server
 
@@ -289,6 +289,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Snapshot build failed";
     case ErrorCode::kStorageDocIdExhausted:
       return "DocID exhausted";
+    case ErrorCode::kStorageDumpReadError:
+      return "Storage dump read error";
+    case ErrorCode::kStorageDumpWriteError:
+      return "Storage dump write error";
 
     // Network
     case ErrorCode::kNetworkBindFailed:

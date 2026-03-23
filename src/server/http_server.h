@@ -157,7 +157,7 @@ class HttpServer {
 
   cache::CacheManager* cache_manager_;
   std::unique_ptr<RateLimiter> rate_limiter_;
-  std::vector<utils::CIDR> parsed_allow_cidrs_;
+  std::vector<mygram::utils::CIDR> parsed_allow_cidrs_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
 

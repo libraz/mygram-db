@@ -18,6 +18,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "index/posting_list.h"
 #include "utils/hash_utils.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::index {
 
@@ -48,8 +49,7 @@ class Index {
    */
   explicit Index(int ngram_size = kDefaultNgramSize, int kanji_ngram_size = kDefaultKanjiNgramSize,
                  double roaring_threshold = kDefaultRoaringThreshold, bool cross_boundary_ngrams = true,
-                 bool normalize_nfkc = true, const std::string& normalize_width = "keep",
-                 bool normalize_lower = true);
+                 bool normalize_nfkc = true, const std::string& normalize_width = "keep", bool normalize_lower = true);
 
   ~Index() = default;
 
@@ -128,7 +128,7 @@ class Index {
    * @return Filtered vector of document IDs matching all terms
    */
   [[nodiscard]] std::vector<DocId> FilterByNgrams(const std::vector<DocId>& candidates,
-                                                   const std::vector<std::string>& terms) const;
+                                                  const std::vector<std::string>& terms) const;
 
   /**
    * @brief Search for documents containing any term (OR)
@@ -275,6 +275,11 @@ class Index {
 
   /** @brief Get lowercase normalization setting */
   [[nodiscard]] bool GetNormalizeLower() const { return normalize_lower_; }
+
+  /** @brief Normalize text using this index's normalization settings */
+  [[nodiscard]] std::string NormalizeText(std::string_view text) const {
+    return mygram::utils::NormalizeText(text, normalize_nfkc_, normalize_width_, normalize_lower_);
+  }
 
  private:
   int ngram_size_;

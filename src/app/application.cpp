@@ -359,7 +359,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::DaemonizeIfRequ
   }
 
   mygram::utils::StructuredLog().Event("process_daemonizing").Info();
-  if (!utils::Daemonize()) {
+  if (!mygram::utils::Daemonize()) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Failed to daemonize process"));
   }

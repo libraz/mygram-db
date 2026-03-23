@@ -20,7 +20,7 @@
 #include <stdexcept>
 #endif
 
-using namespace mygramdb::utils;
+using namespace mygram::utils;
 
 #ifndef _WIN32
 

@@ -5,8 +5,6 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/connection_validator.h"
-
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -16,6 +14,7 @@
 #include <vector>
 
 #include "mysql/connection.h"
+#include "mysql/connection_validator.h"
 
 namespace mygramdb::mysql {
 
@@ -142,12 +141,12 @@ TEST(ConnectionValidatorUnitTest, ValidTableNamePatterns) {
 
 TEST(ConnectionValidatorUnitTest, InvalidTableNamePatterns) {
   std::vector<std::string> invalid_names = {
-      "",                          // empty
-      "table'name",                // single quote
-      "table;name",                // semicolon
-      "table name",                // space
-      "table(name)",               // parentheses
-      "table@name",                // at sign
+      "",             // empty
+      "table'name",   // single quote
+      "table;name",   // semicolon
+      "table name",   // space
+      "table(name)",  // parentheses
+      "table@name",   // at sign
   };
   for (const auto& name : invalid_names) {
     bool is_valid = !name.empty();

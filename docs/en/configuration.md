@@ -401,6 +401,9 @@ memory:
     nfkc: true                      # NFKC normalization
     width: "narrow"                 # Width conversion: keep, narrow, wide
     lower: false                    # Lowercase conversion
+
+  # N-gram post-filter verification
+  verify_text: "off"                # "off", "ascii", "all"
 ```
 
 #### Parameters
@@ -415,6 +418,7 @@ memory:
 | `normalize.nfkc` | boolean | `true` | Apply NFKC normalization (Unicode compatibility) | ❌ No |
 | `normalize.width` | string | `narrow` | Width conversion: `keep`, `narrow`, `wide` | ❌ No |
 | `normalize.lower` | boolean | `false` | Convert text to lowercase | ❌ No |
+| `verify_text` | string | `off` | N-gram post-filter verification mode | ❌ No |
 
 #### Text Normalization
 
@@ -431,6 +435,20 @@ memory:
 **Lowercase Conversion** (`normalize.lower`):
 - `true`: Convert to lowercase (case-insensitive search)
 - `false`: Preserve case (case-sensitive search)
+
+#### N-gram Verification (`verify_text`)
+
+N-gram (bigram) indexing can produce false positives. For example, searching "quantum" generates bigrams `[qu, ua, an, nt, tu, um]`. A document containing "quantity antique stump" has all these bigrams from different words and would be a false match.
+
+The `verify_text` setting enables post-filtering to eliminate these false positives by verifying search results against stored normalized text:
+
+| Value | Behavior | Memory | Use Case |
+|-------|----------|--------|----------|
+| `off` | No verification (default) | ~414MB/M docs | Maximum speed, acceptable for most workloads |
+| `ascii` | Verify ASCII-only queries | Moderate | English content where precision matters |
+| `all` | Verify all queries | ~2.2GB/M docs | Maximum accuracy for all languages |
+
+With `off`, false positive rates vary by query: short common-letter queries (e.g., "quantum") can have high false positive rates, while longer or less common terms have very low rates. CJK queries using unigrams are naturally precise.
 
 ---
 

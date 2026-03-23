@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -1183,4 +1185,204 @@ TEST(DocumentStoreTest, Bug36_LoadFromFileBasicValidation) {
 
   // Clean up
   std::remove(filepath.c_str());
+}
+
+// =============================================================================
+// GetNormalizedText / SetNormalizedText tests (verify_text feature)
+// =============================================================================
+
+/**
+ * @brief Test that GetNormalizedText returns the text set via SetNormalizedText
+ */
+TEST(DocumentStoreTest, GetNormalizedText_ReturnsText) {
+  DocumentStore store;
+
+  DocId doc_id = *store.AddDocument("pk1");
+
+  store.SetNormalizedText(doc_id, "hello world");
+
+  auto text = store.GetNormalizedText(doc_id);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ(text.value(), "hello world");
+}
+
+/**
+ * @brief Test that GetNormalizedText returns nullopt for a non-existent doc
+ */
+TEST(DocumentStoreTest, GetNormalizedText_ReturnsNulloptForMissingDoc) {
+  DocumentStore store;
+
+  auto text = store.GetNormalizedText(999);
+  EXPECT_FALSE(text.has_value());
+}
+
+/**
+ * @brief Test that GetNormalizedText returns an owned copy not invalidated by
+ *        subsequent operations on the same doc
+ */
+TEST(DocumentStoreTest, GetNormalizedText_ReturnsOwnedString) {
+  DocumentStore store;
+
+  DocId doc_id = *store.AddDocument("pk1");
+
+  store.SetNormalizedText(doc_id, "original text");
+
+  // Get the text - should be an owned copy
+  auto text = store.GetNormalizedText(doc_id);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ(text.value(), "original text");
+
+  // Overwrite the normalized text for the same doc
+  store.SetNormalizedText(doc_id, "replaced text");
+
+  // The previously returned string should still hold the original value
+  EXPECT_EQ(text.value(), "original text");
+
+  // A new call should return the updated text
+  auto text2 = store.GetNormalizedText(doc_id);
+  ASSERT_TRUE(text2.has_value());
+  EXPECT_EQ(text2.value(), "replaced text");
+}
+
+// =============================================================================
+// doc_texts_ snapshot serialization tests (v2 format)
+// =============================================================================
+
+/**
+ * @brief SaveToStream/LoadFromStream round-trip preserves doc_texts_
+ */
+TEST(DocumentStoreTest, StreamRoundTrip_PreservesDocTexts) {
+  DocumentStore store;
+
+  auto doc_id1 = *store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}});
+  auto doc_id2 = *store.AddDocument("pk2", {{"status", static_cast<int32_t>(2)}});
+  auto doc_id3 = *store.AddDocument("pk3");
+
+  store.SetNormalizedText(doc_id1, "hello world");
+  store.SetNormalizedText(doc_id2, "goodbye universe");
+  // doc_id3: no normalized text set
+
+  // Save to stream
+  std::stringstream ss;
+  auto save_result = store.SaveToStream(ss);
+  ASSERT_TRUE(save_result.has_value()) << "SaveToStream should succeed";
+
+  // Load into a new store
+  DocumentStore store2;
+  auto load_result = store2.LoadFromStream(ss);
+  ASSERT_TRUE(load_result.has_value()) << "LoadFromStream should succeed";
+
+  // Verify doc_texts_ are preserved
+  auto text1 = store2.GetNormalizedText(doc_id1);
+  ASSERT_TRUE(text1.has_value());
+  EXPECT_EQ(*text1, "hello world");
+
+  auto text2 = store2.GetNormalizedText(doc_id2);
+  ASSERT_TRUE(text2.has_value());
+  EXPECT_EQ(*text2, "goodbye universe");
+
+  // doc_id3 should still have no text
+  auto text3 = store2.GetNormalizedText(doc_id3);
+  EXPECT_FALSE(text3.has_value());
+}
+
+/**
+ * @brief SaveToFile/LoadFromFile preserves doc_texts_ (v2 format)
+ *
+ * SaveToFile writes v2 format which includes doc_texts_.
+ * This test verifies that both documents and normalized texts are preserved.
+ */
+TEST(DocumentStoreTest, FileRoundTrip_PreservesDocTexts) {
+  DocumentStore store;
+
+  auto doc_id1 = *store.AddDocument("pk1");
+  auto doc_id2 = *store.AddDocument("pk2");
+
+  store.SetNormalizedText(doc_id1, "normalized text for doc1");
+  store.SetNormalizedText(doc_id2, "日本語テキスト");
+
+  std::string filepath = "/tmp/doc_texts_roundtrip_test.bin";
+  auto save_result = store.SaveToFile(filepath);
+  ASSERT_TRUE(save_result.has_value()) << "SaveToFile should succeed";
+
+  DocumentStore store2;
+  auto load_result = store2.LoadFromFile(filepath);
+  ASSERT_TRUE(load_result.has_value()) << "LoadFromFile should succeed";
+
+  // Documents themselves are preserved
+  EXPECT_EQ(store2.Size(), 2);
+  EXPECT_TRUE(store2.GetDocId("pk1").has_value());
+  EXPECT_TRUE(store2.GetDocId("pk2").has_value());
+
+  // doc_texts_ are preserved (SaveToFile uses v2 format)
+  auto text1 = store2.GetNormalizedText(doc_id1);
+  ASSERT_TRUE(text1.has_value()) << "v2 file format should serialize doc_texts_";
+  EXPECT_EQ(*text1, "normalized text for doc1");
+
+  auto text2 = store2.GetNormalizedText(doc_id2);
+  ASSERT_TRUE(text2.has_value()) << "v2 file format should serialize doc_texts_";
+  EXPECT_EQ(*text2, "日本語テキスト");
+
+  std::remove(filepath.c_str());
+}
+
+/**
+ * @brief v1 snapshot backward compatibility: doc_texts_ is empty after load
+ *
+ * Simulates loading a v1 snapshot by creating a stream with version=1 format
+ * (without doc_texts_), verifying the new code handles it gracefully.
+ */
+TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
+  // Create a v1 snapshot: save with a store that has doc_texts_, then
+  // manually create a v1-format stream without doc_texts_
+  DocumentStore store;
+  auto doc_id1 = *store.AddDocument("pk1");
+  store.SetNormalizedText(doc_id1, "some text");
+
+  // Save normally (v2 format)
+  std::stringstream v2_stream;
+  auto save_result = store.SaveToStream(v2_stream);
+  ASSERT_TRUE(save_result.has_value());
+
+  // Load it back to verify v2 works
+  DocumentStore store_v2;
+  auto load_v2 = store_v2.LoadFromStream(v2_stream);
+  ASSERT_TRUE(load_v2.has_value());
+  auto text_v2 = store_v2.GetNormalizedText(doc_id1);
+  ASSERT_TRUE(text_v2.has_value());
+  EXPECT_EQ(*text_v2, "some text");
+
+  // Now create a v1-format stream manually
+  // v1 format: [magic "MGDS"][version=1][next_doc_id][gtid_len=0][doc_count=1]
+  //   per doc: [doc_id][pk_len][pk][filter_count=0]
+  // (no doc_texts_ field)
+  std::stringstream v1_stream;
+  v1_stream.write("MGDS", 4);
+  uint32_t v1_version = 1;
+  v1_stream.write(reinterpret_cast<const char*>(&v1_version), sizeof(v1_version));
+  uint32_t next_id = 2;  // next_doc_id after adding 1 doc
+  v1_stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+  uint32_t gtid_len = 0;
+  v1_stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+  uint64_t doc_count = 1;
+  v1_stream.write(reinterpret_cast<const char*>(&doc_count), sizeof(doc_count));
+  // Document: doc_id=1, pk="pk1", filter_count=0
+  uint32_t did = 1;
+  v1_stream.write(reinterpret_cast<const char*>(&did), sizeof(did));
+  uint32_t pk_len = 3;
+  v1_stream.write(reinterpret_cast<const char*>(&pk_len), sizeof(pk_len));
+  v1_stream.write("pk1", 3);
+  uint32_t filter_count = 0;
+  v1_stream.write(reinterpret_cast<const char*>(&filter_count), sizeof(filter_count));
+
+  // Load v1 stream
+  DocumentStore store_v1;
+  auto load_v1 = store_v1.LoadFromStream(v1_stream);
+  ASSERT_TRUE(load_v1.has_value()) << "v1 snapshot should load successfully";
+
+  // Document should exist but doc_texts_ should be empty
+  EXPECT_EQ(store_v1.Size(), 1);
+  EXPECT_TRUE(store_v1.GetDocId("pk1").has_value());
+  auto text_v1 = store_v1.GetNormalizedText(static_cast<DocId>(1));
+  EXPECT_FALSE(text_v1.has_value()) << "v1 snapshot should have no doc_texts_";
 }

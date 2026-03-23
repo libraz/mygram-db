@@ -1,9 +1,11 @@
 add_library(mygramdb_utils STATIC
+  atomic_file_writer.cpp
   string_utils.cpp
   network_utils.cpp
   memory_utils.cpp
   daemon_utils.cpp
   datetime_converter.cpp
+  sql_utils.cpp
 )
 
 target_include_directories(mygramdb_utils PUBLIC
@@ -12,6 +14,11 @@ target_include_directories(mygramdb_utils PUBLIC
 
 target_link_libraries(mygramdb_utils PUBLIC
   spdlog::spdlog
+  ${ZLIB_LIBRARIES}
+)
+
+target_include_directories(mygramdb_utils SYSTEM PUBLIC
+  ${ZLIB_INCLUDE_DIRS}
 )
 
 # Link ICU if available

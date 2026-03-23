@@ -67,7 +67,7 @@ class QueryNormalizer {
    * @brief Normalize SORT clause
    */
   static std::string NormalizeSortClause(const std::optional<query::OrderByClause>& sort, const std::string& table,
-                                          const std::string& primary_key_column);
+                                         const std::string& primary_key_column);
 
   /**
    * @brief Convert filter operator to string

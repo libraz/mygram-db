@@ -325,7 +325,6 @@ TEST(ErrorCodeTest, UnknownErrorCode) {
 }
 
 TEST(ErrorCodeTest, StorageDumpErrorCodes) {
-  // These error codes fall through to default case (not explicitly handled in switch)
-  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpReadError), "Unknown error code");
-  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpWriteError), "Unknown error code");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpReadError), "Storage dump read error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpWriteError), "Storage dump write error");
 }

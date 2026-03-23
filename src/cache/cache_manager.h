@@ -91,8 +91,7 @@ class CacheManager {
    * @return true if cached, false otherwise
    */
   bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::set<std::string>& ngrams,
-              double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0,
-              bool cross_boundary_ngrams = true);
+              double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
 
   /**
    * @brief Invalidate cache entries affected by data modification

@@ -661,6 +661,9 @@ Config ParseConfigFromJson(const json& root) {
         config.memory.normalize.lower = norm["lower"].get<bool>();
       }
     }
+    if (mem.contains("verify_text")) {
+      config.memory.verify_text = mem["verify_text"].get<std::string>();
+    }
   }
 
   // Parse dump config
@@ -823,7 +826,7 @@ Config ParseConfigFromJson(const json& root) {
 
     // Validate cache memory against physical memory
     if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
-      auto system_info = utils::GetSystemMemoryInfo();
+      auto system_info = mygram::utils::GetSystemMemoryInfo();
       if (system_info) {
         constexpr double kMaxCacheRatio = 0.5;       // Maximum 50% of physical memory
         constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
@@ -833,9 +836,9 @@ Config ParseConfigFromJson(const json& root) {
         if (config.cache.max_memory_bytes > max_allowed_cache) {
           std::stringstream err_msg;
           err_msg << "Cache configuration error: max_memory_mb exceeds safe limit\n";
-          err_msg << "  Configured cache size: " << utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
-          err_msg << "  Physical memory: " << utils::FormatBytes(system_info->total_physical_bytes) << "\n";
-          err_msg << "  Maximum allowed (50% of physical memory): " << utils::FormatBytes(max_allowed_cache) << "\n";
+          err_msg << "  Configured cache size: " << mygram::utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
+          err_msg << "  Physical memory: " << mygram::utils::FormatBytes(system_info->total_physical_bytes) << "\n";
+          err_msg << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache) << "\n";
           err_msg << "  Recommendation:\n";
           err_msg << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMB) << " MB\n";
           err_msg << "    - Consider system memory requirements for index and operations\n";
@@ -1171,13 +1174,13 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
   }
 }
 
-mygram::utils::Expected<mygramdb::utils::DateTimeProcessor, mygram::utils::Error> MysqlConfig::CreateDateTimeProcessor()
+mygram::utils::Expected<mygram::utils::DateTimeProcessor, mygram::utils::Error> MysqlConfig::CreateDateTimeProcessor()
     const {
-  auto timezone_result = mygramdb::utils::TimezoneOffset::Parse(datetime_timezone);
+  auto timezone_result = mygram::utils::TimezoneOffset::Parse(datetime_timezone);
   if (!timezone_result) {
     return MakeUnexpected(timezone_result.error());
   }
-  return mygramdb::utils::DateTimeProcessor(*timezone_result);
+  return mygram::utils::DateTimeProcessor(*timezone_result);
 }
 
 }  // namespace mygramdb::config

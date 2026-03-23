@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "types/doc_id.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::cache {
 
@@ -27,19 +29,19 @@ class ResultCompressor {
   /**
    * @brief Compress vector of document IDs
    * @param result Vector of document IDs to compress
-   * @return Compressed data
-   * @throws std::runtime_error if compression fails
+   * @return Compressed data, or Error if compression fails
    */
-  static std::vector<uint8_t> Compress(const std::vector<DocId>& result);
+  static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Compress(
+      const std::vector<DocId>& result);
 
   /**
    * @brief Decompress to vector of document IDs
    * @param compressed Compressed data
    * @param original_size Original uncompressed size in bytes
-   * @return Decompressed vector of document IDs
-   * @throws std::runtime_error if decompression fails or size mismatch
+   * @return Decompressed vector of document IDs, or Error if decompression fails
    */
-  static std::vector<DocId> Decompress(const std::vector<uint8_t>& compressed, size_t original_size);
+  static mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> Decompress(
+      const std::vector<uint8_t>& compressed, size_t original_size);
 };
 
 }  // namespace mygramdb::cache

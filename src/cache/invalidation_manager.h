@@ -163,8 +163,7 @@ class InvalidationManager {
    * @return Set of ngrams
    */
   static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size,
-                                                  bool cross_boundary_ngrams = true);
-
+                                                bool cross_boundary_ngrams = true);
 };
 
 }  // namespace mygramdb::cache

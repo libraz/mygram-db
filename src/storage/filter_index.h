@@ -50,7 +50,7 @@ class FilterIndex {
 
   /// Get bitmap for (column, value) pair. Returns nullptr if not found.
   [[nodiscard]] const roaring_bitmap_t* GetEqBitmap(const std::string& column,
-                                                     const std::string& serialized_value) const;
+                                                    const std::string& serialized_value) const;
 
   /// Clear all bitmaps
   void Clear();

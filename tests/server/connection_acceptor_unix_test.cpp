@@ -29,9 +29,7 @@ class ConnectionAcceptorUnixTest : public ::testing::Test {
     unlink(socket_path_.c_str());
   }
 
-  void TearDown() override {
-    unlink(socket_path_.c_str());
-  }
+  void TearDown() override { unlink(socket_path_.c_str()); }
 
   int ConnectToUnixSocket(const std::string& path) {
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -39,7 +37,7 @@ class ConnectionAcceptorUnixTest : public ::testing::Test {
       return -1;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 
@@ -126,7 +124,7 @@ TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
   int stale_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   ASSERT_GE(stale_fd, 0);
 
-  struct sockaddr_un addr{};
+  struct sockaddr_un addr {};
   addr.sun_family = AF_UNIX;
   std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
 

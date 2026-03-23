@@ -1039,6 +1039,15 @@ bool QueryParser::ParseFilters(const std::vector<std::string>& tokens, size_t& p
     return false;
   }
 
+  if (filter.column.size() > kMaxFilterColumnNameLength) {
+    SetError("FILTER column name exceeds maximum length (" + std::to_string(kMaxFilterColumnNameLength) + ")");
+    return false;
+  }
+  if (filter.value.size() > kMaxFilterValueLength) {
+    SetError("FILTER value exceeds maximum length (" + std::to_string(kMaxFilterValueLength) + ")");
+    return false;
+  }
+
   query.filters.push_back(filter);
   return true;
 }
@@ -1424,22 +1433,24 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
 std::optional<FilterOp> QueryParser::ParseFilterOp(std::string_view op_str) {
   std::string normalized_op = ToUpper(op_str);
 
-  if (normalized_op == "=" || normalized_op == "EQ") {
+  if (normalized_op == "=" || normalized_op == "==" || normalized_op == "EQ") {
     return FilterOp::EQ;
   }
-  if (normalized_op == "!=" || normalized_op == "NE") {
+  if (normalized_op == "!=" || normalized_op == "<>" || normalized_op == "NE") {
     return FilterOp::NE;
   }
   if (normalized_op == ">" || normalized_op == "GT") {
     return FilterOp::GT;
   }
-  if (normalized_op == ">=" || normalized_op == "GTE") {
+  // UTF-8 ≥ (U+2265): \xe2\x89\xa5
+  if (normalized_op == ">=" || normalized_op == "\xe2\x89\xa5" || normalized_op == "GTE") {
     return FilterOp::GTE;
   }
   if (normalized_op == "<" || normalized_op == "LT") {
     return FilterOp::LT;
   }
-  if (normalized_op == "<=" || normalized_op == "LTE") {
+  // UTF-8 ≤ (U+2264): \xe2\x89\xa4
+  if (normalized_op == "<=" || normalized_op == "\xe2\x89\xa4" || normalized_op == "LTE") {
     return FilterOp::LTE;
   }
 

@@ -45,6 +45,20 @@
 namespace mygramdb::mysql {
 
 /**
+ * @brief Convert fractional seconds to microseconds based on precision metadata.
+ * @param frac Raw fractional value from binlog
+ * @param precision Metadata precision (1-6)
+ * @return Microseconds value
+ */
+static uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
+  static constexpr uint32_t kMultipliers[] = {0, 100000, 10000, 1000, 100, 10, 1};
+  if (precision == 0 || precision > 6) {
+    return 0;
+  }
+  return static_cast<uint32_t>(std::abs(frac)) * kMultipliers[precision];
+}
+
+/**
  * @brief Decode a single field value as string
  *
  * @param col_type Column type
@@ -177,7 +191,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT, MEDIUMTEXT, LONGTEXT)
@@ -229,7 +243,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
     }
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
@@ -264,7 +278,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
     // JSON type
@@ -311,7 +325,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
             .Error();
         return "[TRUNCATED]";
       }
-      return mygramdb::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
+      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
     }
 
     // Date/Time types (simple representation as strings)
@@ -352,28 +366,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           frac = (frac << 8) | data[4 + i];
         }
 
-        // Convert to microseconds based on precision
-        uint32_t usec = 0;
-        switch (metadata) {
-          case 1:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
-            break;
-          case 2:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
-            break;
-          case 3:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
-            break;
-          case 4:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
-            break;
-          case 5:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
-            break;
-          case 6:
-            usec = static_cast<uint32_t>(std::abs(frac));
-            break;
-        }
+        uint32_t usec = FractionalToMicroseconds(frac, metadata);
 
         std::ostringstream oss;
         oss << timestamp << '.' << std::setfill('0') << std::setw(6) << usec;
@@ -455,28 +448,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
         // For precision 3-4, it's signed 2 bytes; for 5-6, signed 3 bytes
         // The fractional part can be negative for dates before epoch
 
-        // Convert to microseconds based on precision
-        uint32_t usec = 0;
-        switch (metadata) {
-          case 1:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
-            break;
-          case 2:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
-            break;
-          case 3:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
-            break;
-          case 4:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
-            break;
-          case 5:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
-            break;
-          case 6:
-            usec = static_cast<uint32_t>(std::abs(frac));
-            break;
-        }
+        uint32_t usec = FractionalToMicroseconds(frac, metadata);
 
         oss << '.' << std::setw(6) << usec;
       }
@@ -543,28 +515,7 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           frac = (frac << 8) | data[3 + i];
         }
 
-        // Handle signed fractional values
-        uint32_t usec = 0;
-        switch (metadata) {
-          case 1:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100000;
-            break;
-          case 2:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10000;
-            break;
-          case 3:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 1000;
-            break;
-          case 4:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 100;
-            break;
-          case 5:
-            usec = static_cast<uint32_t>(std::abs(frac)) * 10;
-            break;
-          case 6:
-            usec = static_cast<uint32_t>(std::abs(frac));
-            break;
-        }
+        uint32_t usec = FractionalToMicroseconds(frac, metadata);
 
         oss << '.' << std::setw(6) << usec;
       }
@@ -1530,7 +1481,7 @@ std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
         filters[filter_config.name] = std::stod(value_str);
       } else if (filter_config.type == "datetime" || filter_config.type == "date") {
         // DATETIME/DATE: Convert to epoch seconds using timezone
-        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, datetime_timezone);
+        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, datetime_timezone);
         if (epoch_opt) {
           filters[filter_config.name] = *epoch_opt;
         } else {

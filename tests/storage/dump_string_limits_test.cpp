@@ -43,7 +43,9 @@ void WriteLengthPrefixedString(std::ostringstream& oss, const std::string& str) 
  * Used to craft malicious inputs where the declared length exceeds
  * available data or the field-specific limit.
  */
-void WriteLengthOnly(std::ostringstream& oss, uint32_t length) { WriteBinary(oss, length); }
+void WriteLengthOnly(std::ostringstream& oss, uint32_t length) {
+  WriteBinary(oss, length);
+}
 
 /**
  * @brief Build a valid V1 header binary stream for testing

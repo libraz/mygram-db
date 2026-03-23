@@ -1096,3 +1096,27 @@ TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostPrecision) {
     EXPECT_NEAR(std::stod(*get_result), value, 0.01);  // Allow small floating point error
   }
 }
+
+/**
+ * @brief Test memory.verify_text variable is registered and immutable
+ */
+TEST(RuntimeVariableManagerTest, MemoryVerifyTextVariable) {
+  Config config = CreateTestConfig();
+  config.memory.verify_text = "ascii";
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  // Should be readable
+  auto result = manager->GetVariable("memory.verify_text");
+  ASSERT_TRUE(result.has_value()) << "memory.verify_text should be registered";
+  EXPECT_EQ(*result, "ascii");
+
+  // Should be immutable
+  EXPECT_FALSE(manager->IsMutable("memory.verify_text"));
+
+  // Should appear in GetAllVariables with memory prefix
+  auto memory_vars = manager->GetAllVariables("memory");
+  EXPECT_TRUE(memory_vars.count("memory.verify_text") > 0)
+      << "memory.verify_text should appear in SHOW VARIABLES LIKE 'memory%'";
+  EXPECT_EQ(memory_vars["memory.verify_text"].value, "ascii");
+  EXPECT_FALSE(memory_vars["memory.verify_text"].mutable_);
+}

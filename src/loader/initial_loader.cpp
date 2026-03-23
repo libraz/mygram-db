@@ -106,9 +106,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // Start transaction with consistent snapshot for GTID consistency.
   // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
   // read inside the transaction reflects the snapshot point.
-  mygram::utils::StructuredLog()
-      .Event("consistent_snapshot_starting")
-      .Info();
+  mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
   if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
     std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
     mygram::utils::StructuredLog()
@@ -128,8 +126,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       start_gtid_ = std::string(row[0]);
       // Remove whitespace (MySQL may include newlines in multi-UUID sets)
       start_gtid_.erase(
-          std::remove_if(start_gtid_.begin(), start_gtid_.end(),
-                          [](unsigned char chr) { return std::isspace(chr); }),
+          std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
           start_gtid_.end());
     }
   }
@@ -246,13 +243,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     }
 
     // Normalize text
-    std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
+    std::string normalized_text =
+        index_.NormalizeText(text);
 
     // Extract filters
     auto filters = ExtractFilters(row, fields, num_fields);
 
     // Add to batch
-    doc_batch.push_back({primary_key, filters});
+    doc_batch.push_back({primary_key, filters, normalized_text});
     index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
 
     // Process batch when full
@@ -269,13 +267,13 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
         auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback")
-            .Field("error", connection_.GetLastError())
-            .Warn();
-      }
+        if (!rollback_result) {
+          mygram::utils::StructuredLog()
+              .Event("loader_warning")
+              .Field("operation", "rollback")
+              .Field("error", connection_.GetLastError())
+              .Warn();
+        }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -298,13 +296,13 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
             .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
             .Error();
         auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback")
-            .Field("error", connection_.GetLastError())
-            .Warn();
-      }
+        if (!rollback_result) {
+          mygram::utils::StructuredLog()
+              .Event("loader_warning")
+              .Field("operation", "rollback")
+              .Field("error", connection_.GetLastError())
+              .Warn();
+        }
         return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
       }
 
@@ -554,13 +552,13 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MY
   }
 
   // Normalize text
-  std::string normalized_text = utils::NormalizeText(text, index_.GetNormalizeNfkc(), index_.GetNormalizeWidth(), index_.GetNormalizeLower());
+  std::string normalized_text = index_.NormalizeText(text);
 
   // Extract filters
   auto filters = ExtractFilters(row, fields, num_fields);
 
   // Add to document store
-  auto doc_id_result = doc_store_.AddDocument(primary_key, filters);
+  auto doc_id_result = doc_store_.AddDocument(primary_key, filters, normalized_text);
   if (!doc_id_result) {
     return MakeUnexpected(doc_id_result.error());
   }
@@ -690,7 +688,7 @@ std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilt
       // Date/time types (convert to epoch seconds)
       else if (type == "datetime" || type == "date") {
         // DATETIME/DATE: Convert using configured timezone
-        auto epoch_opt = mygramdb::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
+        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
         if (epoch_opt) {
           filters[filter_config.name] = *epoch_opt;
         } else {

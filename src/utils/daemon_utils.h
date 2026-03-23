@@ -5,7 +5,7 @@
 
 #pragma once
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /**
  * @brief Daemonize the current process
@@ -23,4 +23,4 @@ namespace mygramdb::utils {
  */
 bool Daemonize();
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils

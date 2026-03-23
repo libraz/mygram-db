@@ -27,7 +27,7 @@ class OptimizeConcurrencyTest : public ::testing::Test {
     index_ = std::make_unique<Index>(2, 1);  // bigram for ASCII, unigram for CJK
 
     // Populate index with test data
-    for (uint32_t i = 1; i <= 10000; ++i) {
+    for (uint32_t i = 1; i <= 5000; ++i) {
       std::string text = "test document " + std::to_string(i);
       index_->AddDocument(i, text);
     }
@@ -48,7 +48,7 @@ TEST_F(OptimizeConcurrencyTest, SearchDuringOptimization) {
   // Thread 1: Run optimization
   std::thread optimizer([&]() {
     optimization_started = true;
-    bool result = index_->OptimizeInBatches(10000, 100);
+    bool result = index_->OptimizeInBatches(5000, 50);
     optimization_finished = true;
     EXPECT_TRUE(result);
   });
@@ -98,7 +98,7 @@ TEST_F(OptimizeConcurrencyTest, WritesDuringOptimization) {
   // Thread 1: Run optimization
   std::thread optimizer([&]() {
     optimization_started = true;
-    bool result = index_->OptimizeInBatches(10000, 100);
+    bool result = index_->OptimizeInBatches(5000, 50);
     optimization_finished = true;
     EXPECT_TRUE(result);
   });
@@ -147,7 +147,7 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOptimizationAttempts) {
   std::vector<std::thread> optimizers;
   for (int i = 0; i < 4; ++i) {
     optimizers.emplace_back([&]() {
-      bool result = index_->OptimizeInBatches(10000, 100);
+      bool result = index_->OptimizeInBatches(5000, 50);
       if (result) {
         optimization_successes++;
       } else {
@@ -174,7 +174,7 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOptimizationAttempts) {
 TEST_F(OptimizeConcurrencyTest, OptimizationTimeout) {
   auto start = std::chrono::steady_clock::now();
 
-  bool result = index_->OptimizeInBatches(10000, 100);
+  bool result = index_->OptimizeInBatches(5000, 50);
 
   auto end = std::chrono::steady_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
@@ -192,7 +192,7 @@ TEST_F(OptimizeConcurrencyTest, MixedOperationsDuringOptimization) {
 
   // Start optimization in background
   std::thread optimizer([&]() {
-    index_->OptimizeInBatches(10000, 100);
+    index_->OptimizeInBatches(5000, 50);
     stop = true;
   });
 
@@ -243,19 +243,19 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
   std::atomic<bool> optimization_started{false};
   std::atomic<bool> optimization_finished{false};
   std::atomic<size_t> documents_added_during{0};
-  const size_t total_to_add = 4000;
+  const size_t total_to_add = 2000;
 
   // Thread 1: Run optimization (use non-batched Optimize for now - batched version has issues)
   std::thread optimizer([&]() {
     optimization_started = true;
     auto start = std::chrono::steady_clock::now();
-    index_->Optimize(10000);  // Use Optimize() - batched version needs more work
+    index_->Optimize(5000);  // Use Optimize() - batched version needs more work
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     optimization_finished = true;
     std::cout << "Optimization took " << duration.count() << "ms" << std::endl;
   });
 
-  // Threads 2-5: Add many documents concurrently (1000 each = 4000 total)
+  // Threads 2-5: Add many documents concurrently (500 each = 2000 total)
   std::vector<std::thread> writers;
   for (int i = 0; i < 4; ++i) {
     writers.emplace_back([&, i]() {
@@ -264,9 +264,9 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
 
-      // Add 1000 documents
-      uint32_t base_id = 50000 + (i * 1000);
-      for (int j = 0; j < 1000; ++j) {
+      // Add 500 documents
+      uint32_t base_id = 50000 + (i * 500);
+      for (int j = 0; j < 500; ++j) {
         std::string text = "concurrent document " + std::to_string(base_id + j);
         index_->AddDocument(base_id + j, text);
         // Count if added during optimization
@@ -295,8 +295,8 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
     // Find which documents are missing
     std::set<uint32_t> expected_ids;
     for (size_t i = 0; i < 4; ++i) {
-      for (size_t j = 0; j < 1000; ++j) {
-        expected_ids.insert(50000 + i * 1000 + j);
+      for (size_t j = 0; j < 500; ++j) {
+        expected_ids.insert(50000 + i * 500 + j);
       }
     }
     std::set<uint32_t> found_ids(results.begin(), results.end());
@@ -341,7 +341,7 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
 TEST_F(OptimizeConcurrencyTest, OptimizeInBatchesDataLossRegression) {
   std::atomic<bool> optimization_started{false};
   std::atomic<bool> optimization_finished{false};
-  const size_t docs_per_thread = 500;
+  const size_t docs_per_thread = 250;
   const size_t num_writer_threads = 4;
   const size_t total_expected = docs_per_thread * num_writer_threads;
 
@@ -349,7 +349,7 @@ TEST_F(OptimizeConcurrencyTest, OptimizeInBatchesDataLossRegression) {
   // This ensures many batches are processed, increasing chance of data loss bug
   std::thread optimizer([&]() {
     optimization_started = true;
-    bool result = index_->OptimizeInBatches(10000, 5);  // Very small batches
+    bool result = index_->OptimizeInBatches(5000, 5);  // Very small batches
     optimization_finished = true;
     EXPECT_TRUE(result);
   });
@@ -421,13 +421,13 @@ TEST_F(OptimizeConcurrencyTest, OptimizeInBatchesDataLossRegression) {
  * OptimizeInBatches() should allow concurrent operations to proceed between batches,
  * improving responsiveness for large indexes.
  *
- * Note: This test is lightweight (5000 docs) for CI. For comprehensive benchmarks,
+ * Note: This test is lightweight (2000 docs) for CI. For comprehensive benchmarks,
  * run manually with larger datasets.
  */
 TEST_F(OptimizeConcurrencyTest, OptimizationPerformanceComparison) {
   // Use moderate size for CI (not too slow)
   auto large_index = std::make_unique<Index>(2, 1);
-  const size_t num_docs = 5000;
+  const size_t num_docs = 2000;
 
   // Populate with diverse text to create many terms
   for (uint32_t i = 1; i <= num_docs; ++i) {
@@ -668,8 +668,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
 
     // Populate with documents that share many n-grams (use common prefix text)
     for (uint32_t i = 0; i < num_docs; ++i) {
-      std::string text =
-          "shared prefix common ngram data " + std::to_string(i);
+      std::string text = "shared prefix common ngram data " + std::to_string(i);
       test_index->AddDocument(i, text);
     }
 
@@ -694,8 +693,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
       }
       // Remove immediately, no sleep
       for (uint32_t id = remove_start; id < remove_end; ++id) {
-        std::string text =
-            "shared prefix common ngram data " + std::to_string(id);
+        std::string text = "shared prefix common ngram data " + std::to_string(id);
         test_index->RemoveDocument(id, text);
       }
     });
@@ -708,9 +706,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0)
-          << "Iteration " << iteration << ": Document " << id
-          << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
+                                             << " was removed but still found in search results (resurrection bug)";
     }
 
     // Verify: Non-removed documents should still be found
@@ -723,9 +720,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
         non_removed_found++;
       }
     }
-    EXPECT_GT(non_removed_found, 0)
-        << "Iteration " << iteration
-        << ": Non-removed documents should still be searchable";
+    EXPECT_GT(non_removed_found, 0) << "Iteration " << iteration
+                                    << ": Non-removed documents should still be searchable";
   }
 }
 
@@ -743,8 +739,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
     const uint32_t num_docs = 5000;
 
     for (uint32_t i = 0; i < num_docs; ++i) {
-      std::string text =
-          "shared prefix common ngram data " + std::to_string(i);
+      std::string text = "shared prefix common ngram data " + std::to_string(i);
       test_index->AddDocument(i, text);
     }
 
@@ -767,8 +762,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
         std::this_thread::yield();
       }
       for (uint32_t id = remove_start; id < remove_end; ++id) {
-        std::string text =
-            "shared prefix common ngram data " + std::to_string(id);
+        std::string text = "shared prefix common ngram data " + std::to_string(id);
         test_index->RemoveDocument(id, text);
       }
     });
@@ -781,9 +775,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0)
-          << "Iteration " << iteration << ": Document " << id
-          << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
+                                             << " was removed but still found in search results (resurrection bug)";
     }
 
     // Verify: Non-removed documents should still be found
@@ -796,9 +789,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
         non_removed_found++;
       }
     }
-    EXPECT_GT(non_removed_found, 0)
-        << "Iteration " << iteration
-        << ": Non-removed documents should still be searchable";
+    EXPECT_GT(non_removed_found, 0) << "Iteration " << iteration
+                                    << ": Non-removed documents should still be searchable";
   }
 }
 

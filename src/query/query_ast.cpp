@@ -84,7 +84,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
   switch (type) {
     case NodeType::TERM: {
       // Normalize search term before searching (must match index normalization)
-      std::string normalized_term = utils::NormalizeText(term, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+      std::string normalized_term = index.NormalizeText(term);
 
       // Generate n-grams from the normalized term
       std::vector<std::string> ngrams;
@@ -93,7 +93,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
       bool cross_boundary = index.GetCrossBoundaryNgrams();
 
       // Always use hybrid mode to match index generation logic
-      ngrams = utils::GenerateHybridNgrams(normalized_term, ngram_size, kanji_ngram_size, cross_boundary);
+      ngrams = mygram::utils::GenerateHybridNgrams(normalized_term, ngram_size, kanji_ngram_size, cross_boundary);
 
       // If no n-grams generated (e.g., 1-char term with ngram_size=2), return empty
       if (ngrams.empty()) {

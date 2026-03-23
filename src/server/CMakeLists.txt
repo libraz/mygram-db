@@ -1,6 +1,7 @@
 add_library(mygramdb_server STATIC
   tcp_server.cpp
   http_server.cpp
+  search_pipeline.cpp
   thread_pool.cpp
   server_stats.cpp
   server_lifecycle_manager.cpp

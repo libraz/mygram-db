@@ -49,6 +49,7 @@ MEMORY_SOFT_TARGET_MB=${MEMORY_SOFT_TARGET_MB:-4096}
 MEMORY_NORMALIZE_NFKC=${MEMORY_NORMALIZE_NFKC:-true}
 MEMORY_NORMALIZE_WIDTH=${MEMORY_NORMALIZE_WIDTH:-narrow}
 MEMORY_NORMALIZE_LOWER=${MEMORY_NORMALIZE_LOWER:-false}
+MEMORY_VERIFY_TEXT=${MEMORY_VERIFY_TEXT:-off}
 
 DUMP_DIR=${DUMP_DIR:-/var/lib/mygramdb/dumps}
 DUMP_INTERVAL_SEC=${DUMP_INTERVAL_SEC:-0}  # 0 = disabled (set to 7200 for 120-minute intervals)
@@ -56,6 +57,9 @@ DUMP_RETAIN=${DUMP_RETAIN:-3}
 
 API_BIND=${API_BIND:-0.0.0.0}
 API_PORT=${API_PORT:-11016}
+API_HTTP_ENABLE=${API_HTTP_ENABLE:-true}
+API_HTTP_BIND=${API_HTTP_BIND:-0.0.0.0}
+API_HTTP_PORT=${API_HTTP_PORT:-8080}
 
 NETWORK_ALLOW_CIDRS=${NETWORK_ALLOW_CIDRS:-""}
 
@@ -121,6 +125,7 @@ memory:
     nfkc: ${MEMORY_NORMALIZE_NFKC}
     width: "${MEMORY_NORMALIZE_WIDTH}"
     lower: ${MEMORY_NORMALIZE_LOWER}
+  verify_text: "${MEMORY_VERIFY_TEXT}"
 
 # Dump Persistence
 dump:
@@ -133,6 +138,10 @@ api:
   tcp:
     bind: "${API_BIND}"
     port: ${API_PORT}
+  http:
+    enable: ${API_HTTP_ENABLE}
+    bind: "${API_HTTP_BIND}"
+    port: ${API_HTTP_PORT}
 
 # Logging
 logging:
@@ -159,6 +168,7 @@ EOF
   done
 fi
 
+chmod 600 "$CONFIG_FILE"
 echo "Configuration file generated at: $CONFIG_FILE"
 echo "MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}"
 echo "Table: ${TABLE_NAME} (primary_key: ${TABLE_PRIMARY_KEY}, text_column: ${TABLE_TEXT_COLUMN})"

@@ -401,6 +401,9 @@ memory:
     nfkc: true                      # NFKC正規化
     width: "narrow"                 # 幅変換: keep、narrow、wide
     lower: false                    # 小文字変換
+
+  # N-gramポストフィルタ検証
+  verify_text: "off"                # "off"、"ascii"、"all"
 ```
 
 #### パラメータ
@@ -415,6 +418,7 @@ memory:
 | `normalize.nfkc` | boolean | `true` | NFKC正規化を適用(Unicode互換性) | ❌ 不可 |
 | `normalize.width` | string | `narrow` | 幅変換: `keep`、`narrow`、`wide` | ❌ 不可 |
 | `normalize.lower` | boolean | `false` | テキストを小文字に変換 | ❌ 不可 |
+| `verify_text` | string | `off` | N-gramポストフィルタ検証モード | ❌ 不可 |
 
 #### テキスト正規化
 
@@ -431,6 +435,20 @@ memory:
 **小文字変換**(`normalize.lower`):
 - `true`: 小文字に変換(大文字小文字を区別しない検索)
 - `false`: 大文字小文字を保持(大文字小文字を区別する検索)
+
+#### N-gram検証(`verify_text`)
+
+N-gram(bigram)インデックスは偽陽性を生じることがあります。例えば"quantum"を検索すると、bigram `[qu, ua, an, nt, tu, um]` が生成されますが、"quantity antique stump"のような文書もこれら全てのbigramを異なる単語から含むため、誤ってマッチします。
+
+`verify_text`設定は、保存された正規化テキストと照合することで偽陽性を排除するポストフィルタを有効にします:
+
+| 値 | 動作 | メモリ | 用途 |
+|------|------|--------|------|
+| `off` | 検証なし（デフォルト） | 約414MB/100万件 | 最高速度、ほとんどのワークロードに適切 |
+| `ascii` | ASCIIクエリのみ検証 | 中程度 | 英語コンテンツの精度が重要な場合 |
+| `all` | 全クエリを検証 | 約2.2GB/100万件 | 全言語で最高精度 |
+
+`off`の場合、偽陽性率はクエリにより異なります。短い一般的なクエリ(例: "quantum")は偽陽性率が高く、長いまたは珍しい語句はごく低くなります。ユニグラムを使用するCJKクエリは本質的に正確です。
 
 ---
 

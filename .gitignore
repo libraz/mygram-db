@@ -16,42 +16,11 @@ install_manifest.txt
 CTestTestfile.cmake
 _deps/
 
-# IDE
-.idea/
-*.swp
-*.swo
-*~
-*.bak
-.DS_Store
-
-# Claude Code configuration
-.claude/
-CLAUDE.md
-
-# Serena
-.serena/
-
-# Test diff configuration (local customizations)
-.test-diff.conf
-
-# act (GitHub Actions local runner)
-.secrets
-.act/
-
-# Cache
-.cache/
-
 # Generated files
 *.log
 *.out
 core
 core.*
-
-# Test outputs (CMake CTest output directory)
-/Testing/
-*.gcov
-*.gcda
-*.gcno
 
 # Binaries
 mygramdb
@@ -67,13 +36,15 @@ third_party/*
 *.snap
 snapshots/
 
-# SQL files (may contain sensitive data)
-*.sql
-!support/docker/mysql/init/*.sql
-!e2e/docker/mysql-init/*.sql
+# Test outputs
+/Testing/
+*.gcov
+*.gcda
+*.gcno
 
-# Backup directory
-backup/
+# Coverage reports
+coverage/
+*.info
 
 # Docker
 .env
@@ -82,11 +53,37 @@ backup/
 docker-compose.override.yml
 logs/
 
-# Coverage reports
-coverage/
-*.info
+# SQL files (may contain sensitive data)
+*.sql
+!support/docker/mysql/init/*.sql
+!e2e/docker/mysql-init/*.sql
 
-# RPM test files
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# OS
+.DS_Store
+
+# Cache
+.cache/
+
+# Tools
+.claude/
+.serena/
+.wrangler/
+.act/
+
+# Config (local customizations)
+CLAUDE.md
+.test-diff.conf
+.secrets
+
+# Backup
+backup/
 
 # Python (support/benchmark)
 __pycache__/
@@ -96,7 +93,7 @@ __pycache__/
 .python-version
 dumps/
 
-# E2E test results (generated at runtime)
+# E2E test results
 e2e/results/reports/*.xml
 e2e/results/metrics/
 e2e/.venv/

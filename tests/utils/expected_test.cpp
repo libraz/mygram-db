@@ -448,8 +448,7 @@ TEST(ExpectedTest, ErrorOnFailureWorks) {
   EXPECT_EQ(failure.error().code(), ErrorCode::kTimeout);
   EXPECT_EQ(failure.error().message(), "Timed out");
 
-  const Expected<int, Error> const_failure(
-      MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
+  const Expected<int, Error> const_failure(MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
   EXPECT_EQ(const_failure.error().code(), ErrorCode::kNotFound);
 }
 
@@ -461,7 +460,6 @@ TEST(ExpectedVoidTest, ErrorOnFailureWorks) {
   EXPECT_EQ(failure.error().code(), ErrorCode::kTimeout);
   EXPECT_EQ(failure.error().message(), "Timed out");
 
-  const Expected<void, Error> const_failure(
-      MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
+  const Expected<void, Error> const_failure(MakeUnexpected(MakeError(ErrorCode::kNotFound, "Not found")));
   EXPECT_EQ(const_failure.error().code(), ErrorCode::kNotFound);
 }

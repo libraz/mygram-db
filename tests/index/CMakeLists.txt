@@ -86,14 +86,13 @@ target_link_libraries(index_gettopn_test
   GTest::gtest_main
 )
 
-# Note: Some tests (e.g., MergeJoinSelectivityThreshold, BatchBlockSearchInsufficientResults)
-# process 20,000+ documents and can take over 100 seconds in CI environments
-# RUN_SERIAL prevents parallel execution conflicts and timeout issues
+# GetTopN tests are load tests that require 10K+ documents for threshold-dependent
+# optimization paths. They cannot be reduced without changing test semantics.
 gtest_discover_tests(index_gettopn_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
-    LABELS "SLOW"
+    LABELS "LOAD"
     RUN_SERIAL TRUE
     TIMEOUT 180
 )
@@ -160,11 +159,11 @@ target_link_libraries(optimize_concurrency_test
   GTest::gtest_main
 )
 
-# Note: Tests involve 10,000 documents with concurrent optimization/search/write
-# operations, taking 45-90 seconds in CI environments
+# Concurrency unit tests (5-15 seconds each)
 # On macOS, run serially to avoid scheduler timing issues
 if(APPLE)
   gtest_discover_tests(optimize_concurrency_test
+    TEST_FILTER "-*RemoveDuring*:*PerformanceComparison*"
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
@@ -175,6 +174,7 @@ if(APPLE)
   )
 else()
   gtest_discover_tests(optimize_concurrency_test
+    TEST_FILTER "-*RemoveDuring*:*PerformanceComparison*"
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
@@ -183,6 +183,19 @@ else()
       TIMEOUT 120
   )
 endif()
+
+# Load tests: RemoveDuring* tests (80+ seconds each) and PerformanceComparison (benchmark)
+gtest_discover_tests(optimize_concurrency_test
+  TEST_PREFIX "OptimizeConcurrencyLoad."
+  TEST_FILTER "*RemoveDuring*:*PerformanceComparison*"
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RESOURCE_LOCK optimize_concurrent_lock
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)
 
 # Empty document return value tests
 add_executable(index_empty_doc_test

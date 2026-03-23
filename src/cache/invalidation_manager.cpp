@@ -45,18 +45,15 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
 
   // Track per-table ngram settings for O(1) lookup during invalidation
   if (stored_meta.ngram_size > 0) {
-    auto settings_key = std::make_tuple(stored_meta.ngram_size, stored_meta.kanji_ngram_size,
-                                        stored_meta.cross_boundary_ngrams);
+    auto settings_key =
+        std::make_tuple(stored_meta.ngram_size, stored_meta.kanji_ngram_size, stored_meta.cross_boundary_ngrams);
     table_ngram_settings_[stored_meta.table][settings_key]++;
   }
 }
 
-std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(const std::string& table_name,
-                                                                            const std::string& old_text,
-                                                                            const std::string& new_text, int ngram_size,
-                                                                            int kanji_ngram_size,
-                                                                            bool cross_boundary_ngrams,
-                                                                            bool filter_columns_changed) {
+std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
+    const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
+    int kanji_ngram_size, bool cross_boundary_ngrams, bool filter_columns_changed) {
   // Extract ngrams from old and new text (both are sorted vectors)
   std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
   std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
@@ -172,8 +169,7 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
 
   // Decrement per-table ngram settings reference count
   if (metadata.ngram_size > 0) {
-    auto settings_key =
-        std::make_tuple(metadata.ngram_size, metadata.kanji_ngram_size, metadata.cross_boundary_ngrams);
+    auto settings_key = std::make_tuple(metadata.ngram_size, metadata.kanji_ngram_size, metadata.cross_boundary_ngrams);
     auto tbl_it = table_ngram_settings_.find(metadata.table);
     if (tbl_it != table_ngram_settings_.end()) {
       auto set_it = tbl_it->second.find(settings_key);
@@ -296,11 +292,11 @@ std::vector<std::string> InvalidationManager::ExtractNgrams(const std::string& t
   }
 
   // Use existing utility function for ngram generation
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  std::vector<std::string> ngrams =
+      mygram::utils::GenerateHybridNgrams(text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
 
   // Sort and deduplicate
-  std::sort(ngrams.begin(), ngrams.end());
-  ngrams.erase(std::unique(ngrams.begin(), ngrams.end()), ngrams.end());
+  mygram::utils::DeduplicateSorted(ngrams);
 
   return ngrams;
 }

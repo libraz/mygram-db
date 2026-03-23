@@ -13,7 +13,7 @@
 #include "utils/expected.h"
 
 // Forward declarations
-namespace mygramdb::utils {
+namespace mygram::utils {
 class DateTimeProcessor;
 }
 
@@ -95,7 +95,7 @@ struct MysqlConfig {
    * @brief Create DateTimeProcessor from configured timezone
    * @return DateTimeProcessor or Error if timezone is invalid
    */
-  mygram::utils::Expected<mygramdb::utils::DateTimeProcessor, mygram::utils::Error> CreateDateTimeProcessor() const;
+  mygram::utils::Expected<mygram::utils::DateTimeProcessor, mygram::utils::Error> CreateDateTimeProcessor() const;
 };
 
 /**
@@ -162,7 +162,7 @@ struct TableConfig {
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
   std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
   int ngram_size = 2;                                  // N-gram size for ASCII/alphanumeric characters
-  int kanji_ngram_size = 0;  // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
+  int kanji_ngram_size = 0;           // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
   bool cross_boundary_ngrams = true;  // Generate N-grams that span CJK/non-CJK boundaries
   PostingConfig posting;
 };
@@ -205,6 +205,7 @@ struct MemoryConfig {
     std::string width = "keep";
     bool lower = true;
   } normalize;
+  std::string verify_text = "off";  ///< N-gram post-filter: "off", "ascii", "all"
 };
 
 /**

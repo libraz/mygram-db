@@ -154,6 +154,16 @@ memory:
     width: "narrow"                 # Width conversion: "keep", "narrow", "wide" (default: narrow)
     lower: false                    # Lowercase conversion (default: false)
 
+  # Post-filter verification mode for n-gram false positive elimination
+  # N-gram indexing can produce false positives (e.g., "quantum" matching
+  # "quantity antique stump" because all bigrams exist). This setting
+  # verifies search results against stored normalized text.
+  #   "off"   - No verification (fastest, default, may include false positives)
+  #   "ascii" - Verify only ASCII queries (good balance for English content)
+  #   "all"   - Verify all queries (most accurate, higher memory usage)
+  # Memory impact: "off" ~414MB/M docs, "all" ~2.2GB/M docs
+  verify_text: "off"
+
 # Dump Persistence (Automatic Backup)
 dump:
   dir: "/var/lib/mygramdb/dumps"    # Dump directory path (default: /var/lib/mygramdb/dumps)

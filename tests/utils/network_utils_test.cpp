@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-namespace mygramdb {
+namespace mygram {
 namespace utils {
 
 TEST(NetworkUtilsTest, ParseIPv4_Valid) {
@@ -214,4 +214,4 @@ TEST(NetworkUtilsTest, IsIPAllowed_InvalidCIDR) {
 }
 
 }  // namespace utils
-}  // namespace mygramdb
+}  // namespace mygram

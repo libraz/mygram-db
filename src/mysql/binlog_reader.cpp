@@ -499,8 +499,7 @@ void BinlogReader::ReaderThreadFunc() {
     // The heartbeat period must be shorter than read_timeout (5s) to avoid
     // spurious TCP disconnects. Without heartbeat, each read_timeout expiry
     // causes a full reconnect cycle.
-    if (mysql_query(binlog_connection_->GetHandle(),
-                    "SET @master_heartbeat_period = 3000000000") != 0) {
+    if (mysql_query(binlog_connection_->GetHandle(), "SET @master_heartbeat_period = 3000000000") != 0) {
       // Non-fatal: heartbeat is optional, log and continue
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -1381,7 +1380,8 @@ void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid
   // vector before calling mysql_binlog_open(), which allocates packet_gtid_set
   // with exactly that size.
   auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
-  assert(rpl->gtid_set_encoded_size == encoded_data->size());  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  assert(rpl->gtid_set_encoded_size ==
+         encoded_data->size());  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
 }
 

@@ -193,8 +193,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& /*n
   return MakeUnexpected(MakeError(ErrorCode::kInternalError, "MySQL support not enabled"));
 }
 
-Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(
-    void* /*connection*/) const {
+Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(void* /*connection*/) const {
   return MakeUnexpected(MakeError(ErrorCode::kInternalError, "MySQL support not enabled"));
 }
 

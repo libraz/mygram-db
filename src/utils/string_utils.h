@@ -5,12 +5,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 /**
  * @brief Normalize text according to configuration
@@ -62,8 +63,8 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n = 1);
  * @param cross_boundary_ngrams Generate N-grams spanning CJK/non-CJK boundaries (default: true)
  * @return Vector of n-gram strings
  */
-std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size = 2,
-                                              int kanji_ngram_size = 1, bool cross_boundary_ngrams = true);
+std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size = 2, int kanji_ngram_size = 1,
+                                              bool cross_boundary_ngrams = true);
 
 /**
  * @brief Convert UTF-8 string to codepoint vector
@@ -108,4 +109,11 @@ bool IsValidUtf8(std::string_view text);
  */
 std::string SanitizeUtf8(std::string_view text);
 
-}  // namespace mygramdb::utils
+/// @brief Sort and remove duplicate elements from a vector in-place.
+template <typename T>
+inline void DeduplicateSorted(std::vector<T>& vec) {
+  std::sort(vec.begin(), vec.end());
+  vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+}
+
+}  // namespace mygram::utils

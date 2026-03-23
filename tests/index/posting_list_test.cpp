@@ -614,8 +614,7 @@ TEST_F(PostingListTest, ReverseIterationRoaringCorrectness) {
   auto result = posting.GetTopN(doc_ids.size(), true);
   ASSERT_EQ(result.size(), doc_ids.size());
   for (size_t i = 0; i < doc_ids.size(); ++i) {
-    EXPECT_EQ(result[i], doc_ids[doc_ids.size() - 1 - i])
-        << "Reverse iteration mismatch at index " << i;
+    EXPECT_EQ(result[i], doc_ids[doc_ids.size() - 1 - i]) << "Reverse iteration mismatch at index " << i;
   }
 }
 
@@ -634,8 +633,8 @@ TEST_F(PostingListTest, ForwardReverseConsistencyRoaring) {
 
   ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
 
-  auto forward_result = posting.GetTopN(0, false);   // all, ascending
-  auto reverse_result = posting.GetTopN(0, true);     // all, descending
+  auto forward_result = posting.GetTopN(0, false);  // all, ascending
+  auto reverse_result = posting.GetTopN(0, true);   // all, descending
 
   ASSERT_EQ(forward_result.size(), reverse_result.size());
   ASSERT_EQ(forward_result.size(), doc_ids.size());
@@ -848,8 +847,7 @@ TEST_F(PostingListTest, DeltaEncodingLargeDocIds) {
   PostingList posting(0.5);
 
   // Use large DocId values near uint32_t max
-  std::vector<DocId> large_ids = {
-      4000000000U, 4100000000U, 4200000000U, 4294967290U};
+  std::vector<DocId> large_ids = {4000000000U, 4100000000U, 4200000000U, 4294967290U};
   for (auto id : large_ids) {
     posting.Add(id);
   }

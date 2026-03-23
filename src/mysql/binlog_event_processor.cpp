@@ -59,7 +59,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
         if (matches_required) {
           // Condition satisfied -> add to index
-          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          std::string normalized = index.NormalizeText(event.text);
+
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
           if (!doc_id_result) {
             mygram::utils::StructuredLog()
                 .Event("mysql_binlog_error")
@@ -71,8 +73,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             return false;
           }
           storage::DocId doc_id = *doc_id_result;
-
-          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -127,7 +127,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // that's what was indexed, falling back to after-image (text) if unavailable
           const std::string& removal_text = event.old_text.empty() ? event.text : event.old_text;
           if (!removal_text.empty()) {
-            std::string normalized = utils::NormalizeText(removal_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+            std::string normalized = index.NormalizeText(removal_text);
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {
@@ -168,7 +168,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         } else if (!exists && matches_required) {
           // Transitioned into required conditions -> INSERT into index
-          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters);
+          std::string normalized = index.NormalizeText(event.text);
+
+          auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
           if (!doc_id_result) {
             mygram::utils::StructuredLog()
                 .Event("mysql_binlog_error")
@@ -180,8 +182,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             return false;
           }
           storage::DocId doc_id = *doc_id_result;
-
-          std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
           // Atomic operation: if index fails, rollback document store
           try {
@@ -243,19 +243,22 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             try {
               // Use Index::UpdateDocument for atomic update when both texts are available
               if (!event.old_text.empty() && !event.text.empty()) {
-                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
-                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+                std::string old_normalized = index.NormalizeText(event.old_text);
+                std::string new_normalized = index.NormalizeText(event.text);
                 index.UpdateDocument(doc_id, old_normalized, new_normalized);
+                doc_store.SetNormalizedText(doc_id, new_normalized);
                 text_changed = true;
               } else if (!event.old_text.empty()) {
                 // Only old text available - remove from index
-                std::string old_normalized = utils::NormalizeText(event.old_text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+                std::string old_normalized = index.NormalizeText(event.old_text);
                 index.RemoveDocument(doc_id, old_normalized);
+                doc_store.SetNormalizedText(doc_id, "");
                 text_changed = true;
               } else if (!event.text.empty()) {
                 // Only new text available - add to index
-                std::string new_normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+                std::string new_normalized = index.NormalizeText(event.text);
                 index.AddDocument(doc_id, new_normalized);
+                doc_store.SetNormalizedText(doc_id, new_normalized);
                 text_changed = true;
               }
             } catch (const std::exception& e) {
@@ -311,7 +314,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // For deletion, we extract text from binlog DELETE event (before image)
           // The rows_parser provides the deleted row data including text column
           if (!event.text.empty()) {
-            std::string normalized = utils::NormalizeText(event.text, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+            std::string normalized = index.NormalizeText(event.text);
             try {
               index.RemoveDocument(doc_id, normalized);
             } catch (const std::exception& e) {

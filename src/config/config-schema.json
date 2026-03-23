@@ -448,6 +448,12 @@
               "default": false
             }
           }
+        },
+        "verify_text": {
+          "type": "string",
+          "description": "N-gram post-filter verification mode: off (no verification), ascii (verify ASCII-only queries), all (verify all queries)",
+          "default": "off",
+          "enum": ["off", "ascii", "all"]
         }
       }
     },

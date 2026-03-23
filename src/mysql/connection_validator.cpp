@@ -344,10 +344,10 @@ bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& err
     std::string upper_value = value;
     std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
     if (upper_value != "FULL") {
-      error =
-          "binlog_row_image=" + value + " is not supported. "
-          "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
-          "Set it with: SET GLOBAL binlog_row_image=FULL";
+      error = "binlog_row_image=" + value +
+              " is not supported. "
+              "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
+              "Set it with: SET GLOBAL binlog_row_image=FULL";
       return false;
     }
   }
@@ -373,10 +373,10 @@ bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error
     std::string upper_value = value;
     std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
     if (upper_value != "ROW") {
-      error =
-          "binlog_format=" + value + " is not supported. "
-          "MygramDB requires binlog_format=ROW for row-level replication. "
-          "Set it with: SET GLOBAL binlog_format=ROW";
+      error = "binlog_format=" + value +
+              " is not supported. "
+              "MygramDB requires binlog_format=ROW for row-level replication. "
+              "Set it with: SET GLOBAL binlog_format=ROW";
       return false;
     }
   }

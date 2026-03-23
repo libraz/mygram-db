@@ -15,8 +15,11 @@
 #include <variant>
 
 #include "cache/cache_manager.h"
+#include "query/query_parser.h"
 #include "query/result_sorter.h"
+#include "server/handlers/search_handler.h"
 #include "server/response_formatter.h"
+#include "server/search_pipeline.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
@@ -53,12 +56,12 @@ constexpr int kHttpServiceUnavailable = 503;
 // Server startup delay (milliseconds)
 constexpr int kStartupDelayMs = 100;
 
-std::vector<utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<utils::CIDR> parsed;
+std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<mygram::utils::CIDR> parsed;
   parsed.reserve(allow_cidrs.size());
 
   for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = utils::CIDR::Parse(cidr_str);
+    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
     if (!cidr) {
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -194,8 +197,15 @@ void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
 
+    // Health check endpoints bypass CIDR and rate limit restrictions
+    // (required for Docker HEALTHCHECK, load balancers, and orchestrator probes)
+    if (req.path == "/health" || req.path == "/health/live" || req.path == "/health/ready" ||
+        req.path == "/health/detail") {
+      return httplib::Server::HandlerResponse::Unhandled;
+    }
+
     // Check CIDR-based access control first
-    if (!utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       stats_.IncrementRequests();
       mygram::utils::StructuredLog()
           .Event("server_warning")
@@ -409,22 +419,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
           // Format 2: full operator support
           std::string op_str = val.value("op", "EQ");
           // Parse operator
-          if (op_str == "EQ" || op_str == "==" || op_str == "=") {
-            filter.op = query::FilterOp::EQ;
-          } else if (op_str == "NE" || op_str == "!=" || op_str == "<>") {
-            filter.op = query::FilterOp::NE;
-          } else if (op_str == "GT" || op_str == ">") {
-            filter.op = query::FilterOp::GT;
-          } else if (op_str == "GTE" || op_str == ">=" || op_str == "≥") {
-            filter.op = query::FilterOp::GTE;
-          } else if (op_str == "LT" || op_str == "<") {
-            filter.op = query::FilterOp::LT;
-          } else if (op_str == "LTE" || op_str == "<=" || op_str == "≤") {
-            filter.op = query::FilterOp::LTE;
-          } else {
+          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
+          if (!parsed_op.has_value()) {
             SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
             return;
           }
+          filter.op = parsed_op.value();
           // Get value from nested object
           const auto& val_field = val["value"];
           filter.value = val_field.is_string() ? val_field.get<std::string>() : val_field.dump();
@@ -511,280 +511,27 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
     all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
 
-    // Generate n-grams for each term (same as TCP server)
-    struct TermInfo {
-      std::vector<std::string> ngrams;
-      size_t estimated_size;
-    };
-    std::vector<TermInfo> term_infos;
-    term_infos.reserve(all_search_terms.size());
+    // Generate term infos using shared pipeline
+    auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, current_ngram_size,
+                                                         current_kanji_ngram_size, current_cross_boundary);
 
-    for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
-      std::vector<std::string> ngrams;
-
-      // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
-      if (current_kanji_ngram_size > 0) {
-        ngrams =
-            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
-      } else if (current_ngram_size == 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized);
-      } else {
-        ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-      }
-
-      // Estimate result size by checking the smallest posting list (thread-safe)
-      size_t min_size = std::numeric_limits<size_t>::max();
-      for (const auto& ngram : ngrams) {
-        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
-        if (posting_size > 0) {
-          min_size = std::min(min_size, static_cast<size_t>(posting_size));
-        } else {
-          min_size = 0;
-          break;
-        }
-      }
-
-      term_infos.push_back({std::move(ngrams), min_size});
-    }
-
-    // Sort terms by estimated size (smallest first for faster intersection)
+    // Sort by estimated size (smallest first for faster intersection)
     std::sort(term_infos.begin(), term_infos.end(),
-              [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+              [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
 
-    // If any term has zero results, return empty immediately
-    std::vector<DocId> results;
-    if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
-      results.clear();  // Empty results
-    } else {
-      // Perform intersection (AND of all terms)
-      if (!term_infos.empty()) {
-        results = current_index->SearchAnd(term_infos[0].ngrams);
-        for (size_t i = 1; i < term_infos.size(); ++i) {
-          if (results.empty()) {
-            break;
-          }
-          auto term_results = current_index->SearchAnd(term_infos[i].ngrams);
-          std::vector<DocId> intersection;
-          std::set_intersection(results.begin(), results.end(), term_results.begin(), term_results.end(),
-                                std::back_inserter(intersection));
-          results = std::move(intersection);
-        }
-      }
-    }
+    // Execute search pipeline
+    auto pipeline_result = search_pipeline::Execute(
+        *query, term_infos, all_search_terms, current_index, current_doc_store, full_config_, current_ngram_size,
+        current_kanji_ngram_size, current_cross_boundary, SearchHandler::GetFilterThreshold());
 
-    // Apply NOT terms if specified
-    if (!query->not_terms.empty()) {
-      std::vector<DocId> not_results_union;
-      for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
-        std::vector<std::string> ngrams;
-
-        // Always use hybrid n-grams if kanji_ngram_size is configured (same as TCP)
-        if (current_kanji_ngram_size > 0) {
-          ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
-                                               current_cross_boundary);
-        } else if (current_ngram_size == 0) {
-          ngrams = utils::GenerateHybridNgrams(normalized);
-        } else {
-          ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-        }
-        auto not_results = current_index->SearchOr(ngrams);
-        std::vector<DocId> union_result;
-        std::set_union(not_results_union.begin(), not_results_union.end(), not_results.begin(), not_results.end(),
-                       std::back_inserter(union_result));
-        not_results_union = std::move(union_result);
-      }
-
-      // Remove documents matching NOT terms
-      std::vector<DocId> filtered_results;
-      std::set_difference(results.begin(), results.end(), not_results_union.begin(), not_results_union.end(),
-                          std::back_inserter(filtered_results));
-      results = std::move(filtered_results);
-    }
-
-    // Apply filters if specified
-    if (!query->filters.empty()) {
-      std::vector<DocId> filtered_results;
-      for (const auto& doc_id : results) {
-        auto doc = current_doc_store->GetDocument(doc_id);
-        if (!doc) {
-          continue;
-        }
-
-        bool matches_all_filters = true;
-        for (const auto& filter_cond : query->filters) {
-          auto filter_it = doc->filters.find(filter_cond.column);
-          if (filter_it == doc->filters.end()) {
-            matches_all_filters = false;
-            break;
-          }
-
-          const auto& stored_value = filter_it->second;
-          bool matches = std::visit(
-              [&filter_cond](auto&& val) -> bool {
-                using T = std::decay_t<decltype(val)>;
-                if constexpr (std::is_same_v<T, std::monostate>) {
-                  // NULL value: only match for NE operator
-                  return filter_cond.op == query::FilterOp::NE;
-                } else if constexpr (std::is_same_v<T, std::string>) {
-                  // String comparison with all operators
-                  const std::string& str_val = val;
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return str_val == filter_cond.value;
-                    case query::FilterOp::NE:
-                      return str_val != filter_cond.value;
-                    case query::FilterOp::GT:
-                      return str_val > filter_cond.value;
-                    case query::FilterOp::GTE:
-                      return str_val >= filter_cond.value;
-                    case query::FilterOp::LT:
-                      return str_val < filter_cond.value;
-                    case query::FilterOp::LTE:
-                      return str_val <= filter_cond.value;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, bool>) {
-                  // Boolean: convert filter value to bool, only EQ/NE meaningful
-                  bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val == bool_filter;
-                    case query::FilterOp::NE:
-                      return val != bool_filter;
-                    default:
-                      return false;  // GT/GTE/LT/LTE not meaningful for bools
-                  }
-                } else if constexpr (std::is_same_v<T, double>) {
-                  // Floating-point comparison with all operators
-                  double filter_val = 0.0;
-                  try {
-                    filter_val = std::stod(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;  // Invalid number
-                  }
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val == filter_val;
-                    case query::FilterOp::NE:
-                      return val != filter_val;
-                    case query::FilterOp::GT:
-                      return val > filter_val;
-                    case query::FilterOp::GTE:
-                      return val >= filter_val;
-                    case query::FilterOp::LT:
-                      return val < filter_val;
-                    case query::FilterOp::LTE:
-                      return val <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-                  // TIME value comparison: treat as signed integer (seconds)
-                  int64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoll(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;  // Invalid number
-                  }
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val.seconds == filter_val;
-                    case query::FilterOp::NE:
-                      return val.seconds != filter_val;
-                    case query::FilterOp::GT:
-                      return val.seconds > filter_val;
-                    case query::FilterOp::GTE:
-                      return val.seconds >= filter_val;
-                    case query::FilterOp::LT:
-                      return val.seconds < filter_val;
-                    case query::FilterOp::LTE:
-                      return val.seconds <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
-                                     std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
-                  // Unsigned integer comparison - use unsigned parsing to handle large values
-                  uint64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoull(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;  // Invalid number
-                  }
-                  auto unsigned_val = static_cast<uint64_t>(val);
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return unsigned_val == filter_val;
-                    case query::FilterOp::NE:
-                      return unsigned_val != filter_val;
-                    case query::FilterOp::GT:
-                      return unsigned_val > filter_val;
-                    case query::FilterOp::GTE:
-                      return unsigned_val >= filter_val;
-                    case query::FilterOp::LT:
-                      return unsigned_val < filter_val;
-                    case query::FilterOp::LTE:
-                      return unsigned_val <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else {
-                  // Signed integer comparison (int8_t, int16_t, int32_t, int64_t)
-                  int64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoll(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;  // Invalid number
-                  }
-                  auto signed_val = static_cast<int64_t>(val);
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return signed_val == filter_val;
-                    case query::FilterOp::NE:
-                      return signed_val != filter_val;
-                    case query::FilterOp::GT:
-                      return signed_val > filter_val;
-                    case query::FilterOp::GTE:
-                      return signed_val >= filter_val;
-                    case query::FilterOp::LT:
-                      return signed_val < filter_val;
-                    case query::FilterOp::LTE:
-                      return signed_val <= filter_val;
-                    default:
-                      return false;
-                  }
-                }
-              },
-              stored_value);
-
-          if (!matches) {
-            matches_all_filters = false;
-            break;
-          }
-        }
-
-        if (matches_all_filters) {
-          filtered_results.push_back(doc_id);
-        }
-      }
-      results = std::move(filtered_results);
-    }
+    auto& results = pipeline_result.results;
 
     // Store total count before applying ORDER BY and limit/offset
     size_t total_count = results.size();
 
     // Insert into cache (cache stores results before pagination)
-    if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
-      // Collect all ngrams from term_infos to enable proper cache invalidation
-      std::set<std::string> all_ngrams;
-      for (const auto& term_info : term_infos) {
-        all_ngrams.insert(term_info.ngrams.begin(), term_info.ngrams.end());
-      }
-      cache_manager_->Insert(*query, results, all_ngrams, 0.0);
-    }
+    search_pipeline::InsertToCache(cache_manager_, *query, results, term_infos, 0.0, current_ngram_size,
+                                   current_kanji_ngram_size, current_cross_boundary);
 
     // Apply ORDER BY, LIMIT, OFFSET
     // Only use ResultSorter if ORDER BY is explicitly specified
@@ -919,22 +666,12 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
           // Format 2: full operator support
           std::string op_str = val.value("op", "EQ");
           // Parse operator
-          if (op_str == "EQ" || op_str == "==" || op_str == "=") {
-            filter.op = query::FilterOp::EQ;
-          } else if (op_str == "NE" || op_str == "!=" || op_str == "<>") {
-            filter.op = query::FilterOp::NE;
-          } else if (op_str == "GT" || op_str == ">") {
-            filter.op = query::FilterOp::GT;
-          } else if (op_str == "GTE" || op_str == ">=" || op_str == "≥") {
-            filter.op = query::FilterOp::GTE;
-          } else if (op_str == "LT" || op_str == "<") {
-            filter.op = query::FilterOp::LT;
-          } else if (op_str == "LTE" || op_str == "<=" || op_str == "≤") {
-            filter.op = query::FilterOp::LTE;
-          } else {
+          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
+          if (!parsed_op.has_value()) {
             SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
             return;
           }
+          filter.op = parsed_op.value();
 
           // Get the value
           json value_field = val["value"];
@@ -983,260 +720,22 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     }
     all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
 
-    // Generate n-grams for each term
-    struct TermInfo {
-      std::vector<std::string> ngrams;
-      size_t estimated_size;
-    };
-    std::vector<TermInfo> term_infos;
-    term_infos.reserve(all_search_terms.size());
+    // Generate term infos using shared pipeline
+    auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, current_ngram_size,
+                                                         current_kanji_ngram_size, current_cross_boundary);
 
-    for (const auto& search_term : all_search_terms) {
-      std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
-      std::vector<std::string> ngrams;
-
-      // Use hybrid n-grams if kanji_ngram_size is configured
-      if (current_kanji_ngram_size > 0) {
-        ngrams =
-            utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size, current_cross_boundary);
-      } else if (current_ngram_size == 0) {
-        ngrams = utils::GenerateHybridNgrams(normalized);
-      } else {
-        ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-      }
-
-      // Estimate result size by checking the smallest posting list (thread-safe)
-      size_t min_size = std::numeric_limits<size_t>::max();
-      for (const auto& ngram : ngrams) {
-        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
-        if (posting_size > 0) {
-          min_size = std::min(min_size, static_cast<size_t>(posting_size));
-        } else {
-          min_size = 0;
-          break;
-        }
-      }
-
-      term_infos.push_back({std::move(ngrams), min_size});
-    }
-
-    // Sort terms by estimated size (smallest first)
+    // Sort by estimated size (smallest first for faster intersection)
     std::sort(term_infos.begin(), term_infos.end(),
-              [](const TermInfo& lhs, const TermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+              [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
 
-    // Execute search - perform intersection (AND of all terms)
-    std::vector<DocId> results;
-    if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
-      results.clear();  // Empty results
-    } else {
-      if (!term_infos.empty()) {
-        results = current_index->SearchAnd(term_infos[0].ngrams);
-        for (size_t i = 1; i < term_infos.size(); ++i) {
-          if (results.empty()) {
-            break;
-          }
-          auto term_results = current_index->SearchAnd(term_infos[i].ngrams);
-          std::vector<DocId> intersection;
-          std::set_intersection(results.begin(), results.end(), term_results.begin(), term_results.end(),
-                                std::back_inserter(intersection));
-          results = std::move(intersection);
-        }
-      }
-    }
-
-    // Apply NOT terms if specified
-    if (!query->not_terms.empty()) {
-      for (const auto& not_term : query->not_terms) {
-        std::string normalized = utils::NormalizeText(not_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
-        std::vector<std::string> not_ngrams;
-
-        if (current_kanji_ngram_size > 0) {
-          not_ngrams = utils::GenerateHybridNgrams(normalized, current_ngram_size, current_kanji_ngram_size,
-                                                   current_cross_boundary);
-        } else if (current_ngram_size == 0) {
-          not_ngrams = utils::GenerateHybridNgrams(normalized);
-        } else {
-          not_ngrams = utils::GenerateNgrams(normalized, current_ngram_size);
-        }
-
-        auto not_results = current_index->SearchOr(not_ngrams);
-        std::vector<DocId> difference;
-        std::set_difference(results.begin(), results.end(), not_results.begin(), not_results.end(),
-                            std::back_inserter(difference));
-        results = std::move(difference);
-      }
-    }
-
-    // Apply filters (same logic as search)
-    if (!query->filters.empty()) {
-      std::vector<DocId> filtered_results;
-      filtered_results.reserve(results.size());
-
-      for (DocId doc_id : results) {
-        auto doc = current_doc_store->GetDocument(doc_id);
-        if (!doc) {
-          continue;  // Document not found (shouldn't happen)
-        }
-
-        bool matches_all_filters = true;
-        for (const auto& filter_cond : query->filters) {
-          auto stored_value_it = doc->filters.find(filter_cond.column);
-          if (stored_value_it == doc->filters.end()) {
-            matches_all_filters = false;
-            break;
-          }
-
-          const storage::FilterValue& stored_value = stored_value_it->second;
-          bool matches = std::visit(
-              [&filter_cond](const auto& val) -> bool {
-                using T = std::decay_t<decltype(val)>;
-                if constexpr (std::is_same_v<T, std::monostate>) {
-                  return false;  // NULL values don't match any filter
-                } else if constexpr (std::is_same_v<T, std::string>) {
-                  const std::string& str_val = val;
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return str_val == filter_cond.value;
-                    case query::FilterOp::NE:
-                      return str_val != filter_cond.value;
-                    case query::FilterOp::GT:
-                      return str_val > filter_cond.value;
-                    case query::FilterOp::GTE:
-                      return str_val >= filter_cond.value;
-                    case query::FilterOp::LT:
-                      return str_val < filter_cond.value;
-                    case query::FilterOp::LTE:
-                      return str_val <= filter_cond.value;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, bool>) {
-                  bool bool_filter = (filter_cond.value == "1" || filter_cond.value == "true");
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val == bool_filter;
-                    case query::FilterOp::NE:
-                      return val != bool_filter;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, double>) {
-                  double filter_val = 0.0;
-                  try {
-                    filter_val = std::stod(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;
-                  }
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val == filter_val;
-                    case query::FilterOp::NE:
-                      return val != filter_val;
-                    case query::FilterOp::GT:
-                      return val > filter_val;
-                    case query::FilterOp::GTE:
-                      return val >= filter_val;
-                    case query::FilterOp::LT:
-                      return val < filter_val;
-                    case query::FilterOp::LTE:
-                      return val <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-                  // TIME value comparison: treat as signed integer (seconds)
-                  int64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoll(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;  // Invalid number
-                  }
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return val.seconds == filter_val;
-                    case query::FilterOp::NE:
-                      return val.seconds != filter_val;
-                    case query::FilterOp::GT:
-                      return val.seconds > filter_val;
-                    case query::FilterOp::GTE:
-                      return val.seconds >= filter_val;
-                    case query::FilterOp::LT:
-                      return val.seconds < filter_val;
-                    case query::FilterOp::LTE:
-                      return val.seconds <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
-                                     std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
-                  uint64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoull(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;
-                  }
-                  auto unsigned_val = static_cast<uint64_t>(val);
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return unsigned_val == filter_val;
-                    case query::FilterOp::NE:
-                      return unsigned_val != filter_val;
-                    case query::FilterOp::GT:
-                      return unsigned_val > filter_val;
-                    case query::FilterOp::GTE:
-                      return unsigned_val >= filter_val;
-                    case query::FilterOp::LT:
-                      return unsigned_val < filter_val;
-                    case query::FilterOp::LTE:
-                      return unsigned_val <= filter_val;
-                    default:
-                      return false;
-                  }
-                } else {
-                  // Signed integer comparison
-                  int64_t filter_val = 0;
-                  try {
-                    filter_val = std::stoll(filter_cond.value);
-                  } catch (const std::exception&) {
-                    return false;
-                  }
-                  auto signed_val = static_cast<int64_t>(val);
-                  switch (filter_cond.op) {
-                    case query::FilterOp::EQ:
-                      return signed_val == filter_val;
-                    case query::FilterOp::NE:
-                      return signed_val != filter_val;
-                    case query::FilterOp::GT:
-                      return signed_val > filter_val;
-                    case query::FilterOp::GTE:
-                      return signed_val >= filter_val;
-                    case query::FilterOp::LT:
-                      return signed_val < filter_val;
-                    case query::FilterOp::LTE:
-                      return signed_val <= filter_val;
-                    default:
-                      return false;
-                  }
-                }
-              },
-              stored_value);
-
-          if (!matches) {
-            matches_all_filters = false;
-            break;
-          }
-        }
-
-        if (matches_all_filters) {
-          filtered_results.push_back(doc_id);
-        }
-      }
-      results = std::move(filtered_results);
-    }
+    // Execute search pipeline
+    auto pipeline_result = search_pipeline::Execute(
+        *query, term_infos, all_search_terms, current_index, current_doc_store, full_config_, current_ngram_size,
+        current_kanji_ngram_size, current_cross_boundary, SearchHandler::GetFilterThreshold());
 
     // Build JSON response - just return count
     json response;
-    response["count"] = results.size();
+    response["count"] = pipeline_result.results.size();
 
     SendJson(res, kHttpOk, response);
 
@@ -1361,7 +860,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       table_obj["postings"] = idx_stats.total_postings;
       table_obj["ngram_size"] = ctx->config.ngram_size;
       table_obj["memory_bytes"] = index_mem + doc_mem;
-      table_obj["memory_human"] = utils::FormatBytes(index_mem + doc_mem);
+      table_obj["memory_human"] = mygram::utils::FormatBytes(index_mem + doc_mem);
       tables_obj[table_name] = table_obj;
     }
 
@@ -1376,19 +875,19 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     json memory_obj;
     memory_obj["used_memory_bytes"] = total_memory;
-    memory_obj["used_memory_human"] = utils::FormatBytes(total_memory);
+    memory_obj["used_memory_human"] = mygram::utils::FormatBytes(total_memory);
     memory_obj["peak_memory_bytes"] = effective_stats.GetPeakMemoryUsage();
-    memory_obj["peak_memory_human"] = utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
-    memory_obj["used_memory_index"] = utils::FormatBytes(total_index_memory);
-    memory_obj["used_memory_documents"] = utils::FormatBytes(total_doc_memory);
+    memory_obj["peak_memory_human"] = mygram::utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
+    memory_obj["used_memory_index"] = mygram::utils::FormatBytes(total_index_memory);
+    memory_obj["used_memory_documents"] = mygram::utils::FormatBytes(total_doc_memory);
 
     // System memory information
-    auto sys_info = utils::GetSystemMemoryInfo();
+    auto sys_info = mygram::utils::GetSystemMemoryInfo();
     if (sys_info) {
       memory_obj["total_system_memory"] = sys_info->total_physical_bytes;
-      memory_obj["total_system_memory_human"] = utils::FormatBytes(sys_info->total_physical_bytes);
+      memory_obj["total_system_memory_human"] = mygram::utils::FormatBytes(sys_info->total_physical_bytes);
       memory_obj["available_system_memory"] = sys_info->available_physical_bytes;
-      memory_obj["available_system_memory_human"] = utils::FormatBytes(sys_info->available_physical_bytes);
+      memory_obj["available_system_memory_human"] = mygram::utils::FormatBytes(sys_info->available_physical_bytes);
       if (sys_info->total_physical_bytes > 0) {
         double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
                                        static_cast<double>(sys_info->total_physical_bytes);
@@ -1397,17 +896,17 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     }
 
     // Process memory information
-    auto proc_info = utils::GetProcessMemoryInfo();
+    auto proc_info = mygram::utils::GetProcessMemoryInfo();
     if (proc_info) {
       memory_obj["process_rss"] = proc_info->rss_bytes;
-      memory_obj["process_rss_human"] = utils::FormatBytes(proc_info->rss_bytes);
+      memory_obj["process_rss_human"] = mygram::utils::FormatBytes(proc_info->rss_bytes);
       memory_obj["process_rss_peak"] = proc_info->peak_rss_bytes;
-      memory_obj["process_rss_peak_human"] = utils::FormatBytes(proc_info->peak_rss_bytes);
+      memory_obj["process_rss_peak_human"] = mygram::utils::FormatBytes(proc_info->peak_rss_bytes);
     }
 
     // Memory health status
-    auto health = utils::GetMemoryHealthStatus();
-    memory_obj["memory_health"] = utils::MemoryHealthStatusToString(health);
+    auto health = mygram::utils::GetMemoryHealthStatus();
+    memory_obj["memory_health"] = mygram::utils::MemoryHealthStatusToString(health);
 
     response["memory"] = memory_obj;
 
@@ -1439,7 +938,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["hit_rate"] = cache_stats.HitRate();
       cache_obj["current_entries"] = cache_stats.current_entries;
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
-      cache_obj["memory_human"] = utils::FormatBytes(cache_stats.current_memory_bytes);
+      cache_obj["memory_human"] = mygram::utils::FormatBytes(cache_stats.current_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
       cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
@@ -1671,8 +1170,7 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
 
     // Format response
     std::string metrics = ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, effective_stats,
-                                                                     table_contexts_, binlog_reader_,
-                                                                     cache_manager_);
+                                                                     table_contexts_, binlog_reader_, cache_manager_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

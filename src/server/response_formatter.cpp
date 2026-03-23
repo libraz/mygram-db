@@ -293,11 +293,11 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   // Memory statistics (using pre-computed metrics)
   oss << "# Memory\r\n";
   oss << "used_memory_bytes: " << metrics.total_memory << "\r\n";
-  oss << "used_memory_human: " << utils::FormatBytes(metrics.total_memory) << "\r\n";
+  oss << "used_memory_human: " << mygram::utils::FormatBytes(metrics.total_memory) << "\r\n";
   oss << "used_memory_peak_bytes: " << stats.GetPeakMemoryUsage() << "\r\n";
-  oss << "used_memory_peak_human: " << utils::FormatBytes(stats.GetPeakMemoryUsage()) << "\r\n";
-  oss << "used_memory_index: " << utils::FormatBytes(metrics.total_index_memory) << "\r\n";
-  oss << "used_memory_documents: " << utils::FormatBytes(metrics.total_doc_memory) << "\r\n";
+  oss << "used_memory_peak_human: " << mygram::utils::FormatBytes(stats.GetPeakMemoryUsage()) << "\r\n";
+  oss << "used_memory_index: " << mygram::utils::FormatBytes(metrics.total_index_memory) << "\r\n";
+  oss << "used_memory_documents: " << mygram::utils::FormatBytes(metrics.total_doc_memory) << "\r\n";
 
   // Memory fragmentation estimate
   if (metrics.total_memory > 0) {
@@ -307,10 +307,10 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   }
 
   // System memory information
-  auto sys_info = utils::GetSystemMemoryInfo();
+  auto sys_info = mygram::utils::GetSystemMemoryInfo();
   if (sys_info) {
-    oss << "total_system_memory: " << utils::FormatBytes(sys_info->total_physical_bytes) << "\r\n";
-    oss << "available_system_memory: " << utils::FormatBytes(sys_info->available_physical_bytes) << "\r\n";
+    oss << "total_system_memory: " << mygram::utils::FormatBytes(sys_info->total_physical_bytes) << "\r\n";
+    oss << "available_system_memory: " << mygram::utils::FormatBytes(sys_info->available_physical_bytes) << "\r\n";
     if (sys_info->total_physical_bytes > 0) {
       double usage_ratio = 1.0 - static_cast<double>(sys_info->available_physical_bytes) /
                                      static_cast<double>(sys_info->total_physical_bytes);
@@ -319,15 +319,15 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   }
 
   // Process memory information
-  auto proc_info = utils::GetProcessMemoryInfo();
+  auto proc_info = mygram::utils::GetProcessMemoryInfo();
   if (proc_info) {
-    oss << "process_rss: " << utils::FormatBytes(proc_info->rss_bytes) << "\r\n";
-    oss << "process_rss_peak: " << utils::FormatBytes(proc_info->peak_rss_bytes) << "\r\n";
+    oss << "process_rss: " << mygram::utils::FormatBytes(proc_info->rss_bytes) << "\r\n";
+    oss << "process_rss_peak: " << mygram::utils::FormatBytes(proc_info->peak_rss_bytes) << "\r\n";
   }
 
   // Memory health status
-  auto health = utils::GetMemoryHealthStatus();
-  oss << "memory_health: " << utils::MemoryHealthStatusToString(health) << "\r\n";
+  auto health = mygram::utils::GetMemoryHealthStatus();
+  oss << "memory_health: " << mygram::utils::MemoryHealthStatusToString(health) << "\r\n";
 
   oss << "\r\n";
 
@@ -408,7 +408,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_hit_rate: " << std::fixed << std::setprecision(4) << cache_stats.HitRate() << "\r\n";
     oss << "cache_current_entries: " << cache_stats.current_entries << "\r\n";
     oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
-    oss << "cache_memory_human: " << utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
+    oss << "cache_memory_human: " << mygram::utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
     oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
@@ -629,7 +629,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   }
 
   // System memory information
-  auto sys_info = utils::GetSystemMemoryInfo();
+  auto sys_info = mygram::utils::GetSystemMemoryInfo();
   if (sys_info) {
     oss << "# HELP mygramdb_memory_system_total_bytes Total system physical memory\n";
     oss << "# TYPE mygramdb_memory_system_total_bytes gauge\n";
@@ -652,7 +652,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   }
 
   // Process memory information
-  auto proc_info = utils::GetProcessMemoryInfo();
+  auto proc_info = mygram::utils::GetProcessMemoryInfo();
   if (proc_info) {
     oss << "# HELP mygramdb_memory_process_rss_bytes Process resident set size\n";
     oss << "# TYPE mygramdb_memory_process_rss_bytes gauge\n";
@@ -666,19 +666,19 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   }
 
   // Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)
-  auto health = utils::GetMemoryHealthStatus();
+  auto health = mygram::utils::GetMemoryHealthStatus();
   int health_value = 0;
   switch (health) {
-    case utils::MemoryHealthStatus::HEALTHY:
+    case mygram::utils::MemoryHealthStatus::HEALTHY:
       health_value = 1;
       break;
-    case utils::MemoryHealthStatus::WARNING:
+    case mygram::utils::MemoryHealthStatus::WARNING:
       health_value = 2;
       break;
-    case utils::MemoryHealthStatus::CRITICAL:
+    case mygram::utils::MemoryHealthStatus::CRITICAL:
       health_value = 3;
       break;
-    case utils::MemoryHealthStatus::UNKNOWN:
+    case mygram::utils::MemoryHealthStatus::UNKNOWN:
     default:
       health_value = 0;
       break;

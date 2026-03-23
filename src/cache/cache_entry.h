@@ -5,9 +5,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -26,11 +26,11 @@ namespace mygramdb::cache {
 struct CacheMetadata {
   CacheKey key;                                         ///< Cache key (MD5 hash)
   std::string table;                                    ///< Table name
-  std::vector<std::string> ngrams;                       ///< All ngrams used in this query (sorted)
+  std::vector<std::string> ngrams;                      ///< All ngrams used in this query (sorted)
   std::vector<query::FilterCondition> filters;          ///< Filter conditions (for future optimization)
-  int ngram_size = 0;                 ///< N-gram size used for this query's ngrams
-  int kanji_ngram_size = 0;           ///< Kanji N-gram size used for this query's ngrams
-  bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used for this query's ngrams
+  int ngram_size = 0;                                   ///< N-gram size used for this query's ngrams
+  int kanji_ngram_size = 0;                             ///< Kanji N-gram size used for this query's ngrams
+  bool cross_boundary_ngrams = true;                    ///< Cross-boundary setting used for this query's ngrams
   std::chrono::steady_clock::time_point created_at;     ///< Creation time
   std::chrono::steady_clock::time_point last_accessed;  ///< Last access time
   std::atomic<uint32_t> access_count{0};                ///< Number of times accessed (atomic for lock-free update)

@@ -174,23 +174,21 @@ class MygramClient::Impl {
     if (!config_.unix_socket_path.empty()) {
       sock_ = socket(AF_UNIX, SOCK_STREAM, 0);
       if (sock_ < 0) {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kClientConnectionFailed,
-                      std::string("Failed to create unix socket: ") + strerror(errno)));
+        return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed,
+                                        std::string("Failed to create unix socket: ") + strerror(errno)));
       }
 
       // Set socket timeout
       struct timeval timeout_val = {};
       timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / kMillisecondsPerSecond);
-      timeout_val.tv_usec = static_cast<decltype(timeout_val.tv_usec)>(
-          (config_.timeout_ms % kMillisecondsPerSecond) * kMicrosecondsPerMillisecond);
+      timeout_val.tv_usec = static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % kMillisecondsPerSecond) *
+                                                                       kMicrosecondsPerMillisecond);
       setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
       setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
 
-      struct sockaddr_un server_addr{};
+      struct sockaddr_un server_addr {};
       server_addr.sun_family = AF_UNIX;
-      std::strncpy(server_addr.sun_path, config_.unix_socket_path.c_str(),
-                   sizeof(server_addr.sun_path) - 1);
+      std::strncpy(server_addr.sun_path, config_.unix_socket_path.c_str(), sizeof(server_addr.sun_path) - 1);
 
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
       if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {

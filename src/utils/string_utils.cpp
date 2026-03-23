@@ -20,7 +20,7 @@
 #include <unicode/unistr.h>
 #endif
 
-namespace mygramdb::utils {
+namespace mygram::utils {
 
 namespace {
 
@@ -627,4 +627,4 @@ std::string SanitizeUtf8(std::string_view text) {
 // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 // NOLINTEND(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
-}  // namespace mygramdb::utils
+}  // namespace mygram::utils
