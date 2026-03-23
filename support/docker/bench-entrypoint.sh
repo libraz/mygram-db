@@ -11,7 +11,7 @@ echo "MygramDB version: ${VERSION:-unknown}"
 
 # v1.5+: enable verify_text post-filter to eliminate n-gram false positives
 if [ "${MAJOR:-0}" -gt 1 ] || { [ "${MAJOR:-0}" -eq 1 ] && [ "${MINOR:-0}" -ge 5 ]; }; then
-    export MEMORY_VERIFY_TEXT="${MEMORY_VERIFY_TEXT:-on}"
+    export MEMORY_VERIFY_TEXT="${MEMORY_VERIFY_TEXT:-all}"
     echo "  verify_text: enabled (v1.5+)"
 fi
 
