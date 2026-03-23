@@ -42,6 +42,7 @@ RUN mkdir -p build && cd build && \
           -DBUILD_TESTS=OFF \
           -DUSE_ICU=ON \
           -DUSE_MYSQL=ON \
+          -DMYGRAMDB_PORTABLE_BUILD=ON \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           .. && \
     make -j$(nproc) && \
