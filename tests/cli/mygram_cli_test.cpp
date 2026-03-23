@@ -15,7 +15,7 @@
 // Rename main() to avoid conflict with gtest's main, and expose private
 // members for testing (PrintResponse is private static in MygramClient).
 #define main cli_main
-#define private public  // NOLINT(cppcoreguidelines-macro-usage)
+#define private public         // NOLINT(cppcoreguidelines-macro-usage)
 #include "cli/mygram-cli.cpp"  // NOLINT(bugprone-suspicious-include)
 #undef private
 #undef main
@@ -377,8 +377,7 @@ TEST_F(CliArgumentParsingTest, SingleCommandMode) {
 }
 
 TEST_F(CliArgumentParsingTest, CommandBuildingPreservesSpacing) {
-  std::vector<std::string> args = {"SEARCH", "articles", "hello", "world",
-                                   "LIMIT",  "10",       "OFFSET", "5"};
+  std::vector<std::string> args = {"SEARCH", "articles", "hello", "world", "LIMIT", "10", "OFFSET", "5"};
 
   std::ostringstream command;
   for (size_t i = 0; i < args.size(); ++i) {

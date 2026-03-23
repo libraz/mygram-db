@@ -99,7 +99,9 @@ TEST(FDGuardTest, InvalidFDIsSafe) {
 
 TEST(ScopeGuardTest, ExecutesOnDestruction) {
   bool executed = false;
-  { ScopeGuardFunc guard([&executed]() { executed = true; }); }
+  {
+    ScopeGuardFunc guard([&executed]() { executed = true; });
+  }
   EXPECT_TRUE(executed);
 }
 

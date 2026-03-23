@@ -31,8 +31,7 @@ class ResultCompressor {
    * @param result Vector of document IDs to compress
    * @return Compressed data, or Error if compression fails
    */
-  static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Compress(
-      const std::vector<DocId>& result);
+  static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Compress(const std::vector<DocId>& result);
 
   /**
    * @brief Decompress to vector of document IDs

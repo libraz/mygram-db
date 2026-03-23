@@ -681,7 +681,7 @@ TEST_F(BinlogEventProcessorTest, UpdateSkipsIndexWhenDocumentRemoved) {
 
   // Manually remove doc1 from both index and doc_store
   std::string normalized = mygram::utils::NormalizeText("alpha beta gamma", index_->GetNormalizeNfkc(),
-                                                index_->GetNormalizeWidth(), index_->GetNormalizeLower());
+                                                        index_->GetNormalizeWidth(), index_->GetNormalizeLower());
   index_->RemoveDocument(doc1_id, normalized);
   doc_store_->RemoveDocument(doc1_id);
 

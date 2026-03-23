@@ -243,8 +243,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     }
 
     // Normalize text
-    std::string normalized_text =
-        index_.NormalizeText(text);
+    std::string normalized_text = index_.NormalizeText(text);
 
     // Extract filters
     auto filters = ExtractFilters(row, fields, num_fields);

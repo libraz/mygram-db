@@ -838,7 +838,8 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "Cache configuration error: max_memory_mb exceeds safe limit\n";
           err_msg << "  Configured cache size: " << mygram::utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
           err_msg << "  Physical memory: " << mygram::utils::FormatBytes(system_info->total_physical_bytes) << "\n";
-          err_msg << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache) << "\n";
+          err_msg << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache)
+                  << "\n";
           err_msg << "  Recommendation:\n";
           err_msg << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMB) << " MB\n";
           err_msg << "    - Consider system memory requirements for index and operations\n";

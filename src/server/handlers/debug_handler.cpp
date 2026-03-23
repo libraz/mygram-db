@@ -148,7 +148,8 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         auto stats = current_index->GetStatistics();
         std::ostringstream oss;
         oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-            << " roaring=" << stats.roaring_bitmap_lists << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
+            << " roaring=" << stats.roaring_bitmap_lists
+            << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
         return oss.str();
       }
       return ResponseFormatter::FormatError("Failed to start optimization");
