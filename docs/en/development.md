@@ -298,7 +298,6 @@ When implementing features or making changes, prioritize in this order:
 2. **Memory Efficiency**: Minimize memory footprint
 3. **Maintainability**: Write clean, testable code
 
-For detailed coding guidelines, see [CLAUDE.md](../../CLAUDE.md) in the project root.
 
 ## Linux CI Testing (macOS Developers)
 

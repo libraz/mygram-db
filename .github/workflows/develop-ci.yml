@@ -9,8 +9,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'CMakeLists.txt'
+              - 'third_party/**'
+              - 'Makefile'
+              - 'support/dev/**'
+              - '.github/workflows/develop-ci.yml'
+
   linux-build:
     name: Linux Build and Test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -69,9 +91,8 @@ jobs:
         sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
         sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
 
-    - name: Check code formatting (warnings only)
+    - name: Check code formatting
       run: make format-check
-      continue-on-error: true
 
     - name: Setup ccache
       run: |
@@ -113,9 +134,8 @@ jobs:
           bash support/dev/test-diff.sh --committed --verbose
         fi
 
-    - name: Run clang-tidy (diff mode, warnings only)
+    - name: Run clang-tidy (diff mode)
       run: bash support/dev/run-clang-tidy.sh --diff origin/develop
-      continue-on-error: true
 
     - name: Upload build artifacts
       if: failure()

@@ -1,13 +1,11 @@
-name: Sanitizers (Disabled)
+name: Sanitizers
 
-# Workflow is disabled - only manual trigger available
-# To re-enable, uncomment the push and pull_request triggers below
 on:
-  workflow_dispatch:  # Manual trigger only
-  # push:
-  #   branches: [ main, develop ]
-  # pull_request:
-  #   branches: [ main, develop ]
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches: [ develop ]
+  pull_request:
+    branches: [ develop ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

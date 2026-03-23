@@ -14,11 +14,11 @@ if(POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD)
 endif()
 
-# yaml-cpp for YAML parsing (using master for latest CMake compatibility)
+# yaml-cpp for YAML parsing (pinned to stable release)
 FetchContent_Declare(
   yaml-cpp
   GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-  GIT_TAG master
+  GIT_TAG yaml-cpp-0.9.0
 )
 set(YAML_CPP_FORMAT_SOURCE OFF CACHE BOOL "" FORCE)
 set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -33,12 +33,12 @@ if(YAML_CPP_IID)
   set_target_properties(yaml-cpp PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${YAML_CPP_IID}")
 endif()
 
-# Google Test for testing (using v1.15.2 for better C++17 support)
+# Google Test for testing (using v1.17.0 for better C++17 support)
 if(BUILD_TESTS)
   FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
+    GIT_TAG v1.17.0
   )
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -63,7 +63,7 @@ endif()
 FetchContent_Declare(
   spdlog
   GIT_REPOSITORY https://github.com/gabime/spdlog.git
-  GIT_TAG v1.12.0
+  GIT_TAG v1.17.0
 )
 FetchContent_MakeAvailable(spdlog)
 
@@ -79,7 +79,7 @@ endif()
 FetchContent_Declare(
   lz4
   GIT_REPOSITORY https://github.com/lz4/lz4.git
-  GIT_TAG v1.9.4
+  GIT_TAG v1.10.0
 )
 FetchContent_GetProperties(lz4)
 if(NOT lz4_POPULATED)
@@ -101,11 +101,11 @@ if(LZ4_IID)
   set_target_properties(lz4 PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LZ4_IID}")
 endif()
 
-# CRoaring for Roaring bitmaps (using v4.0.0 for better CMake compatibility)
+# CRoaring for Roaring bitmaps (using v4.6.1 for better CMake compatibility)
 FetchContent_Declare(
   roaring
   GIT_REPOSITORY https://github.com/RoaringBitmap/CRoaring.git
-  GIT_TAG v4.0.0
+  GIT_TAG v4.6.1
 )
 set(ENABLE_ROARING_TESTS OFF CACHE BOOL "" FORCE)
 set(ROARING_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -121,7 +121,7 @@ endif()
 FetchContent_Declare(
   nlohmann_json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
+  GIT_TAG v3.12.0
 )
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install OFF CACHE BOOL "" FORCE)
@@ -137,7 +137,7 @@ endif()
 FetchContent_Declare(
   json-schema-validator
   GIT_REPOSITORY https://github.com/pboettch/json-schema-validator.git
-  GIT_TAG 2.3.0
+  GIT_TAG 2.4.0
 )
 set(JSON_VALIDATOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(JSON_VALIDATOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -153,7 +153,7 @@ endif()
 FetchContent_Declare(
   httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG v0.15.3
+  GIT_TAG v0.18.7
 )
 set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_REQUIRE_ZLIB OFF CACHE BOOL "" FORCE)
@@ -173,7 +173,7 @@ endif()
 FetchContent_Declare(
   abseil
   GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-  GIT_TAG 20240722.0
+  GIT_TAG 20250127.1
 )
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)

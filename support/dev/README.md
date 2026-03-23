@@ -1,44 +1,41 @@
 # Development Support Tools
 
-このディレクトリには開発用のツールとスクリプトが含まれています。
+This directory contains development tools and scripts.
 
-## ファイル一覧
+## File List
 
 ### Docker Linux Testing
 
-macOS開発者がLinux環境（CI環境）でのビルド問題を事前検知するためのツール。
+Tools for macOS developers to detect build issues in Linux (CI) environments before they occur.
 
-- **Dockerfile** - CI環境（Ubuntu 22.04）を再現する開発用Dockerイメージ
+- **Dockerfile** - Development Docker image that reproduces the CI environment (Ubuntu 22.04)
 
-**使い方:**
+**Usage:**
 ```bash
-# コミット前の全チェック（推奨）
+# Run all checks before committing (recommended)
 make docker-ci-check
 
-# 対話的シェル
+# Interactive shell
 make docker-dev-shell
 
-# 個別チェック
+# Individual checks
 make docker-build-linux
 make docker-test-linux
 make docker-lint-linux
 ```
 
-**詳細:** [Linux Testing Guide](../../docs/ja/linux-testing.md) (日本語) / [English](../../docs/en/linux-testing.md)
+**Details:** [Linux Testing Guide](../../docs/en/linux-testing.md)
 
 ### Code Quality Tools
 
-- **run-clang-tidy.sh** - clang-tidyを実行するスクリプト
+- **run-clang-tidy.sh** - Script to run clang-tidy
 
-**使い方:**
+**Usage:**
 ```bash
 make lint
 ```
 
-## 関連ドキュメント
+## Related Documentation
 
-- [Linux Testing Guide](../../docs/ja/linux-testing.md) - Linux CIテストガイド（日本語）
-- [Linux Testing Guide (EN)](../../docs/en/linux-testing.md) - Linux CI Testing Guide (English)
-- [Development Guide](../../docs/ja/development.md) - 開発環境セットアップガイド（日本語）
-- [Development Guide (EN)](../../docs/en/development.md) - Development Guide (English)
-- [CLAUDE.md](../../CLAUDE.md) - 開発ガイドライン
+- [Linux Testing Guide](../../docs/en/linux-testing.md) - Linux CI Testing Guide
+- [Development Guide](../../docs/en/development.md) - Development Environment Setup Guide

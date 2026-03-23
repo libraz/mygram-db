@@ -17,6 +17,9 @@ TEST_JOBS ?= 4          # Parallel jobs for tests (make test TEST_JOBS=2)
 TEST_VERBOSE ?= 0       # Verbose output (make test TEST_VERBOSE=1)
 TEST_DEBUG ?= 0         # Debug output (make test TEST_DEBUG=1)
 
+# MySQL password for benchmark (can be overridden: make MYSQL_PASSWORD=secret bench-run)
+MYSQL_PASSWORD ?= mygramdb
+
 # Default target
 .DEFAULT_GOAL := build
 
@@ -349,7 +352,7 @@ bench-run:
 	@echo "Running benchmark (MygramDB vs MySQL FULLTEXT)..."
 	uv run --with mysql-connector-python python support/seed/benchmark.py \
 		--mysql-host 127.0.0.1 --mysql-port 3306 \
-		--mysql-user root --mysql-password mygramdb --mysql-db mydb \
+		--mysql-user root --mysql-password $(MYSQL_PASSWORD) --mysql-db mydb \
 		--mygramdb-host 127.0.0.1 --mygramdb-port 11016
 
 bench-down:

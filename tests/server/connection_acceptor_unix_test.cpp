@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -185,6 +186,29 @@ TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
   acceptor.Stop();
   EXPECT_FALSE(std::filesystem::exists(socket_path_));
 
+  pool.Shutdown();
+}
+
+TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {
+  ThreadPool pool(2, 100);
+
+  ServerConfig config;
+  config.unix_socket_path = socket_path_;
+  config.max_connections = 10;
+
+  ConnectionAcceptor acceptor(config, &pool);
+  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+
+  auto result = acceptor.Start();
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+
+  // Verify socket file permissions are 0770
+  struct stat st {};
+  ASSERT_EQ(stat(socket_path_.c_str(), &st), 0) << strerror(errno);
+  mode_t perms = st.st_mode & 0777;
+  EXPECT_EQ(perms, 0770) << "Socket permissions should be 0770, got: " << std::oct << perms;
+
+  acceptor.Stop();
   pool.Shutdown();
 }
 

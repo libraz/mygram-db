@@ -479,7 +479,9 @@ if(ENABLE_COVERAGE)
       set(CTEST_PARALLEL_ARGS --parallel ${N})
     endif()
 
-    # Add target to generate HTML coverage report (excludes SLOW tests for faster CI)
+    # Add target to generate HTML coverage report (excludes SLOW tests for faster CI).
+    # SLOW tests (10-25s each) are excluded to keep CI feedback loop fast.
+    # To include them, use: make coverage-full
     add_custom_target(coverage
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
       COMMAND ${LCOV_PATH} --directory . --zerocounters

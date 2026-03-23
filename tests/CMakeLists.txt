@@ -20,6 +20,7 @@ add_subdirectory(query)
 add_subdirectory(cache)
 add_subdirectory(mysql)
 add_subdirectory(server)
+add_subdirectory(cli)
 add_subdirectory(client)
 add_subdirectory(app)
 

@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -101,7 +102,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       if (probe_fd >= 0) {
         struct sockaddr_un probe_addr {};
         probe_addr.sun_family = AF_UNIX;
-        std::strncpy(probe_addr.sun_path, config_.unix_socket_path.c_str(), sizeof(probe_addr.sun_path) - 1);
+        // Safe: path length already validated above (< sizeof(sun_path)), struct is zero-initialized
+        std::memcpy(probe_addr.sun_path, config_.unix_socket_path.c_str(), config_.unix_socket_path.size());
         if (connect(probe_fd, ToSockaddrUn(&probe_addr), sizeof(probe_addr)) == 0) {
           close(probe_fd);
           auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
@@ -140,7 +142,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     // Bind
     struct sockaddr_un bind_addr {};
     bind_addr.sun_family = AF_UNIX;
-    std::strncpy(bind_addr.sun_path, config_.unix_socket_path.c_str(), sizeof(bind_addr.sun_path) - 1);
+    // Safe: path length already validated above (< sizeof(sun_path)), struct is zero-initialized
+    std::memcpy(bind_addr.sun_path, config_.unix_socket_path.c_str(), config_.unix_socket_path.size());
 
     if (bind(server_fd_, ToSockaddrUn(&bind_addr), sizeof(bind_addr)) < 0) {
       close(server_fd_);
@@ -150,6 +153,22 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       mygram::utils::StructuredLog()
           .Event("server_error")
           .Field("operation", "unix_socket_bind")
+          .Field("path", config_.unix_socket_path)
+          .Field("error", error.to_string())
+          .Error();
+      return MakeUnexpected(error);
+    }
+
+    // Set socket permissions (owner + group access)
+    if (chmod(config_.unix_socket_path.c_str(), 0770) < 0) {
+      close(server_fd_);
+      server_fd_ = -1;
+      unlink(config_.unix_socket_path.c_str());
+      auto error = MakeError(ErrorCode::kNetworkBindFailed,
+                             "Failed to set unix socket permissions: " + std::string(strerror(errno)));
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "unix_socket_chmod")
           .Field("path", config_.unix_socket_path)
           .Field("error", error.to_string())
           .Error();
