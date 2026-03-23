@@ -48,8 +48,7 @@ class Index {
    */
   explicit Index(int ngram_size = kDefaultNgramSize, int kanji_ngram_size = kDefaultKanjiNgramSize,
                  double roaring_threshold = kDefaultRoaringThreshold, bool cross_boundary_ngrams = true,
-                 bool normalize_nfkc = true, const std::string& normalize_width = "keep",
-                 bool normalize_lower = true);
+                 bool normalize_nfkc = true, const std::string& normalize_width = "keep", bool normalize_lower = true);
 
   ~Index() = default;
 
@@ -128,7 +127,7 @@ class Index {
    * @return Filtered vector of document IDs matching all terms
    */
   [[nodiscard]] std::vector<DocId> FilterByNgrams(const std::vector<DocId>& candidates,
-                                                   const std::vector<std::string>& terms) const;
+                                                  const std::vector<std::string>& terms) const;
 
   /**
    * @brief Search for documents containing any term (OR)

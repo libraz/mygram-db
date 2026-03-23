@@ -28,8 +28,7 @@ TEST(IndexEmptyDocTest, SingleWhitespaceWithBigramReturnsFalse) {
 
   // Single space can't form a bigram
   bool result = index.AddDocument(2, " ");
-  EXPECT_FALSE(result)
-      << "Single whitespace with ngram_size=2 should return false";
+  EXPECT_FALSE(result) << "Single whitespace with ngram_size=2 should return false";
 }
 
 /**
@@ -60,8 +59,7 @@ TEST(IndexEmptyDocTest, SingleCJKCharWithUnigramReturnsTrue) {
 
   // Single Kanji character can form a unigram
   bool result = index.AddDocument(5, "\xe6\x9d\xb1");  // U+6771 東
-  EXPECT_TRUE(result)
-      << "Single CJK char with kanji_ngram_size=1 should return true";
+  EXPECT_TRUE(result) << "Single CJK char with kanji_ngram_size=1 should return true";
 }
 
 }  // namespace mygramdb::index

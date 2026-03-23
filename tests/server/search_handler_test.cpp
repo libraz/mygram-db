@@ -14,13 +14,14 @@
  * - ParseFilterValue from_chars parsing
  */
 
+#include "server/handlers/search_handler.h"
+
 #include <gtest/gtest.h>
 
 #include <charconv>
 #include <cmath>
 #include <limits>
 
-#include "server/handlers/search_handler.h"
 #include "storage/document_store.h"
 
 namespace mygramdb {
@@ -379,8 +380,7 @@ TEST(SearchHandlerTest, CountStaleCacheDetection) {
   // Simulate the TOCTOU validation logic added to HandleCount
   bool cache_stale = false;
   if (!cached_doc_ids.empty()) {
-    size_t sample_size =
-        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
     size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
     for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
       // In real code: !current_doc_store->GetPrimaryKey(doc_id).has_value()
@@ -411,8 +411,7 @@ TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
 
   bool cache_stale = false;
   if (!cached_doc_ids.empty()) {
-    size_t sample_size =
-        std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
+    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
     size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
     for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
       if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
@@ -456,7 +455,7 @@ TEST(SearchHandlerTest, CountEmptyCacheNotStale) {
 TEST(SearchHandlerTest, FloatFilterEpsilonComparison) {
   // Simulate the filter comparison logic
   double stored_value = 0.1 + 0.2;  // = 0.30000000000000004
-  double filter_value = 0.3;         // Exact 0.3
+  double filter_value = 0.3;        // Exact 0.3
 
   // Exact comparison fails
   EXPECT_NE(stored_value, filter_value) << "Exact comparison should fail (demonstrates the problem)";

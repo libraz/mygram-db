@@ -1,10 +1,11 @@
 #ifndef MYGRAMDB_UTILS_CRC32_H_
 #define MYGRAMDB_UTILS_CRC32_H_
 
+#include <zlib.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <zlib.h>
 
 namespace mygramdb::utils {
 
@@ -14,8 +15,7 @@ namespace mygramdb::utils {
 /// @return CRC32 checksum value
 inline uint32_t ComputeCRC32(const void* data, size_t length) {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  return static_cast<uint32_t>(
-      crc32(0L, reinterpret_cast<const Bytef*>(data), static_cast<uInt>(length)));
+  return static_cast<uint32_t>(crc32(0L, reinterpret_cast<const Bytef*>(data), static_cast<uInt>(length)));
 }
 
 /// @brief Compute CRC32 checksum for a string.

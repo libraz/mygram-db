@@ -236,10 +236,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
       return MakeUnexpected(uds_result.error());
     }
 
-    mygram::utils::StructuredLog()
-        .Event("unix_socket_acceptor_started")
-        .Field("path", config_.unix_socket_path)
-        .Info();
+    mygram::utils::StructuredLog().Event("unix_socket_acceptor_started").Field("path", config_.unix_socket_path).Info();
   }
 
   mygram::utils::StructuredLog()
@@ -297,12 +294,13 @@ void TcpServer::HandleConnection(int client_fd) {
 
   // Get client IP address for rate limiting
   std::string client_ip;
-  struct sockaddr_storage addr_storage{};
+  struct sockaddr_storage addr_storage {};
   socklen_t addr_len = sizeof(addr_storage);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
   if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0) {
     if (addr_storage.ss_family == AF_INET) {
-      auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      auto* addr_in =
+          reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
       char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
       inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);

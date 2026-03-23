@@ -668,8 +668,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
 
     // Populate with documents that share many n-grams (use common prefix text)
     for (uint32_t i = 0; i < num_docs; ++i) {
-      std::string text =
-          "shared prefix common ngram data " + std::to_string(i);
+      std::string text = "shared prefix common ngram data " + std::to_string(i);
       test_index->AddDocument(i, text);
     }
 
@@ -694,8 +693,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
       }
       // Remove immediately, no sleep
       for (uint32_t id = remove_start; id < remove_end; ++id) {
-        std::string text =
-            "shared prefix common ngram data " + std::to_string(id);
+        std::string text = "shared prefix common ngram data " + std::to_string(id);
         test_index->RemoveDocument(id, text);
       }
     });
@@ -708,9 +706,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0)
-          << "Iteration " << iteration << ": Document " << id
-          << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
+                                             << " was removed but still found in search results (resurrection bug)";
     }
 
     // Verify: Non-removed documents should still be found
@@ -723,9 +720,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
         non_removed_found++;
       }
     }
-    EXPECT_GT(non_removed_found, 0)
-        << "Iteration " << iteration
-        << ": Non-removed documents should still be searchable";
+    EXPECT_GT(non_removed_found, 0) << "Iteration " << iteration
+                                    << ": Non-removed documents should still be searchable";
   }
 }
 
@@ -743,8 +739,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
     const uint32_t num_docs = 5000;
 
     for (uint32_t i = 0; i < num_docs; ++i) {
-      std::string text =
-          "shared prefix common ngram data " + std::to_string(i);
+      std::string text = "shared prefix common ngram data " + std::to_string(i);
       test_index->AddDocument(i, text);
     }
 
@@ -767,8 +762,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
         std::this_thread::yield();
       }
       for (uint32_t id = remove_start; id < remove_end; ++id) {
-        std::string text =
-            "shared prefix common ngram data " + std::to_string(id);
+        std::string text = "shared prefix common ngram data " + std::to_string(id);
         test_index->RemoveDocument(id, text);
       }
     });
@@ -781,9 +775,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0)
-          << "Iteration " << iteration << ": Document " << id
-          << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
+                                             << " was removed but still found in search results (resurrection bug)";
     }
 
     // Verify: Non-removed documents should still be found
@@ -796,9 +789,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
         non_removed_found++;
       }
     }
-    EXPECT_GT(non_removed_found, 0)
-        << "Iteration " << iteration
-        << ": Non-removed documents should still be searchable";
+    EXPECT_GT(non_removed_found, 0) << "Iteration " << iteration
+                                    << ": Non-removed documents should still be searchable";
   }
 }
 

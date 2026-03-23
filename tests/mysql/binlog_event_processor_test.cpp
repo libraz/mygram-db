@@ -430,8 +430,8 @@ TEST_F(BinlogEventProcessorTest, UpdateTransitionOutUsesOldTextForRemoval) {
   BinlogEvent update_event;
   update_event.type = BinlogEventType::UPDATE;
   update_event.primary_key = "pk1";
-  update_event.old_text = "alpha beta";     // before-image (what's in the index)
-  update_event.text = "gamma delta";        // after-image (NOT in the index)
+  update_event.old_text = "alpha beta";  // before-image (what's in the index)
+  update_event.text = "gamma delta";     // after-image (NOT in the index)
   update_event.filters["status"] = static_cast<int32_t>(0);
   update_event.table_name = "test_table";
 
@@ -476,8 +476,8 @@ TEST_F(BinlogEventProcessorTest, UpdateTransitionOutFallsBackToTextWhenOldTextEm
   BinlogEvent update_event;
   update_event.type = BinlogEventType::UPDATE;
   update_event.primary_key = "pk1";
-  update_event.old_text = "";               // before-image unavailable
-  update_event.text = "alpha beta";         // after-image happens to match
+  update_event.old_text = "";        // before-image unavailable
+  update_event.text = "alpha beta";  // after-image happens to match
   update_event.filters["status"] = static_cast<int32_t>(0);
   update_event.table_name = "test_table";
 
@@ -503,8 +503,7 @@ TEST_F(BinlogEventProcessorTest, DuplicateInsertIsIdempotent) {
   event1.text = "unique keyword xyz";
   event1.table_name = "test_table";
 
-  ASSERT_TRUE(
-      BinlogEventProcessor::ProcessEvent(event1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   auto doc_id = *doc_store_->GetDocId("pk1");
 
@@ -549,8 +548,7 @@ TEST_F(BinlogEventProcessorTest, UpdateWithRemovedDocumentDoesNotCorruptIndex) {
   insert1.text = "alpha beta gamma";
   insert1.table_name = "test_table";
 
-  ASSERT_TRUE(
-      BinlogEventProcessor::ProcessEvent(insert1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   // INSERT doc2
   BinlogEvent insert2;
@@ -559,8 +557,7 @@ TEST_F(BinlogEventProcessorTest, UpdateWithRemovedDocumentDoesNotCorruptIndex) {
   insert2.text = "delta epsilon zeta";
   insert2.table_name = "test_table";
 
-  ASSERT_TRUE(
-      BinlogEventProcessor::ProcessEvent(insert2, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert2, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   auto doc2_id = *doc_store_->GetDocId("pk2");
 
@@ -669,8 +666,7 @@ TEST_F(BinlogEventProcessorTest, UpdateSkipsIndexWhenDocumentRemoved) {
   insert1.text = "alpha beta gamma";
   insert1.table_name = "test_table";
 
-  ASSERT_TRUE(
-      BinlogEventProcessor::ProcessEvent(insert1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert1, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   BinlogEvent insert2;
   insert2.type = BinlogEventType::INSERT;
@@ -678,8 +674,7 @@ TEST_F(BinlogEventProcessorTest, UpdateSkipsIndexWhenDocumentRemoved) {
   insert2.text = "delta epsilon zeta";
   insert2.table_name = "test_table";
 
-  ASSERT_TRUE(
-      BinlogEventProcessor::ProcessEvent(insert2, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert2, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
 
   auto doc1_id = *doc_store_->GetDocId("pk1");
   auto doc2_id = *doc_store_->GetDocId("pk2");
@@ -822,8 +817,7 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
     event.text = text;
     event.table_name = "test_table";
 
-    ASSERT_TRUE(
-        BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
   }
 
   ASSERT_EQ(doc_store_->Size(), 3);
@@ -843,8 +837,8 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
 
   // All n-grams should be removed from index
   EXPECT_EQ(index_->SearchAnd({"al"}).size(), 0);  // "alpha"
-  EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);   // "beta"
-  EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);   // "gamma"
+  EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);  // "beta"
+  EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);  // "gamma"
 }
 
 /**
@@ -860,8 +854,7 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
     event.text = text;
     event.table_name = "test_table";
 
-    ASSERT_TRUE(
-        BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
   }
 
   ASSERT_EQ(doc_store_->Size(), 3);
@@ -881,8 +874,8 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
 
   // All n-grams should be removed from index
   EXPECT_EQ(index_->SearchAnd({"al"}).size(), 0);  // "alpha"
-  EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);   // "beta"
-  EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);   // "gamma"
+  EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);  // "beta"
+  EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);  // "gamma"
 }
 
 /**

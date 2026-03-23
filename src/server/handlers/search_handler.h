@@ -49,8 +49,8 @@ class SearchHandler : public CommandHandler {
    * @return Verified DocIDs where all terms appear as substrings
    */
   static std::vector<storage::DocId> PostFilterByText(const std::vector<storage::DocId>& candidates,
-                                                       const std::vector<std::string>& normalized_terms,
-                                                       storage::DocumentStore* doc_store) {
+                                                      const std::vector<std::string>& normalized_terms,
+                                                      storage::DocumentStore* doc_store) {
     return search_pipeline::PostFilterByText(candidates, normalized_terms, doc_store);
   }
 

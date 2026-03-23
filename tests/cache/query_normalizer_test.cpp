@@ -673,8 +673,7 @@ TEST(QueryNormalizerTest, SortByPKProducesSameKeyAsDefault) {
   std::string normalized1 = QueryNormalizer::Normalize(query1, "article_id");
   std::string normalized2 = QueryNormalizer::Normalize(query2, "article_id");
 
-  EXPECT_EQ(normalized1, normalized2)
-      << "Default sort and explicit PK sort should produce the same cache key";
+  EXPECT_EQ(normalized1, normalized2) << "Default sort and explicit PK sort should produce the same cache key";
 }
 
 /**
@@ -698,8 +697,7 @@ TEST(QueryNormalizerTest, SortByNonPKProducesDifferentKey) {
   std::string normalized1 = QueryNormalizer::Normalize(query1, "article_id");
   std::string normalized2 = QueryNormalizer::Normalize(query2, "article_id");
 
-  EXPECT_NE(normalized1, normalized2)
-      << "Default sort and non-PK sort should produce different cache keys";
+  EXPECT_NE(normalized1, normalized2) << "Default sort and non-PK sort should produce different cache keys";
 }
 
 /**
@@ -715,8 +713,7 @@ TEST(QueryNormalizerTest, PKPlaceholderInOutput) {
 
   std::string normalized = QueryNormalizer::Normalize(query, "article_id");
 
-  EXPECT_NE(normalized.find("__pk__"), std::string::npos)
-      << "Normalized output should contain __pk__ placeholder";
+  EXPECT_NE(normalized.find("__pk__"), std::string::npos) << "Normalized output should contain __pk__ placeholder";
   EXPECT_EQ(normalized.find("article_id"), std::string::npos)
       << "Normalized output should not contain the actual PK column name";
 }
@@ -762,8 +759,7 @@ TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
   EXPECT_EQ(normalized2, normalized3) << "id vs Id should produce same cache key";
 
   // Should use __pk__ placeholder
-  EXPECT_NE(normalized1.find("__pk__"), std::string::npos)
-      << "Should normalize PK column name to __pk__ placeholder";
+  EXPECT_NE(normalized1.find("__pk__"), std::string::npos) << "Should normalize PK column name to __pk__ placeholder";
 }
 
 // =============================================================================
@@ -789,8 +785,7 @@ TEST(QueryNormalizerTest, SearchAndCountProduceSameNormalizedString) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2)
-      << "SEARCH and COUNT should produce the same normalized cache key";
+  EXPECT_EQ(normalized1, normalized2) << "SEARCH and COUNT should produce the same normalized cache key";
 }
 
 /**

@@ -389,7 +389,7 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
 }
 
 std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
-                                                                             const std::string& column) const {
+                                                                            const std::string& column) const {
   std::shared_lock lock(mutex_);
 
   std::vector<std::optional<FilterValue>> results;
@@ -538,8 +538,8 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
   try {
     std::ofstream ofs(temp_filepath, std::ios::binary);
     if (!ofs) {
-      return MakeUnexpected(
-          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Failed to open temp file for writing", temp_filepath));
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                      "Failed to open temp file for writing", temp_filepath));
     }
 
     // File format:

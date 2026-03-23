@@ -1218,7 +1218,6 @@ TEST_F(ResultSorterTest, SchwartzianTransformThresholdBoundary) {
     auto pk = doc_store_.GetPrimaryKey(sorted[i]);
     ASSERT_TRUE(pk.has_value());
     EXPECT_EQ(pk.value(), std::to_string(150 - static_cast<int>(i)))
-        << "Position " << i << " should have primary key "
-        << (150 - static_cast<int>(i));
+        << "Position " << i << " should have primary key " << (150 - static_cast<int>(i));
   }
 }

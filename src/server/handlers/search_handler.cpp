@@ -144,8 +144,9 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Sort terms by estimated size (smallest first for faster intersection)
-  std::sort(term_infos.begin(), term_infos.end(),
-            [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+  std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) {
+    return lhs.estimated_size < rhs.estimated_size;
+  });
 
   // If any term has zero results, return empty immediately
   if (!term_infos.empty() && term_infos[0].estimated_size == 0) {
@@ -458,8 +459,9 @@ std::string SearchHandler::HandleCount(const query::Query& query, ConnectionCont
   }
 
   // Sort terms by estimated size (smallest first for faster intersection)
-  std::sort(term_infos.begin(), term_infos.end(),
-            [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+  std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) {
+    return lhs.estimated_size < rhs.estimated_size;
+  });
 
   // If any term has zero results, return 0 immediately
   if (!term_infos.empty() && term_infos[0].estimated_size == 0) {

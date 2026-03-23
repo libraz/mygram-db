@@ -94,7 +94,7 @@ class MysqlReconnectionHandler {
 #ifdef USE_MYSQL
   mysql::Connection* mysql_connection_;
   mysql::BinlogReader* binlog_reader_;
-  std::atomic<bool>* reconnecting_flag_;  // Flag to set during reconnection (non-owning)
+  std::atomic<bool>* reconnecting_flag_;      // Flag to set during reconnection (non-owning)
   std::vector<std::string> required_tables_;  // Tables to validate after reconnection
 #else
   void* mysql_connection_;

@@ -30,8 +30,7 @@ bool SkipWhitespace(const std::string& str, size_t& pos);
 /// @param pos Starting position (updated to position after keyword if matched)
 /// @param keyword Keyword to match (should be uppercase)
 /// @return true if keyword matches and is followed by whitespace or backtick
-bool MatchKeyword(const std::string& str, size_t& pos,
-                  const std::string& keyword);
+bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keyword);
 
 /// @brief Match a table name (with optional backtick quoting) at the given
 /// position.
@@ -40,7 +39,6 @@ bool MatchKeyword(const std::string& str, size_t& pos,
 /// matched)
 /// @param table_name Table name to match (should be uppercase)
 /// @return true if table_name matches at pos
-bool MatchTableName(const std::string& str, size_t& pos,
-                    const std::string& table_name);
+bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name);
 
 }  // namespace mygramdb::utils

@@ -46,8 +46,7 @@ class TcpClient {
     server_addr.sin_port = htons(port);
     inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr);
 
-    if (connect(sock_, (struct sockaddr*)&server_addr, sizeof(server_addr)) <
-        0) {
+    if (connect(sock_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
       close(sock_);
       throw std::runtime_error("Failed to connect");
     }
@@ -88,13 +87,12 @@ class TcpClient {
  * @return true if dump completed successfully, false on timeout or failure
  */
 bool WaitForDumpComplete(TcpClient& client,
-                         int timeout_ms = 10000,  // NOLINT(readability-magic-numbers)
+                         int timeout_ms = 10000,       // NOLINT(readability-magic-numbers)
                          int poll_interval_ms = 50) {  // NOLINT(readability-magic-numbers)
   auto start = std::chrono::steady_clock::now();
   while (true) {
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - start)
-                       .count();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     if (elapsed > timeout_ms) {
       return false;
     }
@@ -144,13 +142,10 @@ class VerifyTextAllTest : public ::testing::Test {
     server_config_.allow_cidrs = {"127.0.0.1/32"};
 
     // Create dump directory
-    test_dump_dir_ = std::filesystem::temp_directory_path() /
-                     ("verify_text_test_" + std::to_string(getpid()));
+    test_dump_dir_ = std::filesystem::temp_directory_path() / ("verify_text_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(test_dump_dir_);
 
-    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_,
-                                          test_dump_dir_.string(),
-                                          full_config_.get());
+    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, test_dump_dir_.string(), full_config_.get());
     ASSERT_TRUE(server_->Start());
     port_ = server_->GetPort();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -202,8 +197,7 @@ TEST_F(VerifyTextAllTest, FiltersNgramFalsePositive) {
   std::string response = client.SendCommand("SEARCH articles abc");
 
   // Only pk_true should be returned (false positive filtered)
-  EXPECT_TRUE(response.find("OK RESULTS 1") == 0)
-      << "Expected 1 result (false positive filtered), got: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Expected 1 result (false positive filtered), got: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_EQ(response.find("pk_false"), std::string::npos);
 }
@@ -219,8 +213,7 @@ TEST_F(VerifyTextAllTest, PreservesTrueMatches) {
   TcpClient client("127.0.0.1", port_);
   std::string response = client.SendCommand("SEARCH articles hello");
 
-  EXPECT_TRUE(response.find("OK RESULTS 2") == 0)
-      << "Expected 2 results, got: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "Expected 2 results, got: " << response;
   EXPECT_NE(response.find("pk1"), std::string::npos);
   EXPECT_NE(response.find("pk2"), std::string::npos);
 }
@@ -248,9 +241,7 @@ TEST_F(VerifyTextAllTest, DumpLoadPreservesVerifyTextFiltering) {
 
   // DUMP SAVE (async: returns DUMP_STARTED, must poll DUMP STATUS)
   response = client.SendCommand("DUMP SAVE test_verify.dmp");
-  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 ||
-              response.find("OK SAVED") == 0)
-      << "DUMP SAVE: " << response;
+  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 || response.find("OK SAVED") == 0) << "DUMP SAVE: " << response;
 
   // Wait for async dump to complete
   ASSERT_TRUE(WaitForDumpComplete(client)) << "DUMP SAVE did not complete";
@@ -262,8 +253,7 @@ TEST_F(VerifyTextAllTest, DumpLoadPreservesVerifyTextFiltering) {
   // After DUMP LOAD: verify_text should still filter false positives
   // because doc_texts_ is restored from the snapshot
   response = client.SendCommand("SEARCH articles abc");
-  EXPECT_TRUE(response.find("OK RESULTS 1") == 0)
-      << "Post-dump: verify_text should still filter, got: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Post-dump: verify_text should still filter, got: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_EQ(response.find("pk_false"), std::string::npos);
 }
@@ -288,9 +278,7 @@ TEST_F(VerifyTextAllTest, DumpLoadInvalidatesCache) {
 
   // DUMP SAVE (async) then wait for completion, then DUMP LOAD
   response = client.SendCommand("DUMP SAVE cache_test.dmp");
-  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 ||
-              response.find("OK SAVED") == 0)
-      << response;
+  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 || response.find("OK SAVED") == 0) << response;
   ASSERT_TRUE(WaitForDumpComplete(client)) << "DUMP SAVE did not complete";
 
   response = client.SendCommand("DUMP LOAD cache_test.dmp");
@@ -334,9 +322,7 @@ class VerifyTextAsciiTest : public ::testing::Test {
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
 
-    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_,
-                                          "./test_snapshots",
-                                          full_config_.get());
+    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, "./test_snapshots", full_config_.get());
     ASSERT_TRUE(server_->Start());
     port_ = server_->GetPort();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -373,8 +359,7 @@ TEST_F(VerifyTextAsciiTest, FiltersAsciiTermFalsePositive) {
   TcpClient client("127.0.0.1", port_);
   std::string response = client.SendCommand("SEARCH articles abc");
 
-  EXPECT_TRUE(response.find("OK RESULTS 1") == 0)
-      << "Expected false positive filtered for ASCII term: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Expected false positive filtered for ASCII term: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_EQ(response.find("pk_false"), std::string::npos);
 }
@@ -395,8 +380,7 @@ TEST_F(VerifyTextAsciiTest, SkipsNonAsciiTerms) {
   std::string response = client.SendCommand("SEARCH articles 学習");
 
   // Non-ASCII terms bypass post-filtering, so all N-gram matches returned
-  EXPECT_TRUE(response.find("OK RESULTS 2") == 0)
-      << "Non-ASCII should bypass verify_text: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "Non-ASCII should bypass verify_text: " << response;
 }
 
 // ============================================================================
@@ -426,9 +410,7 @@ class VerifyTextOffTest : public ::testing::Test {
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
 
-    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_,
-                                          "./test_snapshots",
-                                          full_config_.get());
+    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, "./test_snapshots", full_config_.get());
     ASSERT_TRUE(server_->Start());
     port_ = server_->GetPort();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -467,8 +449,7 @@ TEST_F(VerifyTextOffTest, DoesNotFilterFalsePositives) {
   std::string response = client.SendCommand("SEARCH articles abc");
 
   // Both documents should be returned (no post-filter)
-  EXPECT_TRUE(response.find("OK RESULTS 2") == 0)
-      << "verify_text=off should not filter: " << response;
+  EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "verify_text=off should not filter: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_NE(response.find("pk_false"), std::string::npos);
 }
@@ -500,13 +481,10 @@ class VerifyTextDumpConsistencyTest : public ::testing::Test {
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
 
-    test_dump_dir_ = std::filesystem::temp_directory_path() /
-                     ("verify_dump_test_" + std::to_string(getpid()));
+    test_dump_dir_ = std::filesystem::temp_directory_path() / ("verify_dump_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(test_dump_dir_);
 
-    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_,
-                                          test_dump_dir_.string(),
-                                          full_config_.get());
+    server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, test_dump_dir_.string(), full_config_.get());
     ASSERT_TRUE(server_->Start());
     port_ = server_->GetPort();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -554,9 +532,7 @@ TEST_F(VerifyTextDumpConsistencyTest, SearchResultsConsistentAfterDumpLoad) {
 
   // DUMP SAVE (async) and wait for completion
   std::string response = client.SendCommand("DUMP SAVE consistency.dmp");
-  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 ||
-              response.find("OK SAVED") == 0)
-      << response;
+  EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 || response.find("OK SAVED") == 0) << response;
   ASSERT_TRUE(WaitForDumpComplete(client)) << "DUMP SAVE did not complete";
 
   // DUMP LOAD
@@ -565,8 +541,7 @@ TEST_F(VerifyTextDumpConsistencyTest, SearchResultsConsistentAfterDumpLoad) {
 
   // Post-dump results should match
   std::string after = client.SendCommand("SEARCH articles hello");
-  EXPECT_TRUE(after.find("OK RESULTS 2") == 0)
-      << "Post-dump results should match pre-dump: " << after;
+  EXPECT_TRUE(after.find("OK RESULTS 2") == 0) << "Post-dump results should match pre-dump: " << after;
   EXPECT_NE(after.find("pk1"), std::string::npos);
   EXPECT_NE(after.find("pk2"), std::string::npos);
 }

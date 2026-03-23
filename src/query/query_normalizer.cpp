@@ -71,7 +71,7 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   constexpr unsigned char kNoBreakSpaceByte1 = 0xC2;  // U+00A0
   constexpr unsigned char kNoBreakSpaceByte2 = 0xA0;
-  constexpr unsigned char kUnicodeSpace3Byte1 = 0xE2;  // U+2000-U+200B, U+202F, U+205F
+  constexpr unsigned char kUnicodeSpace3Byte1 = 0xE2;   // U+2000-U+200B, U+202F, U+205F
   constexpr unsigned char kFullWidthSpaceByte1 = 0xE3;  // U+3000
   constexpr unsigned char kFullWidthSpaceByte2 = 0x80;
   constexpr unsigned char kFullWidthSpaceByte3 = 0x80;
@@ -122,8 +122,7 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // Check for UTF-8 Ogham Space Mark U+1680 (0xE1 0x9A 0x80)
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    else if (byte == 0xE1 && i + 2 < text.size() &&
-             static_cast<unsigned char>(text[i + 1]) == 0x9A &&
+    else if (byte == 0xE1 && i + 2 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x9A &&
              static_cast<unsigned char>(text[i + 2]) == 0x80) {
       is_space = true;
       i += 2;

@@ -46,8 +46,8 @@ struct CacheStatisticsSnapshot {
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
   uint64_t evictions = 0;
-  uint64_t ttl_expirations = 0;          ///< TTL-expired entries removed
-  uint64_t decompression_failures = 0;   ///< Entries removed due to decompression failure
+  uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
+  uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
 
   // Timing statistics
   double total_cache_hit_time_ms = 0.0;
@@ -117,7 +117,7 @@ struct CacheStatistics {
 enum class RemovalReason {
   kLRUEviction,
   kTTLExpired,
-  kTTLExpiredAlreadyCounted,          ///< TTL expired, stats already counted by Lookup
+  kTTLExpiredAlreadyCounted,  ///< TTL expired, stats already counted by Lookup
   kDecompressionFailure,
   kDecompressionFailureAlreadyCounted,  ///< Decompression failed, stats already counted by Lookup
   kTableClear
@@ -306,8 +306,8 @@ class QueryCache {
   // Configuration
   size_t max_memory_bytes_;
   double min_query_cost_ms_;
-  int ttl_seconds_;              ///< Time-to-live in seconds (0 = no expiration)
-  bool compression_enabled_;     ///< Enable LZ4 compression for cached results
+  int ttl_seconds_;           ///< Time-to-live in seconds (0 = no expiration)
+  bool compression_enabled_;  ///< Enable LZ4 compression for cached results
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;
@@ -323,10 +323,10 @@ class QueryCache {
 
   // Keys pending cleanup (collected by Lookup, processed by RefreshLRU)
   // Using unordered_set for deduplication (same key may expire on multiple Lookups)
-  static constexpr size_t kMaxPendingKeys = 10000;      ///< Max pending keys per category
+  static constexpr size_t kMaxPendingKeys = 10000;  ///< Max pending keys per category
   mutable std::mutex expired_keys_mutex_;
-  std::unordered_set<CacheKey> pending_expired_keys_;          ///< TTL-expired keys
-  std::unordered_set<CacheKey> pending_decompression_keys_;    ///< Decompression-failed keys
+  std::unordered_set<CacheKey> pending_expired_keys_;        ///< TTL-expired keys
+  std::unordered_set<CacheKey> pending_decompression_keys_;  ///< Decompression-failed keys
 
   // Background LRU refresh thread
   std::atomic<bool> should_stop_{false};

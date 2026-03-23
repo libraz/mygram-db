@@ -7,12 +7,13 @@
  * and handles errors gracefully. No MySQL connection required.
  */
 
+#include "config/runtime_variable_manager.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
 
 #include "config/config.h"
-#include "config/runtime_variable_manager.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 

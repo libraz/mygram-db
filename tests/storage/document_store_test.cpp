@@ -1254,10 +1254,8 @@ TEST(DocumentStoreTest, GetNormalizedText_ReturnsOwnedString) {
 TEST(DocumentStoreTest, StreamRoundTrip_PreservesDocTexts) {
   DocumentStore store;
 
-  auto doc_id1 =
-      *store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}});
-  auto doc_id2 =
-      *store.AddDocument("pk2", {{"status", static_cast<int32_t>(2)}});
+  auto doc_id1 = *store.AddDocument("pk1", {{"status", static_cast<int32_t>(1)}});
+  auto doc_id2 = *store.AddDocument("pk2", {{"status", static_cast<int32_t>(2)}});
   auto doc_id3 = *store.AddDocument("pk3");
 
   store.SetNormalizedText(doc_id1, "hello world");
@@ -1318,13 +1316,11 @@ TEST(DocumentStoreTest, FileRoundTrip_PreservesDocTexts) {
 
   // doc_texts_ are preserved (SaveToFile uses v2 format)
   auto text1 = store2.GetNormalizedText(doc_id1);
-  ASSERT_TRUE(text1.has_value())
-      << "v2 file format should serialize doc_texts_";
+  ASSERT_TRUE(text1.has_value()) << "v2 file format should serialize doc_texts_";
   EXPECT_EQ(*text1, "normalized text for doc1");
 
   auto text2 = store2.GetNormalizedText(doc_id2);
-  ASSERT_TRUE(text2.has_value())
-      << "v2 file format should serialize doc_texts_";
+  ASSERT_TRUE(text2.has_value()) << "v2 file format should serialize doc_texts_";
   EXPECT_EQ(*text2, "日本語テキスト");
 
   std::remove(filepath.c_str());
@@ -1363,15 +1359,13 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
   std::stringstream v1_stream;
   v1_stream.write("MGDS", 4);
   uint32_t v1_version = 1;
-  v1_stream.write(reinterpret_cast<const char*>(&v1_version),
-                  sizeof(v1_version));
+  v1_stream.write(reinterpret_cast<const char*>(&v1_version), sizeof(v1_version));
   uint32_t next_id = 2;  // next_doc_id after adding 1 doc
   v1_stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
   uint32_t gtid_len = 0;
   v1_stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
   uint64_t doc_count = 1;
-  v1_stream.write(reinterpret_cast<const char*>(&doc_count),
-                  sizeof(doc_count));
+  v1_stream.write(reinterpret_cast<const char*>(&doc_count), sizeof(doc_count));
   // Document: doc_id=1, pk="pk1", filter_count=0
   uint32_t did = 1;
   v1_stream.write(reinterpret_cast<const char*>(&did), sizeof(did));
@@ -1379,8 +1373,7 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
   v1_stream.write(reinterpret_cast<const char*>(&pk_len), sizeof(pk_len));
   v1_stream.write("pk1", 3);
   uint32_t filter_count = 0;
-  v1_stream.write(reinterpret_cast<const char*>(&filter_count),
-                  sizeof(filter_count));
+  v1_stream.write(reinterpret_cast<const char*>(&filter_count), sizeof(filter_count));
 
   // Load v1 stream
   DocumentStore store_v1;

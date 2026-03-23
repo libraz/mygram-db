@@ -20,15 +20,15 @@
 
 namespace mygramdb::server::search_pipeline {
 
-std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms,
-                                              index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                              bool cross_boundary_ngrams) {
+std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
+                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
   std::vector<SearchTermInfo> term_infos;
   term_infos.reserve(search_terms.size());
 
   for (const auto& search_term : search_terms) {
-    std::string normalized = utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(),
-                                                  current_index->GetNormalizeWidth(), current_index->GetNormalizeLower());
+    std::string normalized =
+        utils::NormalizeText(search_term, current_index->GetNormalizeNfkc(), current_index->GetNormalizeWidth(),
+                             current_index->GetNormalizeLower());
     std::vector<std::string> ngrams;
 
     // Always use hybrid n-grams if kanji_ngram_size is configured
@@ -64,8 +64,7 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
 SearchPipelineResult Execute(const query::Query& query, const std::vector<SearchTermInfo>& term_infos,
                              const std::vector<std::string>& all_search_terms, index::Index* current_index,
                              storage::DocumentStore* current_doc_store, const config::Config* full_config,
-                             int ngram_size, int kanji_ngram_size, bool cross_boundary,
-                             size_t filter_threshold) {
+                             int ngram_size, int kanji_ngram_size, bool cross_boundary, size_t filter_threshold) {
   SearchPipelineResult result;
 
   // Check for empty term (early exit)
@@ -94,8 +93,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Apply NOT filter
   if (!query.not_terms.empty()) {
-    result.results = ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size,
-                                    cross_boundary);
+    result.results =
+        ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary);
   }
 
   // Apply filter conditions
@@ -104,16 +103,15 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
   }
 
   // Apply verify_text post-filter
-  result.results = ApplyVerifyTextFilter(result.results, all_search_terms, current_index, current_doc_store,
-                                         full_config);
+  result.results =
+      ApplyVerifyTextFilter(result.results, all_search_terms, current_index, current_doc_store, full_config);
 
   return result;
 }
 
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
-                                           const std::vector<std::string>& not_terms,
-                                           index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                           bool cross_boundary_ngrams) {
+                                           const std::vector<std::string>& not_terms, index::Index* current_index,
+                                           int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
   // Generate NOT term n-grams
   std::vector<std::string> not_ngrams;
   for (const auto& not_term : not_terms) {

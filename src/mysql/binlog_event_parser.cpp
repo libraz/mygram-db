@@ -971,8 +971,7 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   // event_length (including 4-byte CRC32). If the server didn't strip the checksum,
   // length == header_event_length, and we need to subtract 4 bytes.
   uint32_t header_event_length = buffer[9] | (static_cast<uint32_t>(buffer[10]) << 8) |
-                                 (static_cast<uint32_t>(buffer[11]) << 16) |
-                                 (static_cast<uint32_t>(buffer[12]) << 24);
+                                 (static_cast<uint32_t>(buffer[11]) << 16) | (static_cast<uint32_t>(buffer[12]) << 24);
   size_t effective_length = length;
   if (length == header_event_length && length > 4) {
     // Checksum was NOT stripped by server — exclude 4-byte CRC32
@@ -1050,7 +1049,8 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   size_t saved_start = pos;
   if (mygramdb::utils::MatchKeyword(query_upper, pos, "TRUNCATE")) {
     if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
-      if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
+      if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
+          mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }
@@ -1064,7 +1064,8 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
         // Check for optional "IF EXISTS"
         size_t saved_pos = pos;
         if (mygramdb::utils::MatchKeyword(query_upper, pos, "IF")) {
-          if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
+          if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
+              mygramdb::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
             mygramdb::utils::SkipWhitespace(query_upper, pos);
           } else {
             // "IF" without "EXISTS" - restore position
@@ -1084,7 +1085,8 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   pos = saved_start;
   if (mygramdb::utils::MatchKeyword(query_upper, pos, "ALTER")) {
     if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchKeyword(query_upper, pos, "TABLE")) {
-      if (mygramdb::utils::SkipWhitespace(query_upper, pos) && mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
+      if (mygramdb::utils::SkipWhitespace(query_upper, pos) &&
+          mygramdb::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
       }
     }

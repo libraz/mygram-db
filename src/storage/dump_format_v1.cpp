@@ -74,8 +74,7 @@ bool WriteString(std::ostream& output_stream, const std::string& str) {
  * @param max_length Maximum allowed string length for this field type
  * @return true if read succeeded and length is within limit, false otherwise
  */
-bool ReadString(std::istream& input_stream, std::string& str,
-                uint32_t max_length = kMaxGeneralStringLength) {
+bool ReadString(std::istream& input_stream, std::string& str, uint32_t max_length = kMaxGeneralStringLength) {
   uint32_t len = 0;
   if (!ReadBinary(input_stream, len)) {
     return false;

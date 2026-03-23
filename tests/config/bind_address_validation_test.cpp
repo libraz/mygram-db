@@ -3,13 +3,13 @@
  * @brief Unit tests for bind address validation in configuration
  */
 
-#include "config/config.h"
-
 #include <gtest/gtest.h>
 
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+
+#include "config/config.h"
 
 using namespace mygramdb::config;
 

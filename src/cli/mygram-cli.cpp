@@ -306,8 +306,8 @@ struct Config {
   std::string host = "127.0.0.1";
   uint16_t port = 11016;
   bool interactive = true;
-  int retry_count = 0;     // Number of retries (0 = no retry)
-  int retry_interval = 3;  // Seconds between retries
+  int retry_count = 0;      // Number of retries (0 = no retry)
+  int retry_interval = 3;   // Seconds between retries
   std::string socket_path;  // Unix socket path (empty = use TCP)
 };
 
@@ -345,16 +345,16 @@ class MygramClient {
           continue;
         }
 
-        struct sockaddr_un server_addr{};
+        struct sockaddr_un server_addr {};
         server_addr.sun_family = AF_UNIX;
-        std::strncpy(server_addr.sun_path, config_.socket_path.c_str(),
-                     sizeof(server_addr.sun_path) - 1);
+        std::strncpy(server_addr.sun_path, config_.socket_path.c_str(), sizeof(server_addr.sun_path) - 1);
 
-        if (connect(sock_, reinterpret_cast<struct sockaddr*>(&server_addr),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        if (connect(sock_,
+                    reinterpret_cast<struct sockaddr*>(
+                        &server_addr),  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
                     sizeof(server_addr)) < 0) {
           int saved_errno = errno;
-          std::cerr << "Connection to " << config_.socket_path << " failed: "
-                    << strerror(saved_errno) << '\n';
+          std::cerr << "Connection to " << config_.socket_path << " failed: " << strerror(saved_errno) << '\n';
           close(sock_);
           sock_ = -1;
           if (saved_errno != ECONNREFUSED) {
@@ -571,9 +571,8 @@ class MygramClient {
 
 #ifdef USE_READLINE
       // Use readline for better line editing and history
-      std::string prompt = config_.socket_path.empty()
-          ? config_.host + ":" + std::to_string(config_.port) + "> "
-          : config_.socket_path + "> ";
+      std::string prompt = config_.socket_path.empty() ? config_.host + ":" + std::to_string(config_.port) + "> "
+                                                       : config_.socket_path + "> ";
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       char* raw_input = readline(prompt.c_str());
 

@@ -16,11 +16,11 @@
 #include <sstream>
 #include <thread>
 
+#include "cache/cache_manager.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "storage/document_store.h"
-#include "cache/cache_manager.h"
 #include "storage/dump_format_v1.h"
 
 #ifdef USE_MYSQL
@@ -958,8 +958,7 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
   cache_config.ttl_seconds = 3600;
   cache_config.max_memory_bytes = 1024 * 1024;
 
-  auto cache_manager =
-      std::make_unique<cache::CacheManager>(cache_config, table_contexts_);
+  auto cache_manager = std::make_unique<cache::CacheManager>(cache_config, table_contexts_);
 
   // Set cache_manager in the handler context
   handler_ctx_->cache_manager = cache_manager.get();
@@ -978,36 +977,31 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
 
   // Verify cache has entries before DUMP LOAD
   auto stats_before = cache_manager->GetStatistics();
-  ASSERT_GT(stats_before.current_entries, 0u)
-      << "Cache should have entries before DUMP LOAD";
+  ASSERT_GT(stats_before.current_entries, 0u) << "Cache should have entries before DUMP LOAD";
 
   // First save
   query::Query save_query;
   save_query.type = query::QueryType::DUMP_SAVE;
   save_query.filepath = test_filepath_;
   std::string save_response = handler_->Handle(save_query, conn_ctx_);
-  ASSERT_TRUE(save_response.find("OK SAVED") == 0)
-      << "Save failed: " << save_response;
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
 
   // Re-insert into cache (save may or may not clear it)
   cache_manager->Insert(search_query, dummy_results, ngrams,
                         /*query_cost_ms=*/100.0);
   auto stats_after_save = cache_manager->GetStatistics();
-  ASSERT_GT(stats_after_save.current_entries, 0u)
-      << "Cache should have entries before DUMP LOAD";
+  ASSERT_GT(stats_after_save.current_entries, 0u) << "Cache should have entries before DUMP LOAD";
 
   // Load
   query::Query load_query;
   load_query.type = query::QueryType::DUMP_LOAD;
   load_query.filepath = test_filepath_;
   std::string load_response = handler_->Handle(load_query, conn_ctx_);
-  EXPECT_TRUE(load_response.find("OK LOADED") == 0)
-      << "Load failed: " << load_response;
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0) << "Load failed: " << load_response;
 
   // Verify the cache was cleared after DUMP LOAD
   auto stats_after_load = cache_manager->GetStatistics();
-  EXPECT_EQ(0u, stats_after_load.current_entries)
-      << "Cache should be cleared after DUMP LOAD";
+  EXPECT_EQ(0u, stats_after_load.current_entries) << "Cache should be cleared after DUMP LOAD";
 }
 
 // ============================================================================
@@ -1731,10 +1725,8 @@ TEST_F(DumpHandlerTest, DumpSaveStopsReplicationBeforeCapturingGtid) {
 
   // Find GetCurrentGTID() call AFTER Stop - this is the capture call
   auto gtid_after_stop = std::find(stop_it, log.end(), "GetCurrentGTID");
-  ASSERT_NE(gtid_after_stop, log.end())
-      << "GetCurrentGTID() should have been called after Stop()";
-  EXPECT_LT(stop_it, gtid_after_stop)
-      << "Stop() must be called before the GTID capture call";
+  ASSERT_NE(gtid_after_stop, log.end()) << "GetCurrentGTID() should have been called after Stop()";
+  EXPECT_LT(stop_it, gtid_after_stop) << "Stop() must be called before the GTID capture call";
 
   // Cleanup
   handler_ctx_->binlog_reader = nullptr;

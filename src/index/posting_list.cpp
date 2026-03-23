@@ -311,7 +311,7 @@ size_t PostingList::MemoryUsage() const {
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
   std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
   std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
-  std::lock(lock1, lock2);  // Deadlock-safe acquisition
+  std::lock(lock1, lock2);                                // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
@@ -351,7 +351,7 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
   std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
   std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
-  std::lock(lock1, lock2);  // Deadlock-safe acquisition
+  std::lock(lock1, lock2);                                // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
@@ -552,8 +552,7 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Write size
     if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
-      spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})",
-                    delta_compressed_.size());
+      spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})", delta_compressed_.size());
       return;
     }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
@@ -574,8 +573,7 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 
     if (roaring_size > std::numeric_limits<uint32_t>::max()) {
-      spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})",
-                    roaring_size);
+      spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})", roaring_size);
       return;
     }
     auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);

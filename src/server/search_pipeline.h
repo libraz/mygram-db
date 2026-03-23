@@ -53,9 +53,8 @@ namespace search_pipeline {
 /// @param kanji_ngram_size N-gram size for CJK characters
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
 /// @return Vector of term information with n-grams and size estimates
-std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms,
-                                              index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                              bool cross_boundary_ngrams);
+std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
+                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams);
 
 /// @brief Execute the core search pipeline: intersection, NOT filter, filter application, verify_text
 ///
@@ -94,9 +93,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
 /// @return Filtered results with NOT-matching documents removed
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
-                                           const std::vector<std::string>& not_terms,
-                                           index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                           bool cross_boundary_ngrams);
+                                           const std::vector<std::string>& not_terms, index::Index* current_index,
+                                           int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams);
 
 /// @brief Apply filter conditions using bitmap intersection (fast path) with fallback
 ///

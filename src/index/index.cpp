@@ -48,7 +48,8 @@ Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, boo
 
 bool Index::AddDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams using hybrid mode (no lock needed for this CPU-intensive operation)
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+  std::vector<std::string> ngrams =
+      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   utils::DeduplicateSorted(ngrams);
@@ -126,8 +127,10 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 
 void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_view new_text) {
   // Generate n-grams for both texts (no lock needed for CPU-intensive operation)
-  std::vector<std::string> old_ngrams = utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
-  std::vector<std::string> new_ngrams = utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+  std::vector<std::string> old_ngrams =
+      utils::GenerateHybridNgrams(old_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+  std::vector<std::string> new_ngrams =
+      utils::GenerateHybridNgrams(new_text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Sort and remove duplicates (more efficient than unordered_set)
   utils::DeduplicateSorted(old_ngrams);
@@ -175,7 +178,8 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
 
 void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Generate n-grams (no lock needed for CPU-intensive operation)
-  std::vector<std::string> ngrams = utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
+  std::vector<std::string> ngrams =
+      utils::GenerateHybridNgrams(text, ngram_size_, kanji_ngram_size_, cross_boundary_ngrams_);
 
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   utils::DeduplicateSorted(ngrams);
@@ -966,8 +970,7 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
       buffer.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      buffer.write(reinterpret_cast<const char*>(posting_data.data()),
-                   static_cast<std::streamsize>(posting_size));
+      buffer.write(reinterpret_cast<const char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
     }
 
     // Get the serialized data and compute CRC32

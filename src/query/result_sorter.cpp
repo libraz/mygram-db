@@ -111,8 +111,7 @@ inline std::string ToZeroPaddedString(uint32_t num, int width) {
  * @return Zero-padded string
  */
 inline std::string ToZeroPaddedSignedString(int64_t num, int width) {
-  auto adjusted =
-      static_cast<uint64_t>(static_cast<uint64_t>(num) ^ (1ULL << 63));
+  auto adjusted = static_cast<uint64_t>(static_cast<uint64_t>(num) ^ (1ULL << 63));
   return ToZeroPaddedString(adjusted, width);
 }
 

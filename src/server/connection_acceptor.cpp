@@ -82,10 +82,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     unix_socket_path_ = config_.unix_socket_path;
 
     // Validate path length
-    struct sockaddr_un addr_un{};
+    struct sockaddr_un addr_un {};
     if (config_.unix_socket_path.size() >= sizeof(addr_un.sun_path)) {
-      auto error = MakeError(ErrorCode::kNetworkUnixSocketPathTooLong,
-                             "Unix socket path too long: " + config_.unix_socket_path);
+      auto error =
+          MakeError(ErrorCode::kNetworkUnixSocketPathTooLong, "Unix socket path too long: " + config_.unix_socket_path);
       mygram::utils::StructuredLog()
           .Event("server_error")
           .Field("operation", "unix_socket_path_validate")
@@ -99,10 +99,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     if (access(config_.unix_socket_path.c_str(), F_OK) == 0) {
       int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
       if (probe_fd >= 0) {
-        struct sockaddr_un probe_addr{};
+        struct sockaddr_un probe_addr {};
         probe_addr.sun_family = AF_UNIX;
-        std::strncpy(probe_addr.sun_path, config_.unix_socket_path.c_str(),
-                     sizeof(probe_addr.sun_path) - 1);
+        std::strncpy(probe_addr.sun_path, config_.unix_socket_path.c_str(), sizeof(probe_addr.sun_path) - 1);
         if (connect(probe_fd, ToSockaddrUn(&probe_addr), sizeof(probe_addr)) == 0) {
           close(probe_fd);
           auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
@@ -139,17 +138,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     }
 
     // Bind
-    struct sockaddr_un bind_addr{};
+    struct sockaddr_un bind_addr {};
     bind_addr.sun_family = AF_UNIX;
-    std::strncpy(bind_addr.sun_path, config_.unix_socket_path.c_str(),
-                 sizeof(bind_addr.sun_path) - 1);
+    std::strncpy(bind_addr.sun_path, config_.unix_socket_path.c_str(), sizeof(bind_addr.sun_path) - 1);
 
     if (bind(server_fd_, ToSockaddrUn(&bind_addr), sizeof(bind_addr)) < 0) {
       close(server_fd_);
       server_fd_ = -1;
-      auto error = MakeError(ErrorCode::kNetworkBindFailed,
-                             "Failed to bind unix socket " + config_.unix_socket_path +
-                                 ": " + std::string(strerror(errno)));
+      auto error = MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind unix socket " + config_.unix_socket_path +
+                                                                ": " + std::string(strerror(errno)));
       mygram::utils::StructuredLog()
           .Event("server_error")
           .Field("operation", "unix_socket_bind")
@@ -316,10 +313,7 @@ void ConnectionAcceptor::Stop() {
   // Remove unix socket file
   if (!unix_socket_path_.empty()) {
     unlink(unix_socket_path_.c_str());
-    mygram::utils::StructuredLog()
-        .Event("unix_socket_removed")
-        .Field("path", unix_socket_path_)
-        .Debug();
+    mygram::utils::StructuredLog().Event("unix_socket_removed").Field("path", unix_socket_path_).Debug();
     unix_socket_path_.clear();
   }
 
@@ -343,10 +337,7 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
 
 void ConnectionAcceptor::AcceptLoop() {
   if (IsUnixSocket()) {
-    mygram::utils::StructuredLog()
-        .Event("accept_loop_started")
-        .Field("unix_socket", unix_socket_path_)
-        .Debug();
+    mygram::utils::StructuredLog().Event("accept_loop_started").Field("unix_socket", unix_socket_path_).Debug();
   } else {
     mygram::utils::StructuredLog()
         .Event("accept_loop_started")
@@ -358,11 +349,11 @@ void ConnectionAcceptor::AcceptLoop() {
   while (!should_stop_) {
     int client_fd = -1;
     if (IsUnixSocket()) {
-      struct sockaddr_un client_addr_un{};
+      struct sockaddr_un client_addr_un {};
       socklen_t client_len_un = sizeof(client_addr_un);
       client_fd = accept(server_fd_, ToSockaddrUn(&client_addr_un), &client_len_un);
     } else {
-      struct sockaddr_in client_addr{};
+      struct sockaddr_in client_addr {};
       socklen_t client_len = sizeof(client_addr);
       client_fd = accept(server_fd_, ToSockaddr(&client_addr), &client_len);
     }
@@ -398,7 +389,7 @@ void ConnectionAcceptor::AcceptLoop() {
     if (!IsUnixSocket()) {
       // Convert client IP to string for ACL checks
       std::string client_ip;
-      struct sockaddr_in peer_addr{};
+      struct sockaddr_in peer_addr {};
       socklen_t peer_len = sizeof(peer_addr);
       if (getpeername(client_fd, ToSockaddr(&peer_addr), &peer_len) == 0) {
         // C-style array required by POSIX inet_ntop API

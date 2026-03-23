@@ -10,7 +10,9 @@
 
 namespace mygramdb::storage {
 
-FilterIndex::~FilterIndex() { Clear(); }
+FilterIndex::~FilterIndex() {
+  Clear();
+}
 
 void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
@@ -33,7 +35,7 @@ void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string
 }
 
 void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
-                                  const std::unordered_map<std::string, FilterValue>& new_filters) {
+                                 const std::unordered_map<std::string, FilterValue>& new_filters) {
   std::unique_lock lock(mutex_);
   // Remove from old bitmaps
   for (const auto& [column, value] : old_filters) {
@@ -94,8 +96,7 @@ void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::str
   }
 }
 
-const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column,
-                                                   const std::string& serialized_value) const {
+const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column, const std::string& serialized_value) const {
   std::shared_lock lock(mutex_);
   auto col_it = eq_bitmaps_.find(column);
   if (col_it == eq_bitmaps_.end()) {

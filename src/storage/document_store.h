@@ -244,7 +244,7 @@ class DocumentStore {
    * @return Vector of filter values (nullopt if doc_id or column not found)
    */
   [[nodiscard]] std::vector<std::optional<FilterValue>> GetFilterValuesBatch(const std::vector<DocId>& doc_ids,
-                                                                              const std::string& column) const;
+                                                                             const std::string& column) const;
 
   /**
    * @brief Set normalized text for a document (for n-gram verification)

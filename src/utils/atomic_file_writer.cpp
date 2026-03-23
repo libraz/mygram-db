@@ -22,8 +22,7 @@
 
 namespace mygram::utils {
 
-AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix)
-    : filepath_(std::move(filepath)) {
+AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : filepath_(std::move(filepath)) {
   if (unique_suffix) {
     static thread_local std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<uint32_t> dist(0, UINT32_MAX);
@@ -43,8 +42,7 @@ AtomicFileWriter::~AtomicFileWriter() {
 
 Expected<void, Error> AtomicFileWriter::Commit() {
   if (committed_) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageWriteError, "Already committed"));
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Already committed"));
   }
 
 #ifndef _WIN32
@@ -76,9 +74,7 @@ Expected<void, Error> AtomicFileWriter::Commit() {
         .Error();
     Rollback();
     return MakeUnexpected(
-        MakeError(ErrorCode::kStorageWriteError,
-                  "Failed to rename temp file: " + rename_error.message(),
-                  filepath_));
+        MakeError(ErrorCode::kStorageWriteError, "Failed to rename temp file: " + rename_error.message(), filepath_));
   }
 
   committed_ = true;
@@ -88,8 +84,7 @@ Expected<void, Error> AtomicFileWriter::Commit() {
   {
     auto parent_dir = std::filesystem::path(filepath_).parent_path();
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int dir_file_desc =
-        open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
+    int dir_file_desc = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
     if (dir_file_desc >= 0) {
       if (fsync(dir_file_desc) != 0) {
         StructuredLog()

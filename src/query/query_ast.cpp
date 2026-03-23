@@ -84,7 +84,8 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
   switch (type) {
     case NodeType::TERM: {
       // Normalize search term before searching (must match index normalization)
-      std::string normalized_term = utils::NormalizeText(term, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
+      std::string normalized_term =
+          utils::NormalizeText(term, index.GetNormalizeNfkc(), index.GetNormalizeWidth(), index.GetNormalizeLower());
 
       // Generate n-grams from the normalized term
       std::vector<std::string> ngrams;

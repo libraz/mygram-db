@@ -165,9 +165,12 @@ TEST_F(FilterIndexTest, BoolFilterValue) {
 
 TEST_F(FilterIndexTest, BitmapIntersection) {
   // Test that bitmaps can be intersected for multi-filter queries
-  index_.AddDocument(1, {{"category", FilterValue{std::string("tech")}}, {"status", FilterValue{static_cast<int64_t>(1)}}});
-  index_.AddDocument(2, {{"category", FilterValue{std::string("tech")}}, {"status", FilterValue{static_cast<int64_t>(2)}}});
-  index_.AddDocument(3, {{"category", FilterValue{std::string("news")}}, {"status", FilterValue{static_cast<int64_t>(1)}}});
+  index_.AddDocument(
+      1, {{"category", FilterValue{std::string("tech")}}, {"status", FilterValue{static_cast<int64_t>(1)}}});
+  index_.AddDocument(
+      2, {{"category", FilterValue{std::string("tech")}}, {"status", FilterValue{static_cast<int64_t>(2)}}});
+  index_.AddDocument(
+      3, {{"category", FilterValue{std::string("news")}}, {"status", FilterValue{static_cast<int64_t>(1)}}});
 
   auto key_tech = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
   auto key_status1 = FilterIndex::SerializeFilterValue(FilterValue{static_cast<int64_t>(1)});
