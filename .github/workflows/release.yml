@@ -10,17 +10,27 @@ permissions:
 
 jobs:
   build-rpm:
-    name: Build RPM Package (${{ matrix.arch }})
-    # Use native runners for each architecture to avoid QEMU emulation issues
-    # QEMU has known problems with tar operations that cause rpmbuild to fail
+    name: Build RPM (${{ matrix.el_version }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
+          # el9
           - arch: x86_64
+            el_version: "9"
             runner: ubuntu-latest
             docker_platform: linux/amd64
           - arch: aarch64
+            el_version: "9"
+            runner: ubuntu-24.04-arm
+            docker_platform: linux/arm64
+          # el10
+          - arch: x86_64
+            el_version: "10"
+            runner: ubuntu-latest
+            docker_platform: linux/amd64
+          - arch: aarch64
+            el_version: "10"
             runner: ubuntu-24.04-arm
             docker_platform: linux/arm64
       fail-fast: false
@@ -29,7 +39,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for git describe
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -39,117 +49,203 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION for architecture: ${{ matrix.arch }}"
 
       - name: Build RPM builder Docker image
         run: |
           docker buildx build \
             --platform ${{ matrix.docker_platform }} \
+            --build-arg EL_VERSION=${{ matrix.el_version }} \
             --load \
-            --cache-from type=gha,scope=rpmbuild-${{ matrix.arch }} \
-            --cache-to type=gha,mode=max,scope=rpmbuild-${{ matrix.arch }} \
+            --cache-from type=gha,scope=rpmbuild-el${{ matrix.el_version }}-${{ matrix.arch }} \
+            --cache-to type=gha,mode=max,scope=rpmbuild-el${{ matrix.el_version }}-${{ matrix.arch }} \
             -f support/rpm/Dockerfile.rpmbuild \
-            -t mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }} \
+            -t mygramdb-rpmbuild:${{ steps.version.outputs.version }}-el${{ matrix.el_version }}-${{ matrix.arch }} \
             .
 
       - name: Create source tarball
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           NAME="mygramdb"
-          TARBALL="${NAME}-${VERSION}.tar.gz"
-
           mkdir -p "$GITHUB_WORKSPACE/rpmsources"
-
-          # Create tarball using git archive for clean reproducible builds
           git archive --format=tar.gz --prefix="${NAME}-${VERSION}/" HEAD \
-            > "$GITHUB_WORKSPACE/rpmsources/${TARBALL}"
-
-          echo "Created source tarball:"
-          ls -lh "$GITHUB_WORKSPACE/rpmsources/${TARBALL}"
+            > "$GITHUB_WORKSPACE/rpmsources/${NAME}-${VERSION}.tar.gz"
 
       - name: Build RPM packages
         run: |
-          # Create output directory in workspace
           mkdir -p "$GITHUB_WORKSPACE/dist/rpm"
-
-          # Run RPM build with pre-created tarball mounted
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
             -e MYGRAMDB_VERSION="${{ steps.version.outputs.version }}" \
             -v "$GITHUB_WORKSPACE/rpmsources:/rpmsources:ro" \
             -v "$GITHUB_WORKSPACE/dist:/workspace/dist" \
-            mygramdb-rpmbuild:${{ steps.version.outputs.version }}-${{ matrix.arch }}
+            mygramdb-rpmbuild:${{ steps.version.outputs.version }}-el${{ matrix.el_version }}-${{ matrix.arch }}
 
-      - name: Verify RPM packages exist
+      - name: Collect main RPM only
+        id: collect
         run: |
-          if ! ls dist/rpm/*.rpm 1> /dev/null 2>&1; then
-            echo "Error: No RPM packages found in dist/rpm/"
-            ls -la dist/rpm/ || true
-            exit 1
-          fi
-          echo "Generated RPM packages:"
-          ls -lh dist/rpm/*.rpm
-
-      - name: Test RPM installation (AlmaLinux 9)
-        run: |
-          # Find the main RPM package (not debuginfo/debugsource/devel)
-          MAIN_RPM=$(find dist/rpm -name "mygramdb-${{ steps.version.outputs.version }}-*.el9.${{ matrix.arch }}.rpm" \
+          # Keep only the main package (exclude debuginfo/debugsource/devel/src)
+          MAIN_RPM=$(find dist/rpm -name "mygramdb-${{ steps.version.outputs.version }}-*.el${{ matrix.el_version }}.${{ matrix.arch }}.rpm" \
             ! -name "*debuginfo*" ! -name "*debugsource*" ! -name "*devel*" -print -quit)
 
           if [ -z "$MAIN_RPM" ]; then
-            echo "Error: Main RPM package not found for architecture ${{ matrix.arch }}"
-            echo "Looking for: mygramdb-${{ steps.version.outputs.version }}-*.el9.${{ matrix.arch }}.rpm"
-            echo "Available files:"
+            echo "Error: Main RPM not found"
             ls -la dist/rpm/
             exit 1
           fi
 
-          echo "Testing RPM: $MAIN_RPM"
+          mkdir -p dist/release
+          cp "$MAIN_RPM" dist/release/
+          echo "Releasing: $(basename $MAIN_RPM)"
+          ls -lh dist/release/
 
+      - name: Test RPM installation
+        run: |
+          MAIN_RPM=$(ls dist/release/mygramdb-*.rpm | head -1)
           docker run --rm \
             --platform ${{ matrix.docker_platform }} \
-            -v "$GITHUB_WORKSPACE/dist:/dist" \
-            almalinux:9 bash -c "
+            -v "$GITHUB_WORKSPACE/dist/release:/dist:ro" \
+            almalinux:${{ matrix.el_version }} bash -c "
             set -e
-            echo '=== Installing Oracle MySQL 8.0 repository ==='
-            dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
-            dnf module disable -y mysql
-
-            echo '=== Installing MygramDB RPM ==='
-            dnf install -y /dist/rpm/$(basename $MAIN_RPM)
-
-            echo '=== Verifying installation ==='
-            echo 'Checking binaries exist...'
-            test -x /usr/bin/mygramdb || (echo 'Error: mygramdb binary not found'; exit 1)
-            test -x /usr/bin/mygram-cli || (echo 'Error: mygram-cli binary not found'; exit 1)
-
-            echo 'Checking for missing library dependencies...'
-            if ldd /usr/bin/mygramdb | grep 'not found'; then
-              echo 'Error: mygramdb has missing dependencies'
-              exit 1
-            fi
-            echo 'mygramdb: OK'
-
-            if ldd /usr/bin/mygram-cli | grep 'not found'; then
-              echo 'Error: mygram-cli has missing dependencies'
-              exit 1
-            fi
-            echo 'mygram-cli: OK'
-
+            dnf install -y --nogpgcheck https://dev.mysql.com/get/mysql84-community-release-el${{ matrix.el_version }}-1.noarch.rpm
+            dnf module disable -y mysql 2>/dev/null || true
+            dnf install -y --nogpgcheck /dist/$(basename $MAIN_RPM)
+            test -x /usr/bin/mygramdb && echo 'mygramdb: OK'
+            test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK'
+            ldd /usr/bin/mygramdb | grep -q 'not found' && exit 1 || echo 'Dependencies: OK'
             echo '=== Installation test passed! ==='
           "
 
-      - name: Upload RPM artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-packages-${{ matrix.arch }}
-          path: dist/rpm/*.rpm
+          name: rpm-el${{ matrix.el_version }}-${{ matrix.arch }}
+          path: dist/release/*.rpm
+          retention-days: 30
+          if-no-files-found: error
+
+  build-deb:
+    name: Build DEB (${{ matrix.codename }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04 (jammy)
+          - arch: x86_64
+            ubuntu_version: "22.04"
+            codename: jammy
+            deb_arch: amd64
+            runner: ubuntu-latest
+            docker_platform: linux/amd64
+          - arch: aarch64
+            ubuntu_version: "22.04"
+            codename: jammy
+            deb_arch: arm64
+            runner: ubuntu-24.04-arm
+            docker_platform: linux/arm64
+          # Ubuntu 24.04 (noble)
+          - arch: x86_64
+            ubuntu_version: "24.04"
+            codename: noble
+            deb_arch: amd64
+            runner: ubuntu-latest
+            docker_platform: linux/amd64
+          - arch: aarch64
+            ubuntu_version: "24.04"
+            codename: noble
+            deb_arch: arm64
+            runner: ubuntu-24.04-arm
+            docker_platform: linux/arm64
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build DEB builder Docker image
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.docker_platform }} \
+            --build-arg UBUNTU_VERSION=${{ matrix.ubuntu_version }} \
+            --load \
+            --cache-from type=gha,scope=debbuild-${{ matrix.codename }}-${{ matrix.arch }} \
+            --cache-to type=gha,mode=max,scope=debbuild-${{ matrix.codename }}-${{ matrix.arch }} \
+            -f support/deb/Dockerfile.debbuild \
+            -t mygramdb-debbuild:${{ steps.version.outputs.version }}-${{ matrix.codename }}-${{ matrix.arch }} \
+            .
+
+      - name: Create source tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NAME="mygramdb"
+          mkdir -p "$GITHUB_WORKSPACE/sources"
+          git archive --format=tar.gz --prefix="${NAME}-${VERSION}/" HEAD \
+            > "$GITHUB_WORKSPACE/sources/${NAME}-${VERSION}.tar.gz"
+
+      - name: Build DEB packages
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist/deb"
+          docker run --rm \
+            --platform ${{ matrix.docker_platform }} \
+            -e MYGRAMDB_VERSION="${{ steps.version.outputs.version }}" \
+            -v "$GITHUB_WORKSPACE/sources:/sources:ro" \
+            -v "$GITHUB_WORKSPACE/dist:/workspace/dist" \
+            mygramdb-debbuild:${{ steps.version.outputs.version }}-${{ matrix.codename }}-${{ matrix.arch }}
+
+      - name: Collect main DEB only
+        run: |
+          # Keep only the main .deb (exclude -dbgsym, .ddeb, .buildinfo, .changes)
+          MAIN_DEB=$(find dist/deb -name "mygramdb_${{ steps.version.outputs.version }}-*~${{ matrix.codename }}_${{ matrix.deb_arch }}.deb" \
+            ! -name "*dbgsym*" -print -quit)
+
+          if [ -z "$MAIN_DEB" ]; then
+            echo "Error: Main DEB not found"
+            ls -la dist/deb/
+            exit 1
+          fi
+
+          mkdir -p dist/release
+          cp "$MAIN_DEB" dist/release/
+          echo "Releasing: $(basename $MAIN_DEB)"
+          ls -lh dist/release/
+
+      - name: Test DEB installation
+        run: |
+          MAIN_DEB=$(ls dist/release/mygramdb_*.deb | head -1)
+          docker run --rm \
+            --platform ${{ matrix.docker_platform }} \
+            -v "$GITHUB_WORKSPACE/dist/release:/dist:ro" \
+            ubuntu:${{ matrix.ubuntu_version }} bash -c "
+            set -e
+            apt-get update
+            apt-get install -y /dist/$(basename $MAIN_DEB)
+            test -x /usr/bin/mygramdb && echo 'mygramdb: OK'
+            test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK'
+            ldd /usr/bin/mygramdb | grep -q 'not found' && exit 1 || echo 'Dependencies: OK'
+            echo '=== Installation test passed! ==='
+          "
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.codename }}-${{ matrix.deb_arch }}
+          path: dist/release/*.deb
           retention-days: 30
           if-no-files-found: error
 
   create-release:
     name: Create GitHub Release
-    needs: build-rpm
+    needs: [build-rpm, build-deb]
     runs-on: ubuntu-latest
 
     steps:
@@ -165,14 +261,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist/rpm
-          pattern: rpm-packages-*
+          path: dist/packages
           merge-multiple: true
 
-      - name: List downloaded artifacts
+      - name: List release artifacts
         run: |
-          echo "Downloaded RPM packages:"
-          ls -lh dist/rpm/
+          echo "Release packages:"
+          ls -lh dist/packages/
 
       - name: Check for release notes
         id: check_notes
@@ -180,10 +275,8 @@ jobs:
           NOTES_FILE="docs/releases/v${{ steps.version.outputs.version }}.md"
           if [ -f "$NOTES_FILE" ]; then
             echo "found=true" >> $GITHUB_OUTPUT
-            echo "Release notes found: $NOTES_FILE"
           else
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "Release notes not found: $NOTES_FILE"
           fi
 
       - name: Copy release notes to dist (if exists)
@@ -194,8 +287,8 @@ jobs:
 
       - name: Generate SHA256 checksums
         run: |
-          cd dist/rpm
-          sha256sum *.rpm > SHA256SUMS
+          cd dist/packages
+          find . -maxdepth 1 \( -name "*.rpm" -o -name "*.deb" \) -exec sha256sum {} + > SHA256SUMS
           echo "Generated checksums:"
           cat SHA256SUMS
 
@@ -207,96 +300,74 @@ jobs:
           prerelease: false
           generate_release_notes: false
           files: |
-            dist/rpm/*.rpm
-            dist/rpm/SHA256SUMS
+            dist/packages/*.rpm
+            dist/packages/*.deb
+            dist/packages/SHA256SUMS
             dist/RELEASE_NOTES_*.md
           fail_on_unmatched_files: false
           body: |
             ## MygramDB ${{ steps.version.outputs.version }}
 
-            > **📋 Release Notes**: See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for summary or [docs/releases/v${{ steps.version.outputs.version }}.md](https://github.com/${{ github.repository }}/blob/main/docs/releases/v${{ steps.version.outputs.version }}.md) for detailed notes.
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) or [docs/releases/v${{ steps.version.outputs.version }}.md](https://github.com/${{ github.repository }}/blob/main/docs/releases/v${{ steps.version.outputs.version }}.md) for details.
 
-            ### 🐳 Docker Images (Recommended)
-
-            Multi-architecture Docker images available on GitHub Container Registry:
+            ### Docker Images (Recommended)
 
             ```bash
-            # Pull specific version
             docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
-
-            # Pull latest
             docker pull ghcr.io/${{ github.repository }}:latest
             ```
 
-            **Supported architectures**: linux/amd64, linux/arm64
-
-            **Quick Start**:
-            ```bash
-            docker run -d --name mygramdb \
-              -p 11016:11016 \
-              -p 8080:8080 \
-              -e MYSQL_HOST=your-mysql-host \
-              -e MYSQL_USER=repl_user \
-              -e MYSQL_PASSWORD=your_password \
-              -e MYSQL_DATABASE=mydb \
-              -e TABLE_NAME=articles \
-              -e TABLE_PRIMARY_KEY=id \
-              -e TABLE_TEXT_COLUMN=content \
-              ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
-            ```
+            **Architectures**: linux/amd64, linux/arm64
 
             See [Docker Deployment Guide](https://github.com/${{ github.repository }}/blob/main/docs/en/docker-deployment.md) for details.
 
             ---
 
-            ### 📦 RPM Packages (RHEL/AlmaLinux/Rocky Linux 9)
+            ### RPM Packages (RHEL/AlmaLinux/Rocky Linux)
 
-            #### For x86_64 (Intel/AMD):
             ```bash
-            # Install Oracle MySQL 8.0 repository
-            sudo dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
-            sudo dnf module disable -y mysql
+            # Install MySQL repository (required)
+            sudo dnf install -y --nogpgcheck https://dev.mysql.com/get/mysql84-community-release-el$(rpm -E %rhel)-1.noarch.rpm
+            sudo dnf module disable -y mysql 2>/dev/null || true
 
-            # Download and install MygramDB RPM
-            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm
-            sudo dnf install -y ./mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm
+            # Install MygramDB
+            sudo dnf install -y ./mygramdb-${{ steps.version.outputs.version }}-1.el$(rpm -E %rhel).$(uname -m).rpm
 
-            # Configure and start service
+            # Configure and start
             sudo cp /etc/mygramdb/config.yaml.example /etc/mygramdb/config.yaml
-            sudo vi /etc/mygramdb/config.yaml  # Edit configuration
+            sudo vi /etc/mygramdb/config.yaml
             sudo systemctl enable --now mygramdb
             ```
 
-            #### For aarch64 (ARM64):
+            | Platform | x86_64 | aarch64 |
+            |----------|--------|---------|
+            | EL9 (RHEL/Alma/Rocky 9) | `mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm` | `mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm` |
+            | EL10 (RHEL/Alma/Rocky 10) | `mygramdb-${{ steps.version.outputs.version }}-1.el10.x86_64.rpm` | `mygramdb-${{ steps.version.outputs.version }}-1.el10.aarch64.rpm` |
+
+            ---
+
+            ### DEB Packages (Ubuntu)
+
             ```bash
-            # Install Oracle MySQL 8.0 repository
-            sudo dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
-            sudo dnf module disable -y mysql
+            sudo apt-get update
+            sudo apt-get install -y ./mygramdb_${{ steps.version.outputs.version }}-1~$(lsb_release -cs)_$(dpkg --print-architecture).deb
 
-            # Download and install MygramDB RPM
-            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm
-            sudo dnf install -y ./mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm
-
-            # Configure and start service
+            # Configure and start
             sudo cp /etc/mygramdb/config.yaml.example /etc/mygramdb/config.yaml
-            sudo vi /etc/mygramdb/config.yaml  # Edit configuration
+            sudo vi /etc/mygramdb/config.yaml
             sudo systemctl enable --now mygramdb
             ```
 
-            ### Package Details
-            - **Platform**: RHEL 9 / AlmaLinux 9 / Rocky Linux 9
-            - **Architectures**: x86_64 (Intel/AMD), aarch64 (ARM64)
-            - **Build Type**: Static linking (minimal dependencies)
-            - **Dependencies**: libicu, MySQL client libraries (auto-installed)
+            | Platform | amd64 | arm64 |
+            |----------|-------|-------|
+            | Ubuntu 22.04 (Jammy) | `mygramdb_${{ steps.version.outputs.version }}-1~jammy_amd64.deb` | `mygramdb_${{ steps.version.outputs.version }}-1~jammy_arm64.deb` |
+            | Ubuntu 24.04 (Noble) | `mygramdb_${{ steps.version.outputs.version }}-1~noble_amd64.deb` | `mygramdb_${{ steps.version.outputs.version }}-1~noble_arm64.deb` |
 
-            ### Files Included
-            - Binary: `/usr/bin/mygramdb`
-            - CLI client: `/usr/bin/mygram-cli`
-            - Systemd service: `/usr/lib/systemd/system/mygramdb.service`
-            - Config example: `/etc/mygramdb/config.yaml.example`
-            - Data directory: `/var/lib/mygramdb`
+            ---
 
-            ### Available Packages
-            - `mygramdb-${{ steps.version.outputs.version }}-1.el9.x86_64.rpm` - Main package (x86_64)
-            - `mygramdb-${{ steps.version.outputs.version }}-1.el9.aarch64.rpm` - Main package (aarch64)
-            - Debug packages available for both architectures
+            ### Package Contents
+            - `/usr/bin/mygramdb` — Server binary
+            - `/usr/bin/mygram-cli` — CLI client
+            - `/usr/lib/systemd/system/mygramdb.service` — Systemd service
+            - `/etc/mygramdb/config.yaml.example` — Example configuration
+            - `/var/lib/mygramdb/` — Data directory

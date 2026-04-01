@@ -1,0 +1,29 @@
+Source: mygramdb
+Section: database
+Priority: optional
+Maintainer: libraz <libraz@libraz.net>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.15),
+               pkg-config,
+               libmysqlclient-dev (>= 8.0),
+               libicu-dev,
+               libreadline-dev,
+               zlib1g-dev,
+               liblz4-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/libraz/mygram-db
+
+Package: mygramdb
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: C++ in-memory full-text search engine with MySQL replication
+ MygramDB is a high-performance C++ in-memory full-text search engine designed
+ for MySQL replication with GTID-based binlog tracking. It provides efficient
+ n-gram based indexing and search capabilities.
+ .
+ Features:
+  - In-memory n-gram full-text search
+  - MySQL replication (GTID-based binlog tracking)
+  - TCP/HTTP protocol support
+  - Snapshot persistence
+  - High-performance roaring bitmap indexes

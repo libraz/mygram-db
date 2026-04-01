@@ -55,6 +55,9 @@ rm -rf %{buildroot}/usr/share/doc/mygramdb
 rm -rf %{buildroot}/usr/include
 rm -rf %{buildroot}/usr/lib64/cmake
 rm -rf %{buildroot}/usr/lib64/pkgconfig
+# Remove third-party docs/licenses installed by dependencies (e.g. httplib)
+rm -rf %{buildroot}/usr/share/doc/httplib
+rm -rf %{buildroot}/usr/share/licenses/httplib
 find %{buildroot}/usr/lib64 -name '*.a' -delete 2>/dev/null || true
 find %{buildroot}/usr/lib64 -name '*.so*' -delete 2>/dev/null || true
 find %{buildroot}/usr/lib -name 'libmygramclient.a' -delete 2>/dev/null || true

@@ -1,23 +1,30 @@
 # Dockerfile for building RPM packages
-FROM rockylinux:9
+# Supports el9 and el10 via EL_VERSION build argument
+# Uses AlmaLinux as base (Rocky Linux 10 not yet available on Docker Hub)
+ARG EL_VERSION=9
+FROM almalinux:${EL_VERSION}
 
-# Accept build arguments for multi-arch support
+# Re-declare after FROM (ARGs are reset)
+ARG EL_VERSION=9
 ARG TARGETARCH
 ARG TARGETPLATFORM
 
 # Log build information
 RUN echo "Building for platform: ${TARGETPLATFORM:-unknown}" && \
     echo "Target architecture: ${TARGETARCH:-unknown}" && \
-    echo "System architecture: $(uname -m)"
+    echo "System architecture: $(uname -m)" && \
+    echo "EL version: ${EL_VERSION}"
 
-# Install Oracle MySQL 8.0 repository
-RUN dnf -y install \
-    https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm && \
-    dnf -y module disable mysql
+# Install Oracle MySQL 8.4 Community repository
+# Binlog replication API (MYSQL_RPL) requires Oracle MySQL, not MariaDB
+# --nogpgcheck: el10 MySQL GPG key (RPM-GPG-KEY-mysql-2023) may be expired
+RUN dnf -y install --nogpgcheck \
+    https://dev.mysql.com/get/mysql84-community-release-el${EL_VERSION}-1.noarch.rpm && \
+    (dnf -y module disable mysql 2>/dev/null || true)
 
 # Install build dependencies
-RUN dnf -y update && \
-    dnf -y install \
+RUN dnf -y update --nogpgcheck && \
+    dnf -y install --nogpgcheck \
     rpm-build \
     rpmdevtools \
     gcc-c++ \

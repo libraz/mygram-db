@@ -11,12 +11,12 @@ NC='\033[0m' # No Color
 # Parse command line arguments
 ARCH=""
 BUILD_ALL=false
-EL_VERSION="9"
+UBUNTU_VERSION="22.04"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --el-version)
-            EL_VERSION="$2"
+        --ubuntu-version)
+            UBUNTU_VERSION="$2"
             shift 2
             ;;
         --all)
@@ -30,16 +30,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Normalize architecture (macOS returns arm64, RPM uses aarch64)
+# Normalize architecture (macOS returns arm64, RPM/DEB uses aarch64)
 DETECTED_ARCH=$(uname -m)
 if [ "$DETECTED_ARCH" = "arm64" ]; then
     DETECTED_ARCH="aarch64"
 fi
 ARCH="${ARCH:-$DETECTED_ARCH}"
 
+# Map uname arch to deb/docker conventions
+map_arch_to_deb() {
+    case "$1" in
+        x86_64)  echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        *)       echo "$1" ;;
+    esac
+}
+
+# Map codename
+get_codename() {
+    case "$1" in
+        22.04) echo "jammy" ;;
+        24.04) echo "noble" ;;
+        *)     echo "unknown" ;;
+    esac
+}
+
+CODENAME=$(get_codename "$UBUNTU_VERSION")
+
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  MygramDB RPM Build Verification      ║${NC}"
-echo -e "${BLUE}║  EL Version: ${EL_VERSION}                          ║${NC}"
+echo -e "${BLUE}║  MygramDB DEB Build Verification      ║${NC}"
+echo -e "${BLUE}║  Ubuntu: ${UBUNTU_VERSION} (${CODENAME})                  ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}\n"
 
 # Check if Docker is available
@@ -54,8 +74,9 @@ echo -e "${GREEN}✓ Docker is available${NC}\n"
 build_for_arch() {
     local TARGET_ARCH=$1
     local DOCKER_PLATFORM=""
+    local DEB_ARCH=$(map_arch_to_deb "$TARGET_ARCH")
 
-    # Map RPM architecture to Docker platform
+    # Map architecture to Docker platform
     case "$TARGET_ARCH" in
         x86_64)
             DOCKER_PLATFORM="linux/amd64"
@@ -70,71 +91,67 @@ build_for_arch() {
             ;;
     esac
 
-    echo -e "${BLUE}Building for architecture: $TARGET_ARCH (platform: $DOCKER_PLATFORM), EL${EL_VERSION}${NC}\n"
+    echo -e "${BLUE}Building for architecture: $TARGET_ARCH ($DEB_ARCH), Ubuntu ${UBUNTU_VERSION} (${CODENAME})${NC}\n"
 
-    # Build Docker image for RPM building
-    echo -e "${YELLOW}Building RPM builder Docker image for $TARGET_ARCH (el${EL_VERSION})...${NC}"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     ROOT_DIR="$(git rev-parse --show-toplevel)"
 
+    # Build Docker image
+    echo -e "${YELLOW}Building DEB builder Docker image...${NC}"
     docker buildx build \
         --platform "$DOCKER_PLATFORM" \
-        --build-arg EL_VERSION="${EL_VERSION}" \
+        --build-arg UBUNTU_VERSION="${UBUNTU_VERSION}" \
         --load \
-        -f "${SCRIPT_DIR}/Dockerfile.rpmbuild" \
-        -t mygramdb-rpmbuild:el${EL_VERSION}-$TARGET_ARCH \
+        -f "${SCRIPT_DIR}/Dockerfile.debbuild" \
+        -t mygramdb-debbuild:${CODENAME}-$TARGET_ARCH \
         "$ROOT_DIR"
 
     if [ $? -ne 0 ]; then
-        echo -e "${RED}✗ Failed to build Docker image for $TARGET_ARCH (el${EL_VERSION})${NC}"
+        echo -e "${RED}✗ Failed to build Docker image for $TARGET_ARCH (${CODENAME})${NC}"
         return 1
     fi
 
-    echo -e "${GREEN}✓ Docker image built successfully for $TARGET_ARCH (el${EL_VERSION})${NC}\n"
+    echo -e "${GREEN}✓ Docker image built successfully${NC}\n"
 
-    # Create dist directory
-    mkdir -p "$ROOT_DIR/dist/rpm"
+    # Create dist directory and source tarball
+    mkdir -p "$ROOT_DIR/dist/deb"
 
-    # Get version from git tag or use default
     VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
     NAME="mygramdb"
     TARBALL="${NAME}-${VERSION}.tar.gz"
 
-    # Create source tarball
     echo -e "${YELLOW}Creating source tarball...${NC}"
     mkdir -p "$ROOT_DIR/dist/sources"
     git -C "$ROOT_DIR" archive --format=tar.gz --prefix="${NAME}-${VERSION}/" HEAD \
         > "$ROOT_DIR/dist/sources/${TARBALL}"
 
-    # Run RPM build in container
-    echo -e "${YELLOW}Running RPM build in container for $TARGET_ARCH (el${EL_VERSION})...${NC}"
-    echo -e "${BLUE}Version: ${VERSION}${NC}\n"
+    # Run DEB build in container
+    echo -e "${YELLOW}Running DEB build in container...${NC}"
+    echo -e "${BLUE}Version: ${VERSION}, Codename: ${CODENAME}${NC}\n"
 
     docker run --rm \
         --platform "$DOCKER_PLATFORM" \
         -e MYGRAMDB_VERSION="${VERSION}" \
-        -v "$ROOT_DIR/dist/sources:/rpmsources:ro" \
+        -v "$ROOT_DIR/dist/sources:/sources:ro" \
         -v "$ROOT_DIR/dist:/workspace/dist" \
-        mygramdb-rpmbuild:el${EL_VERSION}-$TARGET_ARCH
+        mygramdb-debbuild:${CODENAME}-$TARGET_ARCH
 
     if [ $? -eq 0 ]; then
         echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║  RPM Build Complete for $TARGET_ARCH (el${EL_VERSION}) ✓${NC}"
+        echo -e "${GREEN}║  DEB Build Complete for $TARGET_ARCH (${CODENAME}) ✓${NC}"
         echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
 
-        echo -e "${BLUE}Generated RPM packages for $TARGET_ARCH (el${EL_VERSION}):${NC}"
-        ls -lh "$ROOT_DIR/dist/rpm/"*.el${EL_VERSION}.$TARGET_ARCH.rpm 2>/dev/null || ls -lh "$ROOT_DIR/dist/rpm/"*.el${EL_VERSION}.src.rpm 2>/dev/null || true
+        echo -e "${BLUE}Generated DEB packages:${NC}"
+        ls -lh "$ROOT_DIR/dist/deb/"*.deb 2>/dev/null || true
 
-        echo -e "\n${YELLOW}To test the RPM package:${NC}"
-        echo -e "  docker run --rm -it --platform $DOCKER_PLATFORM -v \$(git rev-parse --show-toplevel)/dist:/dist almalinux:${EL_VERSION} bash"
+        echo -e "\n${YELLOW}To test the DEB package:${NC}"
+        echo -e "  docker run --rm -it --platform $DOCKER_PLATFORM -v \$(git rev-parse --show-toplevel)/dist:/dist ubuntu:${UBUNTU_VERSION} bash"
         echo -e "  # Inside container:"
-        echo -e "  dnf install -y https://dev.mysql.com/get/mysql84-community-release-el${EL_VERSION}-1.noarch.rpm"
-        echo -e "  dnf module disable -y mysql 2>/dev/null || true"
-        echo -e "  dnf install -y /dist/rpm/mygramdb-*.el${EL_VERSION}.$TARGET_ARCH.rpm"
+        echo -e "  apt-get update && apt-get install -y /dist/deb/mygramdb_*.deb"
         echo -e "  mygramdb --version"
         return 0
     else
-        echo -e "${RED}✗ RPM build failed for $TARGET_ARCH (el${EL_VERSION})${NC}"
+        echo -e "${RED}✗ DEB build failed for $TARGET_ARCH (${CODENAME})${NC}"
         return 1
     fi
 }
@@ -160,8 +177,8 @@ if [ "$BUILD_ALL" = true ]; then
         echo -e "${GREEN}║  All Builds Completed Successfully ✓  ║${NC}"
         echo -e "${BLUE}╚════════════════════════════════════════╝${NC}\n"
 
-        echo -e "${BLUE}All generated RPM packages:${NC}"
-        ls -lh "$(git rev-parse --show-toplevel)/dist/rpm/"*.rpm
+        echo -e "${BLUE}All generated DEB packages:${NC}"
+        ls -lh "$(git rev-parse --show-toplevel)/dist/deb/"*.deb
         exit 0
     else
         echo -e "${RED}║  Some Builds Failed ✗                 ║${NC}"

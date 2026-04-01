@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check
+.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
 
 # Build directory
 BUILD_DIR := build
@@ -104,6 +104,24 @@ help:
 	@echo "  make docker-logs                      # View logs"
 	@echo "  make docker-ci-check                  # Run all CI checks in Linux (before git push)"
 	@echo "  make docker-build-linux               # Test Linux build locally"
+	@echo ""
+	@echo "Package building (RPM and DEB):"
+	@echo "  make pkg-rpm-el9        - Build RPM for EL9 (current arch)"
+	@echo "  make pkg-rpm-el10       - Build RPM for EL10 (current arch)"
+	@echo "  make pkg-rpm-all        - Build RPM for EL9+EL10 (current arch)"
+	@echo "  make pkg-deb-jammy      - Build DEB for Ubuntu 22.04 (current arch)"
+	@echo "  make pkg-deb-noble      - Build DEB for Ubuntu 24.04 (current arch)"
+	@echo "  make pkg-deb-all        - Build DEB for Jammy+Noble (current arch)"
+	@echo "  make pkg-all            - Build all packages (current arch)"
+	@echo "  make pkg-test-rpm-el9   - Basic install test on EL9"
+	@echo "  make pkg-test-rpm-el10  - Basic install test on EL10"
+	@echo "  make pkg-test-deb-jammy - Basic install test on Ubuntu 22.04"
+	@echo "  make pkg-test-deb-noble - Basic install test on Ubuntu 24.04"
+	@echo "  make pkg-verify-rpm-el9 - Full verification (install + MySQL + search)"
+	@echo "  make pkg-verify-rpm-el10  - Full verification on EL10"
+	@echo "  make pkg-verify-deb-jammy - Full verification on Ubuntu 22.04"
+	@echo "  make pkg-verify-deb-noble - Full verification on Ubuntu 24.04"
+	@echo "  make pkg-verify-all       - Full verification on all distros"
 
 # Configure CMake
 configure:
@@ -459,3 +477,111 @@ docker-ci-check: docker-dev-build
 	@echo "✓ All CI checks passed!"
 	@echo "=========================================="
 	@echo "Your code should pass GitHub Actions CI"
+
+# ============================================================================
+# Package Building (RPM and DEB)
+# ============================================================================
+# Build packages locally using Docker. Requires Docker with buildx.
+# Packages are output to dist/rpm/ and dist/deb/.
+
+# --- RPM ---
+
+pkg-rpm-el9:
+	@bash support/rpm/test-rpm-build.sh --el-version 9
+
+pkg-rpm-el10:
+	@bash support/rpm/test-rpm-build.sh --el-version 10
+
+pkg-rpm-all: pkg-rpm-el9 pkg-rpm-el10
+
+# --- DEB ---
+
+pkg-deb-jammy:
+	@bash support/deb/test-deb-build.sh --ubuntu-version 22.04
+
+pkg-deb-noble:
+	@bash support/deb/test-deb-build.sh --ubuntu-version 24.04
+
+pkg-deb-all: pkg-deb-jammy pkg-deb-noble
+
+# --- All packages ---
+
+pkg-all: pkg-rpm-all pkg-deb-all
+
+# --- Installation tests ---
+
+PKG_VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+
+pkg-test-rpm-el9:
+	@echo "Testing RPM installation on AlmaLinux 9..."
+	@docker run --rm \
+		-v $$(pwd)/dist:/dist \
+		almalinux:9 bash -c "\
+		set -e && \
+		dnf install -y https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm && \
+		dnf module disable -y mysql && \
+		dnf install -y /dist/rpm/mygramdb-$(PKG_VERSION)-1.el9.$$(uname -m).rpm && \
+		echo '=== Verifying installation ===' && \
+		test -x /usr/bin/mygramdb && echo 'mygramdb: OK' && \
+		test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK' && \
+		ldd /usr/bin/mygramdb | grep -v 'not found' > /dev/null && echo 'Dependencies: OK' && \
+		echo '=== Installation test passed! ==='"
+
+pkg-test-rpm-el10:
+	@echo "Testing RPM installation on AlmaLinux 10..."
+	@docker run --rm \
+		-v $$(pwd)/dist:/dist \
+		almalinux:10 bash -c "\
+		set -e && \
+		dnf install -y https://dev.mysql.com/get/mysql84-community-release-el10-1.noarch.rpm && \
+		dnf module disable -y mysql 2>/dev/null || true && \
+		dnf install -y /dist/rpm/mygramdb-$(PKG_VERSION)-1.el10.$$(uname -m).rpm && \
+		echo '=== Verifying installation ===' && \
+		test -x /usr/bin/mygramdb && echo 'mygramdb: OK' && \
+		test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK' && \
+		ldd /usr/bin/mygramdb | grep -v 'not found' > /dev/null && echo 'Dependencies: OK' && \
+		echo '=== Installation test passed! ==='"
+
+pkg-test-deb-jammy:
+	@echo "Testing DEB installation on Ubuntu 22.04..."
+	@docker run --rm \
+		-v $$(pwd)/dist:/dist \
+		ubuntu:22.04 bash -c "\
+		set -e && \
+		apt-get update && \
+		apt-get install -y /dist/deb/mygramdb_$(PKG_VERSION)-1~jammy_$$(dpkg --print-architecture).deb && \
+		echo '=== Verifying installation ===' && \
+		test -x /usr/bin/mygramdb && echo 'mygramdb: OK' && \
+		test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK' && \
+		ldd /usr/bin/mygramdb | grep -v 'not found' > /dev/null && echo 'Dependencies: OK' && \
+		echo '=== Installation test passed! ==='"
+
+pkg-test-deb-noble:
+	@echo "Testing DEB installation on Ubuntu 24.04..."
+	@docker run --rm \
+		-v $$(pwd)/dist:/dist \
+		ubuntu:24.04 bash -c "\
+		set -e && \
+		apt-get update && \
+		apt-get install -y /dist/deb/mygramdb_$(PKG_VERSION)-1~noble_$$(dpkg --print-architecture).deb && \
+		echo '=== Verifying installation ===' && \
+		test -x /usr/bin/mygramdb && echo 'mygramdb: OK' && \
+		test -x /usr/bin/mygram-cli && echo 'mygram-cli: OK' && \
+		ldd /usr/bin/mygramdb | grep -v 'not found' > /dev/null && echo 'Dependencies: OK' && \
+		echo '=== Installation test passed! ==='"
+
+# --- Full verification (install + start + MySQL + search) ---
+
+pkg-verify-rpm-el9:
+	@bash support/testing/test-pkg-verify.sh --type rpm --distro el9 --integration
+
+pkg-verify-rpm-el10:
+	@bash support/testing/test-pkg-verify.sh --type rpm --distro el10 --integration
+
+pkg-verify-deb-jammy:
+	@bash support/testing/test-pkg-verify.sh --type deb --distro jammy --integration
+
+pkg-verify-deb-noble:
+	@bash support/testing/test-pkg-verify.sh --type deb --distro noble --integration
+
+pkg-verify-all: pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble

@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create mygramdb user/group if not exists
+        # Use groupadd/useradd (always available) instead of addgroup/adduser
+        if ! getent group mygramdb >/dev/null; then
+            groupadd --system mygramdb
+        fi
+        if ! getent passwd mygramdb >/dev/null; then
+            useradd --system --gid mygramdb --home-dir /var/lib/mygramdb \
+                --no-create-home --shell /usr/sbin/nologin \
+                --comment "MygramDB service user" mygramdb
+        fi
+
+        # Set ownership for data and log directories
+        if [ -d /var/lib/mygramdb ]; then
+            chown -R mygramdb:mygramdb /var/lib/mygramdb
+        fi
+        if [ -d /var/log/mygramdb ]; then
+            chown -R mygramdb:mygramdb /var/log/mygramdb
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

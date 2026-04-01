@@ -1,0 +1,47 @@
+#!/usr/bin/make -f
+
+# Avoid using the project's top-level Makefile which re-invokes cmake.
+# Use debhelper's native cmake buildsystem instead.
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@ --buildsystem=cmake --builddirectory=obj-build
+
+override_dh_auto_configure:
+	dh_auto_configure --builddirectory=obj-build -- \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_TESTS=OFF \
+		-DUSE_ICU=ON \
+		-DUSE_MYSQL=ON \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DMYGRAMDB_PORTABLE_BUILD=ON \
+		-DFETCHCONTENT_FULLY_DISCONNECTED=OFF
+
+override_dh_auto_build:
+	dh_auto_build --builddirectory=obj-build
+
+override_dh_auto_install:
+	dh_auto_install --builddirectory=obj-build
+	# Remove unnecessary files (static build)
+	rm -rf debian/mygramdb/usr/etc
+	rm -rf debian/mygramdb/usr/share/mygramdb
+	rm -rf debian/mygramdb/usr/share/doc/mygramdb
+	rm -rf debian/mygramdb/usr/include
+	find debian/mygramdb/usr/lib -name '*.a' -delete 2>/dev/null || true
+	find debian/mygramdb/usr/lib -name '*.so*' -delete 2>/dev/null || true
+	find debian/mygramdb/usr/lib -name 'cmake' -type d -exec rm -rf {} + 2>/dev/null || true
+	find debian/mygramdb/usr/lib -name 'pkgconfig' -type d -exec rm -rf {} + 2>/dev/null || true
+	# Remove third-party docs/licenses (e.g. httplib)
+	rm -rf debian/mygramdb/usr/share/doc/httplib
+	rm -rf debian/mygramdb/usr/share/licenses/httplib
+	# Install example config
+	install -d debian/mygramdb/etc/mygramdb
+	install -m 644 examples/config.yaml debian/mygramdb/etc/mygramdb/config.yaml.example
+
+override_dh_auto_test:
+	# Tests are disabled (BUILD_TESTS=OFF), skip test phase
+	true
+
+override_dh_installsystemd:
+	dh_installsystemd --name=mygramdb
