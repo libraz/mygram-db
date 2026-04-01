@@ -1,128 +1,128 @@
 # MygramDB E2E Test Suite
 
-MySQL連携を含むエンドツーエンドの結合テスト・負荷テスト・エッジケーステストを自動実行するシステム。
+A system that automatically runs end-to-end integration tests, load tests, and edge case tests including MySQL integration.
 
 ## Quick Start
 
 ```bash
-# 全テスト実行（Docker image build → compose up → pytest → compose down）
+# Run all tests (Docker image build → compose up → pytest → compose down)
 make e2e-test
 
-# スモークテストのみ
+# Smoke tests only
 make e2e-test-smoke
 
-# 負荷テストのみ
+# Load tests only
 make e2e-test-load
 
-# 後片付け（テスト失敗時にコンテナが残った場合）
+# Cleanup (when containers remain after a test failure)
 make e2e-test-cleanup
 ```
 
-## 前提条件
+## Prerequisites
 
 - Docker / Docker Compose
 - Python 3.10+
-- `mygramdb:latest` Docker image（`make docker-build` で作成済みであること）
+- `mygramdb:latest` Docker image (must be pre-built via `make docker-build`)
 
-## アーキテクチャ
+## Architecture
 
 ```
 e2e/
-├── docker/                     # テスト専用Docker環境
-│   ├── docker-compose.yml      #   inttest_mysql + inttest_mygramdb（ホストポート非公開）
-│   └── mysql-init/             #   テーブル定義 + FULLTEXT索引
-├── lib/                        # 共通ヘルパー
-│   ├── mysql_client.py         #   MySQL直接接続クライアント
-│   ├── mygramdb_client.py      #   TCP + HTTPクライアント
-│   ├── metrics.py              #   Prometheusメトリクスパーサー
-│   ├── stats.py                #   統計計算（p50/p95/p99/QPS）
-│   ├── data_generator.py       #   合成データ生成（シード固定）
-│   ├── wait.py                 #   ポーリング待機ユーティリティ
-│   └── wordlists/              #   英語/日本語/Unicodeワードリスト
-├── tests/                      # テストスイート（14カテゴリ, 34ファイル, 70テスト）
-│   ├── smoke/                  #   基本疎通（health, sync, info）
-│   ├── replication/            #   INSERT/UPDATE/DELETE伝播
-│   ├── search/                 #   検索精度・フィルタ・ページネーション
-│   ├── unicode/                #   CJK・NFKC正規化・混合スクリプト
-│   ├── edge_cases/             #   空文書・大容量・特殊文字
-│   ├── ddl/                    #   TRUNCATE・ALTER TABLE
-│   ├── concurrency/            #   書込中検索・高速UPDATE
-│   ├── cache/                  #   Hit/Miss・無効化
-│   ├── memory/                 #   メモリ圧迫・解放
-│   ├── statistics/             #   Prometheusカウンタ正確性
-│   ├── load/                   #   並行負荷・性能回帰検出
-│   ├── persistence/            #   DUMP SAVE/LOAD往復
-│   ├── resilience/             #   MySQL再起動復旧
-│   └── multi_table/            #   複数テーブル独立性
-├── benchmark.py                # CLIベンチマークツール
-├── conftest.py                 # pytestフィクスチャ
-├── pyproject.toml              # Python依存・pytest/ruff/mypy設定
-├── run-all.sh                  # エントリポイント
-└── results/                    # 実行時生成
+├── docker/                     # Test-dedicated Docker environment
+│   ├── docker-compose.yml      #   inttest_mysql + inttest_mygramdb (no host port exposure)
+│   └── mysql-init/             #   Table definitions + FULLTEXT indexes
+├── lib/                        # Common helpers
+│   ├── mysql_client.py         #   Direct MySQL connection client
+│   ├── mygramdb_client.py      #   TCP + HTTP client
+│   ├── metrics.py              #   Prometheus metrics parser
+│   ├── stats.py                #   Statistics calculation (p50/p95/p99/QPS)
+│   ├── data_generator.py       #   Synthetic data generation (fixed seed)
+│   ├── wait.py                 #   Polling wait utility
+│   └── wordlists/              #   English/Japanese/Unicode word lists
+├── tests/                      # Test suites (14 categories, 34 files, 70 tests)
+│   ├── smoke/                  #   Basic connectivity (health, sync, info)
+│   ├── replication/            #   INSERT/UPDATE/DELETE propagation
+│   ├── search/                 #   Search accuracy, filters, pagination
+│   ├── unicode/                #   CJK, NFKC normalization, mixed scripts
+│   ├── edge_cases/             #   Empty documents, large documents, special characters
+│   ├── ddl/                    #   TRUNCATE, ALTER TABLE
+│   ├── concurrency/            #   Search during writes, rapid UPDATEs
+│   ├── cache/                  #   Hit/Miss, invalidation
+│   ├── memory/                 #   Memory pressure, release
+│   ├── statistics/             #   Prometheus counter accuracy
+│   ├── load/                   #   Concurrent load, performance regression detection
+│   ├── persistence/            #   DUMP SAVE/LOAD round-trip
+│   ├── resilience/             #   MySQL restart recovery
+│   └── multi_table/            #   Multi-table independence
+├── benchmark.py                # CLI benchmark tool
+├── conftest.py                 # pytest fixtures
+├── pyproject.toml              # Python dependencies, pytest/ruff/mypy config
+├── run-all.sh                  # Entry point
+└── results/                    # Generated at runtime
     ├── reports/                #   JUnit XML
-    ├── metrics/                #   Prometheusスナップショット
-    └── baselines/              #   性能ベースライン（git管理）
+    ├── metrics/                #   Prometheus snapshots
+    └── baselines/              #   Performance baselines (tracked in git)
 ```
 
-## テストカテゴリとマーカー
+## Test Categories and Markers
 
-| マーカー | カテゴリ | テスト数 | 内容 |
-|---------|---------|---------|------|
-| `smoke` | 基本疎通 | 7 | health endpoints, sync, info, TCP ping |
-| `replication` | レプリケーション | 8 | INSERT/UPDATE/DELETE伝播, バッチ1000行 |
-| `search` | 検索精度 | 10 | 単語検索, フィルタ, ページネーション, MySQL FULLTEXT比較 |
-| `unicode` | Unicode | 9 | 日本語/中国語, NFKC, 全角半角, 絵文字 |
-| `edge_cases` | 境界条件 | 8 | 空文書, 1MB文書, SQLインジェクション文字列 |
-| `ddl` | DDLイベント | 4 | TRUNCATE, ALTER TABLE |
-| `concurrency` | 並行アクセス | 4 | 書込中検索(10並列), 高速UPDATE |
-| `cache` | キャッシュ | 4 | Miss→Hit, INSERT後無効化, CACHE CLEAR |
-| `memory` | メモリ管理 | 3 | ソフト/ハードリミット, TRUNCATE後解放 |
-| `statistics` | メトリクス | 8 | レプリケーション/コマンド/キャッシュカウンタ正確性 |
-| `load` | 負荷テスト | 1 | 並行負荷, p99回帰検出 |
-| `persistence` | 永続化 | 2 | DUMP SAVE→LOAD往復 |
-| `resilience` | 障害復旧 | 2 | MySQL再起動後の再接続 |
-| `multi_table` | 複数テーブル | 2 | インデックス独立性 |
+| Marker | Category | Test Count | Description |
+|--------|----------|------------|-------------|
+| `smoke` | Basic Connectivity | 7 | health endpoints, sync, info, TCP ping |
+| `replication` | Replication | 8 | INSERT/UPDATE/DELETE propagation, batch 1000 rows |
+| `search` | Search Accuracy | 10 | Word search, filters, pagination, MySQL FULLTEXT comparison |
+| `unicode` | Unicode | 9 | Japanese/Chinese, NFKC, fullwidth/halfwidth, emoji |
+| `edge_cases` | Boundary Conditions | 8 | Empty documents, 1MB documents, SQL injection strings |
+| `ddl` | DDL Events | 4 | TRUNCATE, ALTER TABLE |
+| `concurrency` | Concurrent Access | 4 | Search during writes (10 parallel), rapid UPDATEs |
+| `cache` | Cache | 4 | Miss→Hit, invalidation after INSERT, CACHE CLEAR |
+| `memory` | Memory Management | 3 | Soft/hard limits, release after TRUNCATE |
+| `statistics` | Metrics | 8 | Replication/command/cache counter accuracy |
+| `load` | Load Testing | 1 | Concurrent load, p99 regression detection |
+| `persistence` | Persistence | 2 | DUMP SAVE→LOAD round-trip |
+| `resilience` | Failure Recovery | 2 | Reconnection after MySQL restart |
+| `multi_table` | Multi-table | 2 | Index independence |
 
-### カテゴリ別実行
+### Running by Category
 
 ```bash
-# pytestマーカーで選択実行
+# Select by pytest marker
 bash e2e/run-all.sh -m smoke
 bash e2e/run-all.sh -m "replication or search"
 bash e2e/run-all.sh -m "not load"
 
-# 特定ファイルのみ
+# Specific file only
 bash e2e/run-all.sh tests/unicode/test_cjk_search.py
 ```
 
-## Docker環境
+## Docker Environment
 
-テスト専用のDocker環境を使用し、既存の開発環境と完全に分離されている。
+Uses a test-dedicated Docker environment, fully isolated from the existing development environment.
 
-- **コンテナ名**: `inttest_mysql`, `inttest_mygramdb`（既存の `mygramdb_*` と衝突しない）
-- **ネットワーク**: `inttest_network`（Docker内部のみ、ホストポート公開なし）
-- **メモリ制限**: MygramDB 200MB hard limit / 150MB soft target（メモリ圧迫テスト用）
-- **MySQL**: 8.4, GTID有効, binlog ROW形式, utf8mb4
+- **Container names**: `inttest_mysql`, `inttest_mygramdb` (no conflict with existing `mygramdb_*`)
+- **Network**: `inttest_network` (Docker internal only, no host port exposure)
+- **Memory limits**: MygramDB 200MB hard limit / 150MB soft target (for memory pressure testing)
+- **MySQL**: 8.4, GTID enabled, binlog ROW format, utf8mb4
 
-## データ生成
+## Data Generation
 
-外部ダウンロード不要。チェックイン済みワードリストからシード固定で合成生成。
+No external downloads required. Synthetically generated from checked-in word lists with a fixed seed.
 
-| データセット | 行数 | 用途 |
-|-------------|------|------|
-| seed_data | 100 | スモーク・基本検証（session fixture） |
-| load test | 1,000+ | 負荷テスト（自動拡張） |
-| edge_cases | ~15 | 空文字, 1MB, 絵文字, SQL injection等 |
+| Dataset | Rows | Purpose |
+|---------|------|---------|
+| seed_data | 100 | Smoke and basic verification (session fixture) |
+| load test | 1,000+ | Load testing (auto-scaling) |
+| edge_cases | ~15 | Empty strings, 1MB, emoji, SQL injection, etc. |
 
-## ベンチマークCLI
+## Benchmark CLI
 
-`support/benchmark/benchmark.py` から移行した統合ベンチマークツール。
+Integrated benchmark tool migrated from `support/benchmark/benchmark.py`.
 
 ```bash
-# MygramDBベンチマーク
+# MygramDB benchmark
 make e2e-benchmark
 
-# カスタム実行
+# Custom execution
 cd e2e && python3 benchmark.py \
   --target mygramdb \
   --table articles \
@@ -132,36 +132,36 @@ cd e2e && python3 benchmark.py \
   --json-output results/benchmark.json
 ```
 
-## Python開発
+## Python Development
 
 ```bash
-# リント
+# Lint
 make e2e-lint
 
-# フォーマット
+# Format
 make e2e-format
 
-# リント修正 + フォーマット
+# Lint fix + format
 make e2e-fix
 ```
 
-## 成功/失敗基準
+## Pass/Fail Criteria
 
-| カテゴリ | 成功条件 | 失敗条件 |
-|---------|---------|---------|
-| Smoke | 全チェック pass | 1つでも失敗 |
-| Replication | 10秒以内に反映 | タイムアウト or 不一致 |
-| Search | 結果セットが期待通り | 不一致 |
-| Unicode | 全正規化テスト pass | 検索漏れ |
-| Edge cases | クラッシュなし | クラッシュ or ハング |
-| DDL | インデックス状態正常 | 不正カウント |
-| Concurrency | 最終状態一致 | データ破壊 |
-| Cache | Hit/Miss/無効化が正しい | 不正キャッシュ |
-| Memory | OOMクラッシュなし | OOM kill |
-| Statistics | カウンタが実操作と一致 | ズレ |
-| Load | p99 < baseline×1.2, エラー率<1% | 性能劣化 |
-| Persistence | ラウンドトリップでデータ保全 | データ消失 |
-| Resilience | 60秒以内に再接続 | スタック |
-| Multi-table | テーブル間独立 | クロス汚染 |
+| Category | Pass Condition | Fail Condition |
+|----------|---------------|----------------|
+| Smoke | All checks pass | Any single failure |
+| Replication | Reflected within 10 seconds | Timeout or mismatch |
+| Search | Result set matches expected | Mismatch |
+| Unicode | All normalization tests pass | Search misses |
+| Edge cases | No crashes | Crash or hang |
+| DDL | Index state is correct | Incorrect count |
+| Concurrency | Final state is consistent | Data corruption |
+| Cache | Hit/Miss/invalidation are correct | Stale cache |
+| Memory | No OOM crashes | OOM kill |
+| Statistics | Counters match actual operations | Discrepancy |
+| Load | p99 < baseline x 1.2, error rate < 1% | Performance degradation |
+| Persistence | Data integrity after round-trip | Data loss |
+| Resilience | Reconnect within 60 seconds | Stuck |
+| Multi-table | Tables are independent | Cross-contamination |
 
-全カテゴリ pass で終了コード 0。1つでも失敗で非0。
+Exit code 0 when all categories pass. Non-zero if any category fails.

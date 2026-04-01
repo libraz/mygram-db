@@ -105,6 +105,34 @@ If you need to validate against a custom schema (e.g., for testing or extending 
 ./build/bin/mygramdb config.yaml --schema custom-schema.json
 ```
 
+## Grafana Dashboard
+
+### grafana-dashboard.json
+
+Prometheus + Grafana dashboard for monitoring MygramDB instances.
+
+**Panels:**
+
+| Row | Left | Right |
+|-----|------|-------|
+| Header | Uptime / Clients / Documents | Memory % / Replication / Memory Health |
+| 1 | Commands / sec | Memory Usage (index / documents / RSS) |
+| 2 | Command Calls by Type (stacked) | Connected Clients |
+| 3 | Replication Events / sec | Index Size (documents / terms) |
+| 4 | Replication Status | System Memory % |
+
+**Prerequisites:**
+
+- MygramDB with HTTP API enabled (`api.http.enable: true`)
+- Prometheus scraping the `/metrics` endpoint
+
+**Import:**
+
+1. Open Grafana → Dashboards → Import
+2. Upload `grafana-dashboard.json` or paste its contents
+3. Select your Prometheus datasource
+4. Click Import
+
 ## Configuration Documentation
 
 For detailed documentation on all configuration options, see:
