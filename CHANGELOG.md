@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-04-01
+
+### Added
+
+- **DEB package support** — Ubuntu 22.04 (Jammy) and 24.04 (Noble) packages with systemd integration, user creation, and proper directory layout
+- **EL10 RPM support** — RHEL/AlmaLinux/Rocky Linux 10 packages alongside existing EL9; parametric Dockerfile with `EL_VERSION` build argument
+- **Package verification test suite** — Automated install, startup, health check, and search validation across all target distros (`support/testing/test-pkg-verify.sh`)
+- **Multi-distro CI release pipeline** — GitHub Releases now publish 8 packages (EL9/EL10 RPM + Jammy/Noble DEB x 2 architectures); filtered to main packages only
+
+### Fixed
+
+- **SIGILL on non-build CPUs** — Added `MYGRAMDB_PORTABLE_BUILD=ON` to Docker build to prevent illegal instruction crashes
+- **Coverage target shell escaping** — Added `VERBATIM` for correct argument escaping
+- **Sanitizer CI configuration** — Switched to manual-only triggers, fixed label-exclude pipe escaping
+- **Bench compose normalization** — Enabled `MEMORY_NORMALIZE_LOWER` for consistent search behavior
+
+### Changed
+
+- Upgraded third-party dependencies and hardened CI pipeline security
+- Excluded LOAD tests from default CI runs; labeled query parser perf tests as SLOW
+- Release artifacts filtered to main packages only (no debuginfo/debugsource/src)
+
+### Code Quality
+
+- Applied `clang-format` (Google style) across source and test files
+
+**Detailed Release Notes**: [docs/releases/v1.5.1.md](docs/releases/v1.5.1.md)
+
 ## [1.5.0] - 2026-03-23
 
 ### Added
@@ -401,7 +429,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/libraz/mygram-db/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/libraz/mygram-db/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mygram-db/compare/v1.3.9...v1.4.0
 [1.3.9]: https://github.com/libraz/mygram-db/compare/v1.3.8...v1.3.9
