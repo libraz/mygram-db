@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-04-09
+
+### Added
+
+- **MySQL 9.x compatibility** — Support for `MYSQL_TYPE_VECTOR` (type 242) in binlog parser; tables with VECTOR columns replicate without errors
+- **MySQL version-switchable e2e tests** — `./e2e/run-all.sh --mysql-version 9.6` to run tests against different MySQL versions
+- **VECTOR replication e2e tests** — INSERT/UPDATE/DELETE/batch scenarios for tables with VECTOR columns (MySQL 9.x only)
+- **VECTOR unit tests** — `calc_field_size()`, TABLE_MAP metadata parsing, and row data decoding for VECTOR type
+
+### Fixed
+
+- **MySQL 8.4+ authentication** — Added `MYSQL_OPT_GET_SERVER_PUBLIC_KEY` for `caching_sha2_password` without SSL, fixing connection failures on MySQL 8.4+ and 9.x
+- **e2e Docker compatibility** — Removed `--binlog-format=ROW` and `--mysql-native-password=ON` options that are deprecated/removed in MySQL 9.x
+- **Flaky truncate memory test** — Increased timeout and added `sync()` before truncate to reduce intermittent failures
+
 ## [1.5.1] - 2026-04-01
 
 ### Added

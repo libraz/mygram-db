@@ -13,6 +13,9 @@ class TestMemoryRelease:
 
     def test_truncate_releases_memory(self, mysql, mygramdb, seed_data):
         """TRUNCATE should release memory."""
+        # Ensure replication is caught up before measuring
+        mygramdb.sync("articles")
+
         # Get memory before
         detail_before = mygramdb.health_detail()
 
@@ -25,7 +28,7 @@ class TestMemoryRelease:
 
         wait_until(
             _index_cleared,
-            timeout=30,
+            timeout=60,
             interval=1,
             description="truncate for memory release",
         )

@@ -21,11 +21,9 @@ services:
       - --log-bin=mysql-bin
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
-      - --binlog-format=ROW
       - --binlog-row-image=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --mysql-native-password=ON
       - --local-infile=ON
     ports:
       - "3306:3306"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import time
@@ -28,6 +29,18 @@ MYGRAMDB_BINARY = PROJECT_ROOT / "build" / "bin" / "mygramdb"
 MYGRAMDB_CONFIG = Path(__file__).parent / "docker" / "mygramdb-test.yaml"
 MYGRAMDB_LOG = Path("/tmp/mygramdb-e2e.log")
 MYGRAMDB_DUMP_DIR = PROJECT_ROOT / "e2e" / "results" / "dumps"
+
+
+def _mysql_major_minor(version_str: str) -> tuple[int, int]:
+    """Parse MySQL version string (e.g. '9.6.0') into (major, minor)."""
+    parts = version_str.split(".")
+    return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+
+
+@pytest.fixture(scope="session")
+def mysql_version() -> tuple[int, int]:
+    """MySQL version as (major, minor) tuple, from MYSQL_VERSION env var."""
+    return _mysql_major_minor(os.environ.get("MYSQL_VERSION", "8.4"))
 
 
 @pytest.fixture(scope="session")
@@ -98,6 +111,25 @@ def mygramdb(mygramdb_process: subprocess.Popen) -> MygramdbClient:
         description="MygramDB to accept connections",
     )
     return client
+
+
+@pytest.fixture(scope="session")
+def setup_vector_table(mysql: MysqlClient, mysql_version: tuple[int, int]) -> bool:
+    """Create VECTOR table if MySQL >= 9.0. Returns True if created."""
+    if mysql_version[0] < 9:
+        return False
+    mysql.execute(
+        "CREATE TABLE IF NOT EXISTS vec_articles ("
+        "  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+        "  title VARCHAR(255) NOT NULL,"
+        "  content TEXT NOT NULL,"
+        "  embedding VECTOR(3) NOT NULL,"
+        "  status INT NOT NULL DEFAULT 1,"
+        "  enabled TINYINT NOT NULL DEFAULT 1,"
+        "  PRIMARY KEY (id)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    )
+    return True
 
 
 @pytest.fixture(scope="session")

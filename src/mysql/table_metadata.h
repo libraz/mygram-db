@@ -38,6 +38,7 @@ enum class ColumnType : uint8_t {
   TIMESTAMP2 = 17,    // TIMESTAMP with fractional seconds
   DATETIME2 = 18,     // DATETIME with fractional seconds
   TIME2 = 19,         // TIME with fractional seconds
+  VECTOR = 242,       // VECTOR (MySQL 9.0+)
   JSON = 245,         // JSON
   NEWDECIMAL = 246,   // DECIMAL
   ENUM = 247,         // ENUM

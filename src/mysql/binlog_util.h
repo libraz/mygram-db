@@ -279,6 +279,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // BLOB/TEXT types
+    case 242:    // MYSQL_TYPE_VECTOR (same encoding as BLOB)
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT)
       // metadata indicates the number of length bytes (1, 2, 3, or 4)
       uint32_t blob_len = 0;

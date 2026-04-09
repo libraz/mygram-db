@@ -100,6 +100,12 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
   }
 
+  // Enable RSA public key retrieval for caching_sha2_password without SSL.
+  // Required for MySQL 8.4+ where caching_sha2_password is the default plugin
+  // and mysql_native_password may be unavailable (removed in MySQL 9.x).
+  bool get_pubkey = true;
+  mysql_options(mysql_, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_pubkey);
+
   // Set connection timeouts (with error checking)
   if (mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout) != 0) {
     mygram::utils::StructuredLog()

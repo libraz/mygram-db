@@ -839,6 +839,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         case ColumnType::TINY_BLOB:
         case ColumnType::MEDIUM_BLOB:
         case ColumnType::LONG_BLOB:
+        case ColumnType::VECTOR:
           // 1 byte: number of length bytes (1, 2, 3, or 4)
           if (ptr + 1 <= metadata_end) {
             metadata.columns[i].metadata = *ptr;

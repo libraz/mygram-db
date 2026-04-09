@@ -2212,6 +2212,120 @@ TEST_F(RowsParserTest, GeometryTypeEmpty) {
 }
 
 // =============================================================================
+// VECTOR Type Support (MySQL 9.0+)
+// =============================================================================
+
+/**
+ * @test VECTOR type should be parsed as hex string (same encoding as BLOB)
+ *
+ * VECTOR columns store binary float data with a length prefix.
+ * The parser should handle this type and return a hex representation.
+ */
+TEST_F(RowsParserTest, VectorTypeBasic) {
+  TableMetadata table_meta;
+  table_meta.table_id = 500;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "vec_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_vec;
+  col_vec.type = ColumnType::VECTOR;  // col_type = 242
+  col_vec.name = "embedding";
+  col_vec.metadata = 4;  // 4 bytes for length prefix
+  table_meta.columns.push_back(col_vec);
+
+  // Create row data: id=1, embedding=3-dimensional float32 vector [1.0, 2.0, 3.0]
+  std::vector<unsigned char> row_data;
+
+  // id=1 (4 bytes, little-endian)
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // VECTOR: 4-byte length prefix + binary float data
+  // 3 x float32 = 12 bytes
+  std::vector<unsigned char> vec_data = {
+      0x00, 0x00, 0x80, 0x3f,  // 1.0f (little-endian IEEE 754)
+      0x00, 0x00, 0x00, 0x40,  // 2.0f
+      0x00, 0x00, 0x40, 0x40   // 3.0f
+  };
+
+  // Length prefix (4 bytes, little-endian)
+  uint32_t vec_len = vec_data.size();
+  row_data.push_back(vec_len & 0xFF);
+  row_data.push_back((vec_len >> 8) & 0xFF);
+  row_data.push_back((vec_len >> 16) & 0xFF);
+  row_data.push_back((vec_len >> 24) & 0xFF);
+
+  // Vector binary data
+  row_data.insert(row_data.end(), vec_data.begin(), vec_data.end());
+
+  std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value()) << "VECTOR type should be parsed successfully";
+  ASSERT_EQ(1, result->size());
+
+  // The vector column should exist and contain hex representation
+  ASSERT_TRUE(result->front().columns.find("embedding") != result->front().columns.end());
+  std::string vec_value = result->front().columns.at("embedding");
+  EXPECT_TRUE(vec_value.find("UNSUPPORTED") == std::string::npos)
+      << "VECTOR should not return UNSUPPORTED_TYPE, got: " << vec_value;
+  // Verify hex output matches the input bytes
+  EXPECT_EQ("0000803f0000004000004040", vec_value) << "VECTOR should return hex-encoded binary float data";
+}
+
+/**
+ * @test Empty VECTOR (zero-length) should be handled correctly
+ */
+TEST_F(RowsParserTest, VectorTypeEmpty) {
+  TableMetadata table_meta;
+  table_meta.table_id = 501;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "vec_test";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::LONG;
+  col_id.name = "id";
+  col_id.metadata = 0;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_vec;
+  col_vec.type = ColumnType::VECTOR;
+  col_vec.name = "embedding";
+  col_vec.metadata = 4;
+  table_meta.columns.push_back(col_vec);
+
+  // Create row data: id=1, embedding=empty vector (0 length)
+  std::vector<unsigned char> row_data;
+  auto id_bytes = EncodeInt32(1);
+  row_data.insert(row_data.end(), id_bytes.begin(), id_bytes.end());
+
+  // VECTOR with length 0 (4-byte length prefix = 0x00000000)
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+  row_data.push_back(0x00);
+
+  std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
+  auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+
+  ASSERT_TRUE(result->front().columns.find("embedding") != result->front().columns.end());
+  EXPECT_EQ("", result->front().columns.at("embedding")) << "Empty VECTOR should return empty string";
+}
+
+// =============================================================================
 // DECIMAL Type Precision (BUG-0087)
 // =============================================================================
 

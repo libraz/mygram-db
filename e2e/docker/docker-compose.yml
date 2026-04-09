@@ -1,6 +1,6 @@
 services:
   mysql:
-    image: mysql:8.4
+    image: mysql:${MYSQL_VERSION:-8.4}
     container_name: inttest_mysql
     ports:
       - "13306:3306"
@@ -14,11 +14,9 @@ services:
       - --log-bin=mysql-bin
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
-      - --binlog-format=ROW
       - --binlog-row-image=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --mysql-native-password=ON
     volumes:
       - inttest_mysql_data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d:ro

@@ -6,7 +6,31 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$SCRIPT_DIR"
 
+# Parse options
+MYSQL_VERSION="${MYSQL_VERSION:-8.4}"
+PYTEST_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mysql-version)
+            MYSQL_VERSION="$2"
+            shift 2
+            ;;
+        --mysql-version=*)
+            MYSQL_VERSION="${1#*=}"
+            shift
+            ;;
+        *)
+            PYTEST_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+export MYSQL_VERSION
+
 echo "=== MygramDB E2E Test Suite ==="
+echo "MySQL version: $MYSQL_VERSION"
 
 # Check MygramDB binary exists
 BINARY="$PROJECT_ROOT/build/bin/mygramdb"
@@ -31,7 +55,7 @@ mkdir -p results/reports results/metrics
 
 # Run tests (MygramDB binary is started/stopped by conftest.py)
 echo "Running tests..."
-python3 -m pytest tests/ "$@"
+python3 -m pytest tests/ "${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}"
 EXIT_CODE=$?
 
 # Cleanup

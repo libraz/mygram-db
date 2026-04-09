@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.5.1](v1.5.1.md) - Latest release (2026-04-01) - Multi-distro packaging (EL10, Ubuntu DEB), Package verification, Build fixes
+- [v1.5.2](v1.5.2.md) - Latest release (2026-04-09) - MySQL 9.x compatibility, VECTOR type support, Auth fix
+- [v1.5.1](v1.5.1.md) - 2026-04-01 - Multi-distro packaging (EL10, Ubuntu DEB), Package verification, Build fixes
 - [v1.5.0](v1.5.0.md) - 2026-03-23 - verify_text Post-Filter, Docker Benchmark, Namespace Cleanup
 - [v1.4.0](v1.4.0.md) - 2026-03-16 - Unix Socket, Prometheus Metrics, Benchmark Suite & Bug Fixes
 - [v1.3.9](v1.3.9.md) - 2026-01-10 - Critical Bug Fixes, Performance & MySQL Compatibility

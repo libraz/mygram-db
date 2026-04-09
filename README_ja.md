@@ -6,6 +6,7 @@
 [![codecov](https://codecov.io/gh/libraz/mygram-db/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mygram-db)
 [![License](https://img.shields.io/github/license/libraz/mygram-db)](https://github.com/libraz/mygram-db/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.6-blue?logo=mysql)](https://dev.mysql.com/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 
 MySQL binlog レプリケーション対応のインメモリ全文検索エンジン。100万行規模でサブミリ秒のクエリ応答。
@@ -38,7 +39,7 @@ MySQL FULLTEXT はディスク上の B-tree をスキャンするため、一般
 -- GTIDモードを確認（ONであるべき）
 SHOW VARIABLES LIKE 'gtid_mode';
 
--- OFFの場合、GTIDモードを有効化（MySQL 8.0以降）
+-- OFFの場合、GTIDモードを有効化（MySQL 8.0以降 / 9.x）
 SET GLOBAL enforce_gtid_consistency = ON;
 SET GLOBAL gtid_mode = OFF_PERMISSIVE;
 SET GLOBAL gtid_mode = ON_PERMISSIVE;
@@ -86,7 +87,7 @@ docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 ```
 
-サンプルデータ付きの MySQL 8.4 が含まれ、すぐにテストできます。
+サンプルデータ付きの MySQL 8.4 が含まれ、すぐにテストできます。MySQL 9.6 でもテスト済み。
 
 ## 基本的な使い方
 
@@ -183,7 +184,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - OS: Linux または macOS
 
 **MySQL:**
-- バージョン: 8.0+
+- バージョン: 8.4+ / 9.x（8.4 および 9.6 でテスト済み）
 - GTID モード有効化 (`gtid_mode=ON`)
 - バイナリログ形式: ROW (`binlog_format=ROW`)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
@@ -203,6 +204,13 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 ## 作者
 
 - libraz <libraz@libraz.net>
+
+## 関連プロジェクト
+
+- [mysql-event-stream](https://github.com/libraz/mysql-event-stream) - MygramDB のレプリケーション層から抽出したスタンドアロン MySQL CDC ライブラリ
+- [go-mygram-client](https://github.com/libraz/go-mygram-client) - Go クライアントライブラリ
+- [node-mygramdb-client](https://github.com/libraz/node-mygramdb-client) - Node.js クライアントライブラリ（[npm](https://www.npmjs.com/package/mygramdb-client)）
+- [python-mygramdb-client](https://github.com/libraz/python-mygramdb-client) - Python クライアントライブラリ
 
 ## 謝辞
 

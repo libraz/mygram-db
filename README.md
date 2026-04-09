@@ -6,6 +6,7 @@
 [![codecov](https://codecov.io/gh/libraz/mygram-db/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mygram-db)
 [![License](https://img.shields.io/github/license/libraz/mygram-db)](https://github.com/libraz/mygram-db/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.6-blue?logo=mysql)](https://dev.mysql.com/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 
 In-memory full-text search engine with MySQL binlog replication. Sub-millisecond queries on million-row datasets.
@@ -38,7 +39,7 @@ Benchmarked on 1.1M Wikipedia articles (EN + JA), MygramDB v1.5.0 vs MySQL 8.4 F
 -- Check GTID mode (should be ON)
 SHOW VARIABLES LIKE 'gtid_mode';
 
--- If OFF, enable GTID mode (MySQL 8.0+)
+-- If OFF, enable GTID mode (MySQL 8.0+ / 9.x)
 SET GLOBAL enforce_gtid_consistency = ON;
 SET GLOBAL gtid_mode = OFF_PERMISSIVE;
 SET GLOBAL gtid_mode = ON_PERMISSIVE;
@@ -93,7 +94,7 @@ docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"
 ```
 
-Includes MySQL 8.4 with sample data for instant testing.
+Includes MySQL 8.4 with sample data for instant testing. Also tested with MySQL 9.6.
 
 ## Basic Usage
 
@@ -190,7 +191,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - OS: Linux or macOS
 
 **MySQL:**
-- Version: 8.0+
+- Version: 8.4+ / 9.x (tested with 8.4 and 9.6)
 - GTID mode enabled (`gtid_mode=ON`)
 - Binary log format: ROW (`binlog_format=ROW`)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
@@ -210,6 +211,13 @@ For development environment setup, see [Development Guide](docs/en/development.m
 ## Authors
 
 - libraz <libraz@libraz.net>
+
+## Related Projects
+
+- [mysql-event-stream](https://github.com/libraz/mysql-event-stream) - Standalone MySQL CDC library extracted from MygramDB's replication layer
+- [go-mygram-client](https://github.com/libraz/go-mygram-client) - Go client library
+- [node-mygramdb-client](https://github.com/libraz/node-mygramdb-client) - Node.js client library ([npm](https://www.npmjs.com/package/mygramdb-client))
+- [python-mygramdb-client](https://github.com/libraz/python-mygramdb-client) - Python client library
 
 ## Acknowledgments
 

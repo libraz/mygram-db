@@ -530,6 +530,58 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
       return binlog_util::decode_decimal(data, precision, scale);
     }
 
+    case 242: {  // MYSQL_TYPE_VECTOR (same encoding as BLOB, binary float data)
+      uint32_t vec_len = 0;
+      const unsigned char* vec_data = nullptr;
+      switch (metadata) {
+        case 1:
+          if (data + 1 > end) {
+            return "[TRUNCATED]";
+          }
+          vec_len = *data;
+          vec_data = data + 1;
+          break;
+        case 2:
+          if (data + 2 > end) {
+            return "[TRUNCATED]";
+          }
+          vec_len = binlog_util::uint2korr(data);
+          vec_data = data + 2;
+          break;
+        case 3:
+          if (data + 3 > end) {
+            return "[TRUNCATED]";
+          }
+          vec_len = binlog_util::uint3korr(data);
+          vec_data = data + 3;
+          break;
+        case 4:
+          if (data + 4 > end) {
+            return "[TRUNCATED]";
+          }
+          vec_len = binlog_util::uint4korr(data);
+          vec_data = data + 4;
+          break;
+        default:
+          return "[VECTOR:INVALID_METADATA]";
+      }
+      if (vec_len > kMaxFieldLength || vec_data + vec_len > end) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "vector_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(vec_len))
+            .Error();
+        return "[TRUNCATED]";
+      }
+      // VECTOR contains binary float data; return as hex string
+      std::ostringstream oss;
+      oss << std::hex << std::setfill('0');
+      for (uint32_t i = 0; i < vec_len && vec_data != nullptr; ++i) {
+        oss << std::setw(2) << static_cast<int>(vec_data[i]);
+      }
+      return oss.str();
+    }
+
     case 255: {  // MYSQL_TYPE_GEOMETRY
       // GEOMETRY is stored like BLOB: length prefix (1-4 bytes based on metadata) + WKB data
       // metadata indicates the number of bytes used for length prefix (1, 2, 3, or 4)
