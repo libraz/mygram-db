@@ -300,19 +300,27 @@ graph TB
 #### Request Dispatch Pipeline
 
 **ConnectionAcceptor** (`connection_acceptor.h`)
-- **Responsibility**: Socket accept loop
+- **Responsibility**: Socket accept loop (TCP or UDS)
 - **Features**:
-  - `SO_RCVTIMEO` to prevent indefinite hangs
-  - Dispatches connections to thread pool
-  - Thread-safe connection tracking
+  - Hands off each accepted fd to `IoReactor` inline (accept thread → reactor, no thread-pool hop)
+  - max_connections gate with SERVER_BUSY backpressure
+  - Thread-safe `active_fds_` tracking
 
-**ConnectionIOHandler** (`connection_io_handler.h`)
-- **Responsibility**: Per-connection I/O handling
+**IoReactor** (`io_reactor.h`)
+- **Responsibility**: Single-threaded event loop for readiness notification
 - **Features**:
-  - Reads/buffers socket data
-  - Parses protocol messages (delimited by `\r\n`)
-  - Enforces maximum query length (default 1MB)
-  - Writes responses to socket
+  - `EventMultiplexer` abstraction (Linux: epoll, macOS/BSD: kqueue)
+  - Per-fd `ReactorConnection` lifecycle management
+  - Write arm/disarm (EPOLLOUT / EVFILT_WRITE), close callback
+  - Graceful shutdown
+
+**ReactorConnection** (`reactor_connection.h`)
+- **Responsibility**: Per-connection I/O state and drain-task pattern
+- **Features**:
+  - Non-blocking `recv()` drains into `read_buf_`, frames on `\r\n`
+  - Schedules at most one in-flight drain task per connection on the worker pool ("clear-then-recheck" reschedule)
+  - Non-blocking write queue (inline fast path + EPOLLOUT fallback on EAGAIN)
+  - Per-connection `max_write_queue_bytes` slow-reader backpressure cap
 
 **RequestDispatcher** (`request_dispatcher.h`)
 - **Responsibility**: Application logic routing
@@ -565,15 +573,17 @@ graph TB
     MainThread["Main Thread<br/>Application::RunMainLoop()<br/>Signal polling (SignalManager)<br/>Config reload handling<br/>Initialization/shutdown coordination"]
     BinlogThread["BinlogReader Thread (if MySQL enabled)<br/>Reads from MySQL binlog, queues events"]
     EventLoop["Event Processing Loop (main thread)<br/>Dequeues binlog events, applies to Index/DocumentStore"]
-    TCPThread["TCP Server Accept Thread<br/>Listens on TCP port, accepts connections"]
+    TCPThread["TCP/UDS Accept Thread<br/>Listens on socket, hands accepted fds directly to IoReactor"]
+    ReactorThread["IoReactor Event Loop Thread (single)<br/>Drains epoll_wait/kevent, dispatches readiness to ReactorConnection<br/>Owns per-fd write arm/disarm and close"]
     HTTPThread["HTTP Server Thread<br/>Listens on HTTP port"]
-    WorkerPool["Worker Thread Pool (configurable, default = CPU count)<br/>Thread 1: Processes client requests from queue<br/>Thread 2: ...<br/>Thread N: ..."]
+    WorkerPool["Worker Thread Pool (configurable, default = CPU count)<br/>Thread 1: Runs per-connection drain tasks (request processing + inline send)<br/>Thread 2: ...<br/>Thread N: ..."]
     SnapshotThread["SnapshotScheduler Background Thread (if enabled)<br/>Periodically creates snapshots"]
 
     Main --> MainThread
     Main --> BinlogThread
     Main --> EventLoop
     Main --> TCPThread
+    Main --> ReactorThread
     Main --> HTTPThread
     Main --> WorkerPool
     Main --> SnapshotThread
@@ -719,8 +729,9 @@ Following the dependency graph, components are initialized in this order:
    - AdminHandler, ReplicationHandler, DebugHandler
    - CacheHandler, SyncHandler (MySQL)
 6. **RequestDispatcher** (depends on handlers)
-7. **ConnectionAcceptor** (depends on thread pool)
-8. **SnapshotScheduler** (optional, depends on catalog)
+7. **ConnectionAcceptor** (depends only on ServerConfig; the reactor handler is installed later in `TcpServer::Start()`)
+8. **IoReactor** (created in `TcpServer::Start()`, depends on ThreadPool and RequestDispatcher)
+9. **SnapshotScheduler** (optional, depends on catalog)
 
 **Note**: RateLimiter and SyncOperationManager are created in `TcpServer::Start()` before ServerLifecycleManager is instantiated.
 
@@ -932,8 +943,9 @@ class InvalidationManager {
 
 ### Between Acceptor and Handlers
 
-- **ConnectionAcceptor** → accepts connection → submits to **ThreadPool**
-- **ThreadPool worker** → calls **ConnectionIOHandler** → calls **RequestDispatcher** → calls handler
+- **ConnectionAcceptor** → accepts connection → hands the fd directly to **IoReactor::Register** (no thread-pool hop)
+- **IoReactor (event loop thread)** → detects readable → **ReactorConnection::OnReadable** → extracts frames → schedules a drain task on **ThreadPool**
+- **ThreadPool worker** → **ReactorConnection::DrainTask** → dispatches each frame via **RequestDispatcher** → handler → response sent through `EnqueueResponse()` (inline fast path; partial sends fall back to EPOLLOUT in the event loop)
 
 ---
 
