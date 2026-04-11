@@ -67,6 +67,14 @@ bool ReactorConnection::OnReadable() {
     return false;
   }
 
+  // If the peer already half-closed (we saw recv()==0 on a previous readable
+  // event), suppress further recv() calls. The write side may still be open
+  // while the drain task flushes responses, so we remain registered until
+  // DrainTask finishes and marks us closing_.
+  if (read_eof_.load(std::memory_order_acquire)) {
+    return true;
+  }
+
   // 1. Drain the socket until EAGAIN / EWOULDBLOCK.
   std::array<char, kRecvChunkBytes> chunk{};
   while (true) {
@@ -88,9 +96,14 @@ bool ReactorConnection::OnReadable() {
       continue;
     }
     if (n == 0) {
-      // Peer performed orderly close.
-      closing_.store(true, std::memory_order_release);
-      // Process any already-buffered frames before tearing down.
+      // Peer performed orderly close or half-close (shutdown(SHUT_WR)). The
+      // write side of the socket may still be open, so we must not tear down
+      // the connection here — we have to finish dispatching any already
+      // framed requests and flush the response. Set read_eof_ so subsequent
+      // OnReadable calls short-circuit, then fall through to frame
+      // extraction + drain task scheduling below. The drain task closes the
+      // connection after the last response has been queued for send.
+      read_eof_.store(true, std::memory_order_release);
       break;
     }
     // n < 0
@@ -118,19 +131,31 @@ bool ReactorConnection::OnReadable() {
   }
 
   // 3. If we parsed at least one frame, make sure a drain task is running.
-  //    If none were parsed but the peer closed, we still need to tear down.
+  //    The drain task will close the connection on behalf of the read path
+  //    once read_eof_ is set and there is nothing left to flush.
   if (enqueued > 0) {
     if (!ScheduleDrainTask()) {
       return false;
     }
   }
 
-  // If the peer closed and there are no frames in flight, report close to
-  // the reactor. (If frames are still pending, the drain task will call
-  // Unregister after draining.)
-  if (closing_.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire)) {
+  // If the peer half-closed and there are no frames in flight and nothing
+  // pending in the write queue, we can tear down immediately. Otherwise the
+  // drain task (or OnWritable, after the write queue drains) will do the
+  // close for us.
+  if (read_eof_.load(std::memory_order_acquire)) {
+    bool nothing_to_dispatch = false;
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex_);
+      nothing_to_dispatch = pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire);
+    }
+    bool write_queue_empty = false;
+    {
+      std::lock_guard<std::mutex> lock(write_mutex_);
+      write_queue_empty = write_queue_.empty();
+    }
+    if (nothing_to_dispatch && write_queue_empty) {
+      closing_.store(true, std::memory_order_release);
       return false;
     }
   }
@@ -157,6 +182,15 @@ bool ReactorConnection::OnWritable() {
     }
     if (closing_.load(std::memory_order_acquire)) {
       return false;
+    }
+    // Peer already half-closed and the drain task has no more work in
+    // flight: we just flushed the last response, so unregister now.
+    if (read_eof_.load(std::memory_order_acquire) && !drain_scheduled_.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> frames_lock(frame_mutex_);
+      if (pending_frames_.empty()) {
+        closing_.store(true, std::memory_order_release);
+        return false;
+      }
     }
   }
   // Partial drain: leave the queue armed, fire again on next writable event.
@@ -274,6 +308,22 @@ void ReactorConnection::DrainTask() {
   if (reschedule) {
     (void)ScheduleDrainTask();
     return;
+  }
+
+  // If the peer half-closed (recv()==0) and we just finished dispatching the
+  // last buffered frame, we own the close. Wait for the write queue to
+  // drain first — the last response may still be in flight via
+  // EnqueueResponse's EPOLLOUT fallback, in which case OnWritable will
+  // perform the unregister once the queue empties.
+  if (read_eof_.load(std::memory_order_acquire) && !closing_.load(std::memory_order_acquire)) {
+    bool write_queue_empty = false;
+    {
+      std::lock_guard<std::mutex> lock(write_mutex_);
+      write_queue_empty = write_queue_.empty();
+    }
+    if (write_queue_empty) {
+      closing_.store(true, std::memory_order_release);
+    }
   }
 
   if (closing_.load(std::memory_order_acquire) && reactor_ != nullptr) {

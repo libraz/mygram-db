@@ -251,10 +251,20 @@ void IoReactor::DispatchEvent(const reactor::ReadyEvent& ev) {
   }
 
   bool keep = true;
-  if ((ev.events & (reactor::event::kError | reactor::event::kHangup)) != 0) {
+  // Hard error events short-circuit straight to OnError: the socket is no
+  // longer usable for either read or write.
+  if ((ev.events & reactor::event::kError) != 0) {
     keep = conn->OnError();
   } else {
-    if ((ev.events & reactor::event::kReadable) != 0 && keep) {
+    // Hangup alone (EV_EOF on kqueue / EPOLLRDHUP on epoll) means the peer
+    // half-closed the write side of its socket. The *read* side of the
+    // server->client direction is still open, and the kernel may still have
+    // buffered payload bytes waiting to be drained. Fall through into
+    // OnReadable: its recv()==0 path sets read_eof_, finishes processing
+    // any pending frames, flushes the response via the drain task, and
+    // only then unregisters. Treating kHangup as a fatal error here causes
+    // the server to drop half-closed clients' responses on the floor.
+    if ((ev.events & (reactor::event::kReadable | reactor::event::kHangup)) != 0 && keep) {
       keep = conn->OnReadable();
     }
     if ((ev.events & reactor::event::kWritable) != 0 && keep) {

@@ -289,7 +289,19 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   bool write_armed_ = false;      ///< Whether reactor_->ArmWrite was called for this fd.
 
   // Atomic flags.
+  /// Hard-close flag: connection must be torn down as soon as inflight work
+  /// completes. Set on I/O errors, overflow, or after a half-closed client's
+  /// pending frames have been fully dispatched *and* the write queue has
+  /// drained. `EnqueueResponse` refuses to accept new writes when this is set.
   std::atomic<bool> closing_{false};
+  /// Peer-has-stopped-writing flag: set when recv() returns 0 (orderly FIN
+  /// from the client, including shutdown(SHUT_WR) half-close). Distinct from
+  /// `closing_` because the server must still be allowed to flush the
+  /// response for any already-buffered frames back to the peer — a TCP
+  /// half-close keeps the write side open. Once set, OnReadable stops
+  /// issuing recv() calls; the drain task closes the connection after the
+  /// last response has been queued for send.
+  std::atomic<bool> read_eof_{false};
   std::atomic<bool> drain_scheduled_{false};
 
   // Mirror of `write_queue_bytes_` for lock-free metric readers.

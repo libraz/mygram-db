@@ -1246,6 +1246,68 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   std::filesystem::remove(sock_path, ec);
 }
 
+// ----------------------------------------------------------------------------
+// Gap D — TCP half-close (shutdown(SHUT_WR)) must still receive the response
+// ----------------------------------------------------------------------------
+//
+// Regression guard for a bug in the initial reactor: when a client sent a
+// request and then `shutdown(SHUT_WR)`, the server's recv() returned 0 and
+// the reactor set `closing_`, which caused `EnqueueResponse` to reject the
+// outgoing response. The client saw a RST instead of the INFO body.
+//
+// This test mirrors e2e/tests/load/test_connection_stress.py::
+// test_half_close_write and locks in the invariant that the server must
+// finish dispatching + flushing any already-framed requests back to the peer
+// before tearing the connection down, even after an orderly FIN on the
+// read side.
+TEST_F(ReactorIntegrationTest, HalfCloseStillReceivesResponse) {
+  auto server = StartServer();
+  const uint16_t port = server->GetPort();
+
+  int s = Connect(port);
+  ASSERT_GE(s, 0) << "connect() failed";
+
+  // Send INFO and immediately half-close the write side. On kqueue this
+  // delivers the readable event together with EV_EOF, so IoReactor must
+  // route kHangup into OnReadable (not straight to OnError) and
+  // OnReadable's recv()==0 path must schedule a drain task that flushes the
+  // INFO response before unregistering.
+  const std::string wire = "INFO\r\n";
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0),
+            static_cast<ssize_t>(wire.size()));
+  ASSERT_EQ(::shutdown(s, SHUT_WR), 0) << "shutdown(SHUT_WR) failed: " << strerror(errno);
+
+  // Read raw bytes until the server closes or we time out. We cannot use
+  // RecvMultilineResponse here because it returns "" on EOF even if bytes
+  // were already accumulated — in the half-close scenario the server closes
+  // after flushing the response, so we must retain whatever we read before
+  // the EOF.
+  struct timeval io {};
+  io.tv_sec = 3;
+  io.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
+
+  std::string out;
+  std::array<char, 4096> buf{};
+  while (out.size() < 256 * 1024) {
+    ssize_t n = recv(s, buf.data(), buf.size(), 0);
+    if (n <= 0) break;  // EOF or timeout — keep whatever we already buffered
+    out.append(buf.data(), static_cast<size_t>(n));
+  }
+  close(s);
+
+  EXPECT_FALSE(out.empty())
+      << "Server did not send any bytes after client half-closed write side "
+         "— reactor likely treated recv()==0 as a hard close and dropped "
+         "the buffered INFO response.";
+  if (!out.empty()) {
+    EXPECT_EQ(out.substr(0, 7), "OK INFO")
+        << "Unexpected INFO response after half-close: " << out.substr(0, 64);
+  }
+
+  server->Stop();
+}
+
 }  // namespace mygramdb::server
 
 #endif  // platform guard
