@@ -15,6 +15,7 @@
 
 #include "config/config.h"
 #include "server/tcp_server.h"
+#include "test_io_model_override.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb;
@@ -86,6 +87,7 @@ class EndToEndTest : public ::testing::Test {
     config_.port = 0;  // Random port
     config_.host = "127.0.0.1";
     config_.allow_cidrs = {"127.0.0.1/32"};
+    mygramdb::server::test::ApplyIoModelOverride(config_);
 
     server_ = std::make_unique<TcpServer>(config_, table_contexts_, "./snapshots", nullptr);
     ASSERT_TRUE(server_->Start());

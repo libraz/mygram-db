@@ -591,3 +591,44 @@ gtest_discover_tests(connection_acceptor_unix_test
   PROPERTIES RESOURCE_LOCK server_socket
 )
 
+
+add_subdirectory(reactor)
+
+# IoReactor tests (Phase 2.T5)
+
+add_executable(io_reactor_test
+  io_reactor_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor/mock_event_multiplexer.cpp
+)
+
+target_link_libraries(io_reactor_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+target_include_directories(io_reactor_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor
+)
+
+gtest_discover_tests(io_reactor_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
+# ReactorConnection unit tests (Phase 2.T4)
+
+add_executable(reactor_connection_test
+  reactor_connection_test.cpp
+)
+
+target_link_libraries(reactor_connection_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(reactor_connection_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)

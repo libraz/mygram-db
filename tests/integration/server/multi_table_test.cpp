@@ -17,6 +17,7 @@
 
 #include "config/config.h"
 #include "server/tcp_server.h"
+#include "test_io_model_override.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
@@ -68,6 +69,7 @@ TEST(TcpServerMultiTableTest, MultiTableSearch) {
   config.port = 0;
   config.host = "127.0.0.1";
   config.allow_cidrs = {"127.0.0.1/32"};
+  mygramdb::server::test::ApplyIoModelOverride(config);
 
   mygramdb::server::TcpServer server(config, table_contexts, "./snapshots", nullptr);
   ASSERT_TRUE(server.Start());
@@ -167,6 +169,7 @@ TEST(TcpServerMultiTableTest, MultiTableCount) {
   config.port = 0;
   config.host = "127.0.0.1";
   config.allow_cidrs = {"127.0.0.1/32"};
+  mygramdb::server::test::ApplyIoModelOverride(config);
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -248,6 +251,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   config.port = 0;
   config.host = "127.0.0.1";
   config.allow_cidrs = {"127.0.0.1/32"};
+  mygramdb::server::test::ApplyIoModelOverride(config);
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -345,6 +349,7 @@ TEST(TcpServerMultiTableTest, MultiTableInfo) {
   config.port = 0;
   config.host = "127.0.0.1";
   config.allow_cidrs = {"127.0.0.1/32"};
+  mygramdb::server::test::ApplyIoModelOverride(config);
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 
@@ -415,6 +420,7 @@ TEST(TcpServerMultiTableTest, TableIsolation) {
   config.port = 0;
   config.host = "127.0.0.1";
   config.allow_cidrs = {"127.0.0.1/32"};
+  mygramdb::server::test::ApplyIoModelOverride(config);
   mygramdb::server::TcpServer server(config, table_contexts);
   ASSERT_TRUE(server.Start());
 

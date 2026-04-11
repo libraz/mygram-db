@@ -24,6 +24,7 @@
 
 #include "config/config.h"
 #include "server/tcp_server.h"
+#include "test_io_model_override.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb;
@@ -140,6 +141,7 @@ class VerifyTextAllTest : public ::testing::Test {
     server_config_.port = 0;
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
+    mygramdb::server::test::ApplyIoModelOverride(server_config_);
 
     // Create dump directory
     test_dump_dir_ = std::filesystem::temp_directory_path() / ("verify_text_test_" + std::to_string(getpid()));
@@ -321,6 +323,7 @@ class VerifyTextAsciiTest : public ::testing::Test {
     server_config_.port = 0;
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
+    mygramdb::server::test::ApplyIoModelOverride(server_config_);
 
     server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, "./test_snapshots", full_config_.get());
     ASSERT_TRUE(server_->Start());
@@ -409,6 +412,7 @@ class VerifyTextOffTest : public ::testing::Test {
     server_config_.port = 0;
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
+    mygramdb::server::test::ApplyIoModelOverride(server_config_);
 
     server_ = std::make_unique<TcpServer>(server_config_, table_contexts_, "./test_snapshots", full_config_.get());
     ASSERT_TRUE(server_->Start());
@@ -480,6 +484,7 @@ class VerifyTextDumpConsistencyTest : public ::testing::Test {
     server_config_.port = 0;
     server_config_.host = "127.0.0.1";
     server_config_.allow_cidrs = {"127.0.0.1/32"};
+    mygramdb::server::test::ApplyIoModelOverride(server_config_);
 
     test_dump_dir_ = std::filesystem::temp_directory_path() / ("verify_dump_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(test_dump_dir_);
