@@ -1,23 +1,16 @@
 /**
  * @file reactor_starvation_regression_test.cpp
- * @brief Phase 2.T7 — GOAL test: reactor mode must NOT exhibit the blocking
- *        I/O model's starvation failure.
+ * @brief Reactor-mode invariant: decouples the concurrent-client count from
+ *        the worker pool size.
  *
- * The blocking I/O model pins one worker thread per persistent TCP connection.
- * When the number of idle persistent clients >= worker pool size, no newly-
- * submitted task makes progress until a pinned recv() idle timeout fires.
- * In production this manifested as queue full + 5xx cascades.
+ * The reactor I/O model uses an epoll/kqueue event loop + drain-task-per-
+ * connection workers, so persistent idle clients do NOT pin worker threads.
+ * These tests prove the invariant holds.
  *
- * The reactor I/O model (Phase 2) replaces this with an epoll/kqueue event
- * loop + drain-task-per-connection workers, decoupling the concurrent-client
- * count from the worker pool size. These tests prove the replacement works.
- *
- * Test 1 (positive control): reactor mode with 128 persistent clients + 1 late
- *   client, worker_threads=2 — late client MUST get a response within 500 ms.
- * Test 2 (throughput): 256 persistent clients each sending 10 INFO requests —
+ * Test 1: 128 persistent clients + 1 late client, worker_threads=2 — late
+ *   client MUST get a response within 500 ms.
+ * Test 2: 128 persistent clients each sending 10 INFO requests —
  *   no ERR SERVER_BUSY, all responses are OK INFO.
- * Test 3 (negative control): blocking mode with 8 idle clients, worker_threads=2
- *   — late client MUST NOT get a response within 1.5 s.
  *
  * Labeled "INTEGRATION" — runs via `ctest -L INTEGRATION`.
  * RESOURCE_LOCK "server_port" — each test binds a real OS port.
@@ -177,57 +170,23 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
     return "";
   }
 
-  /**
-   * @brief Read a single-line response (no internal CRLFs) terminated by `\r\n`.
-   *
-   * Used by the blocking-mode negative control test, where the late client
-   * must receive NO response at all — so we only need to observe the empty
-   * string return on timeout.
-   */
-  std::string RecvLine(int sock, int timeout_ms = 2000) {
-    struct timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    std::string out;
-    std::array<char, 512> buf{};
-    while (out.size() < 8192) {
-      ssize_t n = recv(sock, buf.data(), buf.size(), 0);
-      if (n <= 0) {
-        return "";
-      }
-      out.append(buf.data(), static_cast<size_t>(n));
-      if (out.find("\r\n") != std::string::npos) {
-        break;
-      }
-    }
-    auto pos = out.find("\r\n");
-    if (pos != std::string::npos) {
-      out.resize(pos);
-    }
-    return out;
-  }
-
   // -------------------------------------------------------------------------
   // Server factory
   // -------------------------------------------------------------------------
-  std::unique_ptr<TcpServer> StartServer(const std::string& io_model, int worker_threads,
-                                         int max_connections = 512) {
+  std::unique_ptr<TcpServer> StartServer(int worker_threads, int max_connections = 512) {
     ServerConfig cfg;
     cfg.host = "127.0.0.1";
     cfg.port = 0;
     cfg.worker_threads = worker_threads;
     cfg.max_connections = max_connections;
-    cfg.io_model = io_model;
     cfg.allow_cidrs = {"127.0.0.1/32"};
     // Disable recv timeout so idle persistent clients don't self-terminate
     // during the test; the starvation window is deliberately short.
     cfg.recv_timeout_sec = 0;
     auto s = std::make_unique<TcpServer>(cfg, table_contexts_);
     auto res = s->Start();
-    EXPECT_TRUE(res) << "Failed to start TcpServer (" << io_model
-                     << "): " << (res ? std::string{} : res.error().to_string());
+    EXPECT_TRUE(res) << "Failed to start TcpServer: "
+                     << (res ? std::string{} : res.error().to_string());
     // Give the accept loop a moment to reach its main select/epoll/kqueue call.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return s;
@@ -259,14 +218,13 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
 };
 
 // ---------------------------------------------------------------------------
-// Test 1 — Positive control: reactor serves 128 persistent clients without
-//           starving a late client (worker_threads = 2).
+// Test 1 — Reactor serves 128 persistent clients without starving a late
+//           client (worker_threads = 2).
 // ---------------------------------------------------------------------------
 /**
- * Pin 128 persistent idle clients against a 2-worker reactor server.
- * In the blocking model this is impossible: only 2 clients would ever reach
- * a worker. In reactor mode the event loop dispatches all 128 initial INFO
- * responses, and the 129th (late) client still gets a reply within 500 ms.
+ * Pin 128 persistent idle clients against a 2-worker reactor server. The
+ * event loop dispatches all 128 initial INFO responses, and the 129th
+ * (late) client still gets a reply within 500 ms.
  */
 TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarvation) {
   // Need at least 256 fds: 128 pinned + 1 late + server-side fds + overhead.
@@ -279,19 +237,11 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
 
   constexpr int kWorkers = 2;
   constexpr int kPinnedClients = 128;
-  auto server = StartServer("reactor", kWorkers, /*max_connections=*/512);
+  auto server = StartServer(kWorkers, /*max_connections=*/512);
   uint16_t port = server->GetPort();
-
-  // Skip if the reactor backend is not available on this platform.
-  if (!server->IsReactorActiveForTest()) {
-    server->Stop();
-    GTEST_SKIP() << "Reactor backend not available on this platform (fell back to "
-                    "blocking mode). Skipping reactor-specific test.";
-  }
 
   // --- Pin kPinnedClients persistent idle clients ---
   // Each sends INFO once (to exercise the reactor's drain path), then idles.
-  // In blocking mode the 3rd client onward would not get a response at all.
   std::vector<int> pinned;
   pinned.reserve(kPinnedClients);
   int pin_failures = 0;
@@ -342,10 +292,8 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
       << " pinned clients received their initial INFO response. "
          "The reactor event loop did not dispatch all connections.";
 
-  // All pinned clients are now idle (last recv() returned, no new send).
-  // In blocking mode the workers would be idle-looping in recv() for each.
-  // In reactor mode the workers are free; the event loop is the only thing
-  // monitoring those fds.
+  // All pinned clients are now idle. In reactor mode the workers are free;
+  // the event loop is the only thing monitoring those fds.
 
   // --- Late client ---
   int late = Connect(port);
@@ -382,14 +330,14 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — Throughput: 256 persistent clients × 10 INFO requests, no
+// Test 2 — Throughput: 128 persistent clients × 10 INFO requests, no
 //           ERR SERVER_BUSY, all responses are "OK INFO".
 // ---------------------------------------------------------------------------
 /**
- * Open 256 connections and send 10 sequential INFO requests on each. With
- * only 2 worker threads in blocking mode this would deadlock immediately.
- * In reactor mode the event loop processes reads and dispatches drain tasks
- * back-to-back on the small pool, and all 2560 responses arrive correctly.
+ * Open 128 connections and send 10 sequential INFO requests on each. In
+ * reactor mode the event loop processes reads and dispatches drain tasks
+ * back-to-back on a small worker pool, and all 1280 responses arrive
+ * correctly.
  */
 TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) {
   // 256 client fds + server-side fds + overhead.
@@ -406,13 +354,8 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
   constexpr int kRequestsPerClient = 10;
   constexpr int kExpectedTotal = kClients * kRequestsPerClient;
 
-  auto server = StartServer("reactor", kWorkers, /*max_connections=*/512);
+  auto server = StartServer(kWorkers, /*max_connections=*/512);
   uint16_t port = server->GetPort();
-
-  if (!server->IsReactorActiveForTest()) {
-    server->Stop();
-    GTEST_SKIP() << "Reactor backend not available on this platform.";
-  }
 
   // Open kClients connections.
   std::vector<int> clients;
@@ -490,84 +433,6 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
 
   // Cleanup
   for (int s : clients) close(s);
-  server->Stop();
-}
-
-// ---------------------------------------------------------------------------
-// Test 3 — Negative control: blocking mode starves under the same load.
-// ---------------------------------------------------------------------------
-/**
- * Pin 8 idle persistent clients against a 2-worker BLOCKING server.
- * The late client's INFO MUST NOT arrive within 1.5 s, proving that the
- * starvation mechanism is real and the reactor test is discriminating.
- *
- * If this test ever starts failing (blocking mode becomes responsive), either
- * (a) the thread pool was enlarged beyond the pinned-client count, or
- * (b) the blocking model was silently replaced with a reactor. Either way,
- * the discriminating property of Test 1 is no longer valid and both tests
- * need to be reviewed.
- */
-TEST_F(ReactorStarvationRegressionTest, BlockingModeStarvesUnderSameLoad) {
-  constexpr int kWorkers = 2;
-  constexpr int kPinnedClients = 8;  // > kWorkers → guaranteed starvation
-
-  auto server = StartServer("blocking", kWorkers, /*max_connections=*/512);
-  uint16_t port = server->GetPort();
-
-  // The blocking model must be engaged; if somehow the reactor activated,
-  // skip rather than give a false-green result.
-  if (server->IsReactorActiveForTest()) {
-    server->Stop();
-    GTEST_SKIP() << "Reactor is active even though io_model=blocking was requested. "
-                    "Blocking-mode negative control is not valid in this configuration.";
-  }
-
-  // --- Pin kPinnedClients persistent idle clients ---
-  std::vector<int> pinned;
-  pinned.reserve(kPinnedClients);
-  for (int i = 0; i < kPinnedClients; ++i) {
-    int s = Connect(port);
-    ASSERT_GE(s, 0) << "Failed to connect pinning client " << i;
-    ASSERT_TRUE(SendLine(s, "INFO"));
-    // Receive the first response (this uses one worker during HandleConnection
-    // setup; the worker then loops back into blocking recv()).
-    std::string resp = RecvLine(s, /*timeout_ms=*/2000);
-    // Only the first kWorkers clients will actually get a response; the rest
-    // will time out because all workers are pinned. Accept either outcome —
-    // the important assertion is on the late client below.
-    (void)resp;
-    pinned.push_back(s);
-  }
-
-  // Give workers time to return to their blocking recv() loops.
-  std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-  // --- Late client ---
-  int late = Connect(port);
-  ASSERT_GE(late, 0) << "Failed to connect late client";
-  ASSERT_TRUE(SendLine(late, "INFO"));
-
-  auto t0 = std::chrono::steady_clock::now();
-  std::string resp = RecvLine(late, /*timeout_ms=*/1500);
-  auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-          .count();
-
-  // This is the permanent regression gate.  If this assertion ever fails, the
-  // blocking connection model has been replaced and Test 1 + Test 2 above are
-  // the definitive PASS criteria.
-  EXPECT_TRUE(resp.empty())
-      << "Blocking-mode late INFO was served in " << elapsed_ms
-      << "ms despite all " << kWorkers
-      << " workers being pinned by " << kPinnedClients
-      << " idle persistent clients. Has the connection-per-worker model been "
-         "replaced? If so, update the negative control to expect success.";
-
-  std::cout << "[T3] blocking_late_client_elapsed_ms=" << elapsed_ms
-            << " (expected: no response within 1500ms)" << std::endl;
-
-  close(late);
-  for (int s : pinned) close(s);
   server->Stop();
 }
 

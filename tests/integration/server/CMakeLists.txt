@@ -26,28 +26,12 @@ target_link_libraries(multi_table_integration_test
   mygramdb_server
   GTest::gtest_main
 )
-target_include_directories(multi_table_integration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(multi_table_integration_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
-)
-
-# Dual-mode CI (design doc Phase 2.6, deferred to Phase 3): the gtest_discover_tests
-# call above registers the binary's tests under the reactor default. Add a second
-# whole-binary ctest entry that runs the same binary with MYGRAMDB_TEST_IO_MODEL=blocking
-# so the blocking fallback I/O model keeps integration coverage.
-add_test(
-  NAME multi_table_integration_test.BlockingMode
-  COMMAND multi_table_integration_test
-)
-set_tests_properties(multi_table_integration_test.BlockingMode PROPERTIES
-  ENVIRONMENT "MYGRAMDB_TEST_IO_MODEL=blocking"
-  LABELS "INTEGRATION_BLOCKING"
-  RESOURCE_LOCK server_port
-  TIMEOUT 120
 )
 
 # End-to-End Integration Tests
@@ -59,25 +43,12 @@ target_link_libraries(end_to_end_integration_test
   mygramdb_server
   GTest::gtest_main
 )
-target_include_directories(end_to_end_integration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 gtest_discover_tests(end_to_end_integration_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
-)
-
-# Dual-mode CI: re-run the same binary with MYGRAMDB_TEST_IO_MODEL=blocking.
-add_test(
-  NAME end_to_end_integration_test.BlockingMode
-  COMMAND end_to_end_integration_test
-)
-set_tests_properties(end_to_end_integration_test.BlockingMode PROPERTIES
-  ENVIRONMENT "MYGRAMDB_TEST_IO_MODEL=blocking"
-  LABELS "INTEGRATION_BLOCKING"
-  RESOURCE_LOCK server_port
-  TIMEOUT 120
 )
 
 # Stress Tests
@@ -101,10 +72,9 @@ gtest_discover_tests(stress_test
 
 # Thread pool saturation regression tests
 #
-# Regression gate for the blocking I/O model's starvation failure mode:
-# ConnectionIOHandler holds one worker thread per persistent connection for
-# its entire lifetime, so W idle clients starve every subsequent request
-# until recv() idle timeouts fire.
+# Positive-control suite for the reactor I/O model: confirms that idle
+# persistent clients do NOT pin worker threads and that late clients are
+# served promptly even when many persistent clients are connected.
 #
 # LOAD-labeled so it runs only via `make test-load` / `ctest -L LOAD`,
 # not in `make test-fast` / CI.
@@ -154,7 +124,6 @@ target_link_libraries(verify_text_integration_test
   mygramdb_server
   GTest::gtest_main
 )
-target_include_directories(verify_text_integration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid port binding and file I/O conflicts
 gtest_discover_tests(verify_text_integration_test
@@ -164,25 +133,11 @@ gtest_discover_tests(verify_text_integration_test
     RESOURCE_LOCK server_port
 )
 
-# Dual-mode CI: re-run the same binary with MYGRAMDB_TEST_IO_MODEL=blocking.
-add_test(
-  NAME verify_text_integration_test.BlockingMode
-  COMMAND verify_text_integration_test
-)
-set_tests_properties(verify_text_integration_test.BlockingMode PROPERTIES
-  ENVIRONMENT "MYGRAMDB_TEST_IO_MODEL=blocking"
-  LABELS "INTEGRATION_BLOCKING"
-  RESOURCE_LOCK server_port
-  TIMEOUT 120
-)
-
 # Reactor starvation regression tests (Phase 2.T7)
 #
-# Goal test: reactor mode must NOT exhibit the blocking I/O model's
-# starvation failure. Three tests:
-#   T1 — positive control: reactor with 128 persistent clients + late client
-#   T2 — throughput: 256 clients × 10 INFO requests, no ERR SERVER_BUSY
-#   T3 — negative control: blocking mode starves under 8 persistent clients
+# Reactor-mode invariant checks:
+#   T1 — 128 persistent clients + late client served promptly
+#   T2 — 256 clients × 10 INFO requests, no ERR SERVER_BUSY
 add_executable(reactor_starvation_regression_test
   reactor_starvation_regression_test.cpp
 )
@@ -203,9 +158,8 @@ gtest_discover_tests(reactor_starvation_regression_test
 
 # Reactor I/O model integration tests (Phase 2.T6)
 #
-# Exercises the end-to-end reactor path: config io_model="reactor" ->
-# IoReactor (epoll/kqueue) -> ReactorConnection drain-task pattern ->
-# RequestDispatcher.  Tests skip at runtime on platforms without epoll/kqueue.
+# Exercises the end-to-end reactor path: IoReactor (epoll/kqueue) ->
+# ReactorConnection drain-task pattern -> RequestDispatcher.
 add_executable(reactor_integration_test
   reactor_integration_test.cpp
 )

@@ -1,15 +1,11 @@
 /**
  * @file reactor_integration_test.cpp
- * @brief Integration tests for the reactor I/O model against a real TcpServer.
+ * @brief Integration tests for the reactor I/O path against a real TcpServer.
  *
  * These tests exercise the end-to-end reactor path:
- *   config_.io_model == "reactor"
- *   -> IoReactor (epoll on Linux, kqueue on macOS)
+ *   IoReactor (epoll on Linux, kqueue on macOS)
  *   -> ReactorConnection per-fd drain-task pattern
  *   -> RequestDispatcher -> INFO handler -> response written on worker thread
- *
- * On platforms with no supported event multiplexer (not Linux, macOS, or
- * BSD), the fixture skips all tests at runtime via GTEST_SKIP().
  *
  * Labeled "INTEGRATION" — included in `ctest -L INTEGRATION`.
  */
@@ -88,11 +84,7 @@ class ReactorIntegrationTest : public ::testing::Test {
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Start a TcpServer in reactor mode and return it.
-   *
-   * If the platform has no supported event multiplexer the reactor silently
-   * falls back to blocking mode. Callers that need reactor mode specifically
-   * should check `server->IsReactorActiveForTest()` and GTEST_SKIP if false.
+   * @brief Start a TcpServer and return it.
    */
   std::unique_ptr<TcpServer> StartServer(int worker_threads = 8, int max_connections = 512,
                                           int64_t max_write_queue_bytes = 0) {
@@ -102,7 +94,6 @@ class ReactorIntegrationTest : public ::testing::Test {
     cfg.worker_threads = worker_threads;
     cfg.max_connections = max_connections;
     cfg.allow_cidrs = {"127.0.0.1/32"};
-    cfg.io_model = "reactor";
     if (max_write_queue_bytes > 0) {
       cfg.max_write_queue_bytes = max_write_queue_bytes;
     }
@@ -114,17 +105,6 @@ class ReactorIntegrationTest : public ::testing::Test {
     // Give the accept loop a moment to reach its main loop.
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     return s;
-  }
-
-  /**
-   * @brief Require reactor mode; skip the test if the server fell back to
-   *        blocking (happens when no epoll/kqueue factory is available).
-   */
-  static void RequireReactor(const TcpServer& server) {
-    if (!server.IsReactorActiveForTest()) {
-      GTEST_SKIP() << "IoReactor is not active on this build/platform "
-                      "(no epoll/kqueue available); skipping reactor-specific test.";
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -283,7 +263,6 @@ class ReactorIntegrationTest : public ::testing::Test {
  */
 TEST_F(ReactorIntegrationTest, InfoCommandRoundtrip) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   int s = Connect(port);
@@ -306,7 +285,6 @@ TEST_F(ReactorIntegrationTest, InfoCommandRoundtrip) {
  */
 TEST_F(ReactorIntegrationTest, MultipleSequentialCommands) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   int s = Connect(port);
@@ -335,7 +313,6 @@ TEST_F(ReactorIntegrationTest, MultipleSequentialCommands) {
  */
 TEST_F(ReactorIntegrationTest, PersistentConnectionPipelining) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   int s = Connect(port);
@@ -368,7 +345,6 @@ TEST_F(ReactorIntegrationTest, PersistentConnectionPipelining) {
  */
 TEST_F(ReactorIntegrationTest, ConcurrentClients100) {
   auto server = StartServer(/*worker_threads=*/8);
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   constexpr int kClients = 100;
@@ -432,7 +408,6 @@ TEST_F(ReactorIntegrationTest, ConcurrentClients100) {
  */
 TEST_F(ReactorIntegrationTest, ConcurrentClientsMany) {
   auto server = StartServer(/*worker_threads=*/16);
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // Each client needs ~2 fds (client-side sock + server-side sock) plus
@@ -512,7 +487,6 @@ TEST_F(ReactorIntegrationTest, ConcurrentClientsMany) {
  */
 TEST_F(ReactorIntegrationTest, ClientDisconnectMidRequest) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // Abrupt client
@@ -561,7 +535,6 @@ TEST_F(ReactorIntegrationTest, ClientDisconnectMidRequest) {
  */
 TEST_F(ReactorIntegrationTest, ClientDisconnectDuringResponse) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // Attempt to trigger EPIPE: send INFO, read 1 byte, close immediately
@@ -606,7 +579,6 @@ TEST_F(ReactorIntegrationTest, ClientDisconnectDuringResponse) {
  */
 TEST_F(ReactorIntegrationTest, GracefulShutdownWithActiveClients) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   constexpr int kPersistentClients = 10;
@@ -658,16 +630,13 @@ TEST_F(ReactorIntegrationTest, GracefulShutdownWithActiveClients) {
 // ============================================================================
 
 /**
- * After Start(), IsReactorActiveForTest() must return true (handled by
- * RequireReactor which would skip otherwise).  Additionally verify that
- * zero clients are connected at baseline.
+ * After Start(), zero clients are connected at baseline and one request
+ * routes through the reactor.
  */
 TEST_F(ReactorIntegrationTest, BackendIsReactor) {
   auto server = StartServer();
-  RequireReactor(*server);
 
   // Reactor is running; no clients yet.
-  EXPECT_TRUE(server->IsReactorActiveForTest());
   EXPECT_EQ(server->GetConnectionCount(), 0U);
 
   // One quick request to confirm it actually routes through the reactor.
@@ -679,7 +648,6 @@ TEST_F(ReactorIntegrationTest, BackendIsReactor) {
   close(s);
 
   server->Stop();
-  EXPECT_FALSE(server->IsReactorActiveForTest());
 }
 
 // ============================================================================
@@ -697,7 +665,6 @@ TEST_F(ReactorIntegrationTest, ReactorModeDoesNotStarvePersistentFleet) {
   // reactor degraded to one-worker-per-connection.
   constexpr int kWorkers = 4;
   auto server = StartServer(kWorkers);
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // Pin 8 persistent idle clients (> kWorkers to stress-test)
@@ -745,7 +712,6 @@ TEST_F(ReactorIntegrationTest, ReactorModeDoesNotStarvePersistentFleet) {
  */
 TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
   auto server = StartServer();
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // --- Sub-cap frame (slightly under 1 MiB) ---
@@ -851,7 +817,6 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
   // non-reading peer will exceed it within a few hundred milliseconds.
   constexpr int64_t kCapBytes = 64 * 1024;
   auto server = StartServer(/*worker_threads=*/4, /*max_connections=*/64, kCapBytes);
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // -------------------------------------------------------------------------
@@ -1004,7 +969,6 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
   // worker count does NOT have to scale with the idle-connection count.
   constexpr int kWorkers = 8;
   auto server = StartServer(kWorkers, /*max_connections=*/static_cast<int>(idle_count + 64));
-  RequireReactor(*server);
   uint16_t port = server->GetPort();
 
   // Open idle_count persistent clients: each sends one INFO to prove the
@@ -1070,26 +1034,15 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
 }
 
 // ============================================================================
-// Phase 3.7 gap regression guards
+// Reactor-path regression guards
 // ============================================================================
 //
-// The tests below pin reactor-path invariants that were *silently* lost when
-// the default io_model flipped to "reactor" in Phase 3. The blocking path's
-// HandleConnection historically enforced rate limiting and max_query_length
-// and handled UDS fds; the initial reactor implementation did not plumb any
-// of this through. These tests fail on the Phase 3 code so the gap cannot be
-// reintroduced, and must stay green through Phase 4 (blocking removal).
+// These tests pin reactor-path invariants for rate limiting, max_query_length
+// enforcement, and UDS handling. They must stay green.
 
 // ----------------------------------------------------------------------------
-// Gap A — Rate limiter wiring
+// Rate limiter wiring
 // ----------------------------------------------------------------------------
-//
-// The blocking path called `rate_limiter_->AllowRequest(client_ip)` in
-// TcpServer::HandleConnection (tcp_server.cpp historical line ~410). The
-// reactor path has no such call site: reactor_connection.cpp and
-// io_reactor.cpp have zero references to `rate_limit`. With reactor as the
-// default, any user who set `api.rate_limiting.enable = true` now gets
-// silently unmetered traffic.
 //
 // This test configures a hard cap (capacity=2, refill_rate=0), opens three
 // connections from 127.0.0.1, and expects the third to be closed without a
@@ -1107,11 +1060,9 @@ TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
   cfg.worker_threads = 4;
   cfg.max_connections = 64;
   cfg.allow_cidrs = {"127.0.0.1/32"};
-  cfg.io_model = "reactor";
 
   auto server = std::make_unique<TcpServer>(cfg, table_contexts_, "./dumps", &full_config);
   ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
-  RequireReactor(*server);
   const uint16_t port = server->GetPort();
 
   auto open_and_info = [&](int idx) -> std::string {
@@ -1147,14 +1098,8 @@ TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
 }
 
 // ----------------------------------------------------------------------------
-// Gap B — max_query_length enforcement
+// max_query_length enforcement
 // ----------------------------------------------------------------------------
-//
-// ReactorConnection currently caps the read buffer at a hardcoded
-// `kMaxReadBufferBytes = 1 MiB`, ignoring `ServerConfig::max_query_length`.
-// The blocking ConnectionIOHandler path used the configured value to drop
-// over-large frames. A user who lowered max_query_length for DoS defence
-// gets no protection from the reactor path.
 //
 // This test sets max_query_length=512, sends a ~4 KiB SEARCH query, and
 // expects the connection to be closed (or the request rejected) rather
@@ -1166,12 +1111,10 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
   cfg.worker_threads = 4;
   cfg.max_connections = 64;
   cfg.allow_cidrs = {"127.0.0.1/32"};
-  cfg.io_model = "reactor";
   cfg.max_query_length = 512;  // deliberately tiny
 
   auto server = std::make_unique<TcpServer>(cfg, table_contexts_);
   ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
-  RequireReactor(*server);
   const uint16_t port = server->GetPort();
 
   int s = Connect(port);
@@ -1249,14 +1192,10 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   cfg.worker_threads = 4;
   cfg.max_connections = 64;
   cfg.allow_cidrs = {"127.0.0.1/32"};
-  cfg.io_model = "reactor";
   cfg.unix_socket_path = sock_path.string();
 
   auto server = std::make_unique<TcpServer>(cfg, table_contexts_);
   ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
-  // Note: we do NOT RequireReactor here — the UDS path may currently be
-  // blocking. The goal is that UDS works *regardless* of io_model so we can
-  // delete the blocking path in Phase 4 without breaking UDS.
 
   // Connect via AF_UNIX
   int s = socket(AF_UNIX, SOCK_STREAM, 0);

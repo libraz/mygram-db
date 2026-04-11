@@ -17,19 +17,15 @@ namespace mygramdb::server {
 ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
   // Auto-size the pool when not specified.
   //
-  // Under the Phase 3 default reactor I/O model, persistent client connections
-  // do NOT pin worker threads — they live in the reactor's connection map and
-  // only consume a worker briefly (via a drain task) when a complete command
+  // Under the reactor I/O model, persistent client connections do NOT pin
+  // worker threads — they live in the reactor's connection map and only
+  // consume a worker briefly (via a drain task) when a complete command
   // frame arrives. Consequently the worker count no longer has to scale with
   // the concurrent-connection count; scaling by CPU count is sufficient.
   //
   // The floor of 4 keeps small VMs and containers responsive even when
   // `hardware_concurrency()` reports a very small value (e.g. 1-2 cores) and
   // gives the reactor somewhere to land burst dispatch tasks.
-  //
-  // Operators running the legacy blocking I/O model on a persistent-client
-  // fleet should set `api.tcp.worker_threads` explicitly (or switch back to
-  // `io_model: blocking` which is still supported as an emergency lever).
   if (num_threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
     if (hw == 0) {

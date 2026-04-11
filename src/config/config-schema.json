@@ -571,15 +571,9 @@
                 }
               }
             },
-            "io_model": {
-              "type": "string",
-              "description": "I/O model for persistent TCP connections. \"reactor\" (default): epoll/kqueue event loop with drain-task-per-connection workers; decouples the concurrent-client cap from worker_threads. \"blocking\": legacy one-worker-per-connection recv loop, retained as fallback and emergency rollback lever. \"reactor\" falls back to \"blocking\" on platforms without a supported event multiplexer.",
-              "enum": ["blocking", "reactor"],
-              "default": "reactor"
-            },
             "max_write_queue_bytes": {
               "type": "integer",
-              "description": "Per-connection soft cap on unsent response bytes under the reactor I/O model. When a single connection's write queue exceeds this cap, the reactor forcibly closes the connection to protect the server from slow-reader OOM. Default: 16 MiB (16777216 bytes). Only meaningful when io_model=\"reactor\".",
+              "description": "Per-connection soft cap on unsent response bytes. When a single connection's write queue exceeds this cap, the reactor forcibly closes the connection to protect the server from slow-reader OOM. Default: 16 MiB (16777216 bytes).",
               "default": 16777216,
               "minimum": 4096,
               "maximum": 1073741824

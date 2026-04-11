@@ -65,7 +65,6 @@ struct ServerConfig {
   // Connection I/O tunables.
   int recv_timeout_sec = 60;          ///< SO_RCVTIMEO seconds applied to accepted sockets (0 = disabled)
   int thread_pool_queue_size = 1000;  ///< ThreadPool task queue bound; 0 = unbounded
-  std::string io_model = "reactor";   ///< "reactor" (default) or "blocking"; see config.h ApiConfig::tcp::io_model
   int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  ///< Per-connection slow-reader cap; see config.h
 
   // TCP keepalive applied per-accepted client socket. See

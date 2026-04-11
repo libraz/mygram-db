@@ -250,13 +250,12 @@ struct ApiConfig {
     /// SERVER_BUSY and closes. Default: 1000.
     int thread_pool_queue_size = 1000;  // NOLINT(readability-magic-numbers)
 
-    /// Per-connection soft cap on unsent response bytes under the reactor
-    /// I/O model (design doc §7 R3). When a single connection's write queue
-    /// exceeds this cap, the reactor forcibly closes the connection to
-    /// protect the server from slow-reader OOM. Only meaningful when
-    /// `io_model == "reactor"`. Default: 16 MiB. A production operator who
-    /// sees `reactor_write_queue_overflow` warnings in steady state should
-    /// either raise this cap (if the responses are legitimately large) or
+    /// Per-connection soft cap on unsent response bytes (design doc §7 R3).
+    /// When a single connection's write queue exceeds this cap, the reactor
+    /// forcibly closes the connection to protect the server from slow-reader
+    /// OOM. Default: 16 MiB. A production operator who sees
+    /// `reactor_write_queue_overflow` warnings in steady state should either
+    /// raise this cap (if the responses are legitimately large) or
     /// investigate the client(s) that are failing to drain their socket.
     int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  // 16 MiB
 
@@ -276,25 +275,6 @@ struct ApiConfig {
       int probe_count = 3;    ///< TCP_KEEPCNT: probes before declaring dead
     } keepalive;
 
-    /// I/O model for persistent TCP connections.
-    ///
-    /// "reactor" (default): epoll/kqueue-based non-blocking event loop with a
-    /// drain-task-per-connection worker pattern. The event loop thread reads
-    /// complete command frames off each fd and hands them to the thread pool;
-    /// workers do not block on recv. This decouples the maximum number of
-    /// concurrent persistent clients from `worker_threads` and is the Phase 3
-    /// default (design doc §5 Phase 3.3).
-    ///
-    /// "blocking": legacy 1-worker-per-connection recv loop. Retained as a
-    /// fallback for platforms with no supported event multiplexer and as an
-    /// emergency rollback lever. Under this model each accepted client parks
-    /// one thread pool worker until the peer closes or `recv_timeout_sec`
-    /// fires, which makes the server vulnerable to starvation once the number
-    /// of persistent clients exceeds `worker_threads`.
-    ///
-    /// On platforms with no supported event multiplexer (neither epoll nor
-    /// kqueue), "reactor" falls back to "blocking" at startup with a warning.
-    std::string io_model = "reactor";
   } tcp;
 
   struct {

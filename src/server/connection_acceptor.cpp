@@ -27,7 +27,6 @@
 #include "server/thread_pool.h"
 #include "utils/error.h"
 #include "utils/expected.h"
-#include "utils/fd_guard.h"
 #include "utils/network_utils.h"
 #include "utils/structured_log.h"
 
@@ -351,10 +350,6 @@ void ConnectionAcceptor::Stop() {
   mygram::utils::StructuredLog().Event("connection_acceptor_stopped").Debug();
 }
 
-void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
-  connection_handler_ = std::move(handler);
-}
-
 void ConnectionAcceptor::SetReactorHandler(ReactorHandler handler) {
   reactor_handler_ = std::move(handler);
 }
@@ -455,14 +450,9 @@ void ConnectionAcceptor::AcceptLoop() {
           .Warn();
     }
 
-    // Apply per-connection TCP keepalive on TCP sockets only (not UDS).
-    //
-    // Background: under the blocking-recv I/O model a half-open connection
-    // parks a worker thread in recv() until either SO_RCVTIMEO elapses or
-    // Linux's TCP keepalive declares the peer dead. The stock Linux defaults
-    // (2h idle + 9 probes * 75s) are useless here, so we tighten them per
-    // YAML config. This is the Phase 1 mitigation from
-    // docs/ja/design/reactor-io-refactor.md §1.1.
+    // Apply per-connection TCP keepalive on TCP sockets only (not UDS). The
+    // stock Linux defaults (2h idle + 9 probes * 75s) are too lax for
+    // detecting half-open connections, so tighten them per YAML config.
     if (!IsUnixSocket() && config_.keepalive.enabled) {
       int keepalive_on = 1;
       if (setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive_on, sizeof(keepalive_on)) < 0) {
@@ -540,62 +530,33 @@ void ConnectionAcceptor::AcceptLoop() {
     }
 
     // Reactor I/O model: hand off inline on the accept thread. The reactor
-    // takes ownership of the fd on success; on failure the acceptor emits
-    // SERVER_BUSY and closes the fd itself. The active_fds_ entry stays
-    // until IoReactor's close callback invokes RemoveConnection.
-    if (reactor_handler_) {
-      const bool accepted = reactor_handler_(client_fd);
-      if (!accepted) {
-        mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "reactor_register_rejected")
-            .Field("client_fd", static_cast<uint64_t>(client_fd))
-            .Warn();
-        static constexpr std::string_view kBusyResponse =
-            "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
-        // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
-        write(client_fd, kBusyResponse.data(), kBusyResponse.size());
-        close(client_fd);
-        RemoveConnection(client_fd);
-      }
-      continue;  // next accept()
-    }
-
-    // Submit to thread pool
-    if (thread_pool_ != nullptr && connection_handler_) {
-      bool submitted = thread_pool_->Submit([this, client_fd]() {
-        // RAII guard to ensure connection is removed from active set
-        // even if connection_handler_ throws an exception
-        mygram::utils::ScopeGuard cleanup([this, client_fd]() { RemoveConnection(client_fd); });
-
-        connection_handler_(client_fd);
-        // Note: cleanup will call RemoveConnection on scope exit
-      });
-
-      if (!submitted) {
-        // Queue is full - send error response and reject connection to prevent FD leak
-        mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "thread_pool_queue_full")
-            .Field("client_fd", static_cast<uint64_t>(client_fd))
-            .Warn();
-
-        // Send error response to client before closing connection
-        static constexpr std::string_view kBusyResponse =
-            "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
-        // Ignore write errors - we're closing the connection anyway
-        // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
-        write(client_fd, kBusyResponse.data(), kBusyResponse.size());
-
-        close(client_fd);
-        RemoveConnection(client_fd);
-      }
-    } else {
+    // takes ownership of the fd on success; on failure we emit SERVER_BUSY
+    // and close the fd here. The active_fds_ entry stays until IoReactor's
+    // close callback invokes RemoveConnection.
+    if (!reactor_handler_) {
+      // Misconfiguration: reactor handler must be installed before Start().
+      // Close the fd and keep looping so the server does not silently leak.
       mygram::utils::StructuredLog()
           .Event("server_error")
-          .Field("type", "no_connection_handler")
-          .Field("error", "No connection handler or thread pool configured")
+          .Field("type", "no_reactor_handler")
+          .Field("error", "reactor handler not installed before accept loop started")
           .Error();
+      close(client_fd);
+      RemoveConnection(client_fd);
+      continue;
+    }
+
+    const bool accepted = reactor_handler_(client_fd);
+    if (!accepted) {
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("type", "reactor_register_rejected")
+          .Field("client_fd", static_cast<uint64_t>(client_fd))
+          .Warn();
+      static constexpr std::string_view kBusyResponse =
+          "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
+      // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
+      write(client_fd, kBusyResponse.data(), kBusyResponse.size());
       close(client_fd);
       RemoveConnection(client_fd);
     }

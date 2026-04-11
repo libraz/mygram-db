@@ -311,24 +311,6 @@ gtest_discover_tests(config_handler_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# ConnectionIOHandler tests
-
-add_executable(connection_io_handler_test
-  connection_io_handler_test.cpp
-)
-
-target_link_libraries(connection_io_handler_test
-  mygramdb_server
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid I/O handler conflicts
-gtest_discover_tests(connection_io_handler_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
-)
-
 # RequestDispatcher tests
 
 add_executable(request_dispatcher_test

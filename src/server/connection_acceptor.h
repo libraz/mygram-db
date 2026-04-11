@@ -44,16 +44,7 @@ class ThreadPool;
 class ConnectionAcceptor {
  public:
   /**
-   * @brief Connection handler callback type (blocking I/O model).
-   *
-   * Invoked for each accepted connection when `SetConnectionHandler` has been
-   * installed. The handler runs on a thread pool worker and is responsible for
-   * processing the connection and closing the file descriptor.
-   */
-  using ConnectionHandler = std::function<void(int client_fd)>;
-
-  /**
-   * @brief Reactor handler callback type (reactor I/O model).
+   * @brief Reactor handler callback type.
    *
    * Invoked **inline** on the accept thread for each accepted connection when
    * `SetReactorHandler` has been installed. The handler must take ownership of
@@ -63,9 +54,6 @@ class ConnectionAcceptor {
    * No thread pool hop: the reactor's `IoReactor::Register` is cheap (map
    * insert + one epoll_ctl/kevent) and latency-sensitive, so bouncing through
    * a worker would add a context switch for no gain.
-   *
-   * When a reactor handler is installed, the blocking `ConnectionHandler` path
-   * is NOT used even if it was also set.
    */
   using ReactorHandler = std::function<bool(int client_fd)>;
 
@@ -98,17 +86,10 @@ class ConnectionAcceptor {
   void Stop();
 
   /**
-   * @brief Set connection handler callback (blocking model).
-   * @param handler Callback to handle accepted connections
-   */
-  void SetConnectionHandler(ConnectionHandler handler);
-
-  /**
-   * @brief Set reactor handler callback (reactor model).
+   * @brief Set reactor handler callback.
    *
-   * Installing a reactor handler switches the accept path from "submit to
-   * thread pool" to "hand off to reactor inline". Used in conjunction with
-   * `api.tcp.io_model = "reactor"`.
+   * The handler is invoked inline on the accept thread and must take
+   * ownership of the fd on true return.
    *
    * @param handler Callback that takes ownership of the fd on true return.
    */
@@ -156,7 +137,6 @@ class ConnectionAcceptor {
 
   ServerConfig config_;
   ThreadPool* thread_pool_;
-  ConnectionHandler connection_handler_;
   ReactorHandler reactor_handler_;
 
   int server_fd_ = -1;

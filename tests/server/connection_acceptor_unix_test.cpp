@@ -64,9 +64,10 @@ TEST_F(ConnectionAcceptorUnixTest, StartAndStopUnixSocket) {
   ConnectionAcceptor acceptor(config, &pool);
 
   std::atomic<int> connections{0};
-  acceptor.SetConnectionHandler([&connections](int fd) {
+  acceptor.SetReactorHandler([&connections](int fd) {
     connections++;
     close(fd);
+    return true;
   });
 
   auto result = acceptor.Start();
@@ -97,11 +98,10 @@ TEST_F(ConnectionAcceptorUnixTest, AcceptsUnixConnection) {
   ConnectionAcceptor acceptor(config, &pool);
 
   std::atomic<int> connections{0};
-  acceptor.SetConnectionHandler([&connections](int fd) {
+  acceptor.SetReactorHandler([&connections](int fd) {
     connections++;
-    // Small delay to keep connection alive briefly
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     close(fd);
+    return true;
   });
 
   auto result = acceptor.Start();
@@ -142,7 +142,10 @@ TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
   config.max_connections = 10;
 
   ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
@@ -160,7 +163,10 @@ TEST_F(ConnectionAcceptorUnixTest, PathTooLongError) {
   config.max_connections = 10;
 
   ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_FALSE(result.has_value());
@@ -177,7 +183,10 @@ TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
   config.max_connections = 10;
 
   ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
@@ -197,7 +206,10 @@ TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {
   config.max_connections = 10;
 
   ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();

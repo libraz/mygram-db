@@ -65,7 +65,6 @@ static const std::map<std::string, bool> kVariableMutability = {
     {"api.tcp.keepalive.idle_sec", false},      // Immutable
     {"api.tcp.keepalive.interval_sec", false},  // Immutable
     {"api.tcp.keepalive.probe_count", false},   // Immutable
-    {"api.tcp.io_model", false},                // Immutable (selects reactor vs blocking at startup)
     {"api.tcp.max_write_queue_bytes", false},   // Immutable (per-connection cap set at accept)
     {"api.http.enable", false},             // Immutable
     {"api.http.bind", false},               // Immutable
@@ -644,9 +643,6 @@ std::string RuntimeVariableManager::GetVariableInternal(const std::string& varia
   }
   if (variable_name == "api.tcp.keepalive.probe_count") {
     return std::to_string(base_config_.api.tcp.keepalive.probe_count);
-  }
-  if (variable_name == "api.tcp.io_model") {
-    return base_config_.api.tcp.io_model;
   }
   if (variable_name == "api.tcp.max_write_queue_bytes") {
     return std::to_string(base_config_.api.tcp.max_write_queue_bytes);

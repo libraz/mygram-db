@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -19,7 +18,6 @@
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/connection_acceptor.h"
-#include "server/connection_io_handler.h"
 #include "server/io_reactor.h"
 #include "server/rate_limiter.h"
 #include "server/request_dispatcher.h"
@@ -116,15 +114,6 @@ class TcpServer {
   uint16_t GetPort() const { return acceptor_ ? acceptor_->GetPort() : 0; }
 
   /**
-   * @brief Check whether the IoReactor is active. TEST-ONLY accessor.
-   *
-   * Returns true when reactor mode was requested, the platform multiplexer
-   * was available, and Start() successfully started the event loop.
-   * Do not call this from production code.
-   */
-  bool IsReactorActiveForTest() const { return reactor_ != nullptr && reactor_->IsRunning(); }
-
-  /**
    * @brief Get active connection count
    */
   size_t GetConnectionCount() const { return stats_.GetActiveConnections(); }
@@ -212,7 +201,7 @@ class TcpServer {
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ConnectionAcceptor> acceptor_;
   std::unique_ptr<RequestDispatcher> dispatcher_;
-  std::unique_ptr<IoReactor> reactor_;  ///< Non-null when io_model == "reactor" and a backend is available.
+  std::unique_ptr<IoReactor> reactor_;  ///< Owns the event loop. Non-null after a successful Start().
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
@@ -223,8 +212,6 @@ class TcpServer {
 
   // Legacy fields (for backward compatibility during migration)
   std::unordered_map<std::string, TableContext*> table_contexts_;
-  std::unordered_map<int, ConnectionContext> connection_contexts_;
-  mutable std::mutex contexts_mutex_;
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;
@@ -250,11 +237,6 @@ class TcpServer {
 
   // Shutdown flag
   std::atomic<bool> shutdown_requested_{false};
-
-  /**
-   * @brief Handle client connection (callback for ConnectionAcceptor)
-   */
-  void HandleConnection(int client_fd);
 };
 
 }  // namespace mygramdb::server

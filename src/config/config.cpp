@@ -731,9 +731,6 @@ Config ParseConfigFromJson(const json& root) {
           config.api.tcp.keepalive.probe_count = ka["probe_count"].get<int>();
         }
       }
-      if (tcp.contains("io_model")) {
-        config.api.tcp.io_model = tcp["io_model"].get<std::string>();
-      }
       if (tcp.contains("max_write_queue_bytes")) {
         config.api.tcp.max_write_queue_bytes = tcp["max_write_queue_bytes"].get<int64_t>();
       }

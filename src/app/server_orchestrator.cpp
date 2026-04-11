@@ -425,7 +425,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   server_config.keepalive.idle_sec = deps_.config.api.tcp.keepalive.idle_sec;
   server_config.keepalive.interval_sec = deps_.config.api.tcp.keepalive.interval_sec;
   server_config.keepalive.probe_count = deps_.config.api.tcp.keepalive.probe_count;
-  server_config.io_model = deps_.config.api.tcp.io_model;
   server_config.max_write_queue_bytes = deps_.config.api.tcp.max_write_queue_bytes;
   server_config.default_limit = deps_.config.api.default_limit;
   server_config.max_query_length = deps_.config.api.max_query_length;
