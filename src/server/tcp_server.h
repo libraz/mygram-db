@@ -20,6 +20,7 @@
 #include "query/query_parser.h"
 #include "server/connection_acceptor.h"
 #include "server/connection_io_handler.h"
+#include "server/io_reactor.h"
 #include "server/rate_limiter.h"
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
@@ -117,6 +118,15 @@ class TcpServer {
   uint16_t GetPort() const { return acceptor_ ? acceptor_->GetPort() : 0; }
 
   /**
+   * @brief Check whether the IoReactor is active. TEST-ONLY accessor.
+   *
+   * Returns true when reactor mode was requested, the platform multiplexer
+   * was available, and Start() successfully started the event loop.
+   * Do not call this from production code.
+   */
+  bool IsReactorActiveForTest() const { return reactor_ != nullptr && reactor_->IsRunning(); }
+
+  /**
    * @brief Get active connection count
    */
   size_t GetConnectionCount() const { return stats_.GetActiveConnections(); }
@@ -140,6 +150,7 @@ class TcpServer {
    * @brief Get mutable server statistics pointer (for binlog reader)
    */
   ServerStats* GetMutableStats() { return &stats_; }
+
 
   /**
    * @brief Get dump load in progress flag pointer (for HttpServer)
@@ -204,6 +215,7 @@ class TcpServer {
   std::unique_ptr<ConnectionAcceptor> acceptor_;
   std::unique_ptr<ConnectionAcceptor> unix_acceptor_;
   std::unique_ptr<RequestDispatcher> dispatcher_;
+  std::unique_ptr<IoReactor> reactor_;  ///< Non-null when io_model == "reactor" and a backend is available.
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;

@@ -44,12 +44,30 @@ class ThreadPool;
 class ConnectionAcceptor {
  public:
   /**
-   * @brief Connection handler callback type
+   * @brief Connection handler callback type (blocking I/O model).
    *
-   * This callback is invoked for each accepted connection.
-   * The handler should process the connection and close the file descriptor.
+   * Invoked for each accepted connection when `SetConnectionHandler` has been
+   * installed. The handler runs on a thread pool worker and is responsible for
+   * processing the connection and closing the file descriptor.
    */
   using ConnectionHandler = std::function<void(int client_fd)>;
+
+  /**
+   * @brief Reactor handler callback type (reactor I/O model).
+   *
+   * Invoked **inline** on the accept thread for each accepted connection when
+   * `SetReactorHandler` has been installed. The handler must take ownership of
+   * `client_fd` and return true, or return false to reject the connection
+   * (the acceptor will then emit `ERR SERVER_BUSY` and close the fd).
+   *
+   * No thread pool hop: the reactor's `IoReactor::Register` is cheap (map
+   * insert + one epoll_ctl/kevent) and latency-sensitive, so bouncing through
+   * a worker would add a context switch for no gain.
+   *
+   * When a reactor handler is installed, the blocking `ConnectionHandler` path
+   * is NOT used even if it was also set.
+   */
+  using ReactorHandler = std::function<bool(int client_fd)>;
 
   /**
    * @brief Construct a ConnectionAcceptor
@@ -80,10 +98,30 @@ class ConnectionAcceptor {
   void Stop();
 
   /**
-   * @brief Set connection handler callback
+   * @brief Set connection handler callback (blocking model).
    * @param handler Callback to handle accepted connections
    */
   void SetConnectionHandler(ConnectionHandler handler);
+
+  /**
+   * @brief Set reactor handler callback (reactor model).
+   *
+   * Installing a reactor handler switches the accept path from "submit to
+   * thread pool" to "hand off to reactor inline". Used in conjunction with
+   * `api.tcp.io_model = "reactor"`.
+   *
+   * @param handler Callback that takes ownership of the fd on true return.
+   */
+  void SetReactorHandler(ReactorHandler handler);
+
+  /**
+   * @brief Remove a connection from the active set.
+   *
+   * Exposed publicly so that `IoReactor`'s close callback can decrement the
+   * `max_connections` gate when it tears down a reactor connection. Safe to
+   * call from any thread.
+   */
+  void RemoveConnection(int socket_fd);
 
   /**
    * @brief Get actual port being listened on
@@ -116,15 +154,10 @@ class ConnectionAcceptor {
    */
   bool SetSocketOptions(int socket_fd) const;
 
-  /**
-   * @brief Remove connection from active list
-   * @param socket_fd Socket file descriptor
-   */
-  void RemoveConnection(int socket_fd);
-
   ServerConfig config_;
   ThreadPool* thread_pool_;
   ConnectionHandler connection_handler_;
+  ReactorHandler reactor_handler_;
 
   int server_fd_ = -1;
   uint16_t actual_port_ = 0;

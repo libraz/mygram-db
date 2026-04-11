@@ -183,6 +183,19 @@ nlohmann::json ConfigToJson(const Config& config) {
        {
            {"bind", config.api.tcp.bind},
            {"port", config.api.tcp.port},
+           {"max_connections", config.api.tcp.max_connections},
+           {"worker_threads", config.api.tcp.worker_threads},
+           {"recv_timeout_sec", config.api.tcp.recv_timeout_sec},
+           {"thread_pool_queue_size", config.api.tcp.thread_pool_queue_size},
+           {"keepalive",
+            {
+                {"enabled", config.api.tcp.keepalive.enabled},
+                {"idle_sec", config.api.tcp.keepalive.idle_sec},
+                {"interval_sec", config.api.tcp.keepalive.interval_sec},
+                {"probe_count", config.api.tcp.keepalive.probe_count},
+            }},
+           {"io_model", config.api.tcp.io_model},
+           {"max_write_queue_bytes", config.api.tcp.max_write_queue_bytes},
        }},
       {"http",
        {

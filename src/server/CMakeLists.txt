@@ -12,6 +12,11 @@ add_library(mygramdb_server STATIC
   request_dispatcher.cpp
   snapshot_scheduler.cpp
   connection_io_handler.cpp
+  reactor_connection.cpp
+  io_reactor.cpp
+  reactor/event_multiplexer.cpp
+  reactor/epoll_multiplexer.cpp
+  reactor/kqueue_multiplexer.cpp
   sync_operation_manager.cpp
   rate_limiter.cpp
   handlers/command_handler.cpp

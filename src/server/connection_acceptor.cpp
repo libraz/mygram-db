@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -354,6 +355,10 @@ void ConnectionAcceptor::SetConnectionHandler(ConnectionHandler handler) {
   connection_handler_ = std::move(handler);
 }
 
+void ConnectionAcceptor::SetReactorHandler(ReactorHandler handler) {
+  reactor_handler_ = std::move(handler);
+}
+
 void ConnectionAcceptor::AcceptLoop() {
   if (IsUnixSocket()) {
     mygram::utils::StructuredLog().Event("accept_loop_started").Field("unix_socket", unix_socket_path_).Debug();
@@ -450,6 +455,70 @@ void ConnectionAcceptor::AcceptLoop() {
           .Warn();
     }
 
+    // Apply per-connection TCP keepalive on TCP sockets only (not UDS).
+    //
+    // Background: under the blocking-recv I/O model a half-open connection
+    // parks a worker thread in recv() until either SO_RCVTIMEO elapses or
+    // Linux's TCP keepalive declares the peer dead. The stock Linux defaults
+    // (2h idle + 9 probes * 75s) are useless here, so we tighten them per
+    // YAML config. This is the Phase 1 mitigation from
+    // docs/ja/design/reactor-io-refactor.md §1.1.
+    if (!IsUnixSocket() && config_.keepalive.enabled) {
+      int keepalive_on = 1;
+      if (setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive_on, sizeof(keepalive_on)) < 0) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "setsockopt_failed")
+            .Field("option", "SO_KEEPALIVE")
+            .Field("error", strerror(errno))
+            .Warn();
+      }
+#if defined(__linux__)
+      // Linux exposes TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT. These are our
+      // production target and where this mitigation actually matters.
+      int idle_sec = config_.keepalive.idle_sec;
+      int intvl_sec = config_.keepalive.interval_sec;
+      int probe_cnt = config_.keepalive.probe_count;
+      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle_sec, sizeof(idle_sec)) < 0) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "setsockopt_failed")
+            .Field("option", "TCP_KEEPIDLE")
+            .Field("error", strerror(errno))
+            .Warn();
+      }
+      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl_sec, sizeof(intvl_sec)) < 0) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "setsockopt_failed")
+            .Field("option", "TCP_KEEPINTVL")
+            .Field("error", strerror(errno))
+            .Warn();
+      }
+      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &probe_cnt, sizeof(probe_cnt)) < 0) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "setsockopt_failed")
+            .Field("option", "TCP_KEEPCNT")
+            .Field("error", strerror(errno))
+            .Warn();
+      }
+#elif defined(__APPLE__) && defined(TCP_KEEPALIVE)
+      // macOS/BSD only exposes TCP_KEEPALIVE (equivalent to Linux TCP_KEEPIDLE).
+      // Interval/count fall back to system defaults. production target is
+      // Linux; this branch only keeps dev/CI on macOS functional.
+      int idle_sec = config_.keepalive.idle_sec;
+      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle_sec, sizeof(idle_sec)) < 0) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "setsockopt_failed")
+            .Field("option", "TCP_KEEPALIVE")
+            .Field("error", strerror(errno))
+            .Warn();
+      }
+#endif
+    }
+
 #ifdef __APPLE__
     // On macOS, set SO_NOSIGPIPE to prevent SIGPIPE when writing to closed connections
     // Linux uses MSG_NOSIGNAL flag instead, but writev() doesn't support flags
@@ -468,6 +537,28 @@ void ConnectionAcceptor::AcceptLoop() {
     {
       std::lock_guard<std::mutex> lock(fds_mutex_);
       active_fds_.insert(client_fd);
+    }
+
+    // Reactor I/O model: hand off inline on the accept thread. The reactor
+    // takes ownership of the fd on success; on failure the acceptor emits
+    // SERVER_BUSY and closes the fd itself. The active_fds_ entry stays
+    // until IoReactor's close callback invokes RemoveConnection.
+    if (reactor_handler_) {
+      const bool accepted = reactor_handler_(client_fd);
+      if (!accepted) {
+        mygram::utils::StructuredLog()
+            .Event("server_warning")
+            .Field("type", "reactor_register_rejected")
+            .Field("client_fd", static_cast<uint64_t>(client_fd))
+            .Warn();
+        static constexpr std::string_view kBusyResponse =
+            "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
+        // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
+        write(client_fd, kBusyResponse.data(), kBusyResponse.size());
+        close(client_fd);
+        RemoveConnection(client_fd);
+      }
+      continue;  // next accept()
     }
 
     // Submit to thread pool

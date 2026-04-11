@@ -56,9 +56,6 @@
 namespace mygramdb::server {
 
 namespace {
-// Thread pool queue size for backpressure
-constexpr size_t kThreadPoolQueueSize = 1000;
-
 // Buffer size for IP address formatting
 constexpr size_t kIpAddressBufferSize = 64;
 
@@ -218,8 +215,85 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   acceptor_ = std::move(components.acceptor);
   scheduler_ = std::move(components.scheduler);
 
-  // Set connection handler callback (must be done after acceptor_ is assigned)
-  acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
+  // Reactor I/O model: attempt to create the IoReactor up front. On platforms
+  // with no supported event multiplexer (neither epoll nor kqueue), log a
+  // warning and fall back to the blocking model.
+  const bool reactor_requested = config_.io_model == "reactor";
+  bool reactor_active = false;
+  if (reactor_requested) {
+    ReactorConfig rcfg;
+    if (config_.max_write_queue_bytes > 0) {
+      rcfg.max_write_queue_bytes = static_cast<size_t>(config_.max_write_queue_bytes);
+    }
+    reactor_ = std::make_unique<IoReactor>(thread_pool_.get(), dispatcher_.get(), rcfg);
+    // When the reactor tears down a connection, decrement the acceptor's
+    // max_connections gate so new accepts can proceed, and the server stats
+    // so GetConnectionCount() reflects reality in reactor mode. (The blocking
+    // path calls IncrementConnections/DecrementConnections inside
+    // HandleConnection; the reactor path has no such entry point, so we
+    // count at Register / close_callback instead — see the reactor_handler
+    // lambda below.)
+    ConnectionAcceptor* accept_ptr = acceptor_.get();
+    ServerStats* close_stats_ptr = &stats_;
+    reactor_->SetCloseCallback([accept_ptr, close_stats_ptr](int fd) {
+      if (accept_ptr != nullptr) {
+        accept_ptr->RemoveConnection(fd);
+      }
+      if (close_stats_ptr != nullptr) {
+        close_stats_ptr->DecrementConnections();
+      }
+    });
+    auto r = reactor_->Start();
+    if (!r) {
+      if (r.error().code() == mygram::utils::ErrorCode::kNetworkReactorUnsupported) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_fallback_to_blocking")
+            .Field("reason", "no event multiplexer available on this platform")
+            .Warn();
+        reactor_.reset();
+      } else {
+        return MakeUnexpected(r.error());
+      }
+    } else {
+      reactor_active = true;
+      mygram::utils::StructuredLog()
+          .Event("reactor_mode_enabled")
+          .Field("backend", reactor_->BackendName())
+          .Info();
+    }
+  }
+
+  // Install the appropriate acceptor callback:
+  //  - Reactor mode: inline hand-off to IoReactor::Register, no thread pool hop.
+  //  - Blocking mode: submit to thread pool running HandleConnection.
+  if (reactor_active) {
+    IoReactor* reactor_ptr = reactor_.get();
+    RequestDispatcher* dispatcher_ptr = dispatcher_.get();
+    ThreadPool* pool_ptr = thread_pool_.get();
+    ServerStats* stats_ptr = &stats_;
+    const size_t max_write_bytes = config_.max_write_queue_bytes > 0
+                                       ? static_cast<size_t>(config_.max_write_queue_bytes)
+                                       : ReactorConnection::kDefaultMaxWriteQueueBytes;
+    acceptor_->SetReactorHandler(
+        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes](int client_fd) -> bool {
+          auto conn = ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr,
+                                                max_write_bytes);
+          auto reg = reactor_ptr->Register(conn);
+          if (reg.has_value()) {
+            // Mirror the blocking path's HandleConnection: count this as an
+            // active connection so GetConnectionCount() and the
+            // mygramdb_active_connections metric report the live reactor
+            // population.  The matching decrement happens in the close
+            // callback installed above.
+            stats_ptr->IncrementConnections();
+            stats_ptr->IncrementTotalConnections();
+            return true;
+          }
+          return false;
+        });
+  } else {
+    acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
+  }
 
   // Start Unix domain socket acceptor (if configured)
   if (!config_.unix_socket_path.empty()) {
@@ -227,6 +301,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     uds_config.unix_socket_path = config_.unix_socket_path;
     uds_config.max_connections = config_.max_connections;
     unix_acceptor_ = std::make_unique<ConnectionAcceptor>(uds_config, thread_pool_.get());
+    // UDS acceptors always use the blocking I/O model for now — reactor mode
+    // is aimed at persistent TCP client fleets.
     unix_acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
 
     auto uds_result = unix_acceptor_->Start();
@@ -265,6 +341,22 @@ void TcpServer::Stop() {
   // Stop snapshot scheduler
   if (scheduler_) {
     scheduler_->Stop();
+  }
+
+  // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
+  // eagerly close(2)s every fd in its active_fds_ set — which includes the
+  // reactor-owned client fds, since the reactor's close_callback removes them
+  // only when the connection terminates naturally. If the acceptor ran first,
+  // it would close fds the reactor still owns, and drain tasks would then hit
+  // EBADF mid-send. Stopping the reactor first gives it the chance to drain
+  // and release its fds via Unregister → close_callback → active_fds_.erase.
+  //
+  // While the reactor is stopping, the acceptor may still accept a stray
+  // connection and hand it to reactor_handler_; the handler's Register call
+  // returns `kNetworkServerNotStarted`, the handler returns false, and the
+  // acceptor sends SERVER_BUSY and closes the socket. Acceptable.
+  if (reactor_) {
+    reactor_->Stop();
   }
 
   // Stop connection acceptor
@@ -341,10 +433,16 @@ void TcpServer::HandleConnection(int client_fd) {
   // RAII guard to ensure stats are decremented even if exceptions occur
   mygram::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
 
-  // Create I/O handler config
+  // Create I/O handler config. recv_timeout_sec is YAML-configurable
+  // (api.tcp.recv_timeout_sec); fall back to the historical 60s default if
+  // it was left at zero for legacy/test configs (0 means "disable timeout"
+  // only when explicitly negative in config — clamp here to preserve the
+  // long-standing production behaviour).
+  const int configured_recv_timeout =
+      config_.recv_timeout_sec > 0 ? config_.recv_timeout_sec : kDefaultConnectionRecvTimeoutSec;
   IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
                      .max_query_length = static_cast<size_t>(config_.max_query_length),
-                     .recv_timeout_sec = kDefaultConnectionRecvTimeoutSec};
+                     .recv_timeout_sec = configured_recv_timeout};
 
   // Request processor callback
   auto processor = [this](const std::string& request, ConnectionContext& conn_ctx) -> std::string {

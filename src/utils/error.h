@@ -125,6 +125,14 @@ enum class ErrorCode : std::uint16_t {
   kNetworkInvalidBindAddress = 6013,     ///< Invalid bind address
   kNetworkUnixSocketPathTooLong = 6014,  ///< Unix socket path exceeds limit
   kNetworkUnixSocketStale = 6015,        ///< Unix socket already in use by another server
+  kNetworkReactorUnsupported = 6016,     ///< No event multiplexer available on this platform
+  kNetworkReactorInitFailed = 6017,      ///< epoll_create / kqueue syscall failed
+  kNetworkReactorRegisterFailed = 6018,  ///< epoll_ctl ADD / kevent EV_ADD failed
+  kNetworkReactorModifyFailed = 6019,    ///< epoll_ctl MOD / kevent update failed
+  kNetworkReactorRemoveFailed = 6020,    ///< epoll_ctl DEL / kevent EV_DELETE failed
+  kNetworkReactorPollFailed = 6021,      ///< epoll_wait / kevent poll failed
+  kNetworkReactorQueueFull = 6022,       ///< Per-connection write queue cap exceeded (slow reader)
+  kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -327,6 +335,22 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Unix socket path too long";
     case ErrorCode::kNetworkUnixSocketStale:
       return "Unix socket already in use";
+    case ErrorCode::kNetworkReactorUnsupported:
+      return "Event multiplexer not supported on this platform";
+    case ErrorCode::kNetworkReactorInitFailed:
+      return "Event multiplexer initialization failed";
+    case ErrorCode::kNetworkReactorRegisterFailed:
+      return "Event multiplexer register failed";
+    case ErrorCode::kNetworkReactorModifyFailed:
+      return "Event multiplexer modify failed";
+    case ErrorCode::kNetworkReactorRemoveFailed:
+      return "Event multiplexer remove failed";
+    case ErrorCode::kNetworkReactorPollFailed:
+      return "Event multiplexer poll failed";
+    case ErrorCode::kNetworkReactorQueueFull:
+      return "Reactor per-connection write queue full";
+    case ErrorCode::kNetworkReactorAlreadyOpen:
+      return "Event multiplexer already opened";
 
     // Client
     case ErrorCode::kClientNotConnected:
