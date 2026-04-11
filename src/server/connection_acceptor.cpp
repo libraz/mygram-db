@@ -24,7 +24,6 @@
 #include <cstring>
 
 #include "server/server_types.h"
-#include "server/thread_pool.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/network_utils.h"
@@ -48,16 +47,7 @@ inline struct sockaddr* ToSockaddrUn(struct sockaddr_un* addr) {
 }
 }  // namespace
 
-ConnectionAcceptor::ConnectionAcceptor(ServerConfig config, ThreadPool* thread_pool)
-    : config_(std::move(config)), thread_pool_(thread_pool) {
-  if (thread_pool_ == nullptr) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("component", "connection_acceptor")
-        .Field("error", "thread_pool cannot be null")
-        .Error();
-  }
-}
+ConnectionAcceptor::ConnectionAcceptor(ServerConfig config) : config_(std::move(config)) {}
 
 ConnectionAcceptor::~ConnectionAcceptor() {
   Stop();

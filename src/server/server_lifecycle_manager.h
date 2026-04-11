@@ -176,8 +176,7 @@ class ServerLifecycleManager {
   mygram::utils::Expected<InitializedComponents, mygram::utils::Error> InitHandlers(HandlerContext& handler_context);
   mygram::utils::Expected<std::unique_ptr<RequestDispatcher>, mygram::utils::Error> InitDispatcher(
       HandlerContext& handler_context, const InitializedComponents& handlers);
-  mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error> InitAcceptor(
-      ThreadPool* thread_pool);
+  mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error> InitAcceptor();
   mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error> InitScheduler(
       TableCatalog* table_catalog);
 };

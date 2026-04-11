@@ -181,7 +181,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
   // Step 7: Initialize Acceptor (depends on thread pool)
   {
-    auto acceptor_result = InitAcceptor(components.thread_pool.get());
+    auto acceptor_result = InitAcceptor();
     if (!acceptor_result) {
       return MakeUnexpected(acceptor_result.error());
     }
@@ -425,14 +425,14 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
   }
 }
 
-mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error> ServerLifecycleManager::InitAcceptor(
-    ThreadPool* thread_pool) {
+mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error>
+ServerLifecycleManager::InitAcceptor() {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   try {
-    auto acceptor = std::make_unique<ConnectionAcceptor>(config_, thread_pool);
+    auto acceptor = std::make_unique<ConnectionAcceptor>(config_);
 
     // Start the acceptor
     auto start_result = acceptor->Start();

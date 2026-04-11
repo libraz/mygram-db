@@ -19,9 +19,6 @@
 
 namespace mygramdb::server {
 
-// Forward declarations
-class ThreadPool;
-
 /**
  * @brief Network connection acceptor
  *
@@ -60,9 +57,8 @@ class ConnectionAcceptor {
   /**
    * @brief Construct a ConnectionAcceptor
    * @param config Server configuration
-   * @param thread_pool Thread pool for connection handling
    */
-  ConnectionAcceptor(ServerConfig config, ThreadPool* thread_pool);
+  explicit ConnectionAcceptor(ServerConfig config);
 
   // Disable copy and move
   ConnectionAcceptor(const ConnectionAcceptor&) = delete;
@@ -136,7 +132,6 @@ class ConnectionAcceptor {
   bool SetSocketOptions(int socket_fd) const;
 
   ServerConfig config_;
-  ThreadPool* thread_pool_;
   ReactorHandler reactor_handler_;
 
   int server_fd_ = -1;
