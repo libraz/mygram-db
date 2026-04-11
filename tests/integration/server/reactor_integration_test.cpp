@@ -34,13 +34,16 @@ TEST(ReactorIntegrationTest, PlatformNotSupported) {
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -1064,6 +1067,244 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
   close(active);
   for (int s : idle_socks) close(s);
   server->Stop();
+}
+
+// ============================================================================
+// Phase 3.7 gap regression guards
+// ============================================================================
+//
+// The tests below pin reactor-path invariants that were *silently* lost when
+// the default io_model flipped to "reactor" in Phase 3. The blocking path's
+// HandleConnection historically enforced rate limiting and max_query_length
+// and handled UDS fds; the initial reactor implementation did not plumb any
+// of this through. These tests fail on the Phase 3 code so the gap cannot be
+// reintroduced, and must stay green through Phase 4 (blocking removal).
+
+// ----------------------------------------------------------------------------
+// Gap A — Rate limiter wiring
+// ----------------------------------------------------------------------------
+//
+// The blocking path called `rate_limiter_->AllowRequest(client_ip)` in
+// TcpServer::HandleConnection (tcp_server.cpp historical line ~410). The
+// reactor path has no such call site: reactor_connection.cpp and
+// io_reactor.cpp have zero references to `rate_limit`. With reactor as the
+// default, any user who set `api.rate_limiting.enable = true` now gets
+// silently unmetered traffic.
+//
+// This test configures a hard cap (capacity=2, refill_rate=0), opens three
+// connections from 127.0.0.1, and expects the third to be closed without a
+// response.
+TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
+  config::Config full_config;
+  full_config.api.rate_limiting.enable = true;
+  full_config.api.rate_limiting.capacity = 2;
+  full_config.api.rate_limiting.refill_rate = 0;  // no refill — hard cap
+  full_config.api.rate_limiting.max_clients = 64;
+
+  ServerConfig cfg;
+  cfg.host = "127.0.0.1";
+  cfg.port = 0;
+  cfg.worker_threads = 4;
+  cfg.max_connections = 64;
+  cfg.allow_cidrs = {"127.0.0.1/32"};
+  cfg.io_model = "reactor";
+
+  auto server = std::make_unique<TcpServer>(cfg, table_contexts_, "./dumps", &full_config);
+  ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
+  RequireReactor(*server);
+  const uint16_t port = server->GetPort();
+
+  auto open_and_info = [&](int idx) -> std::string {
+    int s = Connect(port);
+    if (s < 0) return std::string("__connect_failed__");
+    std::string result;
+    if (SendLine(s, "INFO")) {
+      result = RecvMultilineResponse(s, /*timeout_ms=*/1500);
+    }
+    close(s);
+    (void)idx;
+    return result;
+  };
+
+  // First two connections consume the two available tokens.
+  const std::string r0 = open_and_info(0);
+  const std::string r1 = open_and_info(1);
+  EXPECT_NE(r0, "__connect_failed__") << "connection 0 should connect";
+  EXPECT_NE(r1, "__connect_failed__") << "connection 1 should connect";
+  EXPECT_FALSE(r0.empty()) << "connection 0 should get a response";
+  EXPECT_FALSE(r1.empty()) << "connection 1 should get a response";
+
+  // Third connection: bucket is empty. Rate limiter must reject. The server
+  // may accept the TCP SYN (so connect() succeeds) but must close the fd
+  // without sending a response.
+  const std::string r2 = open_and_info(2);
+  EXPECT_TRUE(r2.empty())
+      << "Rate limiter did not enforce the per-IP cap under reactor mode: "
+         "expected connection 2 to be closed without a response, but got: "
+      << r2;
+
+  server->Stop();
+}
+
+// ----------------------------------------------------------------------------
+// Gap B — max_query_length enforcement
+// ----------------------------------------------------------------------------
+//
+// ReactorConnection currently caps the read buffer at a hardcoded
+// `kMaxReadBufferBytes = 1 MiB`, ignoring `ServerConfig::max_query_length`.
+// The blocking ConnectionIOHandler path used the configured value to drop
+// over-large frames. A user who lowered max_query_length for DoS defence
+// gets no protection from the reactor path.
+//
+// This test sets max_query_length=512, sends a ~4 KiB SEARCH query, and
+// expects the connection to be closed (or the request rejected) rather
+// than successfully executed.
+TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
+  ServerConfig cfg;
+  cfg.host = "127.0.0.1";
+  cfg.port = 0;
+  cfg.worker_threads = 4;
+  cfg.max_connections = 64;
+  cfg.allow_cidrs = {"127.0.0.1/32"};
+  cfg.io_model = "reactor";
+  cfg.max_query_length = 512;  // deliberately tiny
+
+  auto server = std::make_unique<TcpServer>(cfg, table_contexts_);
+  ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
+  RequireReactor(*server);
+  const uint16_t port = server->GetPort();
+
+  int s = Connect(port);
+  ASSERT_GE(s, 0) << "connect() failed";
+
+  // Sanity: a normal short request still works.
+  ASSERT_TRUE(SendLine(s, "INFO"));
+  const std::string sanity = RecvMultilineResponse(s, /*timeout_ms=*/2000);
+  ASSERT_FALSE(sanity.empty()) << "INFO sanity request failed";
+
+  // Build an oversized query: one SEARCH with a 4 KiB keyword. This is ~4096
+  // bytes on the wire before CRLF, well past the 512 byte cap.
+  std::string big_term(4096, 'a');
+  std::string big_cmd = "SEARCH t " + big_term;
+  // Send directly; the request is one CRLF-terminated line.
+  std::string wire = big_cmd + "\r\n";
+  ssize_t sent = send(s, wire.data(), wire.size(), 0);
+  // The server may close mid-write; partial send is acceptable as evidence.
+  (void)sent;
+
+  // Read whatever the server returns. We accept any of:
+  //  - empty (connection closed without response)
+  //  - an error line starting with "ERR" or "-ERR"
+  // We reject: a successful "OK RESULTS" response.
+  std::array<char, 4096> buf{};
+  struct timeval io {};
+  io.tv_sec = 2;
+  io.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
+  ssize_t n = recv(s, buf.data(), buf.size(), 0);
+  std::string resp(n > 0 ? std::string(buf.data(), static_cast<size_t>(n)) : std::string{});
+  close(s);
+
+  // The reactor path must either close the connection or return an error
+  // line. It must NOT dispatch the oversized query as if it were valid.
+  const bool is_ok_response = resp.find("OK RESULTS") == 0 || resp.find("OK COUNT") == 0;
+  EXPECT_FALSE(is_ok_response)
+      << "max_query_length=" << cfg.max_query_length
+      << " but reactor accepted a 4 KiB query and returned: " << resp;
+
+  server->Stop();
+}
+
+// ----------------------------------------------------------------------------
+// Gap C — UDS (Unix domain socket) end-to-end under reactor default
+// ----------------------------------------------------------------------------
+//
+// Currently TcpServer routes UDS fds through the blocking HandleConnection
+// path unconditionally (tcp_server.cpp historical line ~306). This test
+// passes today because of that fallback, but we need a regression gate:
+// Phase 4 deletes HandleConnection, so UDS must be migrated to the reactor
+// handler before then. Keep this test green through the transition.
+TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
+  // Unique socket path per run so parallel test runs don't collide.
+  const auto pid = ::getpid();
+  const auto ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count();
+  std::filesystem::path sock_path =
+      std::filesystem::temp_directory_path() /
+      ("mygramdb_reactor_uds_test_" + std::to_string(pid) + "_" + std::to_string(ts) + ".sock");
+  // Remove if a previous run left one behind.
+  std::error_code ec;
+  std::filesystem::remove(sock_path, ec);
+
+  // sun_path is 108 bytes on Linux / 104 on macOS; refuse to run the test
+  // if our temp path is too long rather than produce confusing errors.
+  if (sock_path.native().size() >= sizeof(sockaddr_un::sun_path)) {
+    GTEST_SKIP() << "UDS test path too long for sockaddr_un: " << sock_path;
+  }
+
+  ServerConfig cfg;
+  cfg.host = "127.0.0.1";
+  cfg.port = 0;
+  cfg.worker_threads = 4;
+  cfg.max_connections = 64;
+  cfg.allow_cidrs = {"127.0.0.1/32"};
+  cfg.io_model = "reactor";
+  cfg.unix_socket_path = sock_path.string();
+
+  auto server = std::make_unique<TcpServer>(cfg, table_contexts_);
+  ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
+  // Note: we do NOT RequireReactor here — the UDS path may currently be
+  // blocking. The goal is that UDS works *regardless* of io_model so we can
+  // delete the blocking path in Phase 4 without breaking UDS.
+
+  // Connect via AF_UNIX
+  int s = socket(AF_UNIX, SOCK_STREAM, 0);
+  ASSERT_GE(s, 0) << "socket(AF_UNIX) failed: " << strerror(errno);
+
+  struct sockaddr_un addr {};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+  int rc = ::connect(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+  ASSERT_EQ(rc, 0) << "connect(AF_UNIX) failed: " << strerror(errno)
+                   << " (path=" << sock_path << ")";
+
+  struct timeval io {};
+  io.tv_sec = 3;
+  io.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &io, sizeof(io));
+
+  // Send INFO and read the multiline response. We reuse the helper by
+  // wrapping send() + RecvMultilineResponse() logic inline.
+  const std::string wire = "INFO\r\n";
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0),
+            static_cast<ssize_t>(wire.size()));
+
+  static constexpr const char kTerminator[] = "\r\nEND\r\n";
+  static constexpr size_t kTerminatorLen = 7;
+  std::string out;
+  std::array<char, 1024> buf{};
+  while (out.size() < 256 * 1024) {
+    ssize_t n = recv(s, buf.data(), buf.size(), 0);
+    if (n <= 0) break;
+    out.append(buf.data(), static_cast<size_t>(n));
+    if (out.size() >= kTerminatorLen &&
+        out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
+      break;
+    }
+  }
+  close(s);
+
+  EXPECT_FALSE(out.empty()) << "UDS client received no response";
+  EXPECT_EQ(out.substr(0, 7), "OK INFO")
+      << "UDS INFO response was not OK INFO: " << out;
+
+  server->Stop();
+  // Best-effort socket file cleanup.
+  std::filesystem::remove(sock_path, ec);
 }
 
 }  // namespace mygramdb::server

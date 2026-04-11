@@ -266,6 +266,17 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Install the appropriate acceptor callback:
   //  - Reactor mode: inline hand-off to IoReactor::Register, no thread pool hop.
   //  - Blocking mode: submit to thread pool running HandleConnection.
+  //
+  // Rate-limit policy:
+  //  - TCP acceptor (unix_socket_path empty) + rate_limiter_ set: enforce per
+  //    peer-IP token bucket inside the accept handler, matching what the
+  //    blocking path did in HandleConnection.
+  //  - UDS acceptor (unix_socket_path non-empty): local, trusted, bypass.
+  //    The blocking path used the "unix-local" sentinel; here we simply skip
+  //    the AllowRequest() call.
+  const bool apply_rate_limit = (rate_limiter_ != nullptr) && config_.unix_socket_path.empty();
+  RateLimiter* rate_limiter_ptr = apply_rate_limit ? rate_limiter_.get() : nullptr;
+
   if (reactor_active) {
     IoReactor* reactor_ptr = reactor_.get();
     RequestDispatcher* dispatcher_ptr = dispatcher_.get();
@@ -274,45 +285,57 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     const size_t max_write_bytes = config_.max_write_queue_bytes > 0
                                        ? static_cast<size_t>(config_.max_write_queue_bytes)
                                        : ReactorConnection::kDefaultMaxWriteQueueBytes;
-    acceptor_->SetReactorHandler(
-        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes](int client_fd) -> bool {
-          auto conn = ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr,
-                                                max_write_bytes);
-          auto reg = reactor_ptr->Register(conn);
-          if (reg.has_value()) {
-            // Mirror the blocking path's HandleConnection: count this as an
-            // active connection so GetConnectionCount() and the
-            // mygramdb_active_connections metric report the live reactor
-            // population.  The matching decrement happens in the close
-            // callback installed above.
-            stats_ptr->IncrementConnections();
-            stats_ptr->IncrementTotalConnections();
-            return true;
-          }
+    acceptor_->SetReactorHandler([reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, rate_limiter_ptr,
+                                  max_write_bytes](int client_fd) -> bool {
+      // Rate limit check (TCP only; rate_limiter_ptr is null on UDS acceptors).
+      // Mirrors the blocking path's HandleConnection: extract the peer IP via
+      // getpeername() and call AllowRequest(). On rejection we return false so
+      // the acceptor emits SERVER_BUSY + closes the fd (see
+      // ConnectionAcceptor::AcceptLoop).
+      if (rate_limiter_ptr != nullptr) {
+        struct sockaddr_storage addr_storage {};
+        socklen_t addr_len = sizeof(addr_storage);
+        std::string client_ip;
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+        if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0 &&
+            addr_storage.ss_family == AF_INET) {
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+          auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+          char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          client_ip = ip_str;
+        } else {
+          client_ip = "unknown";
+        }
+        if (!rate_limiter_ptr->AllowRequest(client_ip)) {
+          mygram::utils::StructuredLog()
+              .Event("server_warning")
+              .Field("type", "rate_limit_exceeded")
+              .Field("client_ip", client_ip)
+              .Warn();
           return false;
-        });
+        }
+      }
+
+      auto conn = ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr,
+                                            max_write_bytes);
+      auto reg = reactor_ptr->Register(conn);
+      if (reg.has_value()) {
+        // Mirror the blocking path's HandleConnection: count this as an
+        // active connection so GetConnectionCount() and the
+        // mygramdb_active_connections metric report the live reactor
+        // population.  The matching decrement happens in the close
+        // callback installed above.
+        stats_ptr->IncrementConnections();
+        stats_ptr->IncrementTotalConnections();
+        return true;
+      }
+      return false;
+    });
   } else {
     acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-  }
-
-  // Start Unix domain socket acceptor (if configured)
-  if (!config_.unix_socket_path.empty()) {
-    ServerConfig uds_config;
-    uds_config.unix_socket_path = config_.unix_socket_path;
-    uds_config.max_connections = config_.max_connections;
-    unix_acceptor_ = std::make_unique<ConnectionAcceptor>(uds_config, thread_pool_.get());
-    // UDS acceptors always use the blocking I/O model for now — reactor mode
-    // is aimed at persistent TCP client fleets.
-    unix_acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-
-    auto uds_result = unix_acceptor_->Start();
-    if (!uds_result) {
-      // Stop TCP acceptor if UDS fails
-      acceptor_->Stop();
-      return MakeUnexpected(uds_result.error());
-    }
-
-    mygram::utils::StructuredLog().Event("unix_socket_acceptor_started").Field("path", config_.unix_socket_path).Info();
   }
 
   mygram::utils::StructuredLog()
@@ -359,14 +382,10 @@ void TcpServer::Stop() {
     reactor_->Stop();
   }
 
-  // Stop connection acceptor
+  // Stop connection acceptor (handles either TCP or UDS depending on
+  // config_.unix_socket_path; see ConnectionAcceptor::Start).
   if (acceptor_) {
     acceptor_->Stop();
-  }
-
-  // Stop Unix domain socket acceptor
-  if (unix_acceptor_) {
-    unix_acceptor_->Stop();
   }
 
   // Join dump worker thread if still running
