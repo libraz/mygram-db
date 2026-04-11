@@ -149,7 +149,7 @@
       "targets": [
         {
           "datasource": "${DS_PROMETHEUS}",
-          "expr": "mygramdb_memory_used_bytes{instance=~\"$instance\", type=\"total\"} / mygramdb_memory_system_total_bytes{instance=~\"$instance\"} * 100",
+          "expr": "mygramdb_memory_used_bytes{instance=~\"$instance\", type=\"total\"} / ignoring(type) mygramdb_memory_system_total_bytes{instance=~\"$instance\"} * 100",
           "legendFormat": "{{instance}}"
         }
       ],
