@@ -7,6 +7,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
+
 #include "config/config_help.h"
 #include "server/statistics_service.h"
 #include "utils/structured_log.h"
@@ -103,6 +106,21 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
 std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
   if (filepath.empty()) {
     return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
+  }
+
+  // Restrict to YAML/YML configuration files only to prevent reading
+  // arbitrary filesystem paths via this command.
+  {
+    const auto dot_pos = filepath.rfind('.');
+    if (dot_pos == std::string::npos) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
+    }
+    std::string ext = filepath.substr(dot_pos);
+    // Case-insensitive extension check
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (ext != ".yaml" && ext != ".yml") {
+      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
+    }
   }
 
   // Try to load and validate the configuration file

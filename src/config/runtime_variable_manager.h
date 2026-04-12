@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -236,9 +237,10 @@ class RuntimeVariableManager {
   mygram::utils::Expected<void, mygram::utils::Error> ApplyCacheTtl(int value);
 
   /**
-   * @brief Get current value for a variable (internal, no lock)
+   * @brief Get current value for a variable (internal, caller must hold mutex_)
+   * @return Value if variable is known, std::nullopt if unknown
    */
-  std::string GetVariableInternal(const std::string& variable_name) const;
+  std::optional<std::string> GetVariableInternal(const std::string& variable_name) const;
 
   /**
    * @brief Initialize runtime values from config

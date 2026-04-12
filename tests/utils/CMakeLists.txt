@@ -158,6 +158,20 @@ gtest_discover_tests(fd_guard_test
   DISCOVERY_TIMEOUT 30
 )
 
+add_executable(flag_guard_test
+  flag_guard_test.cpp
+)
+
+target_link_libraries(flag_guard_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(flag_guard_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(binary_io_test
   binary_io_test.cpp
 )

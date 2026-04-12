@@ -177,12 +177,18 @@ struct CacheEntry {
   }
 
   /**
-   * @brief Calculate memory footprint of this entry
-   * @return Memory usage in bytes
+   * @brief Calculate heap-only memory footprint of this entry
+   *
+   * Returns only the heap allocations owned by this entry, without
+   * counting sizeof(*this). Use this for cache memory tracking where
+   * the entry struct is already stored in a container that accounts
+   * for its inline size.
+   *
+   * @return Heap memory usage in bytes
    */
-  [[nodiscard]] size_t MemoryUsage() const {
-    // Compressed data (heap allocation beyond sizeof)
-    size_t size = sizeof(CacheEntry) + compressed.capacity();
+  [[nodiscard]] size_t HeapFootprint() const {
+    // Compressed data heap allocation
+    size_t size = compressed.capacity();
 
     // Ngrams: vector buffer + each string's heap allocation
     size += metadata.ngrams.capacity() * sizeof(std::string);
@@ -201,6 +207,17 @@ struct CacheEntry {
 
     return size;
   }
+
+  /**
+   * @brief Calculate total memory footprint including sizeof(*this)
+   *
+   * Includes both the inline struct size and all heap allocations.
+   * Use MemoryUsage() when the entry is standalone (not stored in a container).
+   * Use HeapFootprint() when the entry is inside a map or other container.
+   *
+   * @return Total memory usage in bytes
+   */
+  [[nodiscard]] size_t MemoryUsage() const { return sizeof(CacheEntry) + HeapFootprint(); }
 };
 
 }  // namespace mygramdb::cache

@@ -59,6 +59,22 @@ class SearchHandler : public CommandHandler {
   static inline size_t filter_threshold_ = 1000;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
   /**
+   * @brief Result from ExecuteSearchPipeline
+   */
+  struct PipelineOutput {
+    std::vector<storage::DocId> results;        ///< Full result set (before pagination)
+    std::vector<std::string> all_search_terms;  ///< All search terms (main + AND)
+    std::vector<SearchTermInfo> term_infos;     ///< Term information with n-grams
+    double query_time_ms = 0.0;                 ///< Query execution time
+    query::DebugInfo debug_info;                ///< Debug info (populated when debug_mode)
+    index::Index* current_index = nullptr;
+    storage::DocumentStore* current_doc_store = nullptr;
+    int current_ngram_size = 0;
+    int current_kanji_ngram_size = 0;
+    bool current_cross_boundary = false;
+  };
+
+  /**
    * @brief Handle SEARCH query
    */
   std::string HandleSearch(const query::Query& query, ConnectionContext& conn_ctx);
@@ -67,6 +83,15 @@ class SearchHandler : public CommandHandler {
    * @brief Handle COUNT query
    */
   std::string HandleCount(const query::Query& query, ConnectionContext& conn_ctx);
+
+  /**
+   * @brief Execute the shared search pipeline (term generation through verify_text filter)
+   * @param query Parsed query
+   * @param conn_ctx Connection context (for debug mode)
+   * @param[out] output Pipeline output
+   * @return Empty string on success, or error response string on failure
+   */
+  std::string ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx, PipelineOutput& output);
 };
 
 }  // namespace mygramdb::server

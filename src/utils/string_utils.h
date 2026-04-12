@@ -83,6 +83,17 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text);
 std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints);
 
 /**
+ * @brief Convert a range of codepoints to UTF-8 string
+ *
+ * Avoids heap allocation of a temporary vector when converting a sub-range.
+ *
+ * @param begin Iterator to first codepoint
+ * @param end Iterator past last codepoint
+ * @return UTF-8 encoded string
+ */
+std::string CodepointsToUtf8(const uint32_t* begin, const uint32_t* end);
+
+/**
  * @brief Format bytes to human-readable string (e.g., "1.5MB", "500KB")
  *
  * @param bytes Number of bytes
@@ -108,6 +119,14 @@ bool IsValidUtf8(std::string_view text);
  * @return Sanitized UTF-8 string
  */
 std::string SanitizeUtf8(std::string_view text);
+
+/**
+ * @brief Convert a string to uppercase (ASCII only)
+ *
+ * @param str Input string
+ * @return Uppercase copy of the string
+ */
+std::string ToUpper(std::string_view str);
 
 /// @brief Sort and remove duplicate elements from a vector in-place.
 template <typename T>

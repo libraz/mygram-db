@@ -37,7 +37,7 @@ namespace mygramdb::app {
  * 7. Start new BinlogReader
  *
  * Thread Safety:
- * - Blocks all SEARCH queries during reconnection (uses stop-the-world approach)
+ * - Sets reconnecting_flag_ to signal the server to block SEARCH queries during reconnection
  * - Updates are queued in BinlogReader (no data loss)
  * - Reconnection typically completes within 1-5 seconds
  *

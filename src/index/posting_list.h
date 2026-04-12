@@ -96,10 +96,10 @@ class PostingList {
    * @brief Get top N document IDs with optional reverse order
    *
    * Performance optimization for queries with LIMIT and ORDER BY:
-   * - Returns up to 'limit' document IDs without materializing entire posting list
+   * - Returns up to 'limit' document IDs
    * - Reverse order enables efficient "ORDER BY primary_key DESC LIMIT N" queries
    * - For Roaring bitmaps: uses reverse iterator (no full materialization)
-   * - For delta-compressed: decodes and returns last N elements
+   * - For delta-compressed: decodes delta-compressed list and returns the last N elements
    *
    * @param limit Maximum number of documents to return (0 = all documents)
    * @param reverse If true, returns highest DocIds first (descending order)
@@ -165,8 +165,9 @@ class PostingList {
   /**
    * @brief Serialize posting list to buffer
    * @param buffer Output buffer
+   * @return true if serialization succeeded, false if data is too large
    */
-  void Serialize(std::vector<uint8_t>& buffer) const;
+  bool Serialize(std::vector<uint8_t>& buffer) const;
 
   /**
    * @brief Deserialize posting list from buffer

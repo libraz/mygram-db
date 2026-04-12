@@ -7,6 +7,9 @@
 
 #include <lz4.h>
 
+#include <climits>
+#include <string>
+
 using mygram::utils::ErrorCode;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
@@ -20,6 +23,14 @@ mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> ResultCompre
   }
 
   const size_t src_size = result.size() * sizeof(DocId);
+
+  // Guard against size_t -> int overflow (LZ4 APIs take int)
+  if (src_size > static_cast<size_t>(INT_MAX)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kCacheCompressionFailed,
+                  "Input size exceeds INT_MAX (" + std::to_string(src_size) + " bytes); cannot pass to LZ4"));
+  }
+
   // reinterpret_cast required for LZ4 C API (expects char*)
   const auto* src_data =
       reinterpret_cast<const char*>(result.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -55,6 +66,18 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultCompress
 
   // original_size is the number of DocId elements, not bytes
   const size_t original_bytes = original_size * sizeof(DocId);
+
+  // Guard against size_t -> int overflow (LZ4 APIs take int)
+  if (compressed.size() > static_cast<size_t>(INT_MAX)) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kCacheDecompressionFailed,
+        "Compressed size exceeds INT_MAX (" + std::to_string(compressed.size()) + " bytes); cannot pass to LZ4"));
+  }
+  if (original_bytes > static_cast<size_t>(INT_MAX)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kCacheDecompressionFailed,
+                  "Original size exceeds INT_MAX (" + std::to_string(original_bytes) + " bytes); cannot pass to LZ4"));
+  }
 
   // Allocate output buffer
   std::vector<DocId> result(original_size);

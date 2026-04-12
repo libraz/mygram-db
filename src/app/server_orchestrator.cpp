@@ -146,6 +146,15 @@ void ServerOrchestrator::Stop() {
   }
 
 #ifdef USE_MYSQL
+  // Clear the reconnection callback BEFORE destroying mysql_connection_ and
+  // binlog_reader_ to prevent the callback from firing with dangling pointers.
+  if (tcp_server_) {
+    auto* variable_manager = tcp_server_->GetVariableManager();
+    if (variable_manager != nullptr) {
+      variable_manager->SetMysqlReconnectCallback(nullptr);
+    }
+  }
+
   // Stop BinlogReader
   if (binlog_reader_ && binlog_reader_->IsRunning()) {
     mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_binlog_reader").Debug();
@@ -283,6 +292,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
       }
     });
 
+    // Check load_result FIRST so the actual error is not hidden by kCancelled
+    // when both the load fails and a shutdown is requested simultaneously.
+    if (!load_result) {
+      return mygram::utils::MakeUnexpected(load_result.error());
+    }
+
     // Check if shutdown was requested
     if (SignalManager::IsShutdownRequested()) {
       mygram::utils::StructuredLog()
@@ -292,10 +307,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           .Warn();
       return mygram::utils::MakeUnexpected(
           mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Initial load cancelled"));
-    }
-
-    if (!load_result) {
-      return mygram::utils::MakeUnexpected(load_result.error());
     }
 
     mygram::utils::StructuredLog()

@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -18,6 +19,17 @@
 #include "utils/expected.h"
 
 namespace mygramdb::query {
+
+namespace detail {
+
+/// Counts unquoted parentheses in a token string.
+/// Parentheses inside single- or double-quoted regions are ignored.
+/// Backslash-escaped quotes do not toggle the quote state.
+/// @param token The token string to scan.
+/// @return A pair {open_count, close_count}.
+std::pair<int, int> CountParensInToken(const std::string& token);
+
+}  // namespace detail
 
 /**
  * @brief Query command type

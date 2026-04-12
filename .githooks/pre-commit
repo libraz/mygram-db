@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check clang-format on staged C++/header files
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.cpp' '*.h' | grep -v '/build/' || true)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
+
+if ! command -v "$CLANG_FORMAT" &>/dev/null; then
+    echo "warning: $CLANG_FORMAT not found, skipping format check"
+    exit 0
+fi
+
+UNFORMATTED=()
+for file in $STAGED_FILES; do
+    if ! "$CLANG_FORMAT" --dry-run --Werror "$file" &>/dev/null; then
+        UNFORMATTED+=("$file")
+    fi
+done
+
+if [ ${#UNFORMATTED[@]} -gt 0 ]; then
+    echo "error: The following files are not formatted correctly:"
+    printf '  %s\n' "${UNFORMATTED[@]}"
+    echo ""
+    echo "Run 'make format' to fix, then re-stage the files."
+    exit 1
+fi

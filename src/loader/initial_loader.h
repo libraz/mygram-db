@@ -104,15 +104,24 @@ class InitialLoader {
   std::string start_gtid_;  // GTID captured at load time
 
   /**
+   * @brief Flush accumulated document and index batches to storage
+   *
+   * Validates batch consistency, adds documents to the document store,
+   * assigns doc IDs, and indexes the batch. On error, rolls back the
+   * MySQL transaction.
+   *
+   * @param doc_batch Documents to store (cleared on success)
+   * @param index_batch Corresponding index entries (cleared on success)
+   * @return Expected<void, Error> on success or error
+   */
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> FlushBatch(
+      std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
+      std::vector<index::Index::DocumentItem>& index_batch);
+
+  /**
    * @brief Build SELECT query for initial load
    */
   std::string BuildSelectQuery() const;
-
-  /**
-   * @brief Process single row from result set
-   */
-  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                               unsigned int num_fields);
 
   /**
    * @brief Check if column type is text (VARCHAR/TEXT)

@@ -754,3 +754,40 @@ TEST(StringUtilsTest, CrossBoundaryNgramsUnigrams) {
     EXPECT_EQ(ngrams_enabled[i], ngrams_disabled[i]);
   }
 }
+
+// ============================================================================
+// ToUpper tests
+// ============================================================================
+
+/**
+ * @brief Test basic lowercase to uppercase conversion
+ */
+TEST(StringUtilsTest, ToUpperBasic) {
+  EXPECT_EQ(ToUpper("hello"), "HELLO");
+  EXPECT_EQ(ToUpper("world"), "WORLD");
+}
+
+/**
+ * @brief Test ToUpper with empty string
+ */
+TEST(StringUtilsTest, ToUpperEmpty) {
+  EXPECT_EQ(ToUpper(""), "");
+}
+
+/**
+ * @brief Test ToUpper with already-uppercase string
+ */
+TEST(StringUtilsTest, ToUpperAlreadyUppercase) {
+  EXPECT_EQ(ToUpper("HELLO"), "HELLO");
+  EXPECT_EQ(ToUpper("ABC"), "ABC");
+}
+
+/**
+ * @brief Test ToUpper with mixed case, numbers, and symbols
+ */
+TEST(StringUtilsTest, ToUpperMixedCaseNumbersSymbols) {
+  EXPECT_EQ(ToUpper("Hello World"), "HELLO WORLD");
+  EXPECT_EQ(ToUpper("abc123"), "ABC123");
+  EXPECT_EQ(ToUpper("test-value_1.0"), "TEST-VALUE_1.0");
+  EXPECT_EQ(ToUpper("foo@bar!"), "FOO@BAR!");
+}

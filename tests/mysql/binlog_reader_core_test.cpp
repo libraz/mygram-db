@@ -798,6 +798,33 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeTransaction1) {
 }
 
 /**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID where entries need conversion
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidWithSingleGno) {
+  // Multi-UUID GTID where individual entries are single GNOs should be converted
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:50");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID mixed entries
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidMixed) {
+  // Mix of range and single GNO entries
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:1-100,uuid2:50");
+  EXPECT_EQ(result, "uuid1:1-100,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID tagged GTID passthrough
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidWithTagged) {
+  // Tagged GTID entries (UUID:TAG:GNO) should pass through unchanged
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:tag1:50");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:tag1:50");
+}
+
+/**
  * @brief Test ConvertSingleGtidToRange with multiple intervals (no conversion)
  */
 TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithMultipleIntervals) {

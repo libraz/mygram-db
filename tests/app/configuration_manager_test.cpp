@@ -488,3 +488,22 @@ TEST_F(ConfigurationManagerTestFixture, ReopenLogFilePreservesLevel) {
   std::filesystem::remove(config_path);
   std::filesystem::remove_all(log_dir);
 }
+
+/**
+ * @brief Test that schema validation rejects unknown log levels at load time.
+ *
+ * The embedded JSON schema restricts logging.level to {"debug","info","warn","error"}.
+ * ApplyLoggingConfig also contains a defensive else-branch that logs a warning for
+ * unrecognized levels, but this path cannot be reached through normal config loading.
+ */
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigUnknownLevelRejectedBySchema) {
+  // Create config with an unknown log level
+  std::string config_path = CreateTempConfig("trace_invalid", "text", "");
+
+  // Schema validation should reject the unknown level at load time
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  EXPECT_FALSE(config_mgr_result) << "Unknown log level should be rejected by schema validation";
+
+  // Cleanup
+  std::filesystem::remove(config_path);
+}

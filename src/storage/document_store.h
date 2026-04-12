@@ -118,24 +118,33 @@ class DocumentStore {
   };
 
   /**
-   * @brief Add document
+   * @brief Add document (upsert semantic)
+   *
+   * If a document with the same primary key already exists, the existing DocId
+   * is returned without modifying the document. No error is raised for duplicates.
    *
    * @param primary_key Primary key from MySQL
    * @param filters Filter column values
-   * @return Expected<DocId, Error> Assigned DocID or error (e.g., DocID exhausted)
+   * @return Expected<DocId, Error> Assigned DocID (or existing DocID if duplicate primary key),
+   *         or error (e.g., DocID exhausted)
    */
   [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key,
                                                    const std::unordered_map<std::string, FilterValue>& filters = {},
                                                    std::string_view normalized_text = "");
 
   /**
-   * @brief Add multiple documents (batch operation, thread-safe)
+   * @brief Add multiple documents (batch operation, thread-safe, upsert semantic)
    *
    * This method is optimized for bulk insertions during snapshot builds.
    * It processes documents in a single lock acquisition for better performance.
    *
+   * If a document with a duplicate primary key is encountered, the existing DocId
+   * is placed in the result vector at the corresponding position without modifying
+   * the existing document. No error is raised for duplicates.
+   *
    * @param documents Vector of documents to add
-   * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input) or error
+   * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input,
+   *         existing DocIDs for duplicates) or error (e.g., DocID exhausted mid-batch)
    * @note This method is thread-safe
    */
   [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(const std::vector<DocumentItem>& documents);

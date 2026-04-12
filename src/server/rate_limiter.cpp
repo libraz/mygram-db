@@ -89,16 +89,8 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Update statistics and check for cleanup
-  bool should_cleanup = false;
-  {
-    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-    total_requests_++;
-
-    // Check if cleanup is needed
-    if (total_requests_ % cleanup_interval_ == 0) {
-      should_cleanup = true;
-    }
-  }
+  uint64_t current_total = total_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
+  bool should_cleanup = (current_total % cleanup_interval_ == 0);
 
   // Periodic cleanup to prevent memory leak
   // Note: We do this while holding mutex_ to avoid race conditions
@@ -130,8 +122,7 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
     // Check if we've reached max_clients limit
     if (client_buckets_.size() >= max_clients_) {
       // Enforce hard limit: reject new clients
-      std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-      blocked_requests_++;
+      blocked_requests_.fetch_add(1, std::memory_order_relaxed);
       mygram::utils::StructuredLog()
           .Event("server_warning")
           .Field("type", "rate_limiter_max_clients")
@@ -152,34 +143,28 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   bool allowed = bucket_iter->second->bucket->TryConsume();
 
   // Update statistics
-  {
-    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-    if (allowed) {
-      allowed_requests_++;
-    } else {
-      blocked_requests_++;
-    }
+  if (allowed) {
+    allowed_requests_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    blocked_requests_.fetch_add(1, std::memory_order_relaxed);
   }
 
   return allowed;
 }
 
 RateLimiter::Stats RateLimiter::GetStats() const {
-  // Use std::scoped_lock to acquire both mutexes in a deadlock-free manner.
-  // This prevents deadlock with AllowRequest() which acquires mutex_ first.
-  std::scoped_lock lock(mutex_, stats_mutex_);
+  std::lock_guard<std::mutex> lock(mutex_);
 
-  return Stats{.total_requests = total_requests_,
-               .allowed_requests = allowed_requests_,
-               .blocked_requests = blocked_requests_,
+  return Stats{.total_requests = total_requests_.load(std::memory_order_relaxed),
+               .allowed_requests = allowed_requests_.load(std::memory_order_relaxed),
+               .blocked_requests = blocked_requests_.load(std::memory_order_relaxed),
                .tracked_clients = client_buckets_.size()};
 }
 
 void RateLimiter::ResetStats() {
-  std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-  total_requests_ = 0;
-  allowed_requests_ = 0;
-  blocked_requests_ = 0;
+  total_requests_.store(0, std::memory_order_relaxed);
+  allowed_requests_.store(0, std::memory_order_relaxed);
+  blocked_requests_.store(0, std::memory_order_relaxed);
 }
 
 void RateLimiter::Clear() {
@@ -193,30 +178,6 @@ void RateLimiter::UpdateParameters(size_t capacity, size_t refill_rate) {
   refill_rate_ = refill_rate;
   // Existing client buckets keep their old parameters
   // New clients will use the updated parameters
-}
-
-void RateLimiter::CleanupOldClients() {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  auto now = std::chrono::steady_clock::now();
-  size_t removed = 0;
-
-  for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
-    if (now - it->second->last_access > inactivity_timeout_) {
-      it = client_buckets_.erase(it);
-      removed++;
-    } else {
-      ++it;
-    }
-  }
-
-  if (removed > 0) {
-    mygram::utils::StructuredLog()
-        .Event("rate_limiter_cleanup")
-        .Field("removed_clients", static_cast<uint64_t>(removed))
-        .Field("total_tracked", static_cast<uint64_t>(client_buckets_.size()))
-        .Debug();
-  }
 }
 
 }  // namespace mygramdb::server

@@ -86,7 +86,7 @@ struct ServerConfig {
  */
 struct ConnectionContext {
   int client_fd = -1;
-  bool debug_mode = false;  // Debug mode flag
+  std::atomic<bool> debug_mode{false};  // Debug mode flag (atomic for cross-thread visibility)
 };
 
 /**
@@ -194,9 +194,16 @@ struct DumpProgress {
    * @brief Join worker thread if exists
    */
   void JoinWorker() {
-    if (worker_thread && worker_thread->joinable()) {
-      worker_thread->join();
-      worker_thread.reset();
+    std::unique_ptr<std::thread> thread_to_join;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (worker_thread && worker_thread->joinable()) {
+        thread_to_join = std::move(worker_thread);
+      }
+    }
+    // Join outside the lock to avoid blocking other mutex users
+    if (thread_to_join) {
+      thread_to_join->join();
     }
   }
 };

@@ -51,8 +51,8 @@ class RequestDispatcher;
  * (`api.tcp.*`) feed into this struct.
  */
 struct ReactorConfig {
-  /// Number of event-loop threads. Phase 2 hard-codes 1 regardless of this
-  /// value; sharding is Phase 3.5 (design doc §7 R2).
+  /// Number of event-loop threads. Currently ignored (hard-coded to 1);
+  /// sharding is Phase 3.5 (design doc §7 R2).
   int event_loop_threads = 1;
 
   /// Per-connection soft cap on pending write bytes before the reactor
@@ -165,11 +165,11 @@ class IoReactor {
   void SetMultiplexerFactoryForTest(MultiplexerFactory f);
 
   /**
-   * @brief Arm `kWritable` on an already-registered fd. Phase 3 will use
-   *        this when a drain task can no longer write synchronously.
+   * @brief Arm `kWritable` on an already-registered fd.
    *
-   * Phase 2 never calls this from production paths; it exists so the API
-   * stays stable across phases.
+   * Called from production paths (Phase 3 feature) when a drain task can
+   * no longer write synchronously and needs to resume on the next writable
+   * event.
    */
   mygram::utils::Expected<void, mygram::utils::Error> ArmWrite(int fd);
 

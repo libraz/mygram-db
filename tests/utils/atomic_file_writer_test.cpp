@@ -12,13 +12,13 @@
  * - Overwriting an existing file works
  */
 
+#include "utils/atomic_file_writer.h"
+
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <string>
-
-#include "utils/atomic_file_writer.h"
 
 namespace mygram::utils {
 
@@ -152,9 +152,9 @@ TEST_F(AtomicFileWriterTest, CommitWithNoTempFileWritten) {
   // Don't write anything to temp file
 
   auto result = writer.Commit();
-  // Rename of nonexistent file should fail
+  // Commit should fail because temp file does not exist
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(), ErrorCode::kStorageWriteError);
+  EXPECT_EQ(result.error().code(), ErrorCode::kIOError);
 }
 
 TEST_F(AtomicFileWriterTest, EmptyContentWrite) {

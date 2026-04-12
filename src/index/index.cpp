@@ -34,6 +34,10 @@ constexpr uint32_t kCurrentFormatVersion = kFormatVersionV2;
 // Size of the CRC32 checksum trailer (4 bytes)
 constexpr size_t kCRC32Size = 4;
 
+// Query optimization thresholds for streaming vs standard intersection
+constexpr double kSelectivityThreshold = 0.5;  // 50% threshold
+constexpr size_t kMinSizeThreshold = 10000;    // Don't optimize for tiny lists
+
 }  // namespace
 
 Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams,
@@ -259,8 +263,6 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     // selectivity = min_size / max_size
     // High selectivity (close to 1.0) means terms are highly correlated (e.g., CJK bigrams)
     // Low selectivity (close to 0.0) means terms are independent
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    // Suppressing magic-numbers warning: query optimization thresholds are defined as named constants below
     double selectivity = (max_size > 0) ? static_cast<double>(min_size) / static_cast<double>(max_size) : 0.0;
 
     // Step 3: Query planning - choose execution strategy
@@ -274,11 +276,7 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     //   - Cons: Materializes entire intersection result
     //   - Best for: Low selectivity (<50%), or when result set is small anyway
 
-    constexpr double kSelectivityThreshold = 0.5;  // 50% threshold
-    constexpr size_t kMinSizeThreshold = 10000;    // Don't optimize for tiny lists
-
     bool use_streaming = (selectivity >= kSelectivityThreshold) && (min_size >= kMinSizeThreshold);
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
     if (use_streaming) {
       // Optimized intersection using PostingList::Intersect() chain
@@ -630,9 +628,15 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   };
   OptimizationGuard guard(is_optimizing_);
 
+  size_t initial_term_count;
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    initial_term_count = term_postings_.size();
+  }
+
   mygram::utils::StructuredLog()
       .Event("index_batch_optimization_starting")
-      .Field("terms", static_cast<uint64_t>(term_postings_.size()))
+      .Field("terms", static_cast<uint64_t>(initial_term_count))
       .Field("batch_size", static_cast<uint64_t>(batch_size))
       .Info();
 
@@ -963,7 +967,15 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
       // Serialize posting list to buffer
       std::vector<uint8_t> posting_data;
-      posting->Serialize(posting_data);
+      if (!posting->Serialize(posting_data)) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "posting_serialization_failed")
+            .Field("operation", "save_to_stream")
+            .Field("term", term)
+            .Error();
+        return false;
+      }
 
       // Write posting list size and data
       uint64_t posting_size = posting_data.size();

@@ -1147,7 +1147,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
           .Field("format", "yaml")
           .Field("path", path)
           .Debug();
-      // Always validate YAML configs - convert to JSON first
+      // Parse YAML once, validate, then reuse the parsed JSON
       try {
         YAML::Node yaml_root = YAML::LoadFile(path);
         json json_root = YamlToJson(yaml_root);
@@ -1165,10 +1165,41 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
         if (!validation_result) {
           return MakeUnexpected(validation_result.error());
         }
+
+        // Reuse the already-parsed JSON instead of re-reading and re-parsing the file
+        Config config = ParseConfigFromJson(json_root);
+
+        // Apply log format immediately so subsequent logs use the configured format
+        mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
+
+        mygram::utils::StructuredLog()
+            .Event("config_loaded")
+            .Field("path", path)
+            .Field("tables", static_cast<uint64_t>(config.tables.size()))
+            .Field("mysql_host", config.mysql.host)
+            .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
+            .Info();
+
+        return config;
+      } catch (const YAML::Exception& e) {
+        std::stringstream err_msg;
+        err_msg << "YAML parse error in configuration file: " << path << "\n";
+        err_msg << "  Error details: " << e.what() << "\n";
+        if (e.mark.line != static_cast<size_t>(-1)) {
+          err_msg << "  Error location: line " << (e.mark.line + 1) << ", column " << (e.mark.column + 1) << "\n";
+        }
+        err_msg << "  Common issues:\n";
+        err_msg << "    - Incorrect indentation (use spaces, not tabs)\n";
+        err_msg << "    - Missing colon after key name\n";
+        err_msg << "    - Unquoted special characters in values\n";
+        err_msg << "    - Inconsistent list formatting\n";
+        err_msg << "  Tip: Check YAML syntax, especially indentation\n";
+        err_msg << "  Example config: examples/config.yaml";
+        return MakeUnexpected(MakeError(ErrorCode::kConfigYamlError, err_msg.str(), path));
       } catch (const std::exception& e) {
-        return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, e.what(), path));
+        return MakeUnexpected(MakeError(ErrorCode::kConfigParseError,
+                                        std::string("Failed to load config from ") + path + ": " + e.what(), path));
       }
-      return LoadConfigYaml(path);
 
     case FileFormat::kUnknown:
     default:

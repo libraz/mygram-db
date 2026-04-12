@@ -506,7 +506,6 @@ inline Error MakeError(ErrorCode code, const std::string& message, const std::st
  * @param line Line number (automatically filled by compiler)
  * @return Error object with context information
  */
-template <typename... Args>
 inline Error MakeErrorWithLocation(ErrorCode code, const std::string& message, const char* file = __builtin_FILE(),
                                    int line = __builtin_LINE()) {
   return {code, message, std::string(file) + ":" + std::to_string(line)};

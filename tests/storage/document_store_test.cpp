@@ -1386,3 +1386,139 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
   auto text_v1 = store_v1.GetNormalizedText(static_cast<DocId>(1));
   EXPECT_FALSE(text_v1.has_value()) << "v1 snapshot should have no doc_texts_";
 }
+
+// =============================================================================
+// UINT32_MAX wraparound tests for AddDocument and AddDocumentBatch
+// =============================================================================
+
+/**
+ * @brief Test helper: DocumentStore subclass that exposes next_doc_id_ for testing
+ *
+ * The protected next_doc_id_ member allows subclasses to set the counter
+ * to values near UINT32_MAX without adding 4 billion documents.
+ */
+class TestableDocumentStore : public DocumentStore {
+ public:
+  void SetNextDocId(DocId id) { next_doc_id_ = id; }
+  DocId GetNextDocId() const { return next_doc_id_; }
+};
+
+/**
+ * @brief Test AddDocument UINT32_MAX boundary: assigns UINT32_MAX then errors
+ *
+ * When next_doc_id_ == UINT32_MAX, AddDocument should:
+ * 1. Successfully assign UINT32_MAX as the DocId
+ * 2. Set next_doc_id_ to 0 (sentinel)
+ * 3. Return an error on the subsequent call
+ */
+TEST(DocumentStoreTest, AddDocument_Uint32MaxBoundary) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Should succeed and assign UINT32_MAX
+  auto result = store.AddDocument("pk_max");
+  ASSERT_TRUE(result.has_value()) << "AddDocument should succeed at UINT32_MAX";
+  EXPECT_EQ(*result, UINT32_MAX);
+
+  // next_doc_id_ should now be 0 (sentinel)
+  EXPECT_EQ(store.GetNextDocId(), 0);
+
+  // Next call should fail with DocID exhaustion
+  auto result2 = store.AddDocument("pk_overflow");
+  EXPECT_FALSE(result2.has_value()) << "AddDocument should fail after UINT32_MAX is assigned";
+}
+
+/**
+ * @brief Test AddDocument: next_doc_id_ == 0 returns error immediately
+ */
+TEST(DocumentStoreTest, AddDocument_ZeroSentinelReturnsError) {
+  TestableDocumentStore store;
+
+  // Set sentinel value
+  store.SetNextDocId(0);
+
+  auto result = store.AddDocument("pk_fail");
+  EXPECT_FALSE(result.has_value()) << "AddDocument should fail when next_doc_id_ == 0";
+}
+
+/**
+ * @brief Test AddDocumentBatch UINT32_MAX boundary: assigns UINT32_MAX then errors
+ *
+ * When next_doc_id_ == UINT32_MAX, AddDocumentBatch should:
+ * 1. Successfully assign UINT32_MAX for the first new document
+ * 2. Set next_doc_id_ to 0 (sentinel)
+ * 3. Return an error for the second new document in the same batch
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxBoundary) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Batch with two new documents - first should succeed, second should fail
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_max", {}, ""});
+  batch.push_back({"pk_overflow", {}, ""});
+
+  auto result = store.AddDocumentBatch(batch);
+  EXPECT_FALSE(result.has_value()) << "AddDocumentBatch should fail when DocID space is exhausted mid-batch";
+}
+
+/**
+ * @brief Test AddDocumentBatch: single document at UINT32_MAX succeeds
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxSingleDoc) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Single document batch should succeed
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_max", {}, ""});
+
+  auto result = store.AddDocumentBatch(batch);
+  ASSERT_TRUE(result.has_value()) << "Single-doc batch at UINT32_MAX should succeed";
+  EXPECT_EQ(result->size(), 1);
+  EXPECT_EQ((*result)[0], UINT32_MAX);
+
+  // Sentinel should be set
+  EXPECT_EQ(store.GetNextDocId(), 0);
+
+  // Next batch should fail
+  std::vector<DocumentStore::DocumentItem> batch2;
+  batch2.push_back({"pk_next", {}, ""});
+  auto result2 = store.AddDocumentBatch(batch2);
+  EXPECT_FALSE(result2.has_value()) << "Batch after UINT32_MAX should fail";
+}
+
+/**
+ * @brief Test AddDocumentBatch: duplicate at UINT32_MAX does not consume the ID
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_DuplicateAtUint32Max) {
+  TestableDocumentStore store;
+
+  // Add a document first via normal path
+  store.SetNextDocId(1);
+  auto pre = store.AddDocument("pk_existing");
+  ASSERT_TRUE(pre.has_value());
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Batch: duplicate (should return existing ID) + new (should get UINT32_MAX)
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_existing", {}, ""});  // Duplicate - returns existing DocId
+  batch.push_back({"pk_max", {}, ""});       // New - should get UINT32_MAX
+
+  auto result = store.AddDocumentBatch(batch);
+  ASSERT_TRUE(result.has_value()) << "Batch with duplicate + new at UINT32_MAX should succeed";
+  EXPECT_EQ(result->size(), 2);
+  EXPECT_EQ((*result)[0], *pre);        // Existing DocId for duplicate
+  EXPECT_EQ((*result)[1], UINT32_MAX);  // Last valid DocId for new document
+
+  // Sentinel should be set after using UINT32_MAX
+  EXPECT_EQ(store.GetNextDocId(), 0);
+}

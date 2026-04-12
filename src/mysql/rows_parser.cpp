@@ -594,15 +594,17 @@ static std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data,
           geo_data = data + 1;
           break;
         case 2:
-          geo_len = data[0] | (data[1] << 8);
+          geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8);
           geo_data = data + 2;
           break;
         case 3:
-          geo_len = data[0] | (data[1] << 8) | (data[2] << 16);
+          geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                    (static_cast<uint32_t>(data[2]) << 16);
           geo_data = data + 3;
           break;
         case 4:
-          geo_len = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+          geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                    (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
           geo_data = data + 4;
           break;
         default:
@@ -636,7 +638,13 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
     // binlog_reader already skipped OK byte, buffer points to event data
     // Event size is at bytes [9-12] of event data (little-endian)
     // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
-    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+    uint32_t event_size = static_cast<uint32_t>(buffer[9]) | (static_cast<uint32_t>(buffer[10]) << 8) |
+                          (static_cast<uint32_t>(buffer[11]) << 16) | (static_cast<uint32_t>(buffer[12]) << 24);
+
+    // Validate event_size before computing end pointer to prevent underflow/OOB
+    if (event_size < 4 || event_size > length) {
+      return std::nullopt;
+    }
 
     const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN = 19)
 
@@ -845,7 +853,13 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
     // binlog_reader already skipped OK byte, buffer points to event data.
     // Event size is at bytes [9-12] of event data (little-endian)
     // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
-    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+    uint32_t event_size = static_cast<uint32_t>(buffer[9]) | (static_cast<uint32_t>(buffer[10]) << 8) |
+                          (static_cast<uint32_t>(buffer[11]) << 16) | (static_cast<uint32_t>(buffer[12]) << 24);
+
+    // Validate event_size before computing end pointer to prevent underflow/OOB
+    if (event_size < 4 || event_size > length) {
+      return std::nullopt;
+    }
 
     const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
     // Event size includes header + data + 4-byte checksum (even when checksums are disabled)
@@ -997,7 +1011,9 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         .Field("available_bytes", static_cast<int64_t>(end - ptr))
         .Debug();
 
-    while (ptr < end) {
+    bool parse_ended_early = false;
+
+    while (ptr < end && !parse_ended_early) {
       RowData before_row;
       RowData after_row;
 
@@ -1066,7 +1082,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("action", "reached_end_before_image")
               .Field("col_idx", static_cast<uint64_t>(col_idx))
               .Debug();
-          goto end_of_rows;  // Exit both loops cleanly
+          parse_ended_early = true;
+          break;
         }
 
         std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
@@ -1091,7 +1108,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("action", "exceeded_end_after_decode")
               .Field("col_idx", static_cast<uint64_t>(col_idx))
               .Debug();
-          goto end_of_rows;  // Exit both loops cleanly
+          parse_ended_early = true;
+          break;
         }
 
         before_row.columns[col_meta.name] = value;
@@ -1130,6 +1148,10 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         } else {
           mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
         }
+      }
+
+      if (parse_ended_early) {
+        break;
       }
 
       // Parse after image
@@ -1190,7 +1212,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("action", "reached_end_after_image")
               .Field("col_idx", static_cast<uint64_t>(col_idx))
               .Debug();
-          goto end_of_rows;
+          parse_ended_early = true;
+          break;
         }
 
         std::string value = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
@@ -1215,7 +1238,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("action", "exceeded_end_after_decode_after_image")
               .Field("col_idx", static_cast<uint64_t>(col_idx))
               .Debug();
-          goto end_of_rows;
+          parse_ended_early = true;
+          break;
         }
 
         after_row.columns[col_meta.name] = value;
@@ -1256,10 +1280,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         }
       }
 
-      row_pairs.emplace_back(std::move(before_row), std::move(after_row));
+      if (!parse_ended_early) {
+        row_pairs.emplace_back(std::move(before_row), std::move(after_row));
+      }
     }
 
-  end_of_rows:  // Label for graceful early exit from nested loops
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "parsed_update_rows")
@@ -1293,7 +1318,13 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
   try {
     // binlog_reader already skipped OK byte, buffer points to event data
     // Event size is at bytes [9-12] of event data (little-endian)
-    uint32_t event_size = buffer[9] | (buffer[10] << 8) | (buffer[11] << 16) | (buffer[12] << 24);
+    uint32_t event_size = static_cast<uint32_t>(buffer[9]) | (static_cast<uint32_t>(buffer[10]) << 8) |
+                          (static_cast<uint32_t>(buffer[11]) << 16) | (static_cast<uint32_t>(buffer[12]) << 24);
+
+    // Validate event_size before computing end pointer to prevent underflow/OOB
+    if (event_size < 4 || event_size > length) {
+      return std::nullopt;
+    }
 
     const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
     // Event size includes header + data + 4-byte checksum (even when checksums are disabled)

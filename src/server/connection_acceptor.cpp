@@ -326,14 +326,12 @@ void ConnectionAcceptor::Stop() {
     unix_socket_path_.clear();
   }
 
-  // Close all active connections
+  // Clear active connection tracking. Do NOT close the fds here: they are
+  // owned by the reactor (ReactorConnection), which closes them in its
+  // destructor during IoReactor::Stop(). Closing here would cause a
+  // double-close race with the reactor's teardown path.
   {
     std::lock_guard<std::mutex> lock(fds_mutex_);
-    for (int socket_fd : active_fds_) {
-      // Shutdown socket to unblock recv/send calls in other threads
-      shutdown(socket_fd, SHUT_RDWR);
-      close(socket_fd);
-    }
     active_fds_.clear();
   }
 

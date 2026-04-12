@@ -10,6 +10,8 @@
  * - NULL value handling in filters
  */
 
+#include "server/search_pipeline.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
@@ -17,7 +19,6 @@
 #include <vector>
 
 #include "query/query_parser.h"
-#include "server/search_pipeline.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::server::search_pipeline {
@@ -29,25 +30,28 @@ class SearchPipelineFilterTest : public ::testing::Test {
 
     // Add documents with various filter types
     // Doc 0: status=1, name="alice", score=85.5
-    auto d0 = doc_store_->AddDocument("pk0", {{"status", storage::FilterValue{int64_t{1}}},
-                                               {"name", storage::FilterValue{std::string("alice")}},
-                                               {"score", storage::FilterValue{85.5}}},
+    auto d0 = doc_store_->AddDocument("pk0",
+                                      {{"status", storage::FilterValue{int64_t{1}}},
+                                       {"name", storage::FilterValue{std::string("alice")}},
+                                       {"score", storage::FilterValue{85.5}}},
                                       "alice likes cats");
     ASSERT_TRUE(d0.has_value());
     doc_ids_.push_back(d0.value());
 
     // Doc 1: status=2, name="bob", score=92.0
-    auto d1 = doc_store_->AddDocument("pk1", {{"status", storage::FilterValue{int64_t{2}}},
-                                               {"name", storage::FilterValue{std::string("bob")}},
-                                               {"score", storage::FilterValue{92.0}}},
+    auto d1 = doc_store_->AddDocument("pk1",
+                                      {{"status", storage::FilterValue{int64_t{2}}},
+                                       {"name", storage::FilterValue{std::string("bob")}},
+                                       {"score", storage::FilterValue{92.0}}},
                                       "bob likes dogs");
     ASSERT_TRUE(d1.has_value());
     doc_ids_.push_back(d1.value());
 
     // Doc 2: status=1, name="charlie", score=78.0
-    auto d2 = doc_store_->AddDocument("pk2", {{"status", storage::FilterValue{int64_t{1}}},
-                                               {"name", storage::FilterValue{std::string("charlie")}},
-                                               {"score", storage::FilterValue{78.0}}},
+    auto d2 = doc_store_->AddDocument("pk2",
+                                      {{"status", storage::FilterValue{int64_t{1}}},
+                                       {"name", storage::FilterValue{std::string("charlie")}},
+                                       {"score", storage::FilterValue{78.0}}},
                                       "charlie likes cats and dogs");
     ASSERT_TRUE(d2.has_value());
     doc_ids_.push_back(d2.value());

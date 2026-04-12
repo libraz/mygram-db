@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <set>
@@ -151,8 +152,8 @@ class CacheManager {
   void SetTtl(int ttl_seconds);
 
  private:
-  bool enabled_;
-  int ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
+  std::atomic<bool> enabled_;
+  std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

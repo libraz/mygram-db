@@ -16,6 +16,8 @@
 #include "cache/cache_manager.h"
 #include "server/sync_operation_manager.h"
 #include "storage/dump_format_v1.h"
+#include "utils/fd_guard.h"
+#include "utils/flag_guard.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -23,32 +25,6 @@
 #endif
 
 namespace mygramdb::server {
-
-namespace {
-constexpr size_t kGtidPrefixLength = 7;  // Length of "gtid":"
-
-/**
- * @brief RAII guard for atomic boolean flags
- *
- * Automatically sets flag to true on construction and resets to false on destruction.
- * Exception-safe: ensures flag is always reset even if exceptions are thrown.
- */
-class FlagGuard {
- public:
-  explicit FlagGuard(std::atomic<bool>& flag) : flag_(flag) { flag_ = true; }
-  ~FlagGuard() { flag_ = false; }
-
-  // Non-copyable and non-movable
-  FlagGuard(const FlagGuard&) = delete;
-  FlagGuard& operator=(const FlagGuard&) = delete;
-  FlagGuard(FlagGuard&&) = delete;
-  FlagGuard& operator=(FlagGuard&&) = delete;
-
- private:
-  std::atomic<bool>& flag_;
-};
-
-}  // namespace
 
 std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
   (void)conn_ctx;  // Unused for dump commands
@@ -157,8 +133,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
 
-  // Set flag to indicate save is starting
-  ctx_.dump_save_in_progress = true;
+  // Set flag to indicate save is starting.
+  // Use ScopeGuard so the flag is automatically reset if thread creation fails
+  // or if the synchronous path throws an exception.
+  ctx_.dump_save_in_progress.store(true, std::memory_order_release);
+  auto flag_guard =
+      mygram::utils::ScopeGuard([this]() { ctx_.dump_save_in_progress.store(false, std::memory_order_release); });
 
   // Initialize progress tracking and run async if progress tracking is available
   if (ctx_.dump_progress != nullptr) {
@@ -176,6 +156,10 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     // Start background worker thread
     ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
 
+    // Thread created successfully - the worker thread now owns the flag cleanup
+    // (DumpSaveWorker resets dump_save_in_progress at the end)
+    flag_guard.Release();
+
     // Return immediately with started message (async mode)
     return "OK DUMP_STARTED " + filepath + "\r\nUse DUMP STATUS to monitor progress";
   }
@@ -187,18 +171,19 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
       .Field("mode", "sync")
       .Field("tables", static_cast<uint64_t>(ctx_.table_contexts.size()))
       .Info();
-  DumpSaveWorker(filepath);
+
+  // DumpSaveWorker resets the flag at the end, so release the guard
+  flag_guard.Release();
+  bool success = DumpSaveWorker(filepath);
 
   // Check result and return appropriate response (sync mode)
-  if (!ctx_.dump_save_in_progress.load()) {
-    // Worker completed successfully (it resets the flag)
+  if (success) {
     return "OK SAVED " + filepath;
   }
-  // This shouldn't happen in sync mode, but handle it gracefully
-  return ResponseFormatter::FormatError("Dump save failed: unexpected state");
+  return ResponseFormatter::FormatError("Dump save failed");
 }
 
-void DumpHandler::DumpSaveWorker(const std::string& filepath) {
+bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   bool replication_was_running = false;
 
 #ifdef USE_MYSQL
@@ -290,7 +275,8 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
 #endif
 
   // Update progress and clear flag
-  if (result) {
+  bool success = result.has_value();
+  if (success) {
     mygram::utils::StructuredLog().Event("dump_save_completed").Field("filepath", filepath).Field("gtid", gtid).Info();
     if (ctx_.dump_progress != nullptr) {
       ctx_.dump_progress->Complete(filepath);
@@ -310,6 +296,7 @@ void DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   // Clear the in-progress flag
   ctx_.dump_save_in_progress = false;
+  return success;
 }
 
 std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
@@ -392,7 +379,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   mygram::utils::StructuredLog().Event("dump_load_starting").Field("path", filepath).Info();
 
   // Set loading mode (RAII guard ensures it's cleared even on exceptions)
-  FlagGuard loading_guard(ctx_.dump_load_in_progress);
+  mygram::utils::AtomicFlagGuard loading_guard(ctx_.dump_load_in_progress);
 
   // Convert table_contexts to format expected by dump_v1::ReadDumpV1
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;

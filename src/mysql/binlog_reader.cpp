@@ -30,6 +30,36 @@
 
 namespace mygramdb::mysql {
 
+// MySQL error codes used for binlog replication error handling
+constexpr unsigned int kMySQLErrBinlogPurged = 1236;
+constexpr unsigned int kMySQLErrServerLost = 2013;
+constexpr unsigned int kMySQLErrGoneAway = 2006;
+
+namespace {
+
+/// Create a sub-config from a source, optionally overriding the read timeout.
+/// @param src Source connection config
+/// @param read_timeout_override If non-zero, overrides the read timeout
+Connection::Config MakeSubConfig(const Connection::Config& src, uint32_t read_timeout_override = 0) {
+  Connection::Config dst;
+  dst.host = src.host;
+  dst.port = src.port;
+  dst.user = src.user;
+  dst.password = src.password;
+  dst.database = src.database;
+  dst.connect_timeout = src.connect_timeout;
+  dst.read_timeout = (read_timeout_override > 0) ? read_timeout_override : src.read_timeout;
+  dst.write_timeout = src.write_timeout;
+  dst.ssl_enable = src.ssl_enable;
+  dst.ssl_ca = src.ssl_ca;
+  dst.ssl_cert = src.ssl_cert;
+  dst.ssl_key = src.ssl_key;
+  dst.ssl_verify_server_cert = src.ssl_verify_server_cert;
+  return dst;
+}
+
+}  // namespace
+
 // Single-table mode constructor (deprecated)
 BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
                            config::TableConfig table_config, config::MysqlConfig mysql_config, const Config& config,
@@ -73,15 +103,15 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   // Check if currently stopping (running_ is true but should_stop_ is also true)
   if (should_stop_.load()) {
-    last_error_ = "Binlog reader is stopping, please wait";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+    SetLastError("Binlog reader is stopping, please wait");
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
 
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
-    last_error_ = "Binlog reader is already running";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+    SetLastError("Binlog reader is already running");
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
 
   // RAII guard to manage all resources on failure
@@ -142,18 +172,18 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
-    last_error_ = "server_id must be set to a non-zero value for binlog replication";
-    mygram::utils::LogBinlogError("invalid_server_id", current_gtid_, last_error_);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+    SetLastError("server_id must be set to a non-zero value for binlog replication");
+    mygram::utils::LogBinlogError("invalid_server_id", current_gtid_, GetLastError());
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
 
   // Check MySQL connection (reconnect if stale)
   if (!connection_.IsConnected()) {
     auto reconnect_result = connection_.Reconnect();
     if (!reconnect_result) {
-      last_error_ = "MySQL connection not established and reconnect failed";
-      mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+      SetLastError("MySQL connection not established and reconnect failed");
+      mygram::utils::LogBinlogError("startup_failed", current_gtid_, GetLastError());
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, GetLastError()));
     }
   } else {
     // Connection appears alive but may be stale; verify with ping
@@ -161,20 +191,20 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     if (!ping_result) {
       auto reconnect_result = connection_.Reconnect();
       if (!reconnect_result) {
-        last_error_ = "MySQL connection lost and reconnect failed";
-        mygram::utils::LogBinlogError("startup_failed", current_gtid_, last_error_);
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+        SetLastError("MySQL connection lost and reconnect failed");
+        mygram::utils::LogBinlogError("startup_failed", current_gtid_, GetLastError());
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, GetLastError()));
       }
     }
   }
 
   // Check if GTID mode is enabled (using main connection)
   if (!connection_.IsGTIDModeEnabled()) {
-    last_error_ =
+    SetLastError(
         "GTID mode is not enabled on MySQL server. "
-        "Please enable GTID mode (gtid_mode=ON) for binlog replication.";
-    mygram::utils::LogBinlogError("gtid_mode_disabled", current_gtid_, last_error_);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+        "Please enable GTID mode (gtid_mode=ON) for binlog replication.");
+    mygram::utils::LogBinlogError("gtid_mode_disabled", current_gtid_, GetLastError());
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
 
   // Validate primary keys for all tables
@@ -183,18 +213,15 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       std::string validation_error;
       if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key,
                                             validation_error)) {
-        last_error_ = "Primary key validation failed for table '";
-        last_error_ += table_name;
-        last_error_ += "': ";
-        last_error_ += validation_error;
+        SetLastError("Primary key validation failed for table '" + table_name + "': " + validation_error);
         mygram::utils::StructuredLog()
             .Event("binlog_error")
             .Field("type", "primary_key_validation_failed")
             .Field("table", table_name)
             .Field("gtid", current_gtid_)
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Error();
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
       }
     }
   } else {
@@ -202,15 +229,15 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     std::string validation_error;
     if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
                                           table_config_.primary_key, validation_error)) {
-      last_error_ = "Primary key validation failed: " + validation_error;
+      SetLastError("Primary key validation failed: " + validation_error);
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "primary_key_validation_failed")
           .Field("table", table_config_.name)
           .Field("gtid", current_gtid_)
-          .Field("error", last_error_)
+          .Field("error", GetLastError())
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
     }
   }
 
@@ -222,64 +249,34 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       .Field("gtid", current_gtid_)
       .Message("Creating dedicated binlog connection")
       .Info();
-  mysql::Connection::Config binlog_conn_config;
-  binlog_conn_config.host = connection_.GetConfig().host;
-  binlog_conn_config.port = connection_.GetConfig().port;
-  binlog_conn_config.user = connection_.GetConfig().user;
-  binlog_conn_config.password = connection_.GetConfig().password;
-  binlog_conn_config.database = connection_.GetConfig().database;
-  binlog_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
   // Use a short read timeout for the binlog connection so that Stop()
   // completes quickly. The reader thread checks should_stop_ after each
   // mysql_binlog_fetch() return, so this value bounds the max Stop() latency.
-  binlog_conn_config.read_timeout = 5;
-  binlog_conn_config.write_timeout = connection_.GetConfig().write_timeout;
-  binlog_conn_config.ssl_enable = connection_.GetConfig().ssl_enable;
-  binlog_conn_config.ssl_ca = connection_.GetConfig().ssl_ca;
-  binlog_conn_config.ssl_cert = connection_.GetConfig().ssl_cert;
-  binlog_conn_config.ssl_key = connection_.GetConfig().ssl_key;
-  binlog_conn_config.ssl_verify_server_cert = connection_.GetConfig().ssl_verify_server_cert;
-
-  binlog_connection_ = std::make_unique<Connection>(binlog_conn_config);
+  binlog_connection_ = std::make_unique<Connection>(MakeSubConfig(connection_.GetConfig(), 5));
   auto connect_result = binlog_connection_->Connect("binlog worker");
   if (!connect_result) {
-    last_error_ = "Failed to create binlog connection: " + connect_result.error().message();
-    mygram::utils::LogBinlogError("connection_failed", current_gtid_, last_error_);
+    SetLastError("Failed to create binlog connection: " + connect_result.error().message());
+    mygram::utils::LogBinlogError("connection_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up binlog_connection_
     return MakeUnexpected(connect_result.error());
   }
 
   // Create dedicated metadata connection for column name queries (thread-safe)
   // This avoids using the main connection_ from the reader thread
-  mysql::Connection::Config metadata_conn_config;
-  metadata_conn_config.host = connection_.GetConfig().host;
-  metadata_conn_config.port = connection_.GetConfig().port;
-  metadata_conn_config.user = connection_.GetConfig().user;
-  metadata_conn_config.password = connection_.GetConfig().password;
-  metadata_conn_config.database = connection_.GetConfig().database;
-  metadata_conn_config.connect_timeout = connection_.GetConfig().connect_timeout;
-  metadata_conn_config.read_timeout = connection_.GetConfig().read_timeout;
-  metadata_conn_config.write_timeout = connection_.GetConfig().write_timeout;
-  metadata_conn_config.ssl_enable = connection_.GetConfig().ssl_enable;
-  metadata_conn_config.ssl_ca = connection_.GetConfig().ssl_ca;
-  metadata_conn_config.ssl_cert = connection_.GetConfig().ssl_cert;
-  metadata_conn_config.ssl_key = connection_.GetConfig().ssl_key;
-  metadata_conn_config.ssl_verify_server_cert = connection_.GetConfig().ssl_verify_server_cert;
-
-  metadata_connection_ = std::make_unique<Connection>(metadata_conn_config);
+  metadata_connection_ = std::make_unique<Connection>(MakeSubConfig(connection_.GetConfig()));
   auto metadata_connect_result = metadata_connection_->Connect("metadata");
   if (!metadata_connect_result) {
-    last_error_ = "Failed to create metadata connection: " + metadata_connect_result.error().message();
-    mygram::utils::LogBinlogError("metadata_connection_failed", current_gtid_, last_error_);
+    SetLastError("Failed to create metadata connection: " + metadata_connect_result.error().message());
+    mygram::utils::LogBinlogError("metadata_connection_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up
     return MakeUnexpected(metadata_connect_result.error());
   }
 
   // Validate connection before starting replication
   if (!ValidateConnection()) {
-    mygram::utils::LogBinlogError("validation_failed", current_gtid_, last_error_);
+    mygram::utils::LogBinlogError("validation_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up binlog_connection_
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
 
@@ -307,10 +304,10 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     guard.success = true;  // Mark start as successful - StartupGuard won't clean up
     return {};
   } catch (const std::exception& e) {
-    last_error_ = std::string("Failed to start threads: ") + e.what();
-    mygram::utils::LogBinlogError("thread_start_failed", current_gtid_, last_error_);
+    SetLastError(std::string("Failed to start threads: ") + e.what());
+    mygram::utils::LogBinlogError("thread_start_failed", current_gtid_, GetLastError());
     // StartupGuard destructor will clean up all resources automatically
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
   }
 }
 
@@ -423,7 +420,7 @@ void BinlogReader::ReaderThreadFunc() {
     // Disable binlog checksums for this connection
     // We don't verify checksums yet, so ask the server to send events without them
     if (mysql_query(binlog_connection_->GetHandle(), "SET @source_binlog_checksum='NONE'") != 0) {
-      last_error_ = "Failed to disable binlog checksum: " + binlog_connection_->GetLastError();
+      SetLastError("Failed to disable binlog checksum: " + binlog_connection_->GetLastError());
 
       // On first attempt (reconnect_attempt == 0), this is likely a read timeout recovery
       // Use debug logging to avoid noisy error logs during normal idle reconnects
@@ -431,10 +428,10 @@ void BinlogReader::ReaderThreadFunc() {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "checksum_query_failed_idle_reconnect")
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Debug();
       } else {
-        mygram::utils::LogBinlogError("checksum_disable_failed", GetCurrentGTID(), last_error_, reconnect_attempt);
+        mygram::utils::LogBinlogError("checksum_disable_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt);
       }
 
       // Retry connection after delay with exponential backoff (capped at 10x) (#4)
@@ -479,7 +476,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Event("binlog_error")
             .Field("type", "connection_validation_failed")
             .Field("context", "after_reconnect")
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Error();
         should_stop_ = true;
         break;
@@ -534,12 +531,12 @@ void BinlogReader::ReaderThreadFunc() {
       // Encode GTID set using our encoder
       auto encode_result = mygramdb::mysql::GtidEncoder::Encode(current_gtid);
       if (!encode_result) {
-        last_error_ = "Failed to encode GTID set: " + encode_result.error().message();
+        SetLastError("Failed to encode GTID set: " + encode_result.error().message());
         mygram::utils::StructuredLog()
             .Event("binlog_error")
             .Field("type", "gtid_encode_failed")
             .Field("gtid", current_gtid)
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Error();
         should_stop_ = true;
         break;
@@ -574,15 +571,15 @@ void BinlogReader::ReaderThreadFunc() {
     // Open binlog stream (local_gtid_encoded must be alive during this call)
     if (mysql_binlog_open(binlog_connection_->GetHandle(), &rpl) != 0) {
       unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
-      last_error_ = "Failed to open binlog stream: " + binlog_connection_->GetLastError();
+      SetLastError("Failed to open binlog stream: " + binlog_connection_->GetLastError());
 
       // Check for binlog purged error (errno 1236) - non-recoverable, stop immediately
-      if (err_no == 1236) {
+      if (err_no == kMySQLErrBinlogPurged) {
         mygram::utils::StructuredLog()
             .Event("binlog_error")
             .Field("type", "binlog_purged")
             .Field("gtid", GetCurrentGTID())
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Field("errno", static_cast<int64_t>(err_no))
             .Field("message",
                    "Binlog position no longer available on server. "
@@ -596,7 +593,7 @@ void BinlogReader::ReaderThreadFunc() {
       // Other errors - retry with reconnection and exponential backoff
       reconnect_attempt = std::min(reconnect_attempt + 1, 10);
       int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
-      mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), last_error_, reconnect_attempt);
+      mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt);
 
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -625,7 +622,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Event("binlog_error")
               .Field("type", "connection_validation_failed")
               .Field("context", "after_reconnect")
-              .Field("error", last_error_)
+              .Field("error", GetLastError())
               .Error();
           should_stop_ = true;
           break;
@@ -680,8 +677,8 @@ void BinlogReader::ReaderThreadFunc() {
       if (result != 0) {
         unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
         const char* err_str = mysql_error(binlog_connection_->GetHandle());
-        last_error_ =
-            "Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
+        SetLastError("Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) +
+                     ")");
 
         // Check if this is a read timeout (expected with 5-second timeout when heartbeat fails)
         // errno 2013 (CR_SERVER_LOST) can indicate either timeout or actual connection loss
@@ -694,7 +691,7 @@ void BinlogReader::ReaderThreadFunc() {
         // Check if this is likely a read timeout (errno 2013 during idle)
         // With heartbeat configured, timeouts indicate actual connection issues.
         // The TCP connection is broken by the timeout, so we need a full reconnect
-        if (err_no == 2013) {
+        if (err_no == kMySQLErrServerLost) {
           // Full reconnect (closes handle, reinitializes, and connects)
           // This is expected behavior during idle periods, so use silent mode
           // Note: Do NOT call mysql_binlog_close() before Reconnect() because
@@ -713,10 +710,10 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         // Check if this is a real connection loss (server gone away)
-        if (err_no == 2006) {  // Server gone away - actual connection loss
+        if (err_no == kMySQLErrGoneAway) {  // Server gone away - actual connection loss
           mygram::utils::StructuredLog()
               .Event("binlog_connection_lost")
-              .Field("error", last_error_)
+              .Field("error", GetLastError())
               .Field("fetch_result", static_cast<int64_t>(result))
               .Field("gtid", GetCurrentGTID())
               .Warn();
@@ -759,7 +756,7 @@ void BinlogReader::ReaderThreadFunc() {
                   .Event("binlog_error")
                   .Field("type", "connection_validation_failed")
                   .Field("context", "after_reconnect")
-                  .Field("error", last_error_)
+                  .Field("error", GetLastError())
                   .Error();
               should_stop_ = true;
               break;
@@ -775,12 +772,12 @@ void BinlogReader::ReaderThreadFunc() {
         // Check for binlog purged error (errno 1236) - special handling required
         // This error means the GTID position we're requesting is no longer available in binlogs
         // Retrying with the same GTID will never succeed - must stop and wait for manual intervention (SYNC)
-        if (err_no == 1236) {
+        if (err_no == kMySQLErrBinlogPurged) {
           mygram::utils::StructuredLog()
               .Event("binlog_error")
               .Field("type", "binlog_purged")
               .Field("gtid", GetCurrentGTID())
-              .Field("error", last_error_)
+              .Field("error", GetLastError())
               .Field("errno", static_cast<int64_t>(err_no))
               .Field("message",
                      "Binlog position no longer available on server. "
@@ -796,7 +793,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Event("binlog_error")
             .Field("type", "fetch_non_recoverable_error")
             .Field("gtid", GetCurrentGTID())
-            .Field("error", last_error_)
+            .Field("error", GetLastError())
             .Field("result_code", static_cast<int64_t>(result))
             .Field("errno", static_cast<int64_t>(err_no))
             .Error();
@@ -966,10 +963,10 @@ void BinlogReader::ReaderThreadFunc() {
         // Detect unsupported event types that cause silent data loss at runtime.
         // These are checked at connection time, but settings can be changed dynamically.
         if (event_type == MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT) {
-          last_error_ =
+          SetLastError(
               "Received TRANSACTION_PAYLOAD_EVENT: binlog_transaction_compression was enabled "
               "on the server after initial validation. Compressed events cannot be decoded. "
-              "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
+              "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF");
           mygram::utils::StructuredLog()
               .Event("binlog_fatal_error")
               .Field("type", "unsupported_runtime_event")
@@ -980,10 +977,10 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         if (event_type == MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT) {
-          last_error_ =
+          SetLastError(
               "Received PARTIAL_UPDATE_ROWS_EVENT: binlog_row_value_options=PARTIAL_JSON was enabled "
               "on the server after initial validation. Partial JSON updates cannot be decoded. "
-              "Disable with: SET GLOBAL binlog_row_value_options=''";
+              "Disable with: SET GLOBAL binlog_row_value_options=''");
           mygram::utils::StructuredLog()
               .Event("binlog_fatal_error")
               .Field("type", "unsupported_runtime_event")
@@ -1390,10 +1387,26 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
     return gtid;
   }
 
-  // Check if this looks like a single GTID (uuid:N) vs a range (uuid:1-N) or multi-UUID
-  // If it contains a comma, it's multi-UUID - pass through
+  // If it contains commas, it's multi-UUID - process each entry separately
   if (gtid.find(',') != std::string::npos) {
-    return gtid;
+    std::string result;
+    size_t start = 0;
+    while (start < gtid.size()) {
+      size_t comma_pos = gtid.find(',', start);
+      std::string entry;
+      if (comma_pos == std::string::npos) {
+        entry = gtid.substr(start);
+        start = gtid.size();
+      } else {
+        entry = gtid.substr(start, comma_pos - start);
+        start = comma_pos + 1;
+      }
+      if (!result.empty()) {
+        result += ',';
+      }
+      result += ConvertSingleGtidToRange(entry);
+    }
+    return result;
   }
 
   // Find the colon separating UUID from transaction number
@@ -1460,7 +1473,7 @@ bool BinlogReader::ValidateConnection() {
 
   if (!result.valid) {
     // Validation failed - server is invalid
-    last_error_ = "Connection validation failed: " + result.error_message;
+    SetLastError("Connection validation failed: " + result.error_message);
     mygram::utils::StructuredLog()
         .Event("binlog_connection_validation_failed")
         .Field("gtid", GetCurrentGTID())

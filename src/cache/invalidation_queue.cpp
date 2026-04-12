@@ -149,9 +149,14 @@ void InvalidationQueue::WorkerLoop() {
           break;
         }
 
-        // Process batch
+        // Swap pending items into local map while holding lock (eliminates TOCTOU)
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch;
+        batch.swap(pending_cache_keys_);
+        oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
         lock.unlock();
-        ProcessBatch();
+
+        // Process the swapped batch outside the lock
+        ProcessBatchFromMap(std::move(batch));
       } else {
         // Wait for signal or timeout
         const auto remaining_delay = max_delay_ - time_since_oldest;
@@ -191,6 +196,11 @@ void InvalidationQueue::ProcessBatch() {
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
+  ProcessBatchFromMap(std::move(batch));
+}
+
+void InvalidationQueue::ProcessBatchFromMap(
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch) {
   // Process batch: erase invalidated entries from cache
   std::unordered_set<CacheKey> keys_to_erase;
 

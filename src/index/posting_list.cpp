@@ -540,7 +540,7 @@ std::vector<DocId> PostingList::DecodeDelta(const std::vector<uint32_t>& encoded
   return decoded;
 }
 
-void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
+bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
   std::shared_lock lock(mutex_);  // Protect read access
 
   // Format:
@@ -553,7 +553,7 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     // Write size
     if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
       spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})", delta_compressed_.size());
-      return;
+      return false;
     }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
     buffer.push_back((size >> kShift24Bits) & kByteMask);
@@ -574,7 +574,7 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
 
     if (roaring_size > std::numeric_limits<uint32_t>::max()) {
       spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})", roaring_size);
-      return;
+      return false;
     }
     auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);
 
@@ -589,6 +589,8 @@ void PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     buffer.resize(old_size + roaring_size);
     roaring_bitmap_portable_serialize(roaring_bitmap_, GetSerializationPointer(buffer, old_size));
   }
+
+  return true;
 }
 
 bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset) {

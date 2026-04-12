@@ -96,5 +96,33 @@ TEST_F(SignalManagerTest, SIGUSR1DoesNotAffectShutdownFlag) {
   EXPECT_TRUE(SignalManager::ConsumeLogReopenRequest());
 }
 
+TEST_F(SignalManagerTest, ConsumeLogReopenRequestAtomicClearFlag) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  // Directly set the flag (simulating signal delivery)
+  SignalManager::signal_flags_.log_reopen_requested = 1;
+
+  // ConsumeLogReopenRequest should atomically read-and-clear
+  EXPECT_TRUE(SignalManager::ConsumeLogReopenRequest());
+
+  // Flag should be cleared after consume
+  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested, 0);
+
+  // Second call should return false
+  EXPECT_FALSE(SignalManager::ConsumeLogReopenRequest());
+}
+
+TEST_F(SignalManagerTest, ConsumeLogReopenRequestClearsEvenWhenFalse) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  // Flag is already 0
+  EXPECT_FALSE(SignalManager::ConsumeLogReopenRequest());
+
+  // Flag should still be 0
+  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested, 0);
+}
+
 }  // namespace
 }  // namespace mygramdb::app

@@ -57,9 +57,6 @@ namespace {
 // Buffer size for IP address formatting
 constexpr size_t kIpAddressBufferSize = 64;
 
-// Length of "gtid=\"" prefix in meta content
-constexpr size_t kGtidPrefixLength = 7;
-
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 constexpr int kDefaultConnectionRecvTimeoutSec = 60;
@@ -85,26 +82,6 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
   return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<mygram::utils::CIDR> parsed;
-  parsed.reserve(allow_cidrs.size());
-
-  for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
-    if (!cidr) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "invalid_cidr_entry")
-          .Field("cidr", cidr_str)
-          .Warn();
-      continue;
-    }
-    parsed.push_back(*cidr);
-  }
-
-  return parsed;
-}
-
 }  // namespace
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
@@ -120,7 +97,7 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
       dump_dir_(std::move(dump_dir)),
       table_contexts_(std::move(table_contexts)),
       binlog_reader_(binlog_reader) {
-  config_.parsed_allow_cidrs = ParseAllowCidrs(config_.allow_cidrs);
+  config_.parsed_allow_cidrs = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
   // NOTE: Component initialization moved to Start() method
   // This allows for better error handling and resource cleanup
 }

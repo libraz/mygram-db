@@ -320,8 +320,9 @@ typedef struct {
   size_t and_count;       // Number of AND terms
   char** not_terms;       // Array of excluded terms (NOT)
   size_t not_count;       // Number of NOT terms
-  char** optional_terms;  // Array of optional terms (OR)
-  size_t optional_count;  // Number of optional terms
+  char** optional_terms;  // Array of optional terms (OR) — deprecated, always empty
+                          // (all terms placed in required_terms since implicit-AND change)
+  size_t optional_count;  // Number of optional terms (always 0 since implicit-AND change)
 } MygramParsedExpression_C;
 
 /**

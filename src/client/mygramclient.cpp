@@ -30,9 +30,9 @@ namespace mygramdb::client {
 namespace {
 
 // Protocol constants
-constexpr size_t kErrorPrefixLen = 6;    // Length of "ERROR "
-constexpr size_t kSavedPrefixLen = 9;    // Length of "SNAPSHOT "
-constexpr size_t kLoadedPrefixLen = 10;  // Length of "SNAPSHOT: "
+constexpr size_t kErrorPrefixLen = 6;      // Length of "ERROR "
+constexpr size_t kOkSavedPrefixLen = 9;    // Length of "OK SAVED "
+constexpr size_t kOkLoadedPrefixLen = 10;  // Length of "OK LOADED "
 constexpr int kMillisecondsPerSecond = 1000;
 constexpr int kMicrosecondsPerMillisecond = 1000;
 
@@ -659,7 +659,7 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
-    return response.substr(kSavedPrefixLen);  // Return filepath after "OK SAVED "
+    return response.substr(kOkSavedPrefixLen);  // Return filepath after "OK SAVED "
   }
 
   Expected<std::string, Error> Load(const std::string& filepath) const {
@@ -682,7 +682,7 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
     }
 
-    return response.substr(kLoadedPrefixLen);  // Return filepath after "OK LOADED "
+    return response.substr(kOkLoadedPrefixLen);  // Return filepath after "OK LOADED "
   }
 
   Expected<ReplicationStatus, Error> GetReplicationStatus() const {

@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <set>
 #include <sstream>
 
 #include "index/index.h"
@@ -16,20 +15,7 @@
 
 namespace mygramdb::query {
 
-namespace {
-
-/**
- * @brief Convert string to uppercase
- */
-std::string ToUpper(const std::string& str) {
-  std::string result = str;
-  for (auto& character : result) {
-    character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-  }
-  return result;
-}
-
-}  // namespace
+using mygram::utils::ToUpper;
 
 // ============================================================================
 // QueryNode
@@ -134,16 +120,18 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
     }
 
     case NodeType::OR: {
-      // Union of all children's results
-      std::set<DocId> result_set;
+      // Union of all children's results using set_union on sorted vectors
+      std::vector<DocId> result;
 
       for (const auto& child : children) {
         auto child_result = child->Evaluate(index, doc_store);
-        result_set.insert(child_result.begin(), child_result.end());
+        std::vector<DocId> merged;
+        merged.reserve(result.size() + child_result.size());
+        std::set_union(result.begin(), result.end(), child_result.begin(), child_result.end(),
+                       std::back_inserter(merged));
+        result = std::move(merged);
       }
 
-      std::vector<DocId> result(result_set.begin(), result_set.end());
-      std::sort(result.begin(), result.end());
       return result;
     }
 

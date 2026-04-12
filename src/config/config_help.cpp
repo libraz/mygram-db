@@ -630,20 +630,7 @@ ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path, co
 }
 
 std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path) {
-  std::vector<std::string> result;
-  if (path.empty()) {
-    return result;
-  }
-
-  std::istringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '.')) {
-    if (!part.empty()) {
-      result.push_back(part);
-    }
-  }
-
-  return result;
+  return SplitPathHelper(path);
 }
 
 // Standalone functions

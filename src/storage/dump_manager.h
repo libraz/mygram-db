@@ -21,16 +21,22 @@ class DumpManager {
   /**
    * @brief Save dump to disk
    *
+   * @note Placeholder stub. Currently returns false and logs "not implemented".
+   *       Future feature: mmap-based dump save for faster recovery.
+   *
    * @param name Dump name
-   * @return true if successful
+   * @return true if successful (currently always false)
    */
   bool Save(const std::string& name);
 
   /**
    * @brief Load dump from disk
    *
+   * @note Placeholder stub. Currently returns false and logs "not implemented".
+   *       Future feature: mmap-based dump load for faster startup.
+   *
    * @param name Dump name
-   * @return true if successful
+   * @return true if successful (currently always false)
    */
   bool Load(const std::string& name);
 

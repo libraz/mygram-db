@@ -131,7 +131,7 @@ TEST(RuntimeVariableManagerTest, GetImmutableVariables) {
 
   auto password_result = manager->GetVariable("mysql.password");
   ASSERT_TRUE(password_result);
-  EXPECT_EQ(*password_result, "test_pass");
+  EXPECT_EQ(*password_result, "***");
 
   auto database_result = manager->GetVariable("mysql.database");
   ASSERT_TRUE(database_result);
@@ -966,6 +966,24 @@ TEST(RuntimeVariableManagerTest, SetRateLimitingPartialFailure) {
 }
 
 /**
+ * @brief Test SetVariable rejects integers with trailing characters
+ */
+TEST(RuntimeVariableManagerTest, SetVariableRejectsTrailingCharacters) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  // "42abc" should be rejected as an invalid integer
+  auto result = manager->SetVariable("api.default_limit", "42abc");
+  EXPECT_FALSE(result);
+  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+
+  // Original value should remain unchanged
+  auto get_result = manager->GetVariable("api.default_limit");
+  ASSERT_TRUE(get_result);
+  EXPECT_EQ(*get_result, "100");
+}
+
+/**
  * @brief Test error messages for type conversion failures
  */
 TEST(RuntimeVariableManagerTest, ErrorMessageTypeConversion) {
@@ -1119,4 +1137,118 @@ TEST(RuntimeVariableManagerTest, MemoryVerifyTextVariable) {
       << "memory.verify_text should appear in SHOW VARIABLES LIKE 'memory%'";
   EXPECT_EQ(memory_vars["memory.verify_text"].value, "ascii");
   EXPECT_FALSE(memory_vars["memory.verify_text"].mutable_);
+}
+
+/**
+ * @brief Test GetVariable for a variable with empty value returns success
+ */
+TEST(RuntimeVariableManagerTest, GetVariableEmptyValueReturnsSuccess) {
+  Config config = CreateTestConfig();
+  config.mysql.ssl_ca = "";  // Explicitly empty
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  // ssl_ca is empty but known - should return success with empty string
+  auto result = manager->GetVariable("mysql.ssl_ca");
+  ASSERT_TRUE(result) << "Known variable with empty value should return success, not error";
+  EXPECT_EQ(*result, "");
+}
+
+/**
+ * @brief Test GetVariable for unknown variable returns error
+ */
+TEST(RuntimeVariableManagerTest, GetUnknownVariableReturnsError) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->GetVariable("totally.unknown.var");
+  EXPECT_FALSE(result);
+  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+}
+
+/**
+ * @brief Test GetVariable("mysql.password") returns masked value
+ */
+TEST(RuntimeVariableManagerTest, GetPasswordReturnsMasked) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->GetVariable("mysql.password");
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "***") << "Password should be masked to prevent credential exposure";
+}
+
+/**
+ * @brief Test GetVariable("mysql.ssl_ca") returns the configured value
+ */
+TEST(RuntimeVariableManagerTest, GetSslCaReturnsConfiguredValue) {
+  Config config = CreateTestConfig();
+  config.mysql.ssl_ca = "/etc/ssl/certs/ca.pem";
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->GetVariable("mysql.ssl_ca");
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "/etc/ssl/certs/ca.pem");
+}
+
+/**
+ * @brief Test GetVariable for other SSL variables
+ */
+TEST(RuntimeVariableManagerTest, GetSslVariables) {
+  Config config = CreateTestConfig();
+  config.mysql.ssl_ca = "/path/to/ca.pem";
+  config.mysql.ssl_cert = "/path/to/cert.pem";
+  config.mysql.ssl_key = "/path/to/key.pem";
+  config.mysql.ssl_verify_server_cert = false;
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto ca_result = manager->GetVariable("mysql.ssl_ca");
+  ASSERT_TRUE(ca_result);
+  EXPECT_EQ(*ca_result, "/path/to/ca.pem");
+
+  auto cert_result = manager->GetVariable("mysql.ssl_cert");
+  ASSERT_TRUE(cert_result);
+  EXPECT_EQ(*cert_result, "/path/to/cert.pem");
+
+  auto key_result = manager->GetVariable("mysql.ssl_key");
+  ASSERT_TRUE(key_result);
+  EXPECT_EQ(*key_result, "/path/to/key.pem");
+
+  auto verify_result = manager->GetVariable("mysql.ssl_verify_server_cert");
+  ASSERT_TRUE(verify_result);
+  EXPECT_EQ(*verify_result, "false");
+}
+
+/**
+ * @brief Test GetAllVariables includes variables with empty values
+ */
+TEST(RuntimeVariableManagerTest, GetAllVariablesIncludesEmptyValues) {
+  Config config = CreateTestConfig();
+  config.mysql.ssl_ca = "";  // Empty but known
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto all_vars = manager->GetAllVariables("mysql");
+  EXPECT_TRUE(all_vars.count("mysql.ssl_ca") > 0) << "GetAllVariables should include variables with empty values";
+  EXPECT_EQ(all_vars["mysql.ssl_ca"].value, "");
+}
+
+/**
+ * @brief Test SetVariable updates are immediately visible to GetVariable
+ */
+TEST(RuntimeVariableManagerTest, SetVariableImmediatelyVisibleToGet) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  // Verify initial value
+  auto before = manager->GetVariable("api.default_limit");
+  ASSERT_TRUE(before);
+  EXPECT_EQ(*before, "100");
+
+  // Set new value
+  auto set_result = manager->SetVariable("api.default_limit", "50");
+  ASSERT_TRUE(set_result);
+
+  // Immediately read back
+  auto after = manager->GetVariable("api.default_limit");
+  ASSERT_TRUE(after);
+  EXPECT_EQ(*after, "50") << "SetVariable change should be immediately visible to GetVariable";
 }

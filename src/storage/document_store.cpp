@@ -175,8 +175,16 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
                                       "DocID space exhausted (4 billion limit reached) during batch add", ""));
     }
 
-    // Assign new DocID
-    DocId doc_id = next_doc_id_++;
+    // Assign current DocID
+    DocId doc_id = next_doc_id_;
+
+    // Increment for next allocation, handling wraparound explicitly
+    if (next_doc_id_ == UINT32_MAX) {
+      // Last valid ID used, set to 0 to trigger error on next call
+      next_doc_id_ = 0;
+    } else {
+      next_doc_id_++;
+    }
 
     // Store mappings
     doc_id_to_pk_[doc_id] = doc.primary_key;

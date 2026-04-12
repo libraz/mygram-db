@@ -354,3 +354,46 @@ TEST_F(RateLimiterTest, NoDeadlockUnderConcurrentLoad) {
   auto final_stats = limiter.GetStats();
   EXPECT_GT(final_stats.total_requests, 0);
 }
+
+/**
+ * @brief Test that atomic stats counters are consistent under concurrent access
+ *
+ * Verifies that total_requests == allowed_requests + blocked_requests
+ * after concurrent AllowRequest, GetStats, and ResetStats calls.
+ */
+TEST_F(RateLimiterTest, AtomicStatsConsistencyUnderConcurrency) {
+  // Small capacity so some requests will be blocked
+  RateLimiter limiter(5, 5, 10000, 10000, 300);
+
+  constexpr int kThreads = 8;
+  constexpr int kRequestsPerThread = 500;
+
+  std::atomic<uint64_t> total_allowed{0};
+  std::atomic<uint64_t> total_blocked{0};
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([&, i]() {
+      std::string client_ip = "10.0.0." + std::to_string(i);
+      for (int j = 0; j < kRequestsPerThread; ++j) {
+        if (limiter.AllowRequest(client_ip)) {
+          total_allowed.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          total_blocked.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  auto stats = limiter.GetStats();
+  uint64_t expected_total = static_cast<uint64_t>(kThreads) * kRequestsPerThread;
+
+  EXPECT_EQ(stats.total_requests, expected_total);
+  EXPECT_EQ(stats.allowed_requests, total_allowed.load());
+  EXPECT_EQ(stats.blocked_requests, total_blocked.load());
+  EXPECT_EQ(stats.total_requests, stats.allowed_requests + stats.blocked_requests);
+}

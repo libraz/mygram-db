@@ -45,6 +45,10 @@ Expected<void, Error> AtomicFileWriter::Commit() {
     return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Already committed"));
   }
 
+  if (!std::filesystem::exists(temp_filepath_)) {
+    return MakeUnexpected(MakeError(ErrorCode::kIOError, "Temp file does not exist"));
+  }
+
 #ifndef _WIN32
   // Fsync the temp file to ensure data is durable before rename
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
@@ -106,6 +110,8 @@ void AtomicFileWriter::Rollback() {
   if (!committed_) {
     std::error_code ec;
     std::filesystem::remove(temp_filepath_, ec);
+    // Prevent double-removal in destructor
+    committed_ = true;
   }
 }
 

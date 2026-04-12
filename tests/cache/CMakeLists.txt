@@ -128,6 +128,23 @@ gtest_discover_tests(invalidation_queue_test
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
+# CacheThreadSafety test
+add_executable(cache_thread_safety_test
+  cache_thread_safety_test.cpp
+)
+
+target_link_libraries(cache_thread_safety_test PRIVATE
+  mygramdb_cache
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+gtest_discover_tests(cache_thread_safety_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK cache_state
+)
+
 # CacheMetrics test (validates performance monitoring)
 add_executable(cache_metrics_test
   cache_metrics_test.cpp

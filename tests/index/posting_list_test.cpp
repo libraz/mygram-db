@@ -881,6 +881,53 @@ TEST_F(PostingListTest, DeltaEncodingConsecutive) {
 // =============================================================================
 
 /**
+ * @brief Test that Serialize returns true for normal delta-compressed data
+ */
+TEST_F(PostingListTest, SerializeReturnsTrueForNormalData) {
+  PostingList posting(0.5);
+
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+
+  std::vector<uint8_t> buffer;
+  EXPECT_TRUE(posting.Serialize(buffer));
+  EXPECT_FALSE(buffer.empty());
+}
+
+/**
+ * @brief Test that Serialize returns true for Roaring bitmap data
+ */
+TEST_F(PostingListTest, SerializeReturnsTrueForRoaringData) {
+  PostingList posting(0.01);
+
+  std::vector<DocId> doc_ids;
+  for (DocId id = 1; id <= 100; ++id) {
+    doc_ids.push_back(id);
+  }
+  posting.AddBatch(doc_ids);
+  posting.Optimize(100);  // Force Roaring conversion
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  std::vector<uint8_t> buffer;
+  EXPECT_TRUE(posting.Serialize(buffer));
+  EXPECT_FALSE(buffer.empty());
+}
+
+/**
+ * @brief Test that Serialize returns true for empty posting list
+ */
+TEST_F(PostingListTest, SerializeReturnsTrueForEmptyData) {
+  PostingList posting(0.5);
+
+  std::vector<uint8_t> buffer;
+  EXPECT_TRUE(posting.Serialize(buffer));
+  // Should have at least strategy byte + size bytes
+  EXPECT_GE(buffer.size(), 5u);
+}
+
+/**
  * @brief Test that ConvertToRoaring preserves all data
  */
 TEST_F(PostingListTest, ConvertToRoaringPreservesData) {

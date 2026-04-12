@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -110,10 +111,10 @@ class RateLimiter {
    * @brief Get statistics for monitoring
    */
   struct Stats {
-    size_t total_requests = 0;    ///< Total requests checked
-    size_t allowed_requests = 0;  ///< Requests allowed
-    size_t blocked_requests = 0;  ///< Requests blocked (rate limited)
-    size_t tracked_clients = 0;   ///< Number of clients currently tracked
+    uint64_t total_requests = 0;    ///< Total requests checked
+    uint64_t allowed_requests = 0;  ///< Requests allowed
+    uint64_t blocked_requests = 0;  ///< Requests blocked (rate limited)
+    size_t tracked_clients = 0;     ///< Number of clients currently tracked
   };
 
   /**
@@ -132,11 +133,6 @@ class RateLimiter {
   void Clear();
 
  private:
-  /**
-   * @brief Clean up old client entries to prevent memory leak
-   */
-  void CleanupOldClients();
-
   size_t capacity_;                          ///< Token bucket capacity
   size_t refill_rate_;                       ///< Refill rate (tokens/sec)
   size_t max_clients_;                       ///< Maximum tracked clients
@@ -154,11 +150,10 @@ class RateLimiter {
   std::unordered_map<std::string, std::unique_ptr<ClientBucket>> client_buckets_;  ///< Per-client buckets
   mutable std::mutex mutex_;                                                       ///< Protects client_buckets_
 
-  // Statistics
-  mutable std::mutex stats_mutex_;
-  size_t total_requests_ = 0;
-  size_t allowed_requests_ = 0;
-  size_t blocked_requests_ = 0;
+  // Statistics (atomic counters avoid the need for a separate stats_mutex_)
+  std::atomic<uint64_t> total_requests_{0};
+  std::atomic<uint64_t> allowed_requests_{0};
+  std::atomic<uint64_t> blocked_requests_{0};
 };
 
 }  // namespace mygramdb::server

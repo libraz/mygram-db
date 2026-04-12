@@ -173,6 +173,14 @@ class InvalidationQueue {
   void ProcessBatch();
 
   /**
+   * @brief Process a pre-swapped batch of invalidations
+   * @param batch Map of composite keys to timestamps, already extracted from pending_cache_keys_
+   *
+   * Called by WorkerLoop (with batch swapped under lock) and by ProcessBatch.
+   */
+  void ProcessBatchFromMap(std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch);
+
+  /**
    * @brief Create composite key for deduplication
    */
   static std::string MakeCompositeKey(const std::string& table, const std::string& cache_key);

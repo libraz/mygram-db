@@ -268,7 +268,10 @@ class BinlogReader final : public IBinlogReader {
   /**
    * @brief Get last error message
    */
-  const std::string& GetLastError() const override { return last_error_; }
+  std::string GetLastError() const override {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    return last_error_;
+  }
 
   /**
    * @brief Set server statistics tracker
@@ -330,6 +333,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<int> skip_log_count_{0};
 
   std::string last_error_;
+  mutable std::mutex last_error_mutex_;
 
   // Failover detection: track last known server UUID
   std::string last_server_uuid_;
@@ -344,6 +348,15 @@ class BinlogReader final : public IBinlogReader {
 
   // GTID encoding data (must persist during mysql_binlog_open call)
   std::vector<uint8_t> gtid_encoded_data_;
+
+  /**
+   * @brief Set last error message (thread-safe)
+   * @param error Error message
+   */
+  void SetLastError(const std::string& error) {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    last_error_ = error;
+  }
 
   /**
    * @brief Static callback for MySQL binlog API to encode GTID set

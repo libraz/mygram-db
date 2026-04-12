@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <type_traits>
@@ -53,27 +54,78 @@ constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
 
-// Server startup delay (milliseconds)
-constexpr int kStartupDelayMs = 100;
+/**
+ * @brief Convert a JSON filter value to its string representation.
+ *
+ * Handles string, integer, float, and boolean types with appropriate coercion.
+ * Returns std::nullopt if the value type is unsupported.
+ */
+std::optional<std::string> JsonFilterValueToString(const json& val) {
+  if (val.is_string()) {
+    return val.get<std::string>();
+  }
+  if (val.is_number_integer()) {
+    return std::to_string(val.get<int64_t>());
+  }
+  if (val.is_number_float()) {
+    return std::to_string(val.get<double>());
+  }
+  if (val.is_boolean()) {
+    return val.get<bool>() ? "1" : "0";
+  }
+  return std::nullopt;
+}
 
-std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<mygram::utils::CIDR> parsed;
-  parsed.reserve(allow_cidrs.size());
-
-  for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
-    if (!cidr) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "invalid_cidr_entry")
-          .Field("cidr", cidr_str)
-          .Warn();
-      continue;
-    }
-    parsed.push_back(*cidr);
+/**
+ * @brief Parse filter conditions from a JSON body.
+ *
+ * Supports two formats:
+ *   Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
+ *   Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
+ *
+ * @param body JSON request body
+ * @param[out] filters Output vector of filter conditions
+ * @return Empty string on success, or error message on failure
+ */
+std::string ParseFiltersFromJson(const json& body, std::vector<mygramdb::query::FilterCondition>& filters) {
+  if (!body.contains("filters") || !body["filters"].is_object()) {
+    return "";
   }
 
-  return parsed;
+  filters.clear();
+  for (const auto& [key, val] : body["filters"].items()) {
+    mygramdb::query::FilterCondition filter;
+    filter.column = key;
+
+    if (val.is_object() && val.contains("value")) {
+      // Format 2: full operator support
+      std::string op_str = val.value("op", "EQ");
+      auto parsed_op = mygramdb::query::QueryParser::ParseFilterOp(op_str);
+      if (!parsed_op.has_value()) {
+        return "Invalid filter operator: " + op_str;
+      }
+      filter.op = parsed_op.value();
+
+      const auto& value_field = val["value"];
+      auto str_val = JsonFilterValueToString(value_field);
+      if (!str_val.has_value()) {
+        return "Invalid filter value type for column: " + key;
+      }
+      filter.value = std::move(str_val.value());
+    } else {
+      // Format 1: backward compatible (defaults to EQ)
+      filter.op = mygramdb::query::FilterOp::EQ;
+      auto str_val = JsonFilterValueToString(val);
+      if (!str_val.has_value()) {
+        return "Invalid filter value type for column: " + key;
+      }
+      filter.value = std::move(str_val.value());
+    }
+
+    filters.push_back(std::move(filter));
+  }
+
+  return "";
 }
 
 json FilterValueToJson(const storage::FilterValue& value) {
@@ -112,7 +164,7 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       cache_manager_(cache_manager),
       loading_(loading),
       tcp_stats_(tcp_stats) {
-  parsed_allow_cidrs_ = ParseAllowCidrs(config_.allow_cidrs);
+  parsed_allow_cidrs_ = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
@@ -267,43 +319,65 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   // Set running flag before starting thread to avoid race condition
   running_ = true;
 
-  // Store error from thread (if any)
-  std::string thread_error;
-  std::mutex error_mutex;
+  // Use promise/future to synchronize with the server thread instead of sleeping.
+  // httplib supports bind_to_port() + listen_after_bind() which lets us
+  // deterministically know when the port is bound before proceeding.
+  auto startup_promise = std::make_shared<std::promise<std::string>>();
+  auto startup_future = startup_promise->get_future();
 
-  // Start server in separate thread
-  server_thread_ = std::make_unique<std::thread>([this, &thread_error, &error_mutex]() {
+  // Start server in separate thread, capturing error by value via shared_ptr
+  server_thread_ = std::make_unique<std::thread>([this, startup_promise]() {
     mygram::utils::StructuredLog()
         .Event("http_server_starting")
         .Field("bind", config_.bind)
         .Field("port", static_cast<uint64_t>(config_.port))
         .Info();
 
-    if (!server_->listen(config_.bind, config_.port)) {
-      std::lock_guard<std::mutex> lock(error_mutex);
-      thread_error = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
+    // Bind to the port first (non-blocking)
+    if (!server_->bind_to_port(config_.bind, config_.port)) {
+      std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
       mygram::utils::StructuredLog()
           .Event("server_error")
           .Field("operation", "http_server_listen")
           .Field("bind", config_.bind)
           .Field("port", static_cast<uint64_t>(config_.port))
-          .Field("error", thread_error)
+          .Field("error", error_msg)
           .Error();
       running_ = false;
+      startup_promise->set_value(error_msg);
       return;
+    }
+
+    // Signal that bind succeeded - server is ready to accept connections
+    startup_promise->set_value("");
+
+    // Start listening (blocks until server is stopped)
+    if (!server_->listen_after_bind()) {
+      running_ = false;
     }
   });
 
-  // Wait a bit for server to start
-  std::this_thread::sleep_for(std::chrono::milliseconds(kStartupDelayMs));
+  // Wait for the server thread to signal bind result (with timeout)
+  constexpr int kStartupTimeoutSec = 5;
+  auto wait_status = startup_future.wait_for(std::chrono::seconds(kStartupTimeoutSec));
 
-  if (!running_) {
+  if (wait_status == std::future_status::timeout) {
+    // Timeout waiting for server to start
+    running_ = false;
+    server_->stop();
     if (server_thread_ && server_thread_->joinable()) {
       server_thread_->join();
     }
-    std::lock_guard<std::mutex> lock(error_mutex);
-    auto error =
-        MakeError(ErrorCode::kNetworkBindFailed, thread_error.empty() ? "Failed to start HTTP server" : thread_error);
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server startup timed out");
+    return MakeUnexpected(error);
+  }
+
+  std::string error_msg = startup_future.get();
+  if (!error_msg.empty()) {
+    if (server_thread_ && server_thread_->joinable()) {
+      server_thread_->join();
+    }
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, error_msg);
     return MakeUnexpected(error);
   }
 
@@ -406,35 +480,10 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Apply filters from JSON payload
-    // Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
-    // Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
-    if (body.contains("filters") && body["filters"].is_object()) {
-      query->filters.clear();
-      for (const auto& [key, val] : body["filters"].items()) {
-        query::FilterCondition filter;
-        filter.column = key;
-
-        // Check if value is an object with operator specification
-        if (val.is_object() && val.contains("value")) {
-          // Format 2: full operator support
-          std::string op_str = val.value("op", "EQ");
-          // Parse operator
-          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
-          if (!parsed_op.has_value()) {
-            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
-            return;
-          }
-          filter.op = parsed_op.value();
-          // Get value from nested object
-          const auto& val_field = val["value"];
-          filter.value = val_field.is_string() ? val_field.get<std::string>() : val_field.dump();
-        } else {
-          // Format 1: backward compatible, defaults to EQ
-          filter.op = query::FilterOp::EQ;
-          filter.value = val.is_string() ? val.get<std::string>() : val.dump();
-        }
-        query->filters.push_back(std::move(filter));
-      }
+    std::string filter_error = ParseFiltersFromJson(body, query->filters);
+    if (!filter_error.empty()) {
+      SendError(res, kHttpBadRequest, filter_error);
+      return;
     }
 
     // Try cache lookup first
@@ -655,57 +704,10 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     }
 
     // Apply filters from JSON payload (same logic as search)
-    if (body.contains("filters") && body["filters"].is_object()) {
-      query->filters.clear();
-      for (const auto& [key, val] : body["filters"].items()) {
-        query::FilterCondition filter;
-        filter.column = key;
-
-        // Check if value is an object with operator specification
-        if (val.is_object() && val.contains("value")) {
-          // Format 2: full operator support
-          std::string op_str = val.value("op", "EQ");
-          // Parse operator
-          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
-          if (!parsed_op.has_value()) {
-            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
-            return;
-          }
-          filter.op = parsed_op.value();
-
-          // Get the value
-          json value_field = val["value"];
-          if (value_field.is_string()) {
-            filter.value = value_field.get<std::string>();
-          } else if (value_field.is_number_integer()) {
-            filter.value = std::to_string(value_field.get<int64_t>());
-          } else if (value_field.is_number_float()) {
-            filter.value = std::to_string(value_field.get<double>());
-          } else if (value_field.is_boolean()) {
-            filter.value = value_field.get<bool>() ? "1" : "0";
-          } else {
-            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
-            return;
-          }
-        } else {
-          // Format 1: backward compatible (defaults to EQ)
-          filter.op = query::FilterOp::EQ;
-          if (val.is_string()) {
-            filter.value = val.get<std::string>();
-          } else if (val.is_number_integer()) {
-            filter.value = std::to_string(val.get<int64_t>());
-          } else if (val.is_number_float()) {
-            filter.value = std::to_string(val.get<double>());
-          } else if (val.is_boolean()) {
-            filter.value = val.get<bool>() ? "1" : "0";
-          } else {
-            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
-            return;
-          }
-        }
-
-        query->filters.push_back(filter);
-      }
+    std::string filter_error = ParseFiltersFromJson(body, query->filters);
+    if (!filter_error.empty()) {
+      SendError(res, kHttpBadRequest, filter_error);
+      return;
     }
 
     // Get ngram sizes for this table

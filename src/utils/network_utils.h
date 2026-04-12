@@ -46,7 +46,7 @@ std::optional<uint32_t> ParseIPv4(const std::string& ip_str);
  * @brief Check if an IP address is allowed by CIDR list
  * @param ip_str IP address string (e.g., "192.168.1.1")
  * @param allow_cidrs List of allowed CIDR ranges
- * @return True if IP is allowed (or if allow_cidrs is empty = allow all)
+ * @return True if IP is allowed. Returns false (deny) if allow_cidrs is empty (fail-closed)
  */
 bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allow_cidrs);
 
@@ -54,7 +54,7 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<std::string>& allo
  * @brief Check if an IP address is allowed using pre-parsed CIDR list
  * @param ip_str IP address string
  * @param parsed_allow_cidrs Parsed CIDR list
- * @return True if IP allowed (or if list empty = allow all)
+ * @return True if IP allowed. Returns false (deny) if list is empty (fail-closed)
  */
 bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allow_cidrs);
 
@@ -64,5 +64,12 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allo
  * @return IP address string (e.g., "192.168.1.1")
  */
 std::string IPv4ToString(uint32_t ip_addr);
+
+/**
+ * @brief Parse a list of CIDR strings, logging warnings for invalid entries
+ * @param allow_cidrs List of CIDR notation strings (e.g., {"192.168.1.0/24", "10.0.0.0/8"})
+ * @return Vector of successfully parsed CIDR objects (invalid entries are skipped)
+ */
+std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs);
 
 }  // namespace mygram::utils

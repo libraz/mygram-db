@@ -3123,4 +3123,97 @@ TEST_F(RowsParserV2Test, V2BatchInsertMultipleEvents) {
   EXPECT_EQ("batch2", result2->front().columns.at("name"));
 }
 
+// =============================================================================
+// event_size bounds check tests
+// =============================================================================
+
+/**
+ * @test ParseWriteRowsEvent returns nullopt when event_size < 4
+ */
+TEST_F(RowsParserTest, WriteRowsEventSizeTooSmall) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  // Create a minimal buffer with 19-byte header but event_size set to 3 (< 4)
+  std::vector<unsigned char> buffer(32, 0);
+  // Set event_size at bytes [9-12] to 3 (little-endian)
+  buffer[9] = 3;
+  buffer[10] = 0;
+  buffer[11] = 0;
+  buffer[12] = 0;
+
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @test ParseUpdateRowsEvent returns nullopt when event_size < 4
+ */
+TEST_F(RowsParserTest, UpdateRowsEventSizeTooSmall) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  // Create a minimal buffer with event_size set to 2 (< 4)
+  std::vector<unsigned char> buffer(32, 0);
+  buffer[9] = 2;
+  buffer[10] = 0;
+  buffer[11] = 0;
+  buffer[12] = 0;
+
+  auto result = ParseUpdateRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                     MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @test ParseDeleteRowsEvent returns nullopt when event_size < 4
+ */
+TEST_F(RowsParserTest, DeleteRowsEventSizeTooSmall) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  // Create a minimal buffer with event_size set to 0 (< 4)
+  std::vector<unsigned char> buffer(32, 0);
+  buffer[9] = 0;
+  buffer[10] = 0;
+  buffer[11] = 0;
+  buffer[12] = 0;
+
+  auto result = ParseDeleteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                     MySQLBinlogEventType::DELETE_ROWS_EVENT);
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @test ParseWriteRowsEvent returns nullopt when event_size > length
+ */
+TEST_F(RowsParserTest, WriteRowsEventSizeExceedsLength) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  // Create a buffer of size 32 but set event_size to 1000
+  std::vector<unsigned char> buffer(32, 0);
+  buffer[9] = 0xE8;  // 1000 in little-endian
+  buffer[10] = 0x03;
+  buffer[11] = 0;
+  buffer[12] = 0;
+
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  EXPECT_FALSE(result.has_value());
+}
+
 #endif  // USE_MYSQL

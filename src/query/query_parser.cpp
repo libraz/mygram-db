@@ -14,6 +14,7 @@
 
 #include "query/cache_key.h"
 #include "query/query_normalizer.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::query {
 
@@ -46,16 +47,7 @@ size_t CalculateQueryExpressionLength(const Query& query) {
   return length;
 }
 
-/**
- * @brief Convert string to uppercase
- * @deprecated Use EqualsIgnoreCase for comparisons to avoid unnecessary allocations
- */
-std::string ToUpper(std::string_view str) {
-  std::string result(str);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) { return std::toupper(character); });
-  return result;
-}
+using mygram::utils::ToUpper;
 
 /**
  * @brief Convert string to lowercase
@@ -95,6 +87,40 @@ bool IsClauseKeyword(const std::string& token) {
 }
 
 }  // namespace
+
+std::pair<int, int> detail::CountParensInToken(const std::string& token) {
+  int open = 0;
+  int close = 0;
+  bool in_quote = false;
+  char quote_char = '\0';
+
+  for (size_t i = 0; i < token.size(); ++i) {
+    char chr = token[i];
+
+    // Handle quote state
+    if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
+      if (!in_quote) {
+        in_quote = true;
+        quote_char = chr;
+      } else if (chr == quote_char) {
+        in_quote = false;
+        quote_char = '\0';
+      }
+    }
+
+    // Count parentheses only when not inside quotes
+    if (!in_quote) {
+      if (chr == '(') {
+        open++;
+      }
+      if (chr == ')') {
+        close++;
+      }
+    }
+  }
+
+  return {open, close};
+}
 
 bool Query::IsValid() const {
   if (type == QueryType::UNKNOWN) {
@@ -565,46 +591,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  // Helper lambda to count parentheses in a token, respecting quotes
-  auto count_parens = [](const std::string& token) -> std::pair<int, int> {
-    int open = 0;
-    int close = 0;
-    bool in_quote = false;
-    char quote_char = '\0';
-
-    for (size_t i = 0; i < token.size(); ++i) {
-      char chr = token[i];
-
-      // Handle quote state
-      if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
-        if (!in_quote) {
-          in_quote = true;
-          quote_char = chr;
-        } else if (chr == quote_char) {
-          in_quote = false;
-          quote_char = '\0';
-        }
-      }
-
-      // Count parentheses only when not inside quotes
-      if (!in_quote) {
-        if (chr == '(') {
-          open++;
-        }
-        if (chr == ')') {
-          close++;
-        }
-      }
-    }
-
-    return {open, close};
-  };
-
   // First pass: check parentheses balance across ALL tokens
   int total_paren_depth = 0;
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Skip SEARCH and table name
-    auto [open, close] = count_parens(tokens[i]);
+    auto [open, close] = detail::CountParensInToken(tokens[i]);
     total_paren_depth += open - close;
 
     // Check for unmatched closing parentheses
@@ -634,7 +625,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     std::string upper_token = ToUpper(token);
 
     // Track parentheses depth (respecting quotes)
-    auto [open, close] = count_parens(token);
+    auto [open, close] = detail::CountParensInToken(token);
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)
@@ -786,46 +777,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  // Helper lambda to count parentheses in a token, respecting quotes
-  auto count_parens = [](const std::string& token) -> std::pair<int, int> {
-    int open = 0;
-    int close = 0;
-    bool in_quote = false;
-    char quote_char = '\0';
-
-    for (size_t i = 0; i < token.size(); ++i) {
-      char chr = token[i];
-
-      // Handle quote state
-      if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
-        if (!in_quote) {
-          in_quote = true;
-          quote_char = chr;
-        } else if (chr == quote_char) {
-          in_quote = false;
-          quote_char = '\0';
-        }
-      }
-
-      // Count parentheses only when not inside quotes
-      if (!in_quote) {
-        if (chr == '(') {
-          open++;
-        }
-        if (chr == ')') {
-          close++;
-        }
-      }
-    }
-
-    return {open, close};
-  };
-
   // First pass: check parentheses balance across ALL tokens
   int total_paren_depth = 0;
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Skip COUNT and table name
-    auto [open, close] = count_parens(tokens[i]);
+    auto [open, close] = detail::CountParensInToken(tokens[i]);
     total_paren_depth += open - close;
 
     // Check for unmatched closing parentheses
@@ -855,7 +811,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
     std::string upper_token = ToUpper(token);
 
     // Track parentheses depth (respecting quotes)
-    auto [open, close] = count_parens(token);
+    auto [open, close] = detail::CountParensInToken(token);
     paren_depth += open - close;
 
     // Check if this is a keyword (only when not inside parentheses)

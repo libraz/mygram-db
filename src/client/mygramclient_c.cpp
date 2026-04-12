@@ -38,6 +38,8 @@ static char* strdup_safe(const std::string& str) {
 }
 
 // Helper: Convert vector<string> to char** array
+// Returns nullptr on empty input. On allocation failure, frees all prior
+// entries and returns nullptr.
 // cppcoreguidelines-no-malloc)
 static char** string_vector_to_c_array(const std::vector<std::string>& vec) {
   if (vec.empty()) {
@@ -51,6 +53,14 @@ static char** string_vector_to_c_array(const std::vector<std::string>& vec) {
 
   for (size_t i = 0; i < vec.size(); ++i) {
     result[i] = strdup_safe(vec[i]);
+    if (result[i] == nullptr) {
+      // Free all previously allocated entries
+      for (size_t j = 0; j < i; ++j) {
+        free(result[j]);
+      }
+      free(result);
+      return nullptr;
+    }
   }
 
   return result;
@@ -186,6 +196,16 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
 
   for (size_t i = 0; i < resp.results.size(); ++i) {
     result_c->primary_keys[i] = strdup_safe(resp.results[i].primary_key);
+    if (result_c->primary_keys[i] == nullptr) {
+      // Free all previously allocated entries
+      for (size_t j = 0; j < i; ++j) {
+        free(result_c->primary_keys[j]);
+      }
+      free(result_c->primary_keys);
+      free(result_c);
+      client->last_error = "Memory allocation failed";
+      return -1;
+    }
   }
 
   *result = result_c;
@@ -276,7 +296,34 @@ int mygramclient_get(MygramClient_C* client, const char* table, const char* prim
 
     for (size_t i = 0; i < doc_c->field_count; ++i) {
       doc_c->field_keys[i] = strdup_safe(document.fields[i].first);
+      if (doc_c->field_keys[i] == nullptr) {
+        // Free all previously allocated keys and values
+        for (size_t j = 0; j < i; ++j) {
+          free(doc_c->field_keys[j]);
+          free(doc_c->field_values[j]);
+        }
+        free(doc_c->field_keys);
+        free(doc_c->field_values);
+        free(doc_c->primary_key);
+        free(doc_c);
+        client->last_error = "Memory allocation failed";
+        return -1;
+      }
       doc_c->field_values[i] = strdup_safe(document.fields[i].second);
+      if (doc_c->field_values[i] == nullptr) {
+        // Free current key and all previously allocated keys/values
+        free(doc_c->field_keys[i]);
+        for (size_t j = 0; j < i; ++j) {
+          free(doc_c->field_keys[j]);
+          free(doc_c->field_values[j]);
+        }
+        free(doc_c->field_keys);
+        free(doc_c->field_values);
+        free(doc_c->primary_key);
+        free(doc_c);
+        client->last_error = "Memory allocation failed";
+        return -1;
+      }
     }
   } else {
     doc_c->field_keys = nullptr;

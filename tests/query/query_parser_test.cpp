@@ -2122,3 +2122,99 @@ TEST(QueryParserTest, FilterValueAtLimit) {
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].value, value_at_limit);
 }
+
+// =============================================================================
+// CountParensInToken (detail namespace) tests
+// =============================================================================
+
+/**
+ * @brief Test CountParensInToken with no parentheses
+ */
+TEST(CountParensInTokenTest, NoParentheses) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("hello");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with empty string
+ */
+TEST(CountParensInTokenTest, EmptyString) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with simple balanced parentheses
+ */
+TEST(CountParensInTokenTest, SimpleBalanced) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("(hello)");
+  EXPECT_EQ(open, 1);
+  EXPECT_EQ(close, 1);
+}
+
+/**
+ * @brief Test CountParensInToken with nested parentheses
+ */
+TEST(CountParensInTokenTest, NestedParentheses) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("((a))");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 2);
+}
+
+/**
+ * @brief Test CountParensInToken ignores parentheses inside double quotes
+ */
+TEST(CountParensInTokenTest, DoubleQuotedParensIgnored) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("\"(hello)\"");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken ignores parentheses inside single quotes
+ */
+TEST(CountParensInTokenTest, SingleQuotedParensIgnored) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("'(hello)'");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with mixed quoted and unquoted parentheses
+ */
+TEST(CountParensInTokenTest, MixedQuotedAndUnquoted) {
+  // ( outside quote, ")" inside quote, "(" inside quote, then bare (
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("(\")(\"(");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with only open parentheses
+ */
+TEST(CountParensInTokenTest, OnlyOpenParens) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("((");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with only close parentheses
+ */
+TEST(CountParensInTokenTest, OnlyCloseParens) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("))");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 2);
+}
+
+/**
+ * @brief Test CountParensInToken with escaped quotes (backslash does not end quote)
+ */
+TEST(CountParensInTokenTest, EscapedQuoteDoesNotEndQuoteState) {
+  // "\\\"(" - the \" is escaped, so the quote is not closed; ( is still inside quotes
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("\"\\\"(\"");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}

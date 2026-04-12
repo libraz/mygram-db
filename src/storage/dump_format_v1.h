@@ -304,16 +304,6 @@ Expected<void, Error> ReadDumpV1(
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error);
 
 /**
- * @brief Rebuild index from document store (for compact mode)
- * @param doc_store Document store containing all documents
- * @param index Index to rebuild
- * @param table_config Table configuration for n-gram settings
- * @return Expected<void, Error> Success or error with details
- */
-Expected<void, Error> RebuildIndexFromDocStore(const DocumentStore& doc_store, index::Index& index,
-                                               const config::TableConfig& table_config);
-
-/**
  * @brief Dump file metadata information
  *
  * Lightweight metadata structure returned by GetDumpInfo().

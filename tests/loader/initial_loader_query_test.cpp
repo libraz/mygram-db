@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -248,6 +249,128 @@ TEST_F(SelectQueryLogicTest, CollectColumns_NoDuplicatesWithConcat) {
   // Verify 'title' appears exactly once
   int title_count = std::count(columns.begin(), columns.end(), "title");
   EXPECT_EQ(title_count, 1);
+}
+
+// ===========================================================================
+// SQL escaping tests for filter values
+// ===========================================================================
+
+/**
+ * @brief Test fixture for SQL value escaping logic
+ *
+ * These tests verify the defense-in-depth escaping applied to filter values
+ * in BuildSelectQuery(). The escaping function doubles single quotes and
+ * escapes backslashes.
+ */
+class SqlEscapingTest : public ::testing::Test {
+ protected:
+  /**
+   * @brief Mirror of the escape_sql_value lambda in BuildSelectQuery
+   */
+  static std::string EscapeSqlValue(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char chr : value) {
+      if (chr == '\'') {
+        escaped += "''";
+      } else if (chr == '\\') {
+        escaped += "\\\\";
+      } else {
+        escaped += chr;
+      }
+    }
+    return escaped;
+  }
+
+  /**
+   * @brief Build WHERE clause from required_filters (mirrors BuildSelectQuery logic)
+   */
+  static std::string BuildWhereClause(const std::vector<config::RequiredFilterConfig>& filters) {
+    if (filters.empty())
+      return "";
+
+    std::ostringstream query;
+    query << " WHERE ";
+    bool first = true;
+    for (const auto& filter : filters) {
+      if (!first) {
+        query << " AND ";
+      }
+      first = false;
+      query << filter.name << " ";
+
+      if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
+        query << filter.op;
+      } else {
+        query << filter.op << " ";
+        auto requires_quoting = [&filter]() -> bool {
+          return filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
+                 filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
+        };
+        if (requires_quoting()) {
+          query << "'" << EscapeSqlValue(filter.value) << "'";
+        } else {
+          query << filter.value;
+        }
+      }
+    }
+    return query.str();
+  }
+};
+
+/**
+ * @brief Test that single quotes in filter values are properly escaped
+ */
+TEST_F(SqlEscapingTest, SingleQuotesEscaped) {
+  EXPECT_EQ(EscapeSqlValue("it's"), "it''s");
+  EXPECT_EQ(EscapeSqlValue("O'Brien"), "O''Brien");
+  EXPECT_EQ(EscapeSqlValue("''"), "''''");
+}
+
+/**
+ * @brief Test that backslashes in filter values are properly escaped
+ */
+TEST_F(SqlEscapingTest, BackslashesEscaped) {
+  EXPECT_EQ(EscapeSqlValue("path\\to"), "path\\\\to");
+  EXPECT_EQ(EscapeSqlValue("\\"), "\\\\");
+}
+
+/**
+ * @brief Test that normal values pass through unchanged
+ */
+TEST_F(SqlEscapingTest, NormalValuesUnchanged) {
+  EXPECT_EQ(EscapeSqlValue("active"), "active");
+  EXPECT_EQ(EscapeSqlValue("2024-01-01"), "2024-01-01");
+  EXPECT_EQ(EscapeSqlValue(""), "");
+}
+
+/**
+ * @brief Test that a SQL injection attempt via filter value is neutralized
+ */
+TEST_F(SqlEscapingTest, SqlInjectionInFilterValue) {
+  config::RequiredFilterConfig filter;
+  filter.name = "status";
+  filter.type = "string";
+  filter.op = "=";
+  filter.value = "'; DROP TABLE articles; --";
+
+  std::string clause = BuildWhereClause({filter});
+  // The injected quote should be doubled, preventing SQL injection
+  EXPECT_EQ(clause, " WHERE status = '''; DROP TABLE articles; --'");
+}
+
+/**
+ * @brief Test that numeric filter values are not quoted (but still safe)
+ */
+TEST_F(SqlEscapingTest, NumericFilterNotQuoted) {
+  config::RequiredFilterConfig filter;
+  filter.name = "enabled";
+  filter.type = "int";
+  filter.op = "=";
+  filter.value = "1";
+
+  std::string clause = BuildWhereClause({filter});
+  EXPECT_EQ(clause, " WHERE enabled = 1");
 }
 
 // ===========================================================================

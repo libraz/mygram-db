@@ -254,70 +254,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
-      // Verify batch sizes match (defensive check)
-      if (doc_batch.size() != index_batch.size()) {
-        std::string error_msg = "Internal error: doc_batch and index_batch size mismatch (" +
-                                std::to_string(doc_batch.size()) + " vs " + std::to_string(index_batch.size()) + ")";
-        mygram::utils::StructuredLog()
-            .Event("loader_error")
-            .Field("operation", "initial_load")
-            .Field("type", "batch_size_mismatch")
-            .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
-            .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
-            .Error();
-        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-        if (!rollback_result) {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "rollback")
-              .Field("error", connection_.GetLastError())
-              .Warn();
-        }
-        return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+      auto flush_result = FlushBatch(doc_batch, index_batch);
+      if (!flush_result) {
+        return MakeUnexpected(flush_result.error());
       }
-
-      // Add documents to document store
-      auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
-      if (!doc_ids_result) {
-        return MakeUnexpected(doc_ids_result.error());
-      }
-      std::vector<storage::DocId> doc_ids = *doc_ids_result;
-
-      // Verify doc_ids size matches index_batch size (defensive check)
-      if (doc_ids.size() != index_batch.size()) {
-        std::string error_msg = "Internal error: doc_ids and index_batch size mismatch (" +
-                                std::to_string(doc_ids.size()) + " vs " + std::to_string(index_batch.size()) + ")";
-        mygram::utils::StructuredLog()
-            .Event("loader_error")
-            .Field("operation", "initial_load")
-            .Field("type", "doc_ids_size_mismatch")
-            .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
-            .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
-            .Error();
-        auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-        if (!rollback_result) {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "rollback")
-              .Field("error", connection_.GetLastError())
-              .Warn();
-        }
-        return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-      }
-
-      // Update index_batch with assigned doc_ids
-      for (size_t i = 0; i < doc_ids.size(); ++i) {
-        index_batch[i].doc_id = doc_ids[i];
-      }
-
-      // Add to index
-      index_.AddDocumentBatch(index_batch);
-
-      processed_rows_ += doc_batch.size();
-
-      // Clear batches
-      doc_batch.clear();
-      index_batch.clear();
 
       // Progress callback
       if (progress_callback) {
@@ -336,69 +276,11 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Process remaining rows in batch
-  // Note: doc_batch and index_batch are always added/cleared together,
-  // so they should have the same size
   if (!doc_batch.empty() && !index_batch.empty() && !cancelled_) {
-    // Verify batch sizes match (defensive check)
-    if (doc_batch.size() != index_batch.size()) {
-      std::string error_msg = "Internal error: doc_batch and index_batch size mismatch (" +
-                              std::to_string(doc_batch.size()) + " vs " + std::to_string(index_batch.size()) + ")";
-      mygram::utils::StructuredLog()
-          .Event("loader_error")
-          .Field("operation", "initial_load")
-          .Field("type", "batch_size_mismatch")
-          .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
-          .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
-          .Error();
-      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback")
-            .Field("error", connection_.GetLastError())
-            .Warn();
-      }
-      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    auto flush_result = FlushBatch(doc_batch, index_batch);
+    if (!flush_result) {
+      return MakeUnexpected(flush_result.error());
     }
-
-    // Add documents to document store
-    auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
-    if (!doc_ids_result) {
-      return MakeUnexpected(doc_ids_result.error());
-    }
-    std::vector<storage::DocId> doc_ids = *doc_ids_result;
-
-    // Verify doc_ids size matches index_batch size (defensive check)
-    if (doc_ids.size() != index_batch.size()) {
-      std::string error_msg = "Internal error: doc_ids and index_batch size mismatch (" +
-                              std::to_string(doc_ids.size()) + " vs " + std::to_string(index_batch.size()) + ")";
-      mygram::utils::StructuredLog()
-          .Event("loader_error")
-          .Field("operation", "initial_load")
-          .Field("type", "doc_ids_size_mismatch")
-          .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
-          .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
-          .Error();
-      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback")
-            .Field("error", connection_.GetLastError())
-            .Warn();
-      }
-      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-    }
-
-    // Update index_batch with assigned doc_ids
-    for (size_t i = 0; i < doc_ids.size(); ++i) {
-      index_batch[i].doc_id = doc_ids[i];
-    }
-
-    // Add to index
-    index_.AddDocumentBatch(index_batch);
-
-    processed_rows_ += doc_batch.size();
   }
 
   // result automatically freed by MySQLResult destructor
@@ -434,6 +316,80 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       .Info();
 
   return {};  // Success
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
+    std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
+    std::vector<index::Index::DocumentItem>& index_batch) {
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  // Verify batch sizes match (defensive check)
+  if (doc_batch.size() != index_batch.size()) {
+    std::string error_msg = "Internal error: doc_batch and index_batch size mismatch (" +
+                            std::to_string(doc_batch.size()) + " vs " + std::to_string(index_batch.size()) + ")";
+    mygram::utils::StructuredLog()
+        .Event("loader_error")
+        .Field("operation", "initial_load")
+        .Field("type", "batch_size_mismatch")
+        .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
+        .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+        .Error();
+    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
+
+  // Add documents to document store
+  auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
+  if (!doc_ids_result) {
+    return MakeUnexpected(doc_ids_result.error());
+  }
+  std::vector<storage::DocId> doc_ids = *doc_ids_result;
+
+  // Verify doc_ids size matches index_batch size (defensive check)
+  if (doc_ids.size() != index_batch.size()) {
+    std::string error_msg = "Internal error: doc_ids and index_batch size mismatch (" + std::to_string(doc_ids.size()) +
+                            " vs " + std::to_string(index_batch.size()) + ")";
+    mygram::utils::StructuredLog()
+        .Event("loader_error")
+        .Field("operation", "initial_load")
+        .Field("type", "doc_ids_size_mismatch")
+        .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
+        .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
+        .Error();
+    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
+
+  // Update index_batch with assigned doc_ids
+  for (size_t i = 0; i < doc_ids.size(); ++i) {
+    index_batch[i].doc_id = doc_ids[i];
+  }
+
+  // Add to index
+  index_.AddDocumentBatch(index_batch);
+
+  processed_rows_ += doc_batch.size();
+
+  // Clear batches
+  doc_batch.clear();
+  index_batch.clear();
+
+  return {};
 }
 
 std::string InitialLoader::BuildSelectQuery() const {
@@ -488,6 +444,23 @@ std::string InitialLoader::BuildSelectQuery() const {
 
   // Add WHERE clause from required_filters
   if (!table_config_.required_filters.empty()) {
+    // Defense-in-depth: escape filter values to prevent SQL injection.
+    // These values come from configuration, but we escape them as a safety measure.
+    auto escape_sql_value = [](const std::string& value) -> std::string {
+      std::string escaped;
+      escaped.reserve(value.size());
+      for (char chr : value) {
+        if (chr == '\'') {
+          escaped += "''";
+        } else if (chr == '\\') {
+          escaped += "\\\\";
+        } else {
+          escaped += chr;
+        }
+      }
+      return escaped;
+    };
+
     query << " WHERE ";
     bool first = true;
     for (const auto& filter : table_config_.required_filters) {
@@ -509,9 +482,9 @@ std::string InitialLoader::BuildSelectQuery() const {
                  filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
         };
 
-        // Quote string values
+        // Quote string values with escaping
         if (requires_quoting()) {
-          query << "'" << filter.value << "'";
+          query << "'" << escape_sql_value(filter.value) << "'";
         } else {
           query << filter.value;
         }
@@ -523,50 +496,6 @@ std::string InitialLoader::BuildSelectQuery() const {
   query << " ORDER BY " << table_config_.primary_key;
 
   return query.str();
-}
-
-mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::ProcessRow(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                              unsigned int num_fields) {
-  using mygram::utils::Error;
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  // Extract primary key
-  std::string primary_key = ExtractPrimaryKey(row, fields, num_fields);
-  if (primary_key.empty()) {
-    std::string error_msg = "Failed to extract primary key";
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-  }
-
-  // Extract text
-  std::string text = ExtractText(row, fields, num_fields);
-  if (text.empty()) {
-    mygram::utils::StructuredLog()
-        .Event("initial_load_skip")
-        .Field("reason", "empty_text")
-        .Field("primary_key", primary_key)
-        .Debug();
-    return {};  // Skip empty documents (success)
-  }
-
-  // Normalize text
-  std::string normalized_text = index_.NormalizeText(text);
-
-  // Extract filters
-  auto filters = ExtractFilters(row, fields, num_fields);
-
-  // Add to document store
-  auto doc_id_result = doc_store_.AddDocument(primary_key, filters, normalized_text);
-  if (!doc_id_result) {
-    return MakeUnexpected(doc_id_result.error());
-  }
-  storage::DocId doc_id = *doc_id_result;
-
-  // Add to index
-  index_.AddDocument(doc_id, normalized_text);
-
-  return {};  // Success
 }
 
 bool InitialLoader::IsTextColumn(enum_field_types type) {

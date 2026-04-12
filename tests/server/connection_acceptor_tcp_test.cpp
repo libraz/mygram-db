@@ -12,8 +12,8 @@
  * - Graceful stop (double-stop safety)
  */
 
-#include <gtest/gtest.h>
 #include <arpa/inet.h>
+#include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -190,8 +190,7 @@ TEST_F(ConnectionAcceptorTcpTest, ReactorHandlerRejectionSendsServerBusy) {
 
   if (n > 0) {
     std::string response(buf, static_cast<size_t>(n));
-    EXPECT_NE(response.find("SERVER_BUSY"), std::string::npos)
-        << "Expected SERVER_BUSY response, got: " << response;
+    EXPECT_NE(response.find("SERVER_BUSY"), std::string::npos) << "Expected SERVER_BUSY response, got: " << response;
   }
 
   acceptor.Stop();
@@ -230,8 +229,7 @@ TEST_F(ConnectionAcceptorTcpTest, MaxConnectionsEnforced) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     // Verify the handler was NOT called a third time
     std::lock_guard<std::mutex> lock(fds_mu);
-    EXPECT_LE(static_cast<int>(owned_fds.size()), 2)
-        << "Handler should not be called beyond max_connections";
+    EXPECT_LE(static_cast<int>(owned_fds.size()), 2) << "Handler should not be called beyond max_connections";
     close(c3);
   }
 

@@ -238,6 +238,24 @@ gtest_discover_tests(http_server_features_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+# DumpProgress thread safety tests
+
+add_executable(dump_progress_test
+  dump_progress_test.cpp
+)
+
+target_link_libraries(dump_progress_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(dump_progress_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
 # DumpHandler tests
 
 add_executable(dump_handler_test

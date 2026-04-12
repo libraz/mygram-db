@@ -19,12 +19,18 @@ std::string StripSQLComments(const std::string& query) {
     if (pos + 1 < query.length() && query[pos] == '/' && query[pos + 1] == '*') {
       // Skip until end of block comment
       pos += 2;
+      bool found_end = false;
       while (pos + 1 < query.length()) {
         if (query[pos] == '*' && query[pos + 1] == '/') {
           pos += 2;
+          found_end = true;
           break;
         }
         pos++;
+      }
+      // If unterminated block comment, skip all remaining characters
+      if (!found_end) {
+        pos = query.length();
       }
       // Add a space to preserve word boundaries
       if (!result.empty() && result.back() != ' ') {

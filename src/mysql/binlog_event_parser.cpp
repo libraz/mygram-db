@@ -172,6 +172,34 @@ inline std::string GetRowText(const RowData& row, const RowsEventContext& ctx) {
   return row.text;
 }
 
+/**
+ * @brief Format a 16-byte UUID as a standard hyphenated string.
+ * @param bytes Pointer to 16 bytes of UUID data
+ * @return UUID string in format "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+ */
+std::string FormatUUID(const unsigned char* bytes) {
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+  // Bytes 0-3
+  oss << std::setw(2) << static_cast<int>(bytes[0]) << std::setw(2) << static_cast<int>(bytes[1]) << std::setw(2)
+      << static_cast<int>(bytes[2]) << std::setw(2) << static_cast<int>(bytes[3]);
+  oss << '-';
+  // Bytes 4-5
+  oss << std::setw(2) << static_cast<int>(bytes[4]) << std::setw(2) << static_cast<int>(bytes[5]);
+  oss << '-';
+  // Bytes 6-7
+  oss << std::setw(2) << static_cast<int>(bytes[6]) << std::setw(2) << static_cast<int>(bytes[7]);
+  oss << '-';
+  // Bytes 8-9
+  oss << std::setw(2) << static_cast<int>(bytes[8]) << std::setw(2) << static_cast<int>(bytes[9]);
+  oss << '-';
+  // Bytes 10-15
+  oss << std::setw(2) << static_cast<int>(bytes[10]) << std::setw(2) << static_cast<int>(bytes[11]) << std::setw(2)
+      << static_cast<int>(bytes[12]) << std::setw(2) << static_cast<int>(bytes[13]) << std::setw(2)
+      << static_cast<int>(bytes[14]) << std::setw(2) << static_cast<int>(bytes[15]);
+  return oss.str();
+}
+
 }  // namespace
 
 std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
@@ -470,18 +498,6 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
   // Skip header (19 bytes) and commit_flag (1 byte)
   const unsigned char* sid_ptr = buffer + 20;
 
-  // Format UUID as string using std::ostringstream
-  std::ostringstream uuid_oss;
-  uuid_oss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(sid_ptr[0]) << std::setw(2)
-           << static_cast<int>(sid_ptr[1]) << std::setw(2) << static_cast<int>(sid_ptr[2]) << std::setw(2)
-           << static_cast<int>(sid_ptr[3]) << '-' << std::setw(2) << static_cast<int>(sid_ptr[4]) << std::setw(2)
-           << static_cast<int>(sid_ptr[5]) << '-' << std::setw(2) << static_cast<int>(sid_ptr[6]) << std::setw(2)
-           << static_cast<int>(sid_ptr[7]) << '-' << std::setw(2) << static_cast<int>(sid_ptr[8]) << std::setw(2)
-           << static_cast<int>(sid_ptr[9]) << '-' << std::setw(2) << static_cast<int>(sid_ptr[10]) << std::setw(2)
-           << static_cast<int>(sid_ptr[11]) << std::setw(2) << static_cast<int>(sid_ptr[12]) << std::setw(2)
-           << static_cast<int>(sid_ptr[13]) << std::setw(2) << static_cast<int>(sid_ptr[14]) << std::setw(2)
-           << static_cast<int>(sid_ptr[15]);
-
   // Extract GNO (8 bytes, little-endian)
   const unsigned char* gno_ptr = sid_ptr + 16;
   uint64_t gno = 0;
@@ -490,7 +506,7 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
   }
 
   // Format as "UUID:GNO"
-  std::string gtid = uuid_oss.str() + ":" + std::to_string(gno);
+  std::string gtid = FormatUUID(sid_ptr) + ":" + std::to_string(gno);
   return gtid;
 }
 
@@ -589,20 +605,8 @@ std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned c
     return {};
   }
 
-  // Format UUID as string
-  std::ostringstream uuid_oss;
-  uuid_oss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(uuid_ptr[0]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[1]) << std::setw(2) << static_cast<int>(uuid_ptr[2]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[3]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[4]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[5]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[6]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[7]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[8]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[9]) << '-' << std::setw(2) << static_cast<int>(uuid_ptr[10]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[11]) << std::setw(2) << static_cast<int>(uuid_ptr[12]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[13]) << std::setw(2) << static_cast<int>(uuid_ptr[14]) << std::setw(2)
-           << static_cast<int>(uuid_ptr[15]);
-
   // Format as "UUID:TAG:GNO" or "UUID:GNO"
-  std::string gtid = uuid_oss.str();
+  std::string gtid = FormatUUID(uuid_ptr);
   if (!tag.empty()) {
     gtid += ":" + tag;
   }
@@ -884,7 +888,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         case ColumnType::DATETIME2:
         case ColumnType::TIME2:
           // 1 byte: fractional seconds precision (0-6)
-          if (ptr + 1 <= metadata_start + metadata_len) {
+          if (ptr + 1 <= metadata_end) {
             metadata.columns[i].metadata = *ptr;
             ptr += 1;
           }
@@ -893,7 +897,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
         case ColumnType::ENUM:
         case ColumnType::SET:
           // 2 bytes: number of elements
-          if (ptr + 2 <= metadata_start + metadata_len) {
+          if (ptr + 2 <= metadata_end) {
             metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
             ptr += 2;
           }

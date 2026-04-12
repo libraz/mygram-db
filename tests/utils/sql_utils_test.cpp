@@ -38,6 +38,12 @@ TEST(StripSQLCommentsTest, MultipleComments) {
   EXPECT_NE(result.find("FROM users"), std::string::npos);
 }
 
+TEST(StripSQLCommentsTest, UnterminatedBlockComment) {
+  std::string sql = "SELECT /* no end";
+  std::string result = StripSQLComments(sql);
+  EXPECT_EQ(result, "SELECT ");
+}
+
 TEST(StripSQLCommentsTest, EmptyInput) {
   EXPECT_EQ(StripSQLComments(""), "");
 }
