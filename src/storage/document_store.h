@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -269,7 +270,7 @@ class DocumentStore {
    *
    * @param enabled Whether to store normalized text
    */
-  void SetStoreTexts(bool enabled) { store_texts_ = enabled; }
+  void SetStoreTexts(bool enabled) { store_texts_.store(enabled, std::memory_order_relaxed); }
 
   /**
    * @brief Set normalized text for a document (for n-gram verification)
@@ -372,7 +373,7 @@ class DocumentStore {
   std::unordered_map<DocId, std::string> doc_texts_;
 
   // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off)
-  bool store_texts_ = true;
+  std::atomic<bool> store_texts_{true};
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
   // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,
@@ -382,6 +383,14 @@ class DocumentStore {
 
   // Mutex for thread-safe access (shared for reads, exclusive for writes)
   mutable std::shared_mutex mutex_;
+
+  /// Serialize all documents to an output stream (called by SaveToFile and SaveToStream)
+  void SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const;
+
+  /// Deserialize all documents from an input stream (called by LoadFromFile and LoadFromStream)
+  /// @param context Identifier for error messages (e.g., filepath or "stream")
+  Expected<void, Error> DeserializeDocuments(std::istream& in, std::string* replication_gtid,
+                                             const std::string& context);
 };
 
 }  // namespace mygramdb::storage

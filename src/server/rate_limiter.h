@@ -20,6 +20,9 @@ namespace mygramdb::server {
  * Implements the token bucket algorithm for rate limiting.
  * Tokens are added at a fixed rate up to a maximum capacity.
  * Each request consumes one token.
+ *
+ * Not thread-safe on its own. Callers must hold an external lock
+ * (e.g., RateLimiter::mutex_) before accessing any member function.
  */
 class TokenBucket {
  public:
@@ -63,7 +66,6 @@ class TokenBucket {
   size_t refill_rate_;                                 ///< Tokens per second
   double tokens_;                                      ///< Current tokens (float for fractional refill)
   std::chrono::steady_clock::time_point last_refill_;  ///< Last refill time
-  mutable std::mutex mutex_;                           ///< Protects token count
 };
 
 /**

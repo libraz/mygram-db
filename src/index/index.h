@@ -159,7 +159,10 @@ class Index {
   /**
    * @brief Get total number of unique terms
    */
-  [[nodiscard]] size_t TermCount() const { return term_postings_.size(); }
+  [[nodiscard]] size_t TermCount() const {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    return term_postings_.size();
+  }
 
   /**
    * @brief Get total memory usage

@@ -29,8 +29,6 @@ bool TokenBucket::TryConsume() {
 }
 
 bool TokenBucket::TryConsume(size_t tokens_to_consume) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
   Refill();
 
   if (tokens_ >= static_cast<double>(tokens_to_consume)) {
@@ -42,12 +40,10 @@ bool TokenBucket::TryConsume(size_t tokens_to_consume) {
 }
 
 size_t TokenBucket::GetTokenCount() const {
-  std::lock_guard<std::mutex> lock(mutex_);
   return static_cast<size_t>(tokens_);
 }
 
 void TokenBucket::Reset() {
-  std::lock_guard<std::mutex> lock(mutex_);
   tokens_ = static_cast<double>(capacity_);
   last_refill_ = std::chrono::steady_clock::now();
 }

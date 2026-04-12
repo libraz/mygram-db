@@ -855,6 +855,71 @@ network:
 }
 
 /**
+ * @brief Test MySQL port range validation rejects out-of-range ports
+ */
+TEST(ConfigTest, MysqlPortRangeValidation) {
+  // Port 0 should be rejected
+  {
+    std::ofstream f("port_zero.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: 0\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_zero.yaml");
+    EXPECT_FALSE(result) << "Port 0 should be rejected";
+    std::remove("port_zero.yaml");
+  }
+
+  // Negative port should be rejected
+  {
+    std::ofstream f("port_negative.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: -1\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_negative.yaml");
+    EXPECT_FALSE(result) << "Port -1 should be rejected";
+    std::remove("port_negative.yaml");
+  }
+
+  // Port exceeding 65535 should be rejected
+  {
+    std::ofstream f("port_too_large.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: 99999\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_too_large.yaml");
+    EXPECT_FALSE(result) << "Port 99999 should be rejected";
+    std::remove("port_too_large.yaml");
+  }
+}
+
+/**
  * @brief Test ToFilterConfig converts a single RequiredFilterConfig correctly
  */
 TEST(ConfigTest, ToFilterConfigConvertsSingleConfig) {

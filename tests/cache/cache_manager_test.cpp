@@ -652,4 +652,38 @@ TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
   SUCCEED();
 }
 
+/**
+ * @brief Test that Insert uses precomputed cache_key when available
+ *
+ * Regression test: Insert() was always recomputing the cache key via
+ * QueryNormalizer::Normalize, ignoring query.cache_key. This caused
+ * Lookup (which uses the precomputed key) to miss entries inserted
+ * with a precomputed cache_key.
+ */
+TEST(CacheManagerTest, InsertUsesPrecomputedCacheKey) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+
+  CacheManager mgr(config, table_contexts);
+
+  // Create a query with a precomputed cache_key
+  auto query = CreateQuery("posts", "test");
+  query.cache_key = std::make_pair(uint64_t{12345}, uint64_t{67890});
+
+  // Insert with this query
+  std::vector<DocId> results = {1, 2, 3};
+  std::vector<std::string> ngrams = {"tes", "est"};
+  bool inserted = mgr.Insert(query, results, ngrams, 15.0, 3, 2, true);
+  ASSERT_TRUE(inserted);
+
+  // Lookup with same query (same cache_key) should find the entry
+  auto lookup = mgr.Lookup(query);
+  ASSERT_TRUE(lookup.has_value()) << "Lookup should find entry inserted with same precomputed cache_key";
+  EXPECT_EQ(lookup.value().size(), 3u);
+}
+
 }  // namespace mygramdb::cache

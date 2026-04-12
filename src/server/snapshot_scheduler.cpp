@@ -55,17 +55,19 @@ SnapshotScheduler::~SnapshotScheduler() {
 }
 
 void SnapshotScheduler::Start() {
-  if (running_.load()) {
+  if (config_.interval_sec <= 0) {
+    mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
+    return;
+  }
+
+  // Atomically try to set running_ from false to true to prevent TOCTOU race
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("component", "snapshot_scheduler")
         .Field("type", "already_running")
         .Warn();
-    return;
-  }
-
-  if (config_.interval_sec <= 0) {
-    mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return;
   }
 
@@ -75,7 +77,6 @@ void SnapshotScheduler::Start() {
       .Field("retain", static_cast<uint64_t>(config_.retain))
       .Info();
 
-  running_ = true;
   scheduler_thread_ = std::make_unique<std::thread>(&SnapshotScheduler::SchedulerLoop, this);
 }
 

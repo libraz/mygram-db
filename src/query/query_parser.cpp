@@ -18,9 +18,6 @@ namespace mygramdb::query {
 
 namespace {
 
-// Maximum LIMIT value (1000)
-constexpr uint32_t kMaxLimit = 1000;
-
 size_t CalculateQueryExpressionLength(const Query& query) {
   size_t length = query.search_text.size();
 
@@ -141,7 +138,7 @@ bool Query::IsValid() const {
   }
 
   if (type == QueryType::SEARCH) {
-    if (limit == 0 || limit > kMaxLimit) {
+    if (limit == 0 || limit > internal::kMaxLimit) {
       return false;
     }
   }

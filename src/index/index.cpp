@@ -474,17 +474,16 @@ void Index::Clear() {
 }
 
 PostingList* Index::GetOrCreatePostingList(std::string_view term) {
-  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
-  std::string term_str(term);
-  auto iterator = term_postings_.find(term_str);
+  // absl::flat_hash_map with TransparentStringHash supports heterogeneous lookup
+  auto iterator = term_postings_.find(term);
   if (iterator != term_postings_.end()) {
     return iterator->second.get();
   }
 
-  // Create new posting list
+  // Create new posting list - only allocate std::string on the insert path
   auto posting = std::make_shared<PostingList>(roaring_threshold_);
   auto* ptr = posting.get();
-  term_postings_[std::move(term_str)] = std::move(posting);
+  term_postings_[std::string(term)] = std::move(posting);
   return ptr;
 }
 

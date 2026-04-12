@@ -150,7 +150,7 @@ std::vector<storage::DocId> PostFilterByText(const std::vector<storage::DocId>& 
 /// @param doc_store Document store with normalized text
 /// @param full_config Application config (for verify_text setting; may be nullptr)
 /// @return Results after verify_text filtering
-std::vector<storage::DocId> ApplyVerifyTextFilter(const std::vector<storage::DocId>& results,
+std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> results,
                                                   const std::vector<std::string>& search_terms,
                                                   index::Index* current_index, storage::DocumentStore* doc_store,
                                                   const config::Config* full_config);

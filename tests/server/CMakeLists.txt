@@ -285,11 +285,14 @@ target_link_libraries(dump_auto_save_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
+# DumpAutoSave tests use sleep-based timing (2-4 seconds each)
 gtest_discover_tests(dump_auto_save_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK storage_io
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK storage_io
+    TIMEOUT 30
 )
 
 # SyncHandler tests
@@ -376,11 +379,14 @@ target_link_libraries(rate_limiter_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+# TokenBucketTest.CapacityLimit uses sleep-based timing (~2 seconds)
 gtest_discover_tests(rate_limiter_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
+    TIMEOUT 30
 )
 
 # RateLimiter cleanup tests

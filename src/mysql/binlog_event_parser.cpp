@@ -18,6 +18,7 @@
 #include <sstream>
 
 #include "mysql/binlog_event_types.h"
+#include "mysql/binlog_filter_evaluator.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "server/tcp_server.h"  // For TableContext definition
@@ -30,6 +31,20 @@
 namespace mygramdb::mysql {
 
 namespace {
+
+// ============================================================================
+// Binlog event size constants
+// ============================================================================
+
+/// Minimum length for a standard GTID_LOG_EVENT
+constexpr size_t kGTIDEventMinLength = 42;
+
+/// Minimum length for a GTID_TAGGED_LOG_EVENT (MySQL 8.4+)
+constexpr size_t kTaggedGTIDEventMinLength = 46;
+
+/// Size of the fixed-length fields in a QUERY_EVENT (thread_id + exec_time +
+/// db_len + error_code + status_vars_len = 4+4+1+2+2 = 13 bytes)
+constexpr size_t kQueryEventFixedFieldsSize = 13;
 
 // ============================================================================
 // ROWS_EVENT common helper structures and functions
@@ -47,7 +62,6 @@ struct RowsEventContext {
   const config::TableConfig* current_config = nullptr;
   std::string text_column;
   bool use_concat = false;
-  std::vector<config::FilterConfig> required_as_filters;
 };
 
 /**
@@ -123,9 +137,6 @@ std::optional<RowsEventContext> InitRowsEventContext(
   } else {
     ctx.text_column = "";
   }
-
-  // Prepare required_filters config
-  ctx.required_as_filters = config::ToFilterConfigs(ctx.current_config->required_filters);
 
   return ctx;
 }
@@ -266,9 +277,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.gtid = current_gtid;
 
         // Extract all filters (required + optional) from row data
-        event.filters = ExtractFilters(row, ctx.current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(row, ctx.required_as_filters, datetime_timezone);
-        event.filters.insert(required_filters.begin(), required_filters.end());
+        event.filters = BinlogFilterEvaluator::ExtractAllFilters(row, *ctx.current_config, datetime_timezone);
 
         events.push_back(std::move(event));
       }
@@ -322,9 +331,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.gtid = current_gtid;
 
         // Extract all filters from after image
-        event.filters = ExtractFilters(after_row, ctx.current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(after_row, ctx.required_as_filters, datetime_timezone);
-        event.filters.insert(required_filters.begin(), required_filters.end());
+        event.filters = BinlogFilterEvaluator::ExtractAllFilters(after_row, *ctx.current_config, datetime_timezone);
 
         events.push_back(std::move(event));
       }
@@ -374,9 +381,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.gtid = current_gtid;
 
         // Extract all filters from row data (before image for DELETE)
-        event.filters = ExtractFilters(row, ctx.current_config->filters, datetime_timezone);
-        auto required_filters = ExtractFilters(row, ctx.required_as_filters, datetime_timezone);
-        event.filters.insert(required_filters.begin(), required_filters.end());
+        event.filters = BinlogFilterEvaluator::ExtractAllFilters(row, *ctx.current_config, datetime_timezone);
 
         events.push_back(std::move(event));
       }
@@ -478,7 +483,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 }
 
 std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* buffer, unsigned long length) {
-  if ((buffer == nullptr) || length < 42) {
+  if ((buffer == nullptr) || length < kGTIDEventMinLength) {
     // GTID event minimum size
     return {};
   }
@@ -504,7 +509,7 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
 }
 
 std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned char* buffer, unsigned long length) {
-  if ((buffer == nullptr) || length < 46) {
+  if ((buffer == nullptr) || length < kTaggedGTIDEventMinLength) {
     // Minimum: 19 header + 1 commit_flag + 10 field1 + 2 field2_hdr + 16 UUID
     //          + 1 tag_len = 49, but 46 is a reasonable lower bound check
     return {};
@@ -978,7 +983,7 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
   size_t remaining = effective_length - mygram::constants::kBinlogEventHeaderLen;
 
-  if (remaining < 13) {  // Minimum: 4+4+1+2+2
+  if (remaining < kQueryEventFixedFieldsSize) {  // Minimum: 4+4+1+2+2
     return {};
   }
 
@@ -1085,6 +1090,80 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
       if (mygram::utils::SkipWhitespace(query_upper, pos) &&
           mygram::utils::MatchTableName(query_upper, pos, table_upper)) {
         return true;
+      }
+    }
+  }
+
+  // Reset position and check for RENAME TABLE
+  // Syntax: RENAME TABLE tbl1 TO tbl2 [, tbl3 TO tbl4 ...]
+  pos = saved_start;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "RENAME")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      while (mygram::utils::SkipWhitespace(query_upper, pos)) {
+        // Try to match source table name
+        size_t saved_pos = pos;
+        bool source_match = mygram::utils::MatchTableName(query_upper, pos, table_upper);
+        if (!source_match) {
+          // MatchTableName may have partially advanced pos; restore and skip
+          pos = saved_pos;
+          if (pos < query_upper.size() && query_upper[pos] == '`') {
+            size_t end_tick = query_upper.find('`', pos + 1);
+            if (end_tick != std::string::npos) {
+              pos = end_tick + 1;
+            } else {
+              break;
+            }
+          } else {
+            while (pos < query_upper.size() && std::isalnum(static_cast<unsigned char>(query_upper[pos])) == 0 &&
+                   query_upper[pos] != '_') {
+              break;
+            }
+            while (pos < query_upper.size() &&
+                   (std::isalnum(static_cast<unsigned char>(query_upper[pos])) != 0 || query_upper[pos] == '_')) {
+              ++pos;
+            }
+          }
+        }
+
+        // Expect TO keyword
+        if (!mygram::utils::SkipWhitespace(query_upper, pos) || !mygram::utils::MatchKeyword(query_upper, pos, "TO")) {
+          break;
+        }
+        if (!mygram::utils::SkipWhitespace(query_upper, pos)) {
+          break;
+        }
+
+        // Try to match target table name
+        saved_pos = pos;
+        bool target_match = mygram::utils::MatchTableName(query_upper, pos, table_upper);
+
+        if (source_match || target_match) {
+          return true;
+        }
+
+        // Skip over non-matching target table name
+        pos = saved_pos;
+        if (pos < query_upper.size() && query_upper[pos] == '`') {
+          size_t end_tick = query_upper.find('`', pos + 1);
+          if (end_tick != std::string::npos) {
+            pos = end_tick + 1;
+          } else {
+            break;
+          }
+        } else {
+          while (pos < query_upper.size() &&
+                 (std::isalnum(static_cast<unsigned char>(query_upper[pos])) != 0 || query_upper[pos] == '_')) {
+            ++pos;
+          }
+        }
+
+        // Check for comma (multi-table rename)
+        mygram::utils::SkipWhitespace(query_upper, pos);
+        if (pos < query_upper.size() && query_upper[pos] == ',') {
+          ++pos;
+        } else {
+          break;
+        }
       }
     }
   }

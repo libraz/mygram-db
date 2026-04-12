@@ -37,7 +37,7 @@ constexpr size_t kErrorPrefixLen = mygramdb::server::protocol::kErrorPrefixLen;
 constexpr size_t kOkSavedPrefixLen = mygramdb::server::protocol::kOkSavedPrefixLen;
 constexpr size_t kOkLoadedPrefixLen = mygramdb::server::protocol::kOkLoadedPrefixLen;
 constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
-constexpr int kMicrosecondsPerMillisecond = 1000;
+constexpr int64_t kMicrosecondsPerMillisecond = mygram::constants::kMicrosecondsPerMillisecond;
 
 /**
  * @brief Check if response is an error and return appropriate Expected
@@ -182,6 +182,44 @@ std::string EscapeQueryString(const std::string& str) {
   }
   result += '"';
   return result;
+}
+
+/**
+ * @brief Validate common search inputs for control characters
+ *
+ * Checks table, query, and/not terms, and filter keys/values.
+ *
+ * @return nullopt on success, or error message string on failure
+ */
+std::optional<std::string> ValidateSearchInputs(const std::string& table, const std::string& query,
+                                                const std::vector<std::string>& and_terms,
+                                                const std::vector<std::string>& not_terms,
+                                                const std::vector<std::pair<std::string, std::string>>& filters) {
+  if (auto err = ValidateNoControlCharacters(table, "table name")) {
+    return err;
+  }
+  if (auto err = ValidateNoControlCharacters(query, "search query")) {
+    return err;
+  }
+  for (const auto& term : and_terms) {
+    if (auto err = ValidateNoControlCharacters(term, "AND term")) {
+      return err;
+    }
+  }
+  for (const auto& term : not_terms) {
+    if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
+      return err;
+    }
+  }
+  for (const auto& [key, value] : filters) {
+    if (auto err = ValidateNoControlCharacters(key, "filter key")) {
+      return err;
+    }
+    if (auto err = ValidateNoControlCharacters(value, "filter value")) {
+      return err;
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace
@@ -339,29 +377,8 @@ class MygramClient::Impl {
                                          const std::vector<std::string>& not_terms,
                                          const std::vector<std::pair<std::string, std::string>>& filters,
                                          const std::string& sort_column, bool sort_desc) const {
-    if (auto err = ValidateNoControlCharacters(table, "table name")) {
+    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-    }
-    if (auto err = ValidateNoControlCharacters(query, "search query")) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-    }
-    for (const auto& term : and_terms) {
-      if (auto err = ValidateNoControlCharacters(term, "AND term")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-    }
-    for (const auto& term : not_terms) {
-      if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-    }
-    for (const auto& [key, value] : filters) {
-      if (auto err = ValidateNoControlCharacters(key, "filter key")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-      if (auto err = ValidateNoControlCharacters(value, "filter value")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
     }
     if (!sort_column.empty()) {
       if (auto err = ValidateNoControlCharacters(sort_column, "sort column")) {
@@ -464,29 +481,8 @@ class MygramClient::Impl {
                                        const std::vector<std::string>& and_terms,
                                        const std::vector<std::string>& not_terms,
                                        const std::vector<std::pair<std::string, std::string>>& filters) const {
-    if (auto err = ValidateNoControlCharacters(table, "table name")) {
+    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-    }
-    if (auto err = ValidateNoControlCharacters(query, "search query")) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-    }
-    for (const auto& term : and_terms) {
-      if (auto err = ValidateNoControlCharacters(term, "AND term")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-    }
-    for (const auto& term : not_terms) {
-      if (auto err = ValidateNoControlCharacters(term, "NOT term")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-    }
-    for (const auto& [key, value] : filters) {
-      if (auto err = ValidateNoControlCharacters(key, "filter key")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-      if (auto err = ValidateNoControlCharacters(value, "filter value")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
     }
 
     // Build command

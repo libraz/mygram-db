@@ -25,9 +25,8 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
                                                   std::string_view normalized_text) {
   std::unique_lock lock(mutex_);
 
-  // Check if primary key already exists (convert string_view to string for unordered_map lookup)
-  std::string primary_key_str(primary_key);
-  auto iterator = pk_to_doc_id_.find(primary_key_str);
+  // Check if primary key already exists (heterogeneous lookup via TransparentStringHash)
+  auto iterator = pk_to_doc_id_.find(primary_key);
   if (iterator != pk_to_doc_id_.end()) {
     mygram::utils::StructuredLog()
         .Event("storage_warning")
@@ -55,7 +54,8 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
     next_doc_id_++;
   }
 
-  // Store mappings
+  // Store mappings - allocate string only on the insert path
+  std::string primary_key_str(primary_key);
   doc_id_to_pk_[doc_id] = primary_key_str;
   pk_to_doc_id_[std::move(primary_key_str)] = doc_id;
 
@@ -66,7 +66,7 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   }
 
   // Store normalized text for n-gram post-filter verification
-  if (store_texts_ && !normalized_text.empty()) {
+  if (store_texts_.load(std::memory_order_relaxed) && !normalized_text.empty()) {
     doc_texts_[doc_id] = std::string(normalized_text);
   }
 
@@ -133,7 +133,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     }
 
     // Store normalized text for n-gram post-filter verification
-    if (store_texts_ && !doc.normalized_text.empty()) {
+    if (store_texts_.load(std::memory_order_relaxed) && !doc.normalized_text.empty()) {
       doc_texts_[doc_id] = doc.normalized_text;
     }
 
@@ -276,13 +276,14 @@ size_t DocumentStore::MemoryUsage() const {
   total += doc_filters_.bucket_count() * kPointerSize;
 
   // doc_id_to_pk_ - data size
+  // sizeof(std::string) for the object itself, capacity() for heap allocation
   for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
-    total += sizeof(DocId) + primary_key_str.size() + primary_key_str.capacity();
+    total += sizeof(DocId) + sizeof(std::string) + primary_key_str.capacity();
   }
 
   // pk_to_doc_id_ - data size
   for (const auto& [primary_key_str, doc_id] : pk_to_doc_id_) {
-    total += primary_key_str.size() + primary_key_str.capacity() + sizeof(DocId);
+    total += sizeof(std::string) + primary_key_str.capacity() + sizeof(DocId);
   }
 
   // doc_filters_ (approximate)
@@ -291,12 +292,12 @@ size_t DocumentStore::MemoryUsage() const {
     // Include inner map bucket overhead
     total += filters.bucket_count() * kPointerSize;
     for (const auto& [name, value] : filters) {
-      total += name.size() + name.capacity();
+      total += sizeof(std::string) + name.capacity();
       total += std::visit(
           [](const auto& filter_value) -> size_t {
             using T = std::decay_t<decltype(filter_value)>;
             if constexpr (std::is_same_v<T, std::string>) {
-              return filter_value.size() + filter_value.capacity();
+              return sizeof(std::string) + filter_value.capacity();
             } else {
               return sizeof(T);
             }

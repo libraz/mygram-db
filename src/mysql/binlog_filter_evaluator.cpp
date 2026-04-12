@@ -52,13 +52,13 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
                                                const std::string& datetime_timezone) {
   // SECURITY: Limit filter value size to prevent memory exhaustion attacks
   // A malicious binlog event could contain multi-GB filter values
-  constexpr size_t MAX_FILTER_VALUE_SIZE = 1024 * 1024;  // 1MB
-  if (filter.value.size() > MAX_FILTER_VALUE_SIZE) {
+  constexpr size_t kMaxFilterValueSize = 1024 * 1024;  // 1MB
+  if (filter.value.size() > kMaxFilterValueSize) {
     mygram::utils::StructuredLog()
         .Event("mysql_binlog_warning")
         .Field("type", "filter_value_too_large")
         .Field("value_size", static_cast<uint64_t>(filter.value.size()))
-        .Field("max_size", static_cast<uint64_t>(MAX_FILTER_VALUE_SIZE))
+        .Field("max_size", static_cast<uint64_t>(kMaxFilterValueSize))
         .Field("filter_name", filter.name)
         .Warn();
     return false;  // Fail-safe: reject oversized filter values

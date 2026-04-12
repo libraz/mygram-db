@@ -236,6 +236,32 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
 }
 
 /**
+ * @brief Test SetStoreTexts() thread safety during concurrent writes
+ *
+ * SetStoreTexts() writes to store_texts_ which is read by AddDocument()
+ * under lock. Without atomicity, concurrent calls cause a data race on
+ * the plain bool member.
+ */
+TEST(DocumentStoreConcurrentTest, SetStoreTextsDuringConcurrentWrites) {
+  DocumentStore store;
+
+  std::thread writer([&]() {
+    for (int i = 0; i < 100; ++i) {
+      (void)store.AddDocument("pk" + std::to_string(i), {}, "text " + std::to_string(i));
+    }
+  });
+
+  std::thread toggler([&]() {
+    for (int i = 0; i < 200; ++i) {
+      store.SetStoreTexts(i % 2 == 0);
+    }
+  });
+
+  writer.join();
+  toggler.join();
+}
+
+/**
  * @brief Test for next_doc_id_ double setting fix
  *
  * Verifies that LoadFromFile() and LoadFromStream() only set next_doc_id_ once

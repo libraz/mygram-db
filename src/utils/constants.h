@@ -42,6 +42,9 @@ constexpr double kBytesPerGigabyteDouble = kBytesPerMegabyteDouble * 1024.0;
 /// Milliseconds per second
 constexpr int64_t kMillisecondsPerSecond = 1000;
 
+/// Microseconds per millisecond
+constexpr int64_t kMicrosecondsPerMillisecond = 1000;
+
 /// Microseconds per second
 constexpr int64_t kMicrosecondsPerSecond = 1000000;
 

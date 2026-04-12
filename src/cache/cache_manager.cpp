@@ -122,13 +122,12 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
     return false;
   }
 
-  // Normalize query and generate cache key
-  const std::string normalized = QueryNormalizer::Normalize(query);
-  if (normalized.empty()) {
+  // Use the same key derivation as Lookup to ensure consistency
+  auto resolved_key = ResolveCacheKey(query);
+  if (!resolved_key.has_value()) {
     return false;
   }
-
-  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  const CacheKey key = resolved_key.value();
 
   // Prepare metadata for invalidation tracking
   CacheMetadata metadata;

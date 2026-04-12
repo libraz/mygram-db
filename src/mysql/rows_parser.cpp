@@ -272,6 +272,16 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
                 .Warn();
             return std::nullopt;
           }
+          if (ptr + field_size > end) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "field_size_exceeds_buffer")
+                .Field("event_type", "write_rows")
+                .Field("field_size", static_cast<uint64_t>(field_size))
+                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+                .Error();
+            return std::nullopt;
+          }
           ptr += field_size;
         }
       }
@@ -502,6 +512,17 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Warn();
             return std::nullopt;
           }
+          if (ptr + field_size > end) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "field_size_exceeds_buffer")
+                .Field("event_type", "update_rows")
+                .Field("image", "before")
+                .Field("field_size", static_cast<uint64_t>(field_size))
+                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+                .Error();
+            return std::nullopt;
+          }
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
@@ -655,6 +676,17 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Warn();
             return std::nullopt;
           }
+          if (ptr + field_size > end) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "field_size_exceeds_buffer")
+                .Field("event_type", "update_rows")
+                .Field("image", "after")
+                .Field("field_size", static_cast<uint64_t>(field_size))
+                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+                .Error();
+            return std::nullopt;
+          }
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
@@ -797,6 +829,16 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
                 .Field("column_type", static_cast<int64_t>(col_meta.type))
                 .Field("column_name", col_meta.name)
                 .Warn();
+            return std::nullopt;
+          }
+          if (ptr + field_size > end) {
+            mygram::utils::StructuredLog()
+                .Event("mysql_binlog_error")
+                .Field("type", "field_size_exceeds_buffer")
+                .Field("event_type", "delete_rows")
+                .Field("field_size", static_cast<uint64_t>(field_size))
+                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+                .Error();
             return std::nullopt;
           }
           ptr += field_size;

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -47,7 +48,7 @@ constexpr std::size_t kMaxEventBufferSize = 4096;
 /// Number of milliseconds in a second (kept as a named constant to keep the
 /// timespec conversion below readable under clang-tidy's magic-number rule).
 constexpr long kNanosPerMilli = 1'000'000L;
-constexpr int kMillisPerSecond = 1000;
+constexpr int64_t kMillisPerSecond = mygram::constants::kMillisecondsPerSecond;
 
 /// Build an errno-decorated error message suffix. Captures `captured_errno` by
 /// value to avoid TOCTOU between the failing syscall and the `strerror` call.

@@ -139,14 +139,16 @@ bool DocumentStore::HasFilterColumn(std::string_view filter_name) const {
 }
 
 std::vector<DocId> DocumentStore::GetAllDocIds() const {
-  std::shared_lock lock(mutex_);
   std::vector<DocId> results;
-  results.reserve(doc_id_to_pk_.size());
+  {
+    std::shared_lock lock(mutex_);
+    results.reserve(doc_id_to_pk_.size());
 
-  for (const auto& [doc_id, unused_pk] : doc_id_to_pk_) {
-    (void)unused_pk;  // Mark as intentionally unused
-    results.push_back(doc_id);
-  }
+    for (const auto& [doc_id, unused_pk] : doc_id_to_pk_) {
+      (void)unused_pk;  // Mark as intentionally unused
+      results.push_back(doc_id);
+    }
+  }  // Release lock before sorting
 
   // Sort results for consistency with set operations
   std::sort(results.begin(), results.end());

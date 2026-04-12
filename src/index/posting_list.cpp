@@ -696,7 +696,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       roaring_bitmap_free(roaring_bitmap_);
     }
 
-    roaring_bitmap_ = roaring_bitmap_portable_deserialize(GetDeserializationPointer(buffer, offset));
+    roaring_bitmap_ = roaring_bitmap_portable_deserialize_safe(GetDeserializationPointer(buffer, offset), size);
 
     if (roaring_bitmap_ == nullptr) {
       return false;

@@ -103,6 +103,11 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
     } else if (json_obj.contains("port")) {
       config.port = json_obj["port"].get<int>();
     }
+
+    // Validate port range
+    if (config.port < 1 || config.port > 65535) {
+      throw std::runtime_error("MySQL port must be between 1 and 65535, got: " + std::to_string(config.port));
+    }
   }
 
   // User: environment variable takes precedence

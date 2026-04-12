@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include "config/config_schema_embedded.h"
+#include "utils/constants.h"
 
 namespace mygramdb::config {
 
@@ -220,10 +221,10 @@ nlohmann::json ConfigToJson(const Config& config) {
   };
 
   // Cache configuration
-  constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
   json["cache"] = {
       {"enabled", config.cache.enabled},
-      {"max_memory_mb", config.cache.max_memory_bytes / kBytesPerMB},  // Convert bytes to MB for display
+      {"max_memory_mb",
+       config.cache.max_memory_bytes / mygram::constants::kBytesPerMegabyte},  // Convert bytes to MB for display
       {"min_query_cost_ms", config.cache.min_query_cost_ms},
       {"ttl_seconds", config.cache.ttl_seconds},
       {"invalidation_strategy", config.cache.invalidation_strategy},

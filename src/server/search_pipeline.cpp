@@ -95,7 +95,7 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Apply verify_text post-filter
   result.results =
-      ApplyVerifyTextFilter(result.results, all_search_terms, current_index, current_doc_store, full_config);
+      ApplyVerifyTextFilter(std::move(result.results), all_search_terms, current_index, current_doc_store, full_config);
 
   return result;
 }
@@ -440,7 +440,7 @@ std::vector<storage::DocId> PostFilterByText(const std::vector<storage::DocId>& 
   return verified;
 }
 
-std::vector<storage::DocId> ApplyVerifyTextFilter(const std::vector<storage::DocId>& results,
+std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> results,
                                                   const std::vector<std::string>& search_terms,
                                                   index::Index* current_index, storage::DocumentStore* doc_store,
                                                   const config::Config* full_config) {

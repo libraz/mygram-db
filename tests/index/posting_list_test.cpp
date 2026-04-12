@@ -1084,3 +1084,67 @@ TEST_F(PostingListTest, AddOutOfOrderFallback) {
     EXPECT_EQ(all[id - 1], id);
   }
 }
+
+TEST_F(PostingListTest, ContainsDeltaCompressedCorrectness) {
+  // Use high threshold to stay in delta-compressed mode
+  PostingList posting(100.0);
+
+  // Add several documents
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+  posting.Add(50);
+  posting.Add(100);
+
+  // All added doc IDs should be found
+  EXPECT_TRUE(posting.Contains(10));
+  EXPECT_TRUE(posting.Contains(20));
+  EXPECT_TRUE(posting.Contains(30));
+  EXPECT_TRUE(posting.Contains(50));
+  EXPECT_TRUE(posting.Contains(100));
+
+  // Non-existent doc IDs should not be found
+  EXPECT_FALSE(posting.Contains(0));
+  EXPECT_FALSE(posting.Contains(15));
+  EXPECT_FALSE(posting.Contains(25));
+  EXPECT_FALSE(posting.Contains(101));
+  EXPECT_FALSE(posting.Contains(999));
+}
+
+/**
+ * @brief Test that Deserialize detects truncated Roaring bitmap data
+ *
+ * Serializes a PostingList using the Roaring bitmap strategy, then patches
+ * the serialized size field to claim the full original size while actually
+ * truncating the bitmap bytes. This bypasses the outer bounds check and
+ * exercises the safe deserialization path.
+ */
+TEST_F(PostingListTest, DeserializeCorruptedBitmapData) {
+  // Create a posting list that uses Roaring bitmap mode (threshold 0.0)
+  PostingList posting(0.0);
+  for (uint32_t i = 0; i < 200; ++i) {
+    posting.Add(i * 10);
+  }
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(posting.Serialize(buffer));
+
+  // Format: [1 byte strategy] [4 bytes size] [roaring data...]
+  // Keep the strategy byte and size field, but truncate the roaring data
+  // and patch the size field to match the truncated length so the outer
+  // bounds check passes but the roaring deserializer sees corrupt data.
+  ASSERT_GT(buffer.size(), 10U);
+  size_t truncated_data_len = (buffer.size() - 5) / 2;  // Half the bitmap data
+  auto patched = std::vector<uint8_t>(buffer.begin(), buffer.begin() + 5 + static_cast<ptrdiff_t>(truncated_data_len));
+  // Patch the 4-byte big-endian size field to match truncated length
+  auto size_val = static_cast<uint32_t>(truncated_data_len);
+  patched[1] = static_cast<uint8_t>((size_val >> 24) & 0xFF);
+  patched[2] = static_cast<uint8_t>((size_val >> 16) & 0xFF);
+  patched[3] = static_cast<uint8_t>((size_val >> 8) & 0xFF);
+  patched[4] = static_cast<uint8_t>(size_val & 0xFF);
+
+  // Deserialize should fail gracefully, not crash or return success
+  PostingList posting2(0.0);
+  size_t offset = 0;
+  EXPECT_FALSE(posting2.Deserialize(patched, offset));
+}

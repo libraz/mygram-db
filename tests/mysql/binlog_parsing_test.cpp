@@ -729,6 +729,35 @@ TEST(BinlogParsingTest, IsTableAffectingDDL_EdgeCases) {
 }
 
 /**
+ * @brief Test IsTableAffectingDDL with RENAME TABLE statements
+ */
+TEST(BinlogParsingTest, IsTableAffectingDDL_RenameTable) {
+  // RENAME TABLE old_name TO target_table
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE articles TO articles_new", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE old_articles TO articles", "articles"));
+
+  // Case insensitive
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("rename table articles to articles_new", "articles"));
+
+  // With backticks
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE `articles` TO `articles_new`", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE `old` TO `articles`", "articles"));
+
+  // Multiple spaces/tabs
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME  TABLE   articles   TO   articles_new", "articles"));
+
+  // Non-matching: neither source nor target is the monitored table
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE users TO users_old", "articles"));
+
+  // Table name as substring should not match
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE articles_backup TO articles_old", "articles"));
+
+  // Multi-table rename: RENAME TABLE a TO b, c TO d
+  EXPECT_TRUE(
+      BinlogEventParser::IsTableAffectingDDL("RENAME TABLE users TO users_old, articles TO articles_old", "articles"));
+}
+
+/**
  * @brief Test IsTableAffectingDDL security - no regex injection
  */
 TEST(BinlogParsingTest, IsTableAffectingDDL_Security) {
