@@ -16,7 +16,14 @@ BuildRequires:  libicu-devel
 BuildRequires:  readline-devel
 BuildRequires:  pkgconfig
 
-Requires:       mysql-community-libs >= 8.0
+# Runtime libmysqlclient.so.24 is auto-detected from the binary's ELF
+# dependencies by rpmbuild (verify with `rpm -q --requires mygramdb`;
+# the `libmysqlclient.so.24()(64bit)` entry is generated automatically).
+# Do NOT add a manual `Requires: mysql-community-libs` — that name is
+# Oracle MySQL Community-specific and excludes the AlmaLinux/RHEL
+# native `mysql8.4-libs` package, which provides the same shared object
+# under a different package name. Relying on the ELF-level dependency
+# lets the package install on either distribution family.
 Requires:       libicu
 Requires:       readline
 
@@ -123,7 +130,16 @@ fi
 %systemd_preun %{name}.service || :
 
 %postun
-%systemd_postun_with_restart %{name}.service
+# Deliberately use `%systemd_postun` (no auto-restart) rather than
+# `%systemd_postun_with_restart`.  MygramDB is an in-memory engine:
+# on restart it replays the full MySQL binlog from the last snapshot,
+# which for a populated fleet can take minutes and leaves the instance
+# unavailable for search traffic in the meantime. A surprise restart
+# triggered mid-`dnf upgrade` is therefore an operational hazard —
+# operators upgrading an HA pair must stop one instance, upgrade it,
+# start it, wait for replication to catch up, then repeat for the peer.
+# Leaving restart off here forces that explicit sequence.
+%systemd_postun %{name}.service
 
 %files
 %license LICENSE
