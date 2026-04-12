@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -19,7 +18,7 @@
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/connection_acceptor.h"
-#include "server/connection_io_handler.h"
+#include "server/io_reactor.h"
 #include "server/rate_limiter.h"
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
@@ -107,9 +106,7 @@ class TcpServer {
   /**
    * @brief Check if server is running
    */
-  bool IsRunning() const {
-    return (acceptor_ && acceptor_->IsRunning()) || (unix_acceptor_ && unix_acceptor_->IsRunning());
-  }
+  bool IsRunning() const { return acceptor_ && acceptor_->IsRunning(); }
 
   /**
    * @brief Get server port
@@ -202,8 +199,8 @@ class TcpServer {
   std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<ConnectionAcceptor> acceptor_;
-  std::unique_ptr<ConnectionAcceptor> unix_acceptor_;
   std::unique_ptr<RequestDispatcher> dispatcher_;
+  std::unique_ptr<IoReactor> reactor_;  ///< Owns the event loop. Non-null after a successful Start().
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
@@ -214,8 +211,6 @@ class TcpServer {
 
   // Legacy fields (for backward compatibility during migration)
   std::unordered_map<std::string, TableContext*> table_contexts_;
-  std::unordered_map<int, ConnectionContext> connection_contexts_;
-  mutable std::mutex contexts_mutex_;
 
 #ifdef USE_MYSQL
   mysql::BinlogReader* binlog_reader_;
@@ -241,11 +236,6 @@ class TcpServer {
 
   // Shutdown flag
   std::atomic<bool> shutdown_requested_{false};
-
-  /**
-   * @brief Handle client connection (callback for ConnectionAcceptor)
-   */
-  void HandleConnection(int client_fd);
 };
 
 }  // namespace mygramdb::server

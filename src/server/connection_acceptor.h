@@ -19,9 +19,6 @@
 
 namespace mygramdb::server {
 
-// Forward declarations
-class ThreadPool;
-
 /**
  * @brief Network connection acceptor
  *
@@ -44,19 +41,24 @@ class ThreadPool;
 class ConnectionAcceptor {
  public:
   /**
-   * @brief Connection handler callback type
+   * @brief Reactor handler callback type.
    *
-   * This callback is invoked for each accepted connection.
-   * The handler should process the connection and close the file descriptor.
+   * Invoked **inline** on the accept thread for each accepted connection when
+   * `SetReactorHandler` has been installed. The handler must take ownership of
+   * `client_fd` and return true, or return false to reject the connection
+   * (the acceptor will then emit `ERR SERVER_BUSY` and close the fd).
+   *
+   * No thread pool hop: the reactor's `IoReactor::Register` is cheap (map
+   * insert + one epoll_ctl/kevent) and latency-sensitive, so bouncing through
+   * a worker would add a context switch for no gain.
    */
-  using ConnectionHandler = std::function<void(int client_fd)>;
+  using ReactorHandler = std::function<bool(int client_fd)>;
 
   /**
    * @brief Construct a ConnectionAcceptor
    * @param config Server configuration
-   * @param thread_pool Thread pool for connection handling
    */
-  ConnectionAcceptor(ServerConfig config, ThreadPool* thread_pool);
+  explicit ConnectionAcceptor(ServerConfig config);
 
   // Disable copy and move
   ConnectionAcceptor(const ConnectionAcceptor&) = delete;
@@ -80,10 +82,23 @@ class ConnectionAcceptor {
   void Stop();
 
   /**
-   * @brief Set connection handler callback
-   * @param handler Callback to handle accepted connections
+   * @brief Set reactor handler callback.
+   *
+   * The handler is invoked inline on the accept thread and must take
+   * ownership of the fd on true return.
+   *
+   * @param handler Callback that takes ownership of the fd on true return.
    */
-  void SetConnectionHandler(ConnectionHandler handler);
+  void SetReactorHandler(ReactorHandler handler);
+
+  /**
+   * @brief Remove a connection from the active set.
+   *
+   * Exposed publicly so that `IoReactor`'s close callback can decrement the
+   * `max_connections` gate when it tears down a reactor connection. Safe to
+   * call from any thread.
+   */
+  void RemoveConnection(int socket_fd);
 
   /**
    * @brief Get actual port being listened on
@@ -116,15 +131,8 @@ class ConnectionAcceptor {
    */
   bool SetSocketOptions(int socket_fd) const;
 
-  /**
-   * @brief Remove connection from active list
-   * @param socket_fd Socket file descriptor
-   */
-  void RemoveConnection(int socket_fd);
-
   ServerConfig config_;
-  ThreadPool* thread_pool_;
-  ConnectionHandler connection_handler_;
+  ReactorHandler reactor_handler_;
 
   int server_fd_ = -1;
   uint16_t actual_port_ = 0;

@@ -300,19 +300,27 @@ graph TB
 #### リクエストディスパッチパイプライン
 
 **ConnectionAcceptor** (`connection_acceptor.h`)
-- **責務**: ソケット受け入れループ
+- **責務**: ソケット受け入れループ (TCP または UDS)
 - **機能**:
-  - 無期限ハングを防ぐ`SO_RCVTIMEO`
-  - スレッドプールへの接続ディスパッチ
-  - スレッドセーフな接続トラッキング
+  - `accept()` した fd を `IoReactor` にインラインで引き渡す（accept スレッド → reactor、ワーカープールを経由しない）
+  - max_connections のゲート、SERVER_BUSY バックプレッシャー
+  - スレッドセーフな active_fds_ トラッキング
 
-**ConnectionIOHandler** (`connection_io_handler.h`)
-- **責務**: 接続ごとのI/Oハンドリング
+**IoReactor** (`io_reactor.h`)
+- **責務**: 単一スレッドのイベントループでの readiness 通知
 - **機能**:
-  - ソケットデータの読み取り/バッファリング
-  - プロトコルメッセージの解析（`\r\n`で区切り）
-  - 最大クエリ長の強制（デフォルト1MB）
-  - ソケットへのレスポンス書き込み
+  - `EventMultiplexer` 抽象（Linux: epoll、macOS/BSD: kqueue）
+  - per-fd `ReactorConnection` のライフサイクル管理
+  - 書き込みの arm/disarm (EPOLLOUT / EVFILT_WRITE)、close コールバック
+  - graceful shutdown
+
+**ReactorConnection** (`reactor_connection.h`)
+- **責務**: 接続ごとの I/O 状態と drain タスクパターン
+- **機能**:
+  - 非ブロッキング `recv()` で `read_buf_` にドレイン、`\r\n` 区切りでフレーム化
+  - drain task をワーカープールに 1 本だけ in-flight でスケジュール（"clear-then-recheck" 再スケジュール）
+  - 非ブロッキング書き込みキュー（インライン高速パス + EAGAIN 時は EPOLLOUT フォールバック）
+  - per-connection `max_write_queue_bytes` でスローリーダーバックプレッシャー
 
 **RequestDispatcher** (`request_dispatcher.h`)
 - **責務**: アプリケーションロジックルーティング
@@ -565,15 +573,17 @@ graph TB
     MainThread["Main Thread<br/>Application::RunMainLoop()<br/>シグナルポーリング (SignalManager)<br/>設定リロード処理<br/>初期化/シャットダウン調整"]
     BinlogThread["BinlogReader Thread (if MySQL enabled)<br/>MySQLバイナリログを読み取り、イベントをキューイング"]
     EventLoop["Event Processing Loop (main thread)<br/>バイナリログイベントをデキュー、Index/DocumentStoreに適用"]
-    TCPThread["TCP Server Accept Thread<br/>TCPポートでリスン、接続を受け入れ"]
+    TCPThread["TCP/UDS Accept Thread<br/>ソケットでリスン、accept した fd を IoReactor に直接登録"]
+    ReactorThread["IoReactor Event Loop Thread (1 本)<br/>epoll_wait/kevent でドレイン、ReactorConnection に readiness を配送<br/>per-fd の write arm/disarm と close を担当"]
     HTTPThread["HTTP Server Thread<br/>HTTPポートでリスン"]
-    WorkerPool["Worker Thread Pool (configurable, default = CPU count)<br/>Thread 1: キューからクライアントリクエストを処理<br/>Thread 2: ...<br/>Thread N: ..."]
+    WorkerPool["Worker Thread Pool (configurable, default = CPU count)<br/>Thread 1: per-connection drain task を実行（リクエスト処理 + 高速送信）<br/>Thread 2: ...<br/>Thread N: ..."]
     SnapshotThread["SnapshotScheduler Background Thread (if enabled)<br/>定期的にスナップショットを作成"]
 
     Main --> MainThread
     Main --> BinlogThread
     Main --> EventLoop
     Main --> TCPThread
+    Main --> ReactorThread
     Main --> HTTPThread
     Main --> WorkerPool
     Main --> SnapshotThread
@@ -720,8 +730,9 @@ graph TB
    - AdminHandler、ReplicationHandler、DebugHandler
    - CacheHandler、SyncHandler（MySQL）
 6. **RequestDispatcher**（ハンドラーに依存）
-7. **ConnectionAcceptor**（ThreadPoolに依存）
-8. **SnapshotScheduler**（オプショナル、catalogに依存）
+7. **ConnectionAcceptor**（ServerConfig のみに依存。reactor handler は `TcpServer::Start()` で後付け）
+8. **IoReactor**（`TcpServer::Start()` で生成、ThreadPool と RequestDispatcher に依存）
+9. **SnapshotScheduler**（オプショナル、catalogに依存）
 
 **注記**: RateLimiterとSyncOperationManagerは、ServerLifecycleManagerがインスタンス化される前に`TcpServer::Start()`で作成されます。
 
@@ -933,8 +944,9 @@ class InvalidationManager {
 
 ### AcceptorとHandlersの間
 
-- **ConnectionAcceptor** → 接続を受け入れ → **ThreadPool**に投入
-- **ThreadPoolワーカー** → **ConnectionIOHandler**を呼び出し → **RequestDispatcher**を呼び出し → ハンドラを呼び出し
+- **ConnectionAcceptor** → 接続を受け入れ → **IoReactor::Register** に直接渡す（thread pool ホップなし）
+- **IoReactor (event loop thread)** → 読み取り可能を検知 → **ReactorConnection::OnReadable** → フレームを抽出 → drain task を **ThreadPool** にスケジュール
+- **ThreadPool ワーカー** → **ReactorConnection::DrainTask** → **RequestDispatcher** にフレームをディスパッチ → ハンドラ → レスポンスを `EnqueueResponse()` → 高速パスでインライン送信、不完全送信時は EPOLLOUT で event loop に再送出
 
 ---
 

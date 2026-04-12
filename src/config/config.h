@@ -232,6 +232,49 @@ struct ApiConfig {
     std::string bind = "127.0.0.1";
     int port = defaults::kTcpPort;
     int max_connections = kDefaultMaxConnections;  ///< Maximum concurrent connections
+    /// Number of worker threads in the TCP thread pool.
+    /// Architecture note: each persistent client holds one worker for its entire
+    /// lifetime (blocking recv loop with 60s idle timeout), so this cap is also
+    /// the maximum number of concurrent persistent clients the server can serve.
+    /// 0 = auto (see ThreadPool: max(hardware_concurrency() * 4, 64))
+    int worker_threads = 0;
+
+    /// SO_RCVTIMEO (seconds) applied to each client connection.
+    /// Drives the blocking recv() idle watchdog; also bounds the worst-case
+    /// time a worker remains stuck on a dead peer before Linux's own TCP
+    /// keepalive probes expire. Default: 60.
+    int recv_timeout_sec = 60;  // NOLINT(readability-magic-numbers)
+
+    /// Thread pool task queue size. Once a connection is accepted but cannot
+    /// be dispatched (all workers busy, queue full), the server responds with
+    /// SERVER_BUSY and closes. Default: 1000.
+    int thread_pool_queue_size = 1000;  // NOLINT(readability-magic-numbers)
+
+    /// Per-connection soft cap on unsent response bytes (design doc §7 R3).
+    /// When a single connection's write queue exceeds this cap, the reactor
+    /// forcibly closes the connection to protect the server from slow-reader
+    /// OOM. Default: 16 MiB. A production operator who sees
+    /// `reactor_write_queue_overflow` warnings in steady state should either
+    /// raise this cap (if the responses are legitimately large) or
+    /// investigate the client(s) that are failing to drain their socket.
+    int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  // 16 MiB
+
+    /// Per-connection TCP keepalive (applied to accepted client sockets).
+    ///
+    /// Under the blocking-recv I/O model, a half-open TCP connection (peer's
+    /// host died but the socket was never closed) keeps a worker thread parked
+    /// in recv() until either `recv_timeout_sec` fires or TCP keepalive probes
+    /// expire. The Linux defaults (2 hour idle + 75s interval * 9 probes) are
+    /// too permissive for a latency-sensitive server, so we tighten them here.
+    /// This is kept as a defense-in-depth measure even after the reactor
+    /// refactor switches away from blocking recv.
+    struct {
+      bool enabled = true;
+      int idle_sec = 60;      ///< TCP_KEEPIDLE: start probing after N seconds idle
+      int interval_sec = 20;  ///< TCP_KEEPINTVL: seconds between probes
+      int probe_count = 3;    ///< TCP_KEEPCNT: probes before declaring dead
+    } keepalive;
+
   } tcp;
 
   struct {

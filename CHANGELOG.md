@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-04-12
+
+### Added
+
+- **Reactor I/O model (epoll/kqueue)** — New event-driven TCP path replaces the blocking one-thread-per-connection loop; a single event-loop thread plus a bounded worker pool serves thousands of persistent connections
+- **Per-connection slow-reader backpressure** — `api.tcp.max_write_queue_bytes` (default 16 MiB) force-closes clients whose enqueued response bytes exceed the cap
+- **Reactor error codes** — `kNetworkReactorUnsupported`/`PollFailed`/`RegisterFailed`/`ModifyFailed`/`RemoveFailed`/`QueueFull`/`AlreadyOpen` (6016–6023)
+
+### Fixed
+
+- **TCP half-close drain regression** — `shutdown(SHUT_WR)` + `recv()` clients now receive their response; `kHangup` events no longer short-circuit to `OnError`, and `read_eof_` is tracked separately from `closing_` so the drain task can enqueue the response
+- **Rate limiting silently disabled under reactor** — `api.rate_limiting.enable = true` is now honored on every accepted connection; the reactor handler calls `getpeername()` + `AllowRequest()` before `Register()` and returns `SERVER_BUSY` on rejection
+- **Unix domain socket acceptor could not start** — Removed the dead secondary `unix_acceptor_` that collided with the primary acceptor's own UDS bind; UDS now flows end-to-end through the primary acceptor's reactor handler
+- **Grafana memory usage PromQL** — Use `ignoring(type)` on the division so `mygramdb_memory_used_bytes{type="total"}` matches the denominator label set
+
+### Changed
+
+- **Blocking I/O path removed entirely** — `ConnectionIOHandler`, `TcpServer::HandleConnection`, the `api.tcp.io_model` feature flag, `connection_contexts_` map, `ConnectionAcceptor::SetConnectionHandler`, and the `BlockingMode` ctest entries are all deleted
+- **Thread-pool auto-size floor reverted** — Dropped the emergency `hw*4`/64-worker mitigation for blocking-mode starvation; restored `max(hw*2, 4)`
+- **Reactor hot-path polish** — epoll/kqueue poll buffers grow on demand up to 4 KiB entries; `Register`/`Stop` race closed by re-checking `running_` under `mux_lifecycle_` shared; `OnWritable` empty-queue teardown flattened
+
+### Testing
+
+- New unit tests: `event_multiplexer_test`, `io_reactor_test`, `reactor_connection_test`
+- New integration tests: `reactor_integration_test` (write backpressure, many-idle-connections, half-close, rate limit, UDS, max query length), `reactor_starvation_regression_test`, `thread_pool_saturation_test` (migrated, assertion inverted for reactor default)
+- e2e `test_half_close_write` now passes (previously failing on reactor path)
+
+**Detailed Release Notes**: [docs/releases/v1.5.3.md](docs/releases/v1.5.3.md)
+
 ## [1.5.2] - 2026-04-09
 
 ### Added
@@ -444,7 +473,9 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/libraz/mygram-db/compare/v1.5.2...v1.5.3
+[1.5.2]: https://github.com/libraz/mygram-db/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/libraz/mygram-db/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/libraz/mygram-db/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mygram-db/compare/v1.3.9...v1.4.0

@@ -16,7 +16,6 @@
 
 #include "server/connection_acceptor.h"
 #include "server/server_types.h"
-#include "server/thread_pool.h"
 
 namespace mygramdb::server {
 
@@ -55,18 +54,17 @@ class ConnectionAcceptorUnixTest : public ::testing::Test {
 };
 
 TEST_F(ConnectionAcceptorUnixTest, StartAndStopUnixSocket) {
-  ThreadPool pool(2, 100);
-
   ServerConfig config;
   config.unix_socket_path = socket_path_;
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
+  ConnectionAcceptor acceptor(config);
 
   std::atomic<int> connections{0};
-  acceptor.SetConnectionHandler([&connections](int fd) {
+  acceptor.SetReactorHandler([&connections](int fd) {
     connections++;
     close(fd);
+    return true;
   });
 
   auto result = acceptor.Start();
@@ -83,25 +81,20 @@ TEST_F(ConnectionAcceptorUnixTest, StartAndStopUnixSocket) {
 
   // Socket file should be removed after stop
   EXPECT_FALSE(std::filesystem::exists(socket_path_));
-
-  pool.Shutdown();
 }
 
 TEST_F(ConnectionAcceptorUnixTest, AcceptsUnixConnection) {
-  ThreadPool pool(2, 100);
-
   ServerConfig config;
   config.unix_socket_path = socket_path_;
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
+  ConnectionAcceptor acceptor(config);
 
   std::atomic<int> connections{0};
-  acceptor.SetConnectionHandler([&connections](int fd) {
+  acceptor.SetReactorHandler([&connections](int fd) {
     connections++;
-    // Small delay to keep connection alive briefly
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     close(fd);
+    return true;
   });
 
   auto result = acceptor.Start();
@@ -117,7 +110,6 @@ TEST_F(ConnectionAcceptorUnixTest, AcceptsUnixConnection) {
   EXPECT_GE(connections.load(), 1);
 
   acceptor.Stop();
-  pool.Shutdown();
 }
 
 TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
@@ -136,48 +128,49 @@ TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
   EXPECT_TRUE(std::filesystem::exists(socket_path_));
 
   // New acceptor should clean up the stale file and start successfully
-  ThreadPool pool(2, 100);
   ServerConfig config;
   config.unix_socket_path = socket_path_;
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
   acceptor.Stop();
-  pool.Shutdown();
 }
 
 TEST_F(ConnectionAcceptorUnixTest, PathTooLongError) {
-  ThreadPool pool(2, 100);
-
   ServerConfig config;
   // Create a path that exceeds sockaddr_un::sun_path limit (typically 104 or 108 bytes)
   config.unix_socket_path = "/tmp/" + std::string(200, 'x') + ".sock";
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkUnixSocketPathTooLong);
-
-  pool.Shutdown();
 }
 
 TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
-  ThreadPool pool(2, 100);
-
   ServerConfig config;
   config.unix_socket_path = socket_path_;
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
@@ -185,19 +178,18 @@ TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
 
   acceptor.Stop();
   EXPECT_FALSE(std::filesystem::exists(socket_path_));
-
-  pool.Shutdown();
 }
 
 TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {
-  ThreadPool pool(2, 100);
-
   ServerConfig config;
   config.unix_socket_path = socket_path_;
   config.max_connections = 10;
 
-  ConnectionAcceptor acceptor(config, &pool);
-  acceptor.SetConnectionHandler([](int fd) { close(fd); });
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
@@ -209,7 +201,6 @@ TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {
   EXPECT_EQ(perms, 0770) << "Socket permissions should be 0770, got: " << std::oct << perms;
 
   acceptor.Stop();
-  pool.Shutdown();
 }
 
 }  // namespace mygramdb::server

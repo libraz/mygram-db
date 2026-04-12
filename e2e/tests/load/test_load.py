@@ -1,9 +1,9 @@
 """Load and performance tests.
 
 Uses persistent TCP connections per worker to avoid ephemeral port exhaustion.
-The server supports pipelined commands over a single connection (ConnectionIOHandler
-processes multiple \\r\\n-delimited requests in a while loop), so each worker
-keeps one socket open for the entire duration.
+The server supports pipelined commands over a single connection: ReactorConnection
+frames each ``\\r\\n``-delimited request inside a single drain task, so each
+worker keeps one socket open for the entire duration.
 """
 
 import json

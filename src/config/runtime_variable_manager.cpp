@@ -55,14 +55,22 @@ static const std::map<std::string, bool> kVariableMutability = {
     // API settings
     {"api.default_limit", true},
     {"api.max_query_length", true},
-    {"api.tcp.bind", false},                // Immutable (requires socket rebind)
-    {"api.tcp.port", false},                // Immutable
-    {"api.tcp.max_connections", false},     // Immutable
-    {"api.http.enable", false},             // Immutable
-    {"api.http.bind", false},               // Immutable
-    {"api.http.port", false},               // Immutable
-    {"api.http.enable_cors", false},        // Immutable
-    {"api.http.cors_allow_origin", false},  // Immutable
+    {"api.tcp.bind", false},                    // Immutable (requires socket rebind)
+    {"api.tcp.port", false},                    // Immutable
+    {"api.tcp.max_connections", false},         // Immutable
+    {"api.tcp.worker_threads", false},          // Immutable (thread pool is bound at startup)
+    {"api.tcp.recv_timeout_sec", false},        // Immutable (applied per connection at accept)
+    {"api.tcp.thread_pool_queue_size", false},  // Immutable (thread pool queue sized at startup)
+    {"api.tcp.keepalive.enabled", false},       // Immutable (applied per connection at accept)
+    {"api.tcp.keepalive.idle_sec", false},      // Immutable
+    {"api.tcp.keepalive.interval_sec", false},  // Immutable
+    {"api.tcp.keepalive.probe_count", false},   // Immutable
+    {"api.tcp.max_write_queue_bytes", false},   // Immutable (per-connection cap set at accept)
+    {"api.http.enable", false},                 // Immutable
+    {"api.http.bind", false},                   // Immutable
+    {"api.http.port", false},                   // Immutable
+    {"api.http.enable_cors", false},            // Immutable
+    {"api.http.cors_allow_origin", false},      // Immutable
 
     // Rate limiting
     {"api.rate_limiting.enable", true},
@@ -614,6 +622,30 @@ std::string RuntimeVariableManager::GetVariableInternal(const std::string& varia
   }
   if (variable_name == "api.tcp.max_connections") {
     return std::to_string(base_config_.api.tcp.max_connections);
+  }
+  if (variable_name == "api.tcp.worker_threads") {
+    return std::to_string(base_config_.api.tcp.worker_threads);
+  }
+  if (variable_name == "api.tcp.recv_timeout_sec") {
+    return std::to_string(base_config_.api.tcp.recv_timeout_sec);
+  }
+  if (variable_name == "api.tcp.thread_pool_queue_size") {
+    return std::to_string(base_config_.api.tcp.thread_pool_queue_size);
+  }
+  if (variable_name == "api.tcp.keepalive.enabled") {
+    return base_config_.api.tcp.keepalive.enabled ? "true" : "false";
+  }
+  if (variable_name == "api.tcp.keepalive.idle_sec") {
+    return std::to_string(base_config_.api.tcp.keepalive.idle_sec);
+  }
+  if (variable_name == "api.tcp.keepalive.interval_sec") {
+    return std::to_string(base_config_.api.tcp.keepalive.interval_sec);
+  }
+  if (variable_name == "api.tcp.keepalive.probe_count") {
+    return std::to_string(base_config_.api.tcp.keepalive.probe_count);
+  }
+  if (variable_name == "api.tcp.max_write_queue_bytes") {
+    return std::to_string(base_config_.api.tcp.max_write_queue_bytes);
   }
   if (variable_name == "api.http.enable") {
     return base_config_.api.http.enable ? "true" : "false";

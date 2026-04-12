@@ -704,6 +704,36 @@ Config ParseConfigFromJson(const json& root) {
       if (tcp.contains("port")) {
         config.api.tcp.port = tcp["port"].get<int>();
       }
+      if (tcp.contains("max_connections")) {
+        config.api.tcp.max_connections = tcp["max_connections"].get<int>();
+      }
+      if (tcp.contains("worker_threads")) {
+        config.api.tcp.worker_threads = tcp["worker_threads"].get<int>();
+      }
+      if (tcp.contains("recv_timeout_sec")) {
+        config.api.tcp.recv_timeout_sec = tcp["recv_timeout_sec"].get<int>();
+      }
+      if (tcp.contains("thread_pool_queue_size")) {
+        config.api.tcp.thread_pool_queue_size = tcp["thread_pool_queue_size"].get<int>();
+      }
+      if (tcp.contains("keepalive")) {
+        const auto& ka = tcp["keepalive"];
+        if (ka.contains("enabled")) {
+          config.api.tcp.keepalive.enabled = ka["enabled"].get<bool>();
+        }
+        if (ka.contains("idle_sec")) {
+          config.api.tcp.keepalive.idle_sec = ka["idle_sec"].get<int>();
+        }
+        if (ka.contains("interval_sec")) {
+          config.api.tcp.keepalive.interval_sec = ka["interval_sec"].get<int>();
+        }
+        if (ka.contains("probe_count")) {
+          config.api.tcp.keepalive.probe_count = ka["probe_count"].get<int>();
+        }
+      }
+      if (tcp.contains("max_write_queue_bytes")) {
+        config.api.tcp.max_write_queue_bytes = tcp["max_write_queue_bytes"].get<int64_t>();
+      }
     }
     if (api.contains("http")) {
       const auto& http = api["http"];

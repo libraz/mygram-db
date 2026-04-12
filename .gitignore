@@ -1,3 +1,6 @@
+# Local scratch / backup area (never committed)
+.backup/
+
 # Build directories
 build/
 build-*/

@@ -61,6 +61,21 @@ struct ServerConfig {
   int send_buffer_size = kDefaultSendBufferSize;
   int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
   int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
+
+  // Connection I/O tunables.
+  int recv_timeout_sec = 60;          ///< SO_RCVTIMEO seconds applied to accepted sockets (0 = disabled)
+  int thread_pool_queue_size = 1000;  ///< ThreadPool task queue bound; 0 = unbounded
+  int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  ///< Per-connection slow-reader cap; see config.h
+
+  // TCP keepalive applied per-accepted client socket. See
+  // config.h ApiConfig::tcp::keepalive for rationale.
+  struct {
+    bool enabled = true;
+    int idle_sec = 60;
+    int interval_sec = 20;
+    int probe_count = 3;
+  } keepalive;
+
   std::vector<std::string> allow_cidrs;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs;
   std::string unix_socket_path;  // Empty = TCP mode, non-empty = UDS mode

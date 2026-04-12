@@ -39,11 +39,9 @@
 #include "server/handlers/sync_handler.h"
 #endif
 #include "cache/cache_manager.h"
-#include "server/connection_io_handler.h"
 #include "server/response_formatter.h"
 #include "server/server_lifecycle_manager.h"
 #include "storage/dump_format_v1.h"
-#include "utils/fd_guard.h"
 #include "utils/network_utils.h"
 #include "utils/string_utils.h"
 #include "version.h"
@@ -56,9 +54,6 @@
 namespace mygramdb::server {
 
 namespace {
-// Thread pool queue size for backpressure
-constexpr size_t kThreadPoolQueueSize = 1000;
-
 // Buffer size for IP address formatting
 constexpr size_t kIpAddressBufferSize = 64;
 
@@ -150,7 +145,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     return MakeUnexpected(error);
   }
 
-  // Create rate limiter (if configured) - needed by HandleConnection
+  // Create rate limiter (if configured). The reactor_handler lambda below
+  // enforces the token bucket per peer IP on every accept.
   // Note: RateLimiter is NOT managed by ServerLifecycleManager because it's only used in TcpServer
   if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
     rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
@@ -218,25 +214,104 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   acceptor_ = std::move(components.acceptor);
   scheduler_ = std::move(components.scheduler);
 
-  // Set connection handler callback (must be done after acceptor_ is assigned)
-  acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-
-  // Start Unix domain socket acceptor (if configured)
-  if (!config_.unix_socket_path.empty()) {
-    ServerConfig uds_config;
-    uds_config.unix_socket_path = config_.unix_socket_path;
-    uds_config.max_connections = config_.max_connections;
-    unix_acceptor_ = std::make_unique<ConnectionAcceptor>(uds_config, thread_pool_.get());
-    unix_acceptor_->SetConnectionHandler([this](int client_fd) { HandleConnection(client_fd); });
-
-    auto uds_result = unix_acceptor_->Start();
-    if (!uds_result) {
-      // Stop TCP acceptor if UDS fails
-      acceptor_->Stop();
-      return MakeUnexpected(uds_result.error());
+  // Reactor I/O model: create the IoReactor up front. This is the only I/O
+  // path; the legacy blocking one-thread-per-connection model was removed in
+  // Phase 4. On platforms with no supported event multiplexer (neither epoll
+  // nor kqueue), IoReactor::Start() returns kNetworkReactorUnsupported and
+  // we propagate that error up — there is no fallback.
+  ReactorConfig rcfg;
+  if (config_.max_write_queue_bytes > 0) {
+    rcfg.max_write_queue_bytes = static_cast<size_t>(config_.max_write_queue_bytes);
+  }
+  reactor_ = std::make_unique<IoReactor>(thread_pool_.get(), dispatcher_.get(), rcfg);
+  // When the reactor tears down a connection, decrement the acceptor's
+  // max_connections gate so new accepts can proceed, and the server stats
+  // so GetConnectionCount() reflects reality.
+  {
+    ConnectionAcceptor* accept_ptr = acceptor_.get();
+    ServerStats* close_stats_ptr = &stats_;
+    reactor_->SetCloseCallback([accept_ptr, close_stats_ptr](int fd) {
+      if (accept_ptr != nullptr) {
+        accept_ptr->RemoveConnection(fd);
+      }
+      if (close_stats_ptr != nullptr) {
+        close_stats_ptr->DecrementConnections();
+      }
+    });
+  }
+  {
+    auto r = reactor_->Start();
+    if (!r) {
+      return MakeUnexpected(r.error());
     }
+  }
+  mygram::utils::StructuredLog().Event("reactor_mode_enabled").Field("backend", reactor_->BackendName()).Info();
 
-    mygram::utils::StructuredLog().Event("unix_socket_acceptor_started").Field("path", config_.unix_socket_path).Info();
+  // Install the acceptor reactor handler.
+  //
+  // Rate-limit policy:
+  //  - TCP acceptor (unix_socket_path empty) + rate_limiter_ set: enforce per
+  //    peer-IP token bucket inside the accept handler.
+  //  - UDS acceptor (unix_socket_path non-empty): local, trusted, bypass the
+  //    AllowRequest() call entirely.
+  const bool apply_rate_limit = (rate_limiter_ != nullptr) && config_.unix_socket_path.empty();
+  RateLimiter* rate_limiter_ptr = apply_rate_limit ? rate_limiter_.get() : nullptr;
+
+  {
+    IoReactor* reactor_ptr = reactor_.get();
+    RequestDispatcher* dispatcher_ptr = dispatcher_.get();
+    ThreadPool* pool_ptr = thread_pool_.get();
+    ServerStats* stats_ptr = &stats_;
+    const size_t max_write_bytes = config_.max_write_queue_bytes > 0
+                                       ? static_cast<size_t>(config_.max_write_queue_bytes)
+                                       : ReactorConnection::kDefaultMaxWriteQueueBytes;
+    acceptor_->SetReactorHandler(
+        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, rate_limiter_ptr, max_write_bytes](int client_fd) -> bool {
+          // Rate limit check (TCP only; rate_limiter_ptr is null on UDS acceptors).
+          // Extract the peer IP via getpeername() and call AllowRequest(). On
+          // rejection we return false so the acceptor emits SERVER_BUSY + closes
+          // the fd (see ConnectionAcceptor::AcceptLoop).
+          if (rate_limiter_ptr != nullptr) {
+            struct sockaddr_storage addr_storage {};
+            socklen_t addr_len = sizeof(addr_storage);
+            std::string client_ip;
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+            if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0 &&
+                addr_storage.ss_family == AF_INET) {
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+              auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+              char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+              inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+              client_ip = ip_str;
+            } else {
+              client_ip = "unknown";
+            }
+            if (!rate_limiter_ptr->AllowRequest(client_ip)) {
+              mygram::utils::StructuredLog()
+                  .Event("server_warning")
+                  .Field("type", "rate_limit_exceeded")
+                  .Field("client_ip", client_ip)
+                  .Warn();
+              return false;
+            }
+          }
+
+          auto conn =
+              ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes);
+          auto reg = reactor_ptr->Register(conn);
+          if (reg.has_value()) {
+            // Count this as an active connection so GetConnectionCount() and the
+            // mygramdb_active_connections metric report the live reactor
+            // population. The matching decrement happens in the close callback
+            // installed above.
+            stats_ptr->IncrementConnections();
+            stats_ptr->IncrementTotalConnections();
+            return true;
+          }
+          return false;
+        });
   }
 
   mygram::utils::StructuredLog()
@@ -267,14 +342,26 @@ void TcpServer::Stop() {
     scheduler_->Stop();
   }
 
-  // Stop connection acceptor
-  if (acceptor_) {
-    acceptor_->Stop();
+  // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
+  // eagerly close(2)s every fd in its active_fds_ set — which includes the
+  // reactor-owned client fds, since the reactor's close_callback removes them
+  // only when the connection terminates naturally. If the acceptor ran first,
+  // it would close fds the reactor still owns, and drain tasks would then hit
+  // EBADF mid-send. Stopping the reactor first gives it the chance to drain
+  // and release its fds via Unregister → close_callback → active_fds_.erase.
+  //
+  // While the reactor is stopping, the acceptor may still accept a stray
+  // connection and hand it to reactor_handler_; the handler's Register call
+  // returns `kNetworkServerNotStarted`, the handler returns false, and the
+  // acceptor sends SERVER_BUSY and closes the socket. Acceptable.
+  if (reactor_) {
+    reactor_->Stop();
   }
 
-  // Stop Unix domain socket acceptor
-  if (unix_acceptor_) {
-    unix_acceptor_->Stop();
+  // Stop connection acceptor (handles either TCP or UDS depending on
+  // config_.unix_socket_path; see ConnectionAcceptor::Start).
+  if (acceptor_) {
+    acceptor_->Stop();
   }
 
   // Join dump worker thread if still running
@@ -286,103 +373,6 @@ void TcpServer::Stop() {
   }
 
   mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
-}
-
-void TcpServer::HandleConnection(int client_fd) {
-  // RAII guard to ensure FD is closed even if exceptions occur
-  mygram::utils::FDGuard fd_guard(client_fd);
-
-  // Get client IP address for rate limiting
-  std::string client_ip;
-  struct sockaddr_storage addr_storage {};
-  socklen_t addr_len = sizeof(addr_storage);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for POSIX socket API
-  if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0) {
-    if (addr_storage.ss_family == AF_INET) {
-      auto* addr_in =
-          reinterpret_cast<struct sockaddr_in*>(&addr_storage);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-      inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
-      client_ip = ip_str;  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    } else if (addr_storage.ss_family == AF_UNIX) {
-      client_ip = "unix-local";
-    } else {
-      client_ip = "unknown";
-    }
-  } else {
-    client_ip = "unknown";
-  }
-
-  // Skip rate limit for UDS connections
-  if (rate_limiter_ && client_ip != "unix-local" && !rate_limiter_->AllowRequest(client_ip)) {
-    mygram::utils::StructuredLog()
-        .Event("server_warning")
-        .Field("type", "rate_limit_exceeded")
-        .Field("client_ip", client_ip)
-        .Warn();
-    // Connection will be closed by fd_guard
-    return;
-  }
-
-  // Initialize connection context
-  ConnectionContext ctx;
-  ctx.client_fd = client_fd;
-  ctx.debug_mode = false;
-  {
-    std::scoped_lock<std::mutex> lock(contexts_mutex_);
-    connection_contexts_[client_fd] = ctx;
-  }
-
-  // Increment active connection count and total connections received
-  stats_.IncrementConnections();
-  stats_.IncrementTotalConnections();
-
-  // RAII guard to ensure stats are decremented even if exceptions occur
-  mygram::utils::ScopeGuard stats_cleanup([this]() { stats_.DecrementConnections(); });
-
-  // Create I/O handler config
-  IOConfig io_config{.recv_buffer_size = static_cast<size_t>(config_.recv_buffer_size),
-                     .max_query_length = static_cast<size_t>(config_.max_query_length),
-                     .recv_timeout_sec = kDefaultConnectionRecvTimeoutSec};
-
-  // Request processor callback
-  auto processor = [this](const std::string& request, ConnectionContext& conn_ctx) -> std::string {
-    // Update context from map
-    {
-      std::scoped_lock<std::mutex> lock(contexts_mutex_);
-      conn_ctx = connection_contexts_[conn_ctx.client_fd];
-    }
-
-    // Dispatch request
-    std::string response = dispatcher_->Dispatch(request, conn_ctx);
-    stats_.IncrementRequests();
-
-    // Update context back to map
-    {
-      std::scoped_lock<std::mutex> lock(contexts_mutex_);
-      connection_contexts_[conn_ctx.client_fd] = conn_ctx;
-    }
-
-    return response;
-  };
-
-  // Delegate to ConnectionIOHandler
-  ConnectionIOHandler io_handler(io_config, processor, shutdown_requested_);
-  io_handler.HandleConnection(client_fd, ctx);
-
-  // Clean up connection context
-  {
-    std::scoped_lock<std::mutex> lock(contexts_mutex_);
-    connection_contexts_.erase(client_fd);
-  }
-
-  mygram::utils::StructuredLog()
-      .Event("connection_closed")
-      .Field("active_connections", static_cast<uint64_t>(stats_.GetActiveConnections()))
-      .Debug();
-
-  // Note: FD guard will close the FD, stats_cleanup will decrement the connection count
 }
 
 #ifdef USE_MYSQL

@@ -509,6 +509,74 @@
               "default": 11016,
               "minimum": 1,
               "maximum": 65535
+            },
+            "max_connections": {
+              "type": "integer",
+              "description": "Maximum number of concurrent TCP connections accepted by the server.",
+              "default": 10000,
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "worker_threads": {
+              "type": "integer",
+              "description": "Number of worker threads in the TCP thread pool. In the blocking I/O model each persistent client holds one worker for its entire lifetime (blocking recv loop with 60s idle keepalive), so this is also the cap on concurrent persistent clients. 0 = auto (max(hardware_concurrency() * 4, 64)). Set explicitly when you know your client concurrency.",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 16384
+            },
+            "recv_timeout_sec": {
+              "type": "integer",
+              "description": "SO_RCVTIMEO applied to accepted client connections. With the current blocking-recv I/O model, this also bounds how long a worker stays parked on an idle or half-dead client. 0 disables the timeout.",
+              "default": 60,
+              "minimum": 0,
+              "maximum": 86400
+            },
+            "thread_pool_queue_size": {
+              "type": "integer",
+              "description": "Maximum number of connection tasks that can be queued waiting for a worker. When this is exceeded, the acceptor sends SERVER_BUSY and closes the connection. 0 = unbounded (not recommended in production).",
+              "default": 1000,
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "keepalive": {
+              "type": "object",
+              "description": "Per-connection TCP keepalive settings applied to accepted client sockets. Tightens Linux's multi-hour defaults so half-open connections (dead peer host) are detected within a few minutes. See docs/ja/design/reactor-io-refactor.md §1.1.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable SO_KEEPALIVE on accepted client sockets.",
+                  "default": true
+                },
+                "idle_sec": {
+                  "type": "integer",
+                  "description": "TCP_KEEPIDLE: seconds of idle before the first keepalive probe is sent.",
+                  "default": 60,
+                  "minimum": 1,
+                  "maximum": 86400
+                },
+                "interval_sec": {
+                  "type": "integer",
+                  "description": "TCP_KEEPINTVL: seconds between keepalive probes.",
+                  "default": 20,
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "probe_count": {
+                  "type": "integer",
+                  "description": "TCP_KEEPCNT: number of unanswered probes before declaring the peer dead.",
+                  "default": 3,
+                  "minimum": 1,
+                  "maximum": 32
+                }
+              }
+            },
+            "max_write_queue_bytes": {
+              "type": "integer",
+              "description": "Per-connection soft cap on unsent response bytes. When a single connection's write queue exceeds this cap, the reactor forcibly closes the connection to protect the server from slow-reader OOM. Default: 16 MiB (16777216 bytes).",
+              "default": 16777216,
+              "minimum": 4096,
+              "maximum": 1073741824
             }
           }
         },

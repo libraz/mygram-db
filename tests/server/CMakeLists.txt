@@ -311,24 +311,6 @@ gtest_discover_tests(config_handler_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# ConnectionIOHandler tests
-
-add_executable(connection_io_handler_test
-  connection_io_handler_test.cpp
-)
-
-target_link_libraries(connection_io_handler_test
-  mygramdb_server
-  GTest::gtest_main
-)
-
-# RESOURCE_LOCK: Prevent parallel execution to avoid I/O handler conflicts
-gtest_discover_tests(connection_io_handler_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
-)
-
 # RequestDispatcher tests
 
 add_executable(request_dispatcher_test
@@ -591,3 +573,44 @@ gtest_discover_tests(connection_acceptor_unix_test
   PROPERTIES RESOURCE_LOCK server_socket
 )
 
+
+add_subdirectory(reactor)
+
+# IoReactor tests (Phase 2.T5)
+
+add_executable(io_reactor_test
+  io_reactor_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor/mock_event_multiplexer.cpp
+)
+
+target_link_libraries(io_reactor_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+target_include_directories(io_reactor_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor
+)
+
+gtest_discover_tests(io_reactor_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
+# ReactorConnection unit tests (Phase 2.T4)
+
+add_executable(reactor_connection_test
+  reactor_connection_test.cpp
+)
+
+target_link_libraries(reactor_connection_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(reactor_connection_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)

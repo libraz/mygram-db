@@ -15,12 +15,24 @@
 namespace mygramdb::server {
 
 ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
-  // Default to CPU count if not specified
+  // Auto-size the pool when not specified.
+  //
+  // Under the reactor I/O model, persistent client connections do NOT pin
+  // worker threads — they live in the reactor's connection map and only
+  // consume a worker briefly (via a drain task) when a complete command
+  // frame arrives. Consequently the worker count no longer has to scale with
+  // the concurrent-connection count; scaling by CPU count is sufficient.
+  //
+  // The floor of 4 keeps small VMs and containers responsive even when
+  // `hardware_concurrency()` reports a very small value (e.g. 1-2 cores) and
+  // gives the reactor somewhere to land burst dispatch tasks.
   if (num_threads == 0) {
-    num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) {
-      num_threads = 4;  // Fallback
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+      hw = 4;  // Fallback when the runtime can't detect core count
     }
+    constexpr size_t kMinAutoWorkers = 4;
+    num_threads = std::max<size_t>(static_cast<size_t>(hw) * 2, kMinAutoWorkers);
   }
 
   mygram::utils::StructuredLog()

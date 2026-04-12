@@ -27,8 +27,11 @@
 namespace mygramdb::server {
 
 namespace {
-// Thread pool queue size for backpressure
-constexpr size_t kThreadPoolQueueSize = 1000;
+// Historical default for backpressure queue depth. Used when the operator
+// leaves `api.tcp.thread_pool_queue_size` at 0 in YAML. This is NOT the same
+// semantic as "0 = unbounded" on ThreadPool; we treat 0 as "keep the legacy
+// default" so that existing configs and tests continue to work unchanged.
+constexpr size_t kDefaultThreadPoolQueueSize = 1000;
 }  // namespace
 
 ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
@@ -178,7 +181,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
   // Step 7: Initialize Acceptor (depends on thread pool)
   {
-    auto acceptor_result = InitAcceptor(components.thread_pool.get());
+    auto acceptor_result = InitAcceptor();
     if (!acceptor_result) {
       return MakeUnexpected(acceptor_result.error());
     }
@@ -218,8 +221,9 @@ mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> Serve
   using mygram::utils::MakeUnexpected;
 
   try {
-    auto pool =
-        std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, kThreadPoolQueueSize);
+    const size_t queue_size = config_.thread_pool_queue_size > 0 ? static_cast<size_t>(config_.thread_pool_queue_size)
+                                                                 : kDefaultThreadPoolQueueSize;
+    auto pool = std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, queue_size);
     return pool;
   } catch (const std::exception& e) {
     auto error = MakeError(ErrorCode::kInternalError, "Failed to create thread pool: " + std::string(e.what()));
@@ -421,14 +425,14 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
   }
 }
 
-mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error> ServerLifecycleManager::InitAcceptor(
-    ThreadPool* thread_pool) {
+mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error>
+ServerLifecycleManager::InitAcceptor() {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   try {
-    auto acceptor = std::make_unique<ConnectionAcceptor>(config_, thread_pool);
+    auto acceptor = std::make_unique<ConnectionAcceptor>(config_);
 
     // Start the acceptor
     auto start_result = acceptor->Start();
