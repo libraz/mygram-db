@@ -5,11 +5,15 @@ if(USE_MYSQL AND MYSQL_FOUND)
     connection.cpp
     connection_validator.cpp
     binlog_reader.cpp
+    binlog_reader_threads.cpp
+    binlog_reader_utils.cpp
     binlog_event_parser.cpp
     binlog_filter_evaluator.cpp
     binlog_event_processor.cpp
     table_metadata.cpp
     rows_parser.cpp
+    rows_parser_field_decoder.cpp
+    rows_parser_filter.cpp
     gtid_encoder.cpp
   )
 

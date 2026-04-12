@@ -1,5 +1,7 @@
 add_library(mygramdb_query STATIC
   query_parser.cpp
+  query_parser_commands.cpp
+  query_parser_clauses.cpp
   query_ast.cpp
   result_sorter.cpp
   cache_key.cpp
