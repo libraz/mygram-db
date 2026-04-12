@@ -52,8 +52,9 @@ class EpollMultiplexer : public EventMultiplexer {
   int epoll_fd_{-1};
 
   /// Reusable scratch buffer for `epoll_wait`. Sized once in the constructor
-  /// so the hot path never allocates. Grows only if callers supply a bigger
-  /// output vector (currently they do not).
+  /// and doubled on demand (up to a fixed cap) whenever a Poll() fills it
+  /// completely, so sustained bursts do not fragment across multiple Poll
+  /// rounds. Never shrinks back down.
   std::vector<struct epoll_event> events_;
 };
 

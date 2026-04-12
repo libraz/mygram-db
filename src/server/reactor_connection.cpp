@@ -172,28 +172,33 @@ bool ReactorConnection::OnWritable() {
     return false;
   }
 
-  if (write_queue_.empty()) {
-    // Fully drained: disarm kWritable so the event loop stops spinning on
-    // this fd. If we had never actually armed (edge case — OnWritable fired
-    // spuriously), skip the disarm call.
-    if (write_armed_ && reactor_ != nullptr) {
-      (void)reactor_->DisarmWrite(fd_);
-      write_armed_ = false;
-    }
-    if (closing_.load(std::memory_order_acquire)) {
+  if (!write_queue_.empty()) {
+    // Partial drain: leave the queue armed, fire again on next writable event.
+    return true;
+  }
+
+  // Fully drained: disarm kWritable so the event loop stops spinning on
+  // this fd. If we had never actually armed (edge case — OnWritable fired
+  // spuriously), skip the disarm call.
+  if (write_armed_ && reactor_ != nullptr) {
+    (void)reactor_->DisarmWrite(fd_);
+    write_armed_ = false;
+  }
+
+  if (closing_.load(std::memory_order_acquire)) {
+    return false;
+  }
+
+  // Peer already half-closed and the drain task has no more work in flight:
+  // we just flushed the last response, so unregister now.
+  if (read_eof_.load(std::memory_order_acquire) && !drain_scheduled_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> frames_lock(frame_mutex_);
+    if (pending_frames_.empty()) {
+      closing_.store(true, std::memory_order_release);
       return false;
     }
-    // Peer already half-closed and the drain task has no more work in
-    // flight: we just flushed the last response, so unregister now.
-    if (read_eof_.load(std::memory_order_acquire) && !drain_scheduled_.load(std::memory_order_acquire)) {
-      std::lock_guard<std::mutex> frames_lock(frame_mutex_);
-      if (pending_frames_.empty()) {
-        closing_.store(true, std::memory_order_release);
-        return false;
-      }
-    }
   }
-  // Partial drain: leave the queue armed, fire again on next writable event.
+
   return true;
 }
 

@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -31,10 +32,17 @@ using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
-/// Default size of the `kevent()` output buffer. Sized to match the reactor's
-/// expected worst-case concurrency per tick; anything beyond this cap simply
-/// rolls over to the next `Poll()` call because kqueue is level-triggered.
+/// Starting size of the `kevent()` output buffer. Grows on demand up to
+/// `kMaxEventBufferSize` whenever a Poll fills the buffer completely.
 constexpr std::size_t kDefaultEventBufferSize = 64;
+
+/// Upper bound on the `kevent()` output buffer. 4096 keeps the scratch
+/// allocation bounded at ~128 KiB (`sizeof(struct kevent) * 4096`) while
+/// still covering the server's expected peak concurrency of ~2000
+/// connections with comfortable headroom. kqueue is level-triggered, so
+/// excess ready events beyond the cap are harmlessly re-reported on the
+/// next Poll.
+constexpr std::size_t kMaxEventBufferSize = 4096;
 
 /// Number of milliseconds in a second (kept as a named constant to keep the
 /// timespec conversion below readable under clang-tidy's magic-number rule).
@@ -307,6 +315,15 @@ Expected<void, Error> KqueueMultiplexer::Poll(int timeout_ms, std::vector<ReadyE
     out.push_back(ready);
   }
 
+  // Dynamic grow: if this Poll() filled the scratch buffer, chances are we
+  // are running behind and the next tick will need more slots. Double the
+  // capacity up to `kMaxEventBufferSize` so high-concurrency bursts are not
+  // fragmented across multiple Poll() rounds. Growth is one-shot and
+  // monotonic; the buffer never shrinks back down.
+  if (static_cast<std::size_t>(n) == events_.size() && events_.size() < kMaxEventBufferSize) {
+    const std::size_t new_size = std::min(events_.size() * 2, kMaxEventBufferSize);
+    events_.resize(new_size);
+  }
   return {};
 }
 

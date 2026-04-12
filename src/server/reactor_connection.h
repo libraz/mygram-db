@@ -83,10 +83,14 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// Default read buffer reservation. Grows on demand up to kMaxReadBufferBytes.
   static constexpr size_t kDefaultReadBufferBytes = 4096;
 
-  /// Hard cap on the read accumulation buffer. A single frame larger than
-  /// this is rejected (peer is either misbehaving or under attack). 1 MiB is
-  /// comfortably above the configured MygramDB query length limit (~64 KiB)
-  /// while still providing OOM protection.
+  /// Hard cap on the read accumulation buffer. This is an OOM safety rail
+  /// only — per-query size enforcement (`api.max_query_length`) is the
+  /// responsibility of the downstream query parser, which rejects oversized
+  /// requests with a structured error. 1 MiB is comfortably above the
+  /// default `max_query_length` (~64 KiB) and is deliberately decoupled
+  /// from config so that lowering `max_query_length` at runtime cannot make
+  /// the reactor drop well-formed but large requests that are still in
+  /// flight on an existing connection.
   static constexpr size_t kMaxReadBufferBytes = 1 * 1024 * 1024;  // 1 MiB
 
   /// Hard upper bound on unsent response bytes; once exceeded the reactor

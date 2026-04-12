@@ -103,9 +103,10 @@ class KqueueMultiplexer final : public EventMultiplexer {
 
   int kqueue_fd_ = -1;
 
-  /// Reusable output buffer for `kevent()`. Sized at construction so the
-  /// steady-state event loop never allocates. Touched only by the event-loop
-  /// thread via `Poll()`; no locking.
+  /// Reusable output buffer for `kevent()`. Sized at construction and
+  /// doubled on demand (up to a fixed cap) whenever a Poll() fills it
+  /// completely, so sustained bursts do not fragment across multiple Poll
+  /// rounds. Touched only by the event-loop thread via `Poll()`; no locking.
   std::vector<struct kevent> events_;
 
   /// Mutex protecting `interest_`. IoReactor now allows concurrent Poll (on

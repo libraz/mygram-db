@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -28,9 +29,17 @@ using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
-/// Steady-state batch size for `epoll_wait`. Matches the reactor's expected
-/// worst-case concurrency per tick; the buffer only ever grows, never shrinks.
+/// Starting batch size for `epoll_wait`. The buffer grows on demand up to
+/// `kMaxEventsCapacity` whenever a Poll fills it completely — a full batch
+/// is a strong signal that the next tick will need more headroom.
 constexpr std::size_t kInitialEventsCapacity = 64;
+
+/// Upper bound on the `epoll_wait` output buffer. 4096 keeps the scratch
+/// allocation bounded at ~48 KiB (`sizeof(epoll_event) * 4096`) while still
+/// covering the server's expected peak concurrency of ~2000 connections
+/// with comfortable headroom. Beyond this cap, excess ready events roll
+/// over to the next Poll — harmless because epoll is level-triggered.
+constexpr std::size_t kMaxEventsCapacity = 4096;
 
 /// Build the `errno`-decorated error message suffix used everywhere in this
 /// translation unit. Captures `errno` by value to avoid TOCTOU between the
@@ -167,6 +176,16 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
   for (int i = 0; i < n; ++i) {
     const auto& ev = events_[static_cast<std::size_t>(i)];
     out.push_back(ReadyEvent{ev.data.fd, EpollEventsToReady(ev.events)});
+  }
+
+  // Dynamic grow: if this Poll() filled the scratch buffer, chances are we
+  // are running behind and the next tick will need more slots. Double the
+  // capacity up to `kMaxEventsCapacity` so we stop fragmenting high-concurrency
+  // bursts across multiple Poll() rounds. Growth is one-shot and monotonic;
+  // the buffer never shrinks back down.
+  if (static_cast<std::size_t>(n) == events_.size() && events_.size() < kMaxEventsCapacity) {
+    const std::size_t new_size = std::min(events_.size() * 2, kMaxEventsCapacity);
+    events_.resize(new_size);
   }
   return {};
 }

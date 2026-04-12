@@ -146,6 +146,21 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
       connections_.erase(fd);
       return MakeUnexpected(r.error());
     }
+
+    // Narrow race: Stop() sets running_=false and clears connections_
+    // *before* blocking on mux_lifecycle_ exclusive. If that sequence
+    // interleaved between our initial running_ check and this point, our
+    // emplace is already gone from the map and the about-to-be-destroyed
+    // multiplexer will never deliver events for this fd. Detect that window
+    // by re-checking running_ while we still hold mux_lifecycle_ shared,
+    // and roll back the Add so the caller sees a clean failure.
+    if (!running_.load(std::memory_order_acquire)) {
+      (void)mux_->Remove(fd);
+      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+      connections_.erase(fd);  // no-op if Stop() already cleared the map
+      return MakeUnexpected(
+          MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register raced with Stop"));
+    }
   }
 
   return {};
