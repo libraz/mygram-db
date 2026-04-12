@@ -25,6 +25,8 @@
 
 namespace mygramdb::server {
 
+constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every second
+
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
 #ifdef USE_MYSQL
@@ -94,7 +96,7 @@ void SnapshotScheduler::Stop() {
 
 void SnapshotScheduler::SchedulerLoop() {
   const int interval_sec = config_.interval_sec;
-  const int check_interval_ms = 1000;  // Check for shutdown every second
+  const int check_interval_ms = kShutdownCheckIntervalMs;
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_started").Info();
 

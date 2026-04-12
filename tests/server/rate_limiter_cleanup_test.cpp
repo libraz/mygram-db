@@ -26,9 +26,9 @@ class RateLimiterCleanupTest : public ::testing::Test {
     // capacity=1000 (large enough to not block during tests)
     // refill_rate=100 (fast refill)
     // max_clients=100
-    // cleanup_interval=1000 (cleanup every 1000 requests)
+    // cleanup_interval=2s (cleanup every 2 seconds)
     // inactivity_timeout_sec=2 (2 seconds for faster tests)
-    limiter_ = std::make_unique<RateLimiter>(1000, 100, 100, 1000, 2);
+    limiter_ = std::make_unique<RateLimiter>(1000, 100, 100, std::chrono::seconds(2), 2);
   }
 
   std::unique_ptr<RateLimiter> limiter_;
@@ -121,7 +121,7 @@ TEST_F(RateLimiterCleanupTest, MaxClientsLimitEnforced) {
  */
 TEST_F(RateLimiterCleanupTest, MemoryUsageDoesntGrowUnbounded) {
   // Create a rate limiter with short inactivity timeout (1 second) for testing
-  RateLimiter short_timeout_limiter(10, 10, 100, 10, 1);  // 1 second timeout
+  RateLimiter short_timeout_limiter(10, 10, 100, std::chrono::seconds(1), 1);  // 1 second timeout
 
   // Simulate long-running server with many ephemeral clients
   const int iterations = 50;
@@ -200,7 +200,7 @@ TEST_F(RateLimiterCleanupTest, ClearRemovesAllClients) {
  */
 TEST_F(RateLimiterCleanupTest, RateLimitingWorksWithCleanup) {
   // Create a limiter with small capacity for this specific test
-  RateLimiter small_limiter(10, 1, 100, 1000, 2);
+  RateLimiter small_limiter(10, 1, 100, std::chrono::seconds(2), 2);
   std::string client_ip = "192.168.1.50";
 
   // Exhaust the bucket (capacity=10)

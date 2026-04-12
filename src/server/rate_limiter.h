@@ -74,20 +74,20 @@ class TokenBucket {
  */
 class RateLimiter {
  public:
-  static constexpr size_t kDefaultMaxClients = 10000;         ///< Default maximum number of tracked clients
-  static constexpr size_t kDefaultCleanupInterval = 1000;     ///< Default cleanup interval (requests)
-  static constexpr uint32_t kDefaultInactivityTimeout = 300;  ///< Default inactivity timeout (seconds)
+  static constexpr size_t kDefaultMaxClients = 10000;                 ///< Default maximum number of tracked clients
+  static constexpr std::chrono::seconds kDefaultCleanupInterval{60};  ///< Default cleanup interval (time)
+  static constexpr uint32_t kDefaultInactivityTimeout = 300;          ///< Default inactivity timeout (seconds)
 
   /**
    * @brief Construct rate limiter
    * @param capacity Maximum tokens per client (burst size)
    * @param refill_rate Tokens added per second per client
    * @param max_clients Maximum number of tracked clients (for memory management)
-   * @param cleanup_interval Cleanup check interval (number of requests)
+   * @param cleanup_interval Cleanup check interval (time between cleanup sweeps)
    * @param inactivity_timeout Client inactivity timeout in seconds
    */
   RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients = kDefaultMaxClients,
-              size_t cleanup_interval = kDefaultCleanupInterval,
+              std::chrono::seconds cleanup_interval = kDefaultCleanupInterval,
               uint32_t inactivity_timeout_sec = kDefaultInactivityTimeout);
 
   /**
@@ -133,11 +133,12 @@ class RateLimiter {
   void Clear();
 
  private:
-  size_t capacity_;                          ///< Token bucket capacity
-  size_t refill_rate_;                       ///< Refill rate (tokens/sec)
-  size_t max_clients_;                       ///< Maximum tracked clients
-  size_t cleanup_interval_;                  ///< Cleanup check interval (requests)
-  std::chrono::seconds inactivity_timeout_;  ///< Client inactivity timeout
+  size_t capacity_;                                          ///< Token bucket capacity
+  size_t refill_rate_;                                       ///< Refill rate (tokens/sec)
+  size_t max_clients_;                                       ///< Maximum tracked clients
+  std::chrono::seconds cleanup_interval_;                    ///< Cleanup check interval (time)
+  std::chrono::seconds inactivity_timeout_;                  ///< Client inactivity timeout
+  std::chrono::steady_clock::time_point last_cleanup_time_;  ///< Last cleanup timestamp
 
   struct ClientBucket {
     std::unique_ptr<TokenBucket> bucket;

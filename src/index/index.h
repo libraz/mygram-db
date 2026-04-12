@@ -312,16 +312,6 @@ class Index {
   PostingList* GetOrCreatePostingList(std::string_view term);
 
   /**
-   * @brief Internal OR search (no locking)
-   *
-   * @pre Caller MUST hold postings_mutex_ (shared or exclusive).
-   *      Violating this precondition causes undefined behavior.
-   * @param terms Search terms
-   * @return Vector of document IDs containing any of the terms
-   */
-  [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
-
-  /**
    * @brief RCU snapshot helpers for lock-free search
    *
    * These methods take a short lock to copy shared_ptrs, then release the lock.

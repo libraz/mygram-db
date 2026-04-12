@@ -24,17 +24,6 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
                                         const config::MysqlConfig& mysql_config, server::ServerStats* stats,
                                         cache::CacheManager* cache_manager) {
   try {
-    // Debug: log doc_store instance address and document count to verify correct instance is used
-    // This helps diagnose BUG where replication uses different instance than SYNC populated
-    mygram::utils::StructuredLog()
-        .Event("binlog_process_event")
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for debug address logging
-        .Field("doc_store_addr", reinterpret_cast<uint64_t>(&doc_store))
-        .Field("doc_store_size", static_cast<uint64_t>(doc_store.Size()))
-        .Field("event_type", static_cast<int64_t>(event.type))
-        .Field("primary_key", event.primary_key)
-        .Debug();
-
     // Evaluate required_filters to determine if data should exist in index
     bool matches_required =
         BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config, mysql_config.datetime_timezone);

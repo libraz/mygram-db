@@ -34,11 +34,9 @@ void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string
   }
 }
 
-void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
-                                 const std::unordered_map<std::string, FilterValue>& new_filters) {
-  std::unique_lock lock(mutex_);
-  // Remove from old bitmaps
-  for (const auto& [column, value] : old_filters) {
+void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id,
+                                             const std::unordered_map<std::string, FilterValue>& filters) {
+  for (const auto& [column, value] : filters) {
     if (std::holds_alternative<std::monostate>(value)) {
       continue;
     }
@@ -48,7 +46,6 @@ void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::str
       auto val_it = col_it->second.find(key);
       if (val_it != col_it->second.end()) {
         roaring_bitmap_remove(val_it->second, doc_id);
-        // Clean up empty bitmaps
         if (roaring_bitmap_is_empty(val_it->second)) {
           roaring_bitmap_free(val_it->second);
           col_it->second.erase(val_it);
@@ -56,6 +53,12 @@ void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::str
       }
     }
   }
+}
+
+void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
+                                 const std::unordered_map<std::string, FilterValue>& new_filters) {
+  std::unique_lock lock(mutex_);
+  RemoveDocFromBitmapsLocked(doc_id, old_filters);
 
   // Add to new bitmaps (inline to avoid re-locking)
   for (const auto& [column, value] : new_filters) {
@@ -77,36 +80,20 @@ void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::str
 
 void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
   std::unique_lock lock(mutex_);
-  for (const auto& [column, value] : filters) {
-    if (std::holds_alternative<std::monostate>(value)) {
-      continue;
-    }
-    std::string key = SerializeFilterValue(value);
-    auto col_it = eq_bitmaps_.find(column);
-    if (col_it != eq_bitmaps_.end()) {
-      auto val_it = col_it->second.find(key);
-      if (val_it != col_it->second.end()) {
-        roaring_bitmap_remove(val_it->second, doc_id);
-        if (roaring_bitmap_is_empty(val_it->second)) {
-          roaring_bitmap_free(val_it->second);
-          col_it->second.erase(val_it);
-        }
-      }
-    }
-  }
+  RemoveDocFromBitmapsLocked(doc_id, filters);
 }
 
-const roaring_bitmap_t* FilterIndex::GetEqBitmap(const std::string& column, const std::string& serialized_value) const {
+RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column, const std::string& serialized_value) const {
   std::shared_lock lock(mutex_);
   auto col_it = eq_bitmaps_.find(column);
   if (col_it == eq_bitmaps_.end()) {
-    return nullptr;
+    return RoaringBitmapPtr(nullptr, roaring_bitmap_free);
   }
   auto val_it = col_it->second.find(serialized_value);
   if (val_it == col_it->second.end()) {
-    return nullptr;
+    return RoaringBitmapPtr(nullptr, roaring_bitmap_free);
   }
-  return val_it->second;
+  return RoaringBitmapPtr(roaring_bitmap_copy(val_it->second), roaring_bitmap_free);
 }
 
 void FilterIndex::Clear() {

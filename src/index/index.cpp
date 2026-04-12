@@ -18,6 +18,7 @@
 #include <unistd.h>
 #endif
 
+#include "utils/constants.h"
 #include "utils/crc32.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -98,7 +99,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
 
   // Phase 1: Generate n-grams for all documents (no locking, CPU-intensive)
   // Map: term -> vector of doc_ids containing that term
-  std::unordered_map<std::string, std::vector<DocId>> term_to_docs;
+  absl::flat_hash_map<std::string, std::vector<DocId>> term_to_docs;
 
   for (const auto& doc : documents) {
     // Generate n-grams
@@ -375,27 +376,6 @@ std::vector<DocId> Index::FilterByNgrams(const std::vector<DocId>& candidates,
   return result;
 }
 
-std::vector<DocId> Index::SearchOrInternal(const std::vector<std::string>& terms) const {
-  // PRECONDITION: Caller MUST hold postings_mutex_ (shared or exclusive) before
-  // calling this method. Accessing term_postings_ without the lock is undefined
-  // behavior. This method is private and must only be called from methods that
-  // already hold the lock (e.g., SearchNot with its shared_lock).
-  std::vector<DocId> result;
-
-  for (const auto& term : terms) {
-    const auto* posting = GetPostingList(term);
-    if (posting != nullptr) {
-      auto term_docs = posting->GetAll();
-      std::vector<DocId> union_result;
-      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
-                     std::back_inserter(union_result));
-      result = std::move(union_result);
-    }
-  }
-
-  return result;
-}
-
 std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {
   // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
   if (terms.empty()) {
@@ -522,8 +502,8 @@ void Index::Optimize(uint64_t total_docs) {
   // - shared_ptr copies keep posting lists alive during optimization
   // - Version snapshots capture state at T0, unaffected by concurrent mutations
   // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
-  std::unordered_map<std::string, std::shared_ptr<PostingList>> snapshot;
-  std::unordered_map<std::string, uint64_t> snapshot_versions;
+  absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> snapshot;
+  absl::flat_hash_map<std::string, uint64_t> snapshot_versions;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
     for (const auto& [term, posting] : term_postings_) {
@@ -536,7 +516,7 @@ void Index::Optimize(uint64_t total_docs) {
   // Phase 1b: Create optimized copies outside the lock (CPU-intensive work)
   // This doesn't block any operations - searches and writes continue normally
   // The snapshot keeps posting lists alive via shared_ptr reference counting
-  std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
+  absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
   for (const auto& [term, posting] : snapshot) {
     // Clone creates an optimized copy without modifying the original
     optimized_postings[term] = posting->Clone(total_docs);
@@ -589,8 +569,6 @@ void Index::Optimize(uint64_t total_docs) {
         .Debug();
   }
 
-  // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  // 1024: Standard conversion factor for bytes to KB to MB
   size_t final_term_count = 0;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
@@ -600,9 +578,8 @@ void Index::Optimize(uint64_t total_docs) {
       .Event("index_optimized")
       .Field("terms_optimized", static_cast<uint64_t>(term_count))
       .Field("terms_final", static_cast<uint64_t>(final_term_count))
-      .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+      .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
       .Info();
-  // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 }
 
 bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
@@ -664,8 +641,8 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     // IMPORTANT: We store versions (not sizes) to detect all concurrent mutations:
     // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
     // - shared_ptr copies keep posting lists alive during optimization
-    std::unordered_map<std::string, uint64_t> batch_snapshot_versions;
-    std::unordered_map<std::string, std::shared_ptr<PostingList>> batch_snapshot_ptrs;
+    absl::flat_hash_map<std::string, uint64_t> batch_snapshot_versions;
+    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> batch_snapshot_ptrs;
     {
       std::shared_lock<std::shared_mutex> lock(postings_mutex_);
       for (size_t j = i; j < batch_end; ++j) {
@@ -680,7 +657,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     // Lock released - AddDocument/RemoveDocument can proceed
 
     // Phase 1b: Create optimized copies for this batch (CPU-intensive, outside lock)
-    std::unordered_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
+    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
     for (size_t j = i; j < batch_end; ++j) {
       const auto& term = terms[j];
 
@@ -896,15 +873,12 @@ bool Index::SaveToFile(const std::string& filepath) const {
     }
 #endif
 
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    // 1024: Standard conversion factor for bytes to KB to MB
     mygram::utils::StructuredLog()
         .Event("index_saved")
         .Field("path", filepath)
         .Field("terms", term_count)
-        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
@@ -1038,8 +1012,6 @@ bool Index::LoadFromFile(const std::string& filepath) {
       return false;
     }
 
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    // 1024: Standard conversion factor for bytes to KB to MB
     uint64_t term_count = 0;
     {
       std::shared_lock<std::shared_mutex> lock(postings_mutex_);
@@ -1049,9 +1021,8 @@ bool Index::LoadFromFile(const std::string& filepath) {
         .Event("index_loaded")
         .Field("path", filepath)
         .Field("terms", term_count)
-        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / (1024 * 1024)))
+        .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     return true;
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()

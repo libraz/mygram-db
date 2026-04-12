@@ -930,6 +930,53 @@ TEST_F(PostingListTest, SerializeReturnsTrueForEmptyData) {
 /**
  * @brief Test that ConvertToRoaring preserves all data
  */
+/**
+ * @brief Test that Deserialize rejects an invalid strategy byte
+ *
+ * Serializes a valid PostingList, then corrupts the strategy byte to an
+ * out-of-range value and verifies that Deserialize returns false.
+ */
+TEST_F(PostingListTest, DeserializeInvalidStrategyByte) {
+  // Create and serialize a simple posting list
+  PostingList posting(0.5);
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(posting.Serialize(buffer));
+  ASSERT_FALSE(buffer.empty());
+
+  // The first byte is the strategy byte - corrupt it with value 2 (out of range)
+  {
+    std::vector<uint8_t> corrupted = buffer;
+    corrupted[0] = 2;
+    PostingList target(0.5);
+    size_t offset = 0;
+    EXPECT_FALSE(target.Deserialize(corrupted, offset));
+  }
+
+  // Also test with value 255
+  {
+    std::vector<uint8_t> corrupted = buffer;
+    corrupted[0] = 255;
+    PostingList target(0.5);
+    size_t offset = 0;
+    EXPECT_FALSE(target.Deserialize(corrupted, offset));
+  }
+
+  // Verify that valid strategy bytes still work
+  {
+    PostingList target(0.5);
+    size_t offset = 0;
+    EXPECT_TRUE(target.Deserialize(buffer, offset));
+    EXPECT_EQ(target.Size(), 3);
+  }
+}
+
+/**
+ * @brief Test that ConvertToRoaring preserves all data
+ */
 TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
   // Use very low threshold so Optimize triggers conversion
   PostingList posting(0.01);  // 1% threshold
@@ -953,6 +1000,87 @@ TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
   auto all = posting.GetAll();
   ASSERT_EQ(all.size(), 100);
   for (DocId id = 1; id <= 100; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}
+
+// =============================================================================
+// Tail-append optimization tests for Add()
+// =============================================================================
+
+/**
+ * @brief Test Add() tail-append optimization for monotonically increasing DocIds
+ *
+ * When DocIds are added in strictly increasing order (common during binlog
+ * replication), the optimized path appends directly to delta_compressed_
+ * without full decode-sort-encode, achieving O(1) per insertion.
+ */
+TEST_F(PostingListTest, AddMonotonicallyIncreasingOptimization) {
+  PostingList posting(0.5);
+
+  // Add DocIds in strictly increasing order
+  posting.Add(1);
+  posting.Add(2);
+  posting.Add(3);
+  posting.Add(4);
+  posting.Add(5);
+
+  // Verify size is correct
+  EXPECT_EQ(posting.Size(), 5);
+
+  // Verify all elements are found
+  EXPECT_TRUE(posting.Contains(1));
+  EXPECT_TRUE(posting.Contains(2));
+  EXPECT_TRUE(posting.Contains(3));
+  EXPECT_TRUE(posting.Contains(4));
+  EXPECT_TRUE(posting.Contains(5));
+
+  // Verify non-existent elements are not found
+  EXPECT_FALSE(posting.Contains(0));
+  EXPECT_FALSE(posting.Contains(6));
+
+  // Verify GetAll returns correct sorted order
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), 5);
+  for (DocId id = 1; id <= 5; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}
+
+/**
+ * @brief Test Add() fallback path for out-of-order DocId insertions
+ *
+ * When DocIds arrive out of order, the full decode-sort-encode path
+ * is used as a fallback to maintain sorted invariant.
+ */
+TEST_F(PostingListTest, AddOutOfOrderFallback) {
+  PostingList posting(0.5);
+
+  // Add DocIds in non-monotonic order
+  posting.Add(5);
+  posting.Add(3);
+  posting.Add(1);
+  posting.Add(4);
+  posting.Add(2);
+
+  // Verify size is correct
+  EXPECT_EQ(posting.Size(), 5);
+
+  // Verify all elements are found
+  EXPECT_TRUE(posting.Contains(1));
+  EXPECT_TRUE(posting.Contains(2));
+  EXPECT_TRUE(posting.Contains(3));
+  EXPECT_TRUE(posting.Contains(4));
+  EXPECT_TRUE(posting.Contains(5));
+
+  // Verify non-existent elements are not found
+  EXPECT_FALSE(posting.Contains(0));
+  EXPECT_FALSE(posting.Contains(6));
+
+  // Verify GetAll returns correct sorted order
+  auto all = posting.GetAll();
+  ASSERT_EQ(all.size(), 5);
+  for (DocId id = 1; id <= 5; ++id) {
     EXPECT_EQ(all[id - 1], id);
   }
 }

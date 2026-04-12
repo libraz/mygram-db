@@ -14,7 +14,7 @@ namespace mygramdb::storage {
  *
  * Handles saving and loading index dumps to/from disk
  */
-class DumpManager {
+class [[deprecated("Use dump_format_v1 API directly")]] DumpManager {
  public:
   explicit DumpManager(std::string dump_dir);
 

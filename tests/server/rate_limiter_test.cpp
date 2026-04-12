@@ -312,7 +312,7 @@ TEST_F(RateLimiterTest, RealisticRefill) {
  *   cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON ..
  */
 TEST_F(RateLimiterTest, NoDeadlockUnderConcurrentLoad) {
-  RateLimiter limiter(100, 10, 1000, 1000, 60);
+  RateLimiter limiter(100, 10, 1000, std::chrono::seconds(60), 60);
 
   std::atomic<bool> stop{false};
   std::vector<std::thread> threads;
@@ -363,7 +363,7 @@ TEST_F(RateLimiterTest, NoDeadlockUnderConcurrentLoad) {
  */
 TEST_F(RateLimiterTest, AtomicStatsConsistencyUnderConcurrency) {
   // Small capacity so some requests will be blocked
-  RateLimiter limiter(5, 5, 10000, 10000, 300);
+  RateLimiter limiter(5, 5, 10000, std::chrono::seconds(2), 300);
 
   constexpr int kThreads = 8;
   constexpr int kRequestsPerThread = 500;

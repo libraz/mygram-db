@@ -7,8 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 using namespace mygramdb::storage;
 
@@ -25,11 +28,11 @@ TEST_F(FilterIndexTest, AddAndGetEqBitmap) {
   index_.AddDocument(2, filters);
 
   std::string key = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
-  const roaring_bitmap_t* bm = index_.GetEqBitmap("category", key);
+  auto bm = index_.GetEqBitmap("category", key);
   ASSERT_NE(bm, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm), 2);
-  EXPECT_TRUE(roaring_bitmap_contains(bm, 1));
-  EXPECT_TRUE(roaring_bitmap_contains(bm, 2));
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm.get()), 2);
+  EXPECT_TRUE(roaring_bitmap_contains(bm.get(), 1));
+  EXPECT_TRUE(roaring_bitmap_contains(bm.get(), 2));
 }
 
 TEST_F(FilterIndexTest, DifferentValues) {
@@ -40,13 +43,13 @@ TEST_F(FilterIndexTest, DifferentValues) {
   auto key_tech = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
   auto key_news = FilterIndex::SerializeFilterValue(FilterValue{std::string("news")});
 
-  const roaring_bitmap_t* bm_tech = index_.GetEqBitmap("category", key_tech);
-  const roaring_bitmap_t* bm_news = index_.GetEqBitmap("category", key_news);
+  auto bm_tech = index_.GetEqBitmap("category", key_tech);
+  auto bm_news = index_.GetEqBitmap("category", key_news);
 
   ASSERT_NE(bm_tech, nullptr);
   ASSERT_NE(bm_news, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_tech), 2);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_news), 1);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_tech.get()), 2);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_news.get()), 1);
 }
 
 TEST_F(FilterIndexTest, RemoveDocument) {
@@ -56,11 +59,11 @@ TEST_F(FilterIndexTest, RemoveDocument) {
   index_.RemoveDocument(1, {{"category", FilterValue{std::string("tech")}}});
 
   auto key = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
-  const roaring_bitmap_t* bm = index_.GetEqBitmap("category", key);
+  auto bm = index_.GetEqBitmap("category", key);
   ASSERT_NE(bm, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm), 1);
-  EXPECT_FALSE(roaring_bitmap_contains(bm, 1));
-  EXPECT_TRUE(roaring_bitmap_contains(bm, 2));
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm.get()), 1);
+  EXPECT_FALSE(roaring_bitmap_contains(bm.get(), 1));
+  EXPECT_TRUE(roaring_bitmap_contains(bm.get(), 2));
 }
 
 TEST_F(FilterIndexTest, RemoveLastDocCleansUpBitmap) {
@@ -83,9 +86,9 @@ TEST_F(FilterIndexTest, UpdateDocument) {
   auto key_news = FilterIndex::SerializeFilterValue(FilterValue{std::string("news")});
 
   EXPECT_EQ(index_.GetEqBitmap("category", key_tech), nullptr);
-  const roaring_bitmap_t* bm = index_.GetEqBitmap("category", key_news);
+  auto bm = index_.GetEqBitmap("category", key_news);
   ASSERT_NE(bm, nullptr);
-  EXPECT_TRUE(roaring_bitmap_contains(bm, 1));
+  EXPECT_TRUE(roaring_bitmap_contains(bm.get(), 1));
 }
 
 TEST_F(FilterIndexTest, NumericFilterValues) {
@@ -96,13 +99,13 @@ TEST_F(FilterIndexTest, NumericFilterValues) {
   auto key1 = FilterIndex::SerializeFilterValue(FilterValue{static_cast<int64_t>(1)});
   auto key2 = FilterIndex::SerializeFilterValue(FilterValue{static_cast<int64_t>(2)});
 
-  const roaring_bitmap_t* bm1 = index_.GetEqBitmap("status", key1);
+  auto bm1 = index_.GetEqBitmap("status", key1);
   ASSERT_NE(bm1, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm1), 2);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm1.get()), 2);
 
-  const roaring_bitmap_t* bm2 = index_.GetEqBitmap("status", key2);
+  auto bm2 = index_.GetEqBitmap("status", key2);
   ASSERT_NE(bm2, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm2), 1);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm2.get()), 1);
 }
 
 TEST_F(FilterIndexTest, NonexistentBitmapReturnsNull) {
@@ -154,13 +157,13 @@ TEST_F(FilterIndexTest, BoolFilterValue) {
   auto key_true = FilterIndex::SerializeFilterValue(FilterValue{true});
   auto key_false = FilterIndex::SerializeFilterValue(FilterValue{false});
 
-  const roaring_bitmap_t* bm_true = index_.GetEqBitmap("active", key_true);
-  const roaring_bitmap_t* bm_false = index_.GetEqBitmap("active", key_false);
+  auto bm_true = index_.GetEqBitmap("active", key_true);
+  auto bm_false = index_.GetEqBitmap("active", key_false);
 
   ASSERT_NE(bm_true, nullptr);
   ASSERT_NE(bm_false, nullptr);
-  EXPECT_TRUE(roaring_bitmap_contains(bm_true, 1));
-  EXPECT_TRUE(roaring_bitmap_contains(bm_false, 2));
+  EXPECT_TRUE(roaring_bitmap_contains(bm_true.get(), 1));
+  EXPECT_TRUE(roaring_bitmap_contains(bm_false.get(), 2));
 }
 
 TEST_F(FilterIndexTest, BitmapIntersection) {
@@ -175,14 +178,14 @@ TEST_F(FilterIndexTest, BitmapIntersection) {
   auto key_tech = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
   auto key_status1 = FilterIndex::SerializeFilterValue(FilterValue{static_cast<int64_t>(1)});
 
-  const roaring_bitmap_t* bm_tech = index_.GetEqBitmap("category", key_tech);
-  const roaring_bitmap_t* bm_status1 = index_.GetEqBitmap("status", key_status1);
+  auto bm_tech = index_.GetEqBitmap("category", key_tech);
+  auto bm_status1 = index_.GetEqBitmap("status", key_status1);
 
   ASSERT_NE(bm_tech, nullptr);
   ASSERT_NE(bm_status1, nullptr);
 
   // Manually intersect
-  roaring_bitmap_t* intersection = roaring_bitmap_and(bm_tech, bm_status1);
+  roaring_bitmap_t* intersection = roaring_bitmap_and(bm_tech.get(), bm_status1.get());
   EXPECT_EQ(roaring_bitmap_get_cardinality(intersection), 1);
   EXPECT_TRUE(roaring_bitmap_contains(intersection, 1));
   roaring_bitmap_free(intersection);
@@ -199,7 +202,64 @@ TEST_F(FilterIndexTest, LargeScale) {
 
   // Each category should have ~2000 docs
   auto key = FilterIndex::SerializeFilterValue(FilterValue{std::string("cat_0")});
-  const roaring_bitmap_t* bm = index_.GetEqBitmap("category", key);
+  auto bm = index_.GetEqBitmap("category", key);
   ASSERT_NE(bm, nullptr);
-  EXPECT_EQ(roaring_bitmap_get_cardinality(bm), kDocCount / kCategories);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm.get()), kDocCount / kCategories);
+}
+
+TEST_F(FilterIndexTest, GetEqBitmapReturnsCopy) {
+  // Verify the returned bitmap is an independent copy that remains valid
+  // after the source data is modified (use-after-free prevention)
+  index_.AddDocument(1, {{"category", FilterValue{std::string("tech")}}});
+  index_.AddDocument(2, {{"category", FilterValue{std::string("tech")}}});
+
+  auto key = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
+  auto bm_copy = index_.GetEqBitmap("category", key);
+  ASSERT_NE(bm_copy, nullptr);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_copy.get()), 2);
+
+  // Modify the source data: remove both documents
+  index_.RemoveDocument(1, {{"category", FilterValue{std::string("tech")}}});
+  index_.RemoveDocument(2, {{"category", FilterValue{std::string("tech")}}});
+
+  // The copy should still be valid and reflect the original state
+  EXPECT_EQ(roaring_bitmap_get_cardinality(bm_copy.get()), 2);
+  EXPECT_TRUE(roaring_bitmap_contains(bm_copy.get(), 1));
+  EXPECT_TRUE(roaring_bitmap_contains(bm_copy.get(), 2));
+}
+
+TEST_F(FilterIndexTest, ConcurrentReadWriteSafety) {
+  // Verify concurrent GetEqBitmap + AddDocument/RemoveDocument does not crash
+  constexpr int kIterations = 5000;
+  auto key = FilterIndex::SerializeFilterValue(FilterValue{std::string("tech")});
+
+  // Seed initial data
+  for (uint32_t i = 1; i <= 100; ++i) {
+    index_.AddDocument(i, {{"category", FilterValue{std::string("tech")}}});
+  }
+
+  std::atomic<bool> stop{false};
+
+  // Writer thread: add and remove documents
+  std::thread writer([&] {
+    for (int i = 0; i < kIterations && !stop; ++i) {
+      auto doc_id = static_cast<uint32_t>(1000 + i);
+      index_.AddDocument(doc_id, {{"category", FilterValue{std::string("tech")}}});
+      index_.RemoveDocument(doc_id, {{"category", FilterValue{std::string("tech")}}});
+    }
+  });
+
+  // Reader thread: get bitmaps and use them
+  std::thread reader([&] {
+    for (int i = 0; i < kIterations && !stop; ++i) {
+      auto bm = index_.GetEqBitmap("category", key);
+      if (bm != nullptr) {
+        // Actually use the bitmap to detect use-after-free
+        (void)roaring_bitmap_get_cardinality(bm.get());
+      }
+    }
+  });
+
+  writer.join();
+  reader.join();
 }

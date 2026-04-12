@@ -200,15 +200,25 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       }
     }
 
-    // Wait for threads to finish
+    // Move threads out of sync_threads_ under lock, then join WITHOUT holding
+    // the lock. This mirrors the destructor pattern and avoids deadlock: the
+    // background thread's update_state lambda also acquires sync_mutex_.
+    std::unordered_map<std::string, std::thread> threads_to_join;
     {
       std::lock_guard<std::mutex> lock(sync_mutex_);
       for (const auto& tbl : tables_to_stop) {
         auto thread_iter = sync_threads_.find(tbl);
-        if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-          thread_iter->second.join();
+        if (thread_iter != sync_threads_.end()) {
+          threads_to_join[tbl] = std::move(thread_iter->second);
           sync_threads_.erase(thread_iter);
         }
+      }
+    }
+
+    // Join threads WITHOUT holding sync_mutex_
+    for (auto& [tbl, thread] : threads_to_join) {
+      if (thread.joinable()) {
+        thread.join();
       }
     }
 
@@ -239,14 +249,22 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     }
   }
 
-  // Wait for thread to finish
+  // Move thread out of sync_threads_ under lock, then join WITHOUT holding
+  // the lock. This mirrors the destructor pattern and avoids deadlock: the
+  // background thread's update_state lambda also acquires sync_mutex_.
+  std::thread thread_to_join;
   {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     auto thread_iter = sync_threads_.find(table_name);
-    if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-      thread_iter->second.join();
+    if (thread_iter != sync_threads_.end()) {
+      thread_to_join = std::move(thread_iter->second);
       sync_threads_.erase(thread_iter);
     }
+  }
+
+  // Join thread WITHOUT holding sync_mutex_
+  if (thread_to_join.joinable()) {
+    thread_to_join.join();
   }
 
   return "OK SYNC STOPPED table=" + table_name;

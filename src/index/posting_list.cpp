@@ -112,13 +112,30 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
 void PostingList::Add(DocId doc_id) {
   std::unique_lock lock(mutex_);  // Exclusive access for write
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    // For delta-compressed strategy, decode, modify, and re-encode
-    // This is simpler and more maintainable than in-place delta manipulation
-    auto docs = DecodeDelta(delta_compressed_);
-    auto iter = std::lower_bound(docs.begin(), docs.end(), doc_id);
-    if (iter == docs.end() || *iter != doc_id) {
-      docs.insert(iter, doc_id);
-      delta_compressed_ = EncodeDelta(docs);
+    if (delta_compressed_.empty()) {
+      // First entry: store doc_id as-is (delta encoding stores first value raw)
+      delta_compressed_.push_back(doc_id);
+    } else {
+      // Compute the last stored doc_id by summing all deltas
+      DocId last_id = 0;
+      for (DocId delta : delta_compressed_) {
+        last_id += delta;
+      }
+
+      if (doc_id > last_id) {
+        // Fast path: monotonically increasing insertion (O(1) append)
+        // Common case during binlog replication where DocIds arrive in order
+        delta_compressed_.push_back(doc_id - last_id);
+      } else if (doc_id != last_id) {
+        // Slow path: out-of-order insertion requires full decode-sort-encode
+        auto docs = DecodeDelta(delta_compressed_);
+        auto iter = std::lower_bound(docs.begin(), docs.end(), doc_id);
+        if (iter == docs.end() || *iter != doc_id) {
+          docs.insert(iter, doc_id);
+          delta_compressed_ = EncodeDelta(docs);
+        }
+      }
+      // If doc_id == last_id, it's a duplicate; skip silently
     }
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
@@ -600,8 +617,12 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     return false;
   }
 
-  // Read strategy
-  strategy_ = static_cast<PostingStrategy>(buffer[offset++]);
+  // Read and validate strategy byte
+  uint8_t strategy_byte = buffer[offset++];
+  if (strategy_byte > static_cast<uint8_t>(PostingStrategy::kRoaringBitmap)) {
+    return false;
+  }
+  strategy_ = static_cast<PostingStrategy>(strategy_byte);
 
   if (offset + 4 > buffer.size()) {
     return false;

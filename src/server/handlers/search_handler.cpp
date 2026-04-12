@@ -119,8 +119,13 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
       output.term_infos.begin(), output.term_infos.end(),
       [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
 
-  // If any term has zero results, return empty immediately
-  if (!output.term_infos.empty() && output.term_infos[0].estimated_size == 0) {
+  // Execute the core search pipeline (intersection, NOT filter, filters, verify_text)
+  auto pipeline_result =
+      search_pipeline::Execute(query, output.term_infos, output.all_search_terms, output.current_index,
+                               output.current_doc_store, ctx_.full_config, output.current_ngram_size,
+                               output.current_kanji_ngram_size, output.current_cross_boundary, filter_threshold_);
+
+  if (pipeline_result.empty_term_detected) {
     output.results.clear();
     auto end_time = std::chrono::high_resolution_clock::now();
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
@@ -133,56 +138,15 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     return "";  // Success with empty results
   }
 
-  // Process most selective term first
-  output.results = output.current_index->SearchAnd(output.term_infos[0].ngrams);
+  output.results = std::move(pipeline_result.results);
+
   if (conn_ctx.debug_mode) {
     output.debug_info.total_candidates = output.results.size();
     output.debug_info.after_intersection = output.results.size();
     output.debug_info.optimization_used = "size-based term ordering";
-  }
-
-  // Intersect with remaining terms
-  for (size_t i = 1; i < output.term_infos.size() && !output.results.empty(); ++i) {
-    if (output.results.size() <= filter_threshold_) {
-      output.results = output.current_index->FilterByNgrams(output.results, output.term_infos[i].ngrams);
-    } else {
-      auto and_results = output.current_index->SearchAnd(output.term_infos[i].ngrams);
-      std::vector<storage::DocId> intersection;
-      intersection.reserve(std::min(output.results.size(), and_results.size()));
-      std::set_intersection(output.results.begin(), output.results.end(), and_results.begin(), and_results.end(),
-                            std::back_inserter(intersection));
-      output.results = std::move(intersection);
-    }
-  }
-
-  // Apply NOT filter if present
-  if (!query.not_terms.empty()) {
-    output.results = search_pipeline::ApplyNotFilter(output.results, query.not_terms, output.current_index,
-                                                     output.current_ngram_size, output.current_kanji_ngram_size,
-                                                     output.current_cross_boundary);
-    if (conn_ctx.debug_mode) {
-      output.debug_info.after_not = output.results.size();
-    }
-  } else if (conn_ctx.debug_mode) {
     output.debug_info.after_not = output.results.size();
-  }
-
-  // Apply filter conditions (use bitmap fast path when possible)
-  auto filter_start = std::chrono::high_resolution_clock::now();
-  if (!query.filters.empty()) {
-    output.results = search_pipeline::ApplyFiltersWithBitmap(output.results, query.filters, output.current_doc_store);
-    if (conn_ctx.debug_mode) {
-      auto filter_end = std::chrono::high_resolution_clock::now();
-      output.debug_info.filter_time_ms = std::chrono::duration<double, std::milli>(filter_end - filter_start).count();
-      output.debug_info.after_filters = output.results.size();
-    }
-  } else if (conn_ctx.debug_mode) {
     output.debug_info.after_filters = output.results.size();
   }
-
-  // N-gram post-filter verification
-  output.results = search_pipeline::ApplyVerifyTextFilter(output.results, output.all_search_terms, output.current_index,
-                                                          output.current_doc_store, ctx_.full_config);
 
   // Calculate query execution time
   auto end_time = std::chrono::high_resolution_clock::now();

@@ -35,6 +35,12 @@ constexpr unsigned int kMySQLErrBinlogPurged = 1236;
 constexpr unsigned int kMySQLErrServerLost = 2013;
 constexpr unsigned int kMySQLErrGoneAway = 2006;
 
+/// Heartbeat period in nanoseconds (3 seconds) to keep binlog connection alive
+constexpr uint64_t kHeartbeatPeriodNs = 3000000000;
+
+/// Log every Nth no-data occurrence to avoid spam
+constexpr int kLogSampleInterval = 100;
+
 namespace {
 
 /// Create a sub-config from a source, optionally overriding the read timeout.
@@ -496,7 +502,8 @@ void BinlogReader::ReaderThreadFunc() {
     // The heartbeat period must be shorter than read_timeout (5s) to avoid
     // spurious TCP disconnects. Without heartbeat, each read_timeout expiry
     // causes a full reconnect cycle.
-    if (mysql_query(binlog_connection_->GetHandle(), "SET @master_heartbeat_period = 3000000000") != 0) {
+    std::string heartbeat_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+    if (mysql_query(binlog_connection_->GetHandle(), heartbeat_query.c_str()) != 0) {
       // Non-fatal: heartbeat is optional, log and continue
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -806,7 +813,7 @@ void BinlogReader::ReaderThreadFunc() {
         // No data available (EOF or keepalive)
         // Log at debug level to diagnose why no events are being received
         int current_no_data = no_data_log_count_.fetch_add(1) + 1;
-        if (current_no_data % 100 == 1) {  // Log every 100th occurrence to avoid spam
+        if (current_no_data % kLogSampleInterval == 1) {  // Log every Nth occurrence to avoid spam
           mygram::utils::StructuredLog()
               .Event("binlog_debug")
               .Field("action", "no_data_received")

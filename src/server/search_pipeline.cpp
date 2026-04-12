@@ -203,9 +203,9 @@ roaring_bitmap_t* BuildTypeUnionBitmap(const storage::FilterIndex* filter_index,
 
   auto try_add = [&](const storage::FilterValue& fv) {
     std::string key = storage::FilterIndex::SerializeFilterValue(fv);
-    const roaring_bitmap_t* bm = filter_index->GetEqBitmap(column, key);
+    auto bm = filter_index->GetEqBitmap(column, key);
     if (bm != nullptr) {
-      roaring_bitmap_or_inplace(union_bm, bm);
+      roaring_bitmap_or_inplace(union_bm, bm.get());
     }
   };
 

@@ -68,19 +68,20 @@ void TokenBucket::Refill() {
 // RateLimiter implementation
 //
 
-RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, size_t cleanup_interval,
+RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, std::chrono::seconds cleanup_interval,
                          uint32_t inactivity_timeout_sec)
     : capacity_(capacity),
       refill_rate_(refill_rate),
       max_clients_(max_clients),
       cleanup_interval_(cleanup_interval),
-      inactivity_timeout_(inactivity_timeout_sec) {
+      inactivity_timeout_(inactivity_timeout_sec),
+      last_cleanup_time_(std::chrono::steady_clock::now()) {
   mygram::utils::StructuredLog()
       .Event("rate_limiter_created")
       .Field("capacity", static_cast<uint64_t>(capacity))
       .Field("refill_rate", static_cast<uint64_t>(refill_rate))
       .Field("max_clients", static_cast<uint64_t>(max_clients))
-      .Field("cleanup_interval", static_cast<uint64_t>(cleanup_interval))
+      .Field("cleanup_interval_sec", static_cast<uint64_t>(cleanup_interval.count()))
       .Field("inactivity_timeout_sec", static_cast<uint64_t>(inactivity_timeout_sec))
       .Debug();
 }
@@ -88,14 +89,16 @@ RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Update statistics and check for cleanup
-  uint64_t current_total = total_requests_.fetch_add(1, std::memory_order_relaxed) + 1;
-  bool should_cleanup = (current_total % cleanup_interval_ == 0);
+  // Update statistics
+  total_requests_.fetch_add(1, std::memory_order_relaxed);
 
-  // Periodic cleanup to prevent memory leak
+  // Time-based cleanup to prevent memory leak
   // Note: We do this while holding mutex_ to avoid race conditions
+  auto now = std::chrono::steady_clock::now();
+  bool should_cleanup = (now - last_cleanup_time_ >= cleanup_interval_);
+
   if (should_cleanup) {
-    auto now = std::chrono::steady_clock::now();
+    last_cleanup_time_ = now;
     size_t removed = 0;
 
     for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
