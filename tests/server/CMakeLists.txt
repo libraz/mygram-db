@@ -574,6 +574,40 @@ gtest_discover_tests(connection_acceptor_unix_test
 )
 
 
+# SearchPipeline tests (filter evaluation, text verification, cache staleness)
+
+add_executable(search_pipeline_test
+  search_pipeline_test.cpp
+)
+
+target_link_libraries(search_pipeline_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# ConnectionAcceptor TCP socket tests
+
+add_executable(connection_acceptor_tcp_test
+  connection_acceptor_tcp_test.cpp
+)
+
+target_link_libraries(connection_acceptor_tcp_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(connection_acceptor_tcp_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_socket
+)
+
 add_subdirectory(reactor)
 
 # IoReactor tests (Phase 2.T5)

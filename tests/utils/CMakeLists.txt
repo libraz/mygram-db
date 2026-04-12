@@ -239,3 +239,21 @@ gtest_discover_tests(endian_utils_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# AtomicFileWriter tests
+
+add_executable(atomic_file_writer_test
+  atomic_file_writer_test.cpp
+)
+
+target_link_libraries(atomic_file_writer_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(atomic_file_writer_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
+)
