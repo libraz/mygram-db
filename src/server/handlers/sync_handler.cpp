@@ -32,7 +32,11 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
   if (sync_manager_ == nullptr) {
     return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
-  return sync_manager_->StartSync(query.table);
+  auto result = sync_manager_->StartSync(query.table);
+  if (!result) {
+    return ResponseFormatter::FormatError(result.error().message());
+  }
+  return *result;
 }
 
 std::string SyncHandler::HandleSyncStatus(const query::Query& query) {

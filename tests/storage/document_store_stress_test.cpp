@@ -50,7 +50,7 @@ TEST(DocumentStoreStressTest, RemoveDocumentUseAfterFreeRegression) {
       std::string pk = "primary_key_with_longer_content_for_memory_pressure_" + std::to_string(iter) + "_" +
                        std::to_string(i) + "_padding";
 
-      std::unordered_map<std::string, FilterValue> filters;
+      FilterMap filters;
       filters["iteration"] = static_cast<int64_t>(iter);
       filters["index"] = static_cast<int64_t>(i);
 
@@ -124,7 +124,7 @@ TEST(DocumentStoreStressTest, ConcurrentAddRemoveMemoryStress) {
         std::string pk = "stress_add_thread_" + std::to_string(t) + "_doc_" + std::to_string(counter) +
                          "_with_extra_padding_for_memory_allocation";
 
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["thread"] = static_cast<int64_t>(t);
         filters["counter"] = static_cast<int64_t>(counter);
         filters["description"] = std::string("Document created by thread ") + std::to_string(t);

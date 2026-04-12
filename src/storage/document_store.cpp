@@ -21,8 +21,7 @@ DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) 
 
 DocumentStore::~DocumentStore() = default;
 
-Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
-                                                  const std::unordered_map<std::string, FilterValue>& filters,
+Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, const FilterMap& filters,
                                                   std::string_view normalized_text) {
   std::unique_lock lock(mutex_);
 
@@ -67,7 +66,7 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key,
   }
 
   // Store normalized text for n-gram post-filter verification
-  if (!normalized_text.empty()) {
+  if (store_texts_ && !normalized_text.empty()) {
     doc_texts_[doc_id] = std::string(normalized_text);
   }
 
@@ -134,7 +133,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     }
 
     // Store normalized text for n-gram post-filter verification
-    if (!doc.normalized_text.empty()) {
+    if (store_texts_ && !doc.normalized_text.empty()) {
       doc_texts_[doc_id] = doc.normalized_text;
     }
 
@@ -149,7 +148,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
   return doc_ids;
 }
 
-bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if document exists
@@ -165,7 +164,7 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const std::unordered_map<std::s
 
   // Get old filters for bitmap update
   auto old_filter_it = doc_filters_.find(doc_id);
-  std::unordered_map<std::string, FilterValue> old_filters;
+  FilterMap old_filters;
   if (old_filter_it != doc_filters_.end()) {
     old_filters = old_filter_it->second;
   }
@@ -235,7 +234,7 @@ void DocumentStore::Clear() {
   // Swap with empty maps to release memory (clear() doesn't shrink capacity)
   std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
-  std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>>().swap(doc_filters_);
+  std::unordered_map<DocId, FilterMap>().swap(doc_filters_);
   std::unordered_map<DocId, std::string>().swap(doc_texts_);
   filter_index_ = std::make_shared<FilterIndex>();
 

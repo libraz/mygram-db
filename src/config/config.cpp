@@ -14,6 +14,7 @@
 #include <stdexcept>
 
 #include "config/config_internal.h"
+#include "utils/constants.h"
 #include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
@@ -24,8 +25,6 @@ namespace mygramdb::config {
 namespace {
 
 using json = nlohmann::json;
-
-constexpr size_t kGtidPrefixLength = 5;  // "gtid="
 
 /**
  * @brief Get value from environment variable
@@ -541,7 +540,7 @@ Config ParseConfigFromJson(const json& root) {
 
       // If gtid= format, validate the GTID format
       if (start.find("gtid=") == 0) {
-        std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
+        std::string gtid_str = start.substr(mygram::constants::kGtidPrefixLength);  // Remove "gtid=" prefix
         // Basic GTID format check: UUID:transaction_id
         // Full validation will be done when connecting to MySQL
         if (gtid_str.find(':') == std::string::npos) {

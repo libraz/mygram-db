@@ -239,6 +239,38 @@ mygram::utils::Expected<GtidEncoder::Interval, Error> GtidEncoder::ParseInterval
   return interval;
 }
 
+std::string GtidEncoder::ExtractUuid(const std::string& gtid_str) {
+  size_t colon_pos = gtid_str.find(':');
+  if (colon_pos == std::string::npos || colon_pos == 0) {
+    return "";
+  }
+  return gtid_str.substr(0, colon_pos);
+}
+
+bool GtidEncoder::IsValidGtidSet(const std::string& gtid_set) {
+  if (gtid_set.empty()) {
+    return false;
+  }
+
+  std::istringstream input_stream(gtid_set);
+  std::string entry;
+  while (std::getline(input_stream, entry, ',')) {
+    // Trim whitespace
+    size_t start = entry.find_first_not_of(" \t\n\r");
+    size_t end = entry.find_last_not_of(" \t\n\r");
+    if (start == std::string::npos) {
+      return false;
+    }
+    entry = entry.substr(start, end - start + 1);
+
+    // Each entry must have at least one colon separating UUID from intervals
+    if (entry.find(':') == std::string::npos) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void GtidEncoder::StoreInt64(std::vector<uint8_t>& buffer, uint64_t value) {
   // Store in little-endian format (MySQL protocol uses little-endian)
   buffer.push_back(static_cast<uint8_t>(value & 0xFF));

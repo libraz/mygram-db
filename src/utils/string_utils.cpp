@@ -575,4 +575,25 @@ std::string ToUpper(std::string_view str) {
   return result;
 }
 
+std::string ReplaceAll(std::string_view str, std::string_view from, std::string_view to) {
+  std::string result(str);
+  if (from.empty()) {
+    return result;
+  }
+  size_t pos = 0;
+  while ((pos = result.find(from, pos)) != std::string::npos) {
+    result.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  return result;
+}
+
+std::pair<std::string, std::string> SplitOnFirst(std::string_view str, std::string_view delimiter) {
+  auto pos = str.find(delimiter);
+  if (pos == std::string_view::npos) {
+    return {std::string(str), ""};
+  }
+  return {std::string(str.substr(0, pos)), std::string(str.substr(pos + delimiter.size()))};
+}
+
 }  // namespace mygram::utils

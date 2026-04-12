@@ -258,19 +258,19 @@ TEST_F(TcpServerTest, FilterOperators) {
   SkipIfSocketCreationBlocked();
 
   // Add documents with filter values
-  std::unordered_map<std::string, storage::FilterValue> filters1;
+  storage::FilterMap filters1;
   filters1["score"] = static_cast<int32_t>(10);
   filters1["status"] = std::string("active");
   auto doc_id1 = doc_store_->AddDocument("doc1", filters1);
   index_->AddDocument(static_cast<index::DocId>(*doc_id1), "hello world");
 
-  std::unordered_map<std::string, storage::FilterValue> filters2;
+  storage::FilterMap filters2;
   filters2["score"] = static_cast<int32_t>(20);
   filters2["status"] = std::string("inactive");
   auto doc_id2 = doc_store_->AddDocument("doc2", filters2);
   index_->AddDocument(static_cast<index::DocId>(*doc_id2), "hello world");
 
-  std::unordered_map<std::string, storage::FilterValue> filters3;
+  storage::FilterMap filters3;
   filters3["score"] = static_cast<int32_t>(30);
   filters3["status"] = std::string("active");
   auto doc_id3 = doc_store_->AddDocument("doc3", filters3);

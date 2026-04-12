@@ -2,6 +2,8 @@ add_executable(mygram-cli
   mygram-cli.cpp
 )
 
+target_include_directories(mygram-cli PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 # Try to find and use readline library for better CLI experience
 find_library(READLINE_LIBRARY readline)
 if(READLINE_LIBRARY)

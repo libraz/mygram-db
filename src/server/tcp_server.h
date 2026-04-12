@@ -167,7 +167,7 @@ class TcpServer {
   /**
    * @brief Start SYNC operation for a table
    * @param table_name Table to synchronize
-   * @return Response string (OK or ERROR)
+   * @return Response string (OK or ERROR formatted)
    */
   std::string StartSync(const std::string& table_name);
 

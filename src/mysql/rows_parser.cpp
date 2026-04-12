@@ -35,6 +35,7 @@
 
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -64,7 +65,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
       return std::nullopt;
     }
 
-    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN = 19)
+    const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip standard header
 
     // IMPORTANT: Event size includes header + data + 4-byte CRC32 checksum at the end.
     // Even when checksums are disabled via SET @source_binlog_checksum='NONE', MySQL still
@@ -279,7 +280,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
       return std::nullopt;
     }
 
-    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
+    const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip standard header
     // Event size includes header + data + 4-byte checksum (even when checksums are disabled)
     // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: BINLOG_CHECKSUM_LEN = 4)
     const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
@@ -744,7 +745,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
       return std::nullopt;
     }
 
-    const unsigned char* ptr = buffer + 19;  // Skip standard header (LOG_EVENT_HEADER_LEN)
+    const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip standard header
     // Event size includes header + data + 4-byte checksum (even when checksums are disabled)
     const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
 

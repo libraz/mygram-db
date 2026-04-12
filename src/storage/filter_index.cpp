@@ -14,7 +14,7 @@ FilterIndex::~FilterIndex() {
   Clear();
 }
 
-void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
   std::unique_lock lock(mutex_);
   for (const auto& [column, value] : filters) {
     // Skip NULL values (monostate)
@@ -34,8 +34,7 @@ void FilterIndex::AddDocument(DocId doc_id, const std::unordered_map<std::string
   }
 }
 
-void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id,
-                                             const std::unordered_map<std::string, FilterValue>& filters) {
+void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
     if (std::holds_alternative<std::monostate>(value)) {
       continue;
@@ -55,8 +54,7 @@ void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id,
   }
 }
 
-void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
-                                 const std::unordered_map<std::string, FilterValue>& new_filters) {
+void FilterIndex::UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters) {
   std::unique_lock lock(mutex_);
   RemoveDocFromBitmapsLocked(doc_id, old_filters);
 
@@ -78,7 +76,7 @@ void FilterIndex::UpdateDocument(DocId doc_id, const std::unordered_map<std::str
   }
 }
 
-void FilterIndex::RemoveDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters) {
+void FilterIndex::RemoveDocument(DocId doc_id, const FilterMap& filters) {
   std::unique_lock lock(mutex_);
   RemoveDocFromBitmapsLocked(doc_id, filters);
 }

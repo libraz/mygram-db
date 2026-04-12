@@ -133,6 +133,9 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReactorPollFailed = 6021,      ///< epoll_wait / kevent poll failed
   kNetworkReactorQueueFull = 6022,       ///< Per-connection write queue cap exceeded (slow reader)
   kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
+  kSyncTableNotFound = 6030,             ///< Table not found for SYNC operation
+  kSyncAlreadyInProgress = 6031,         ///< SYNC already in progress for table
+  kSyncMemoryCritical = 6032,            ///< Memory critically low, cannot start SYNC
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -351,6 +354,12 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Reactor per-connection write queue full";
     case ErrorCode::kNetworkReactorAlreadyOpen:
       return "Event multiplexer already opened";
+    case ErrorCode::kSyncTableNotFound:
+      return "Table not found for SYNC";
+    case ErrorCode::kSyncAlreadyInProgress:
+      return "SYNC already in progress";
+    case ErrorCode::kSyncMemoryCritical:
+      return "Memory critically low for SYNC";
 
     // Client
     case ErrorCode::kClientNotConnected:

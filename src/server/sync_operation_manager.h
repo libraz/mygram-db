@@ -18,6 +18,8 @@
 
 #include "config/config.h"
 #include "server/server_types.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::mysql {
 class BinlogReader;
@@ -94,9 +96,9 @@ class SyncOperationManager {
   /**
    * @brief Start SYNC operation for a table
    * @param table_name Table to synchronize
-   * @return Response string (OK or ERROR)
+   * @return Expected containing success response string, or Error on failure
    */
-  std::string StartSync(const std::string& table_name);
+  mygram::utils::Expected<std::string, mygram::utils::Error> StartSync(const std::string& table_name);
 
   /**
    * @brief Stop SYNC operation for a table

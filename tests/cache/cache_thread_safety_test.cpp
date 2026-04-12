@@ -10,7 +10,6 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <set>
 #include <thread>
 #include <vector>
 
@@ -135,7 +134,7 @@ TEST(CacheThreadSafetyTest, CacheManagerLookupWithEnableDisable) {
   // Insert an entry so Lookup has something to find
   auto query = CreateQuery("posts", "thread safety test");
   std::vector<DocId> result = {1, 2, 3};
-  std::set<std::string> ngrams = {"thr", "hre", "rea", "ead"};
+  std::vector<std::string> ngrams = {"ead", "hre", "rea", "thr"};
   mgr.Insert(query, result, ngrams, 10.0);
 
   std::atomic<bool> done{false};

@@ -141,8 +141,7 @@ class InitialLoader {
   /**
    * @brief Extract filter values from row
    */
-  std::unordered_map<std::string, storage::FilterValue> ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                       unsigned int num_fields) const;
+  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
 
   /**
    * @brief Find field index by name

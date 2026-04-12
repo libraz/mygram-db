@@ -21,6 +21,7 @@
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "server/tcp_server.h"  // For TableContext definition
+#include "utils/constants.h"
 #include "utils/sql_utils.h"
 #include "utils/structured_log.h"
 
@@ -55,7 +56,7 @@ struct RowsEventContext {
  * @return Table ID (6-byte little-endian value)
  */
 inline uint64_t ExtractTableId(const unsigned char* buffer) {
-  const unsigned char* post_header = buffer + 19;  // Skip common header
+  const unsigned char* post_header = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
   uint64_t table_id = 0;
   for (int i = 0; i < 6; i++) {
     table_id |= static_cast<uint64_t>(post_header[i]) << (i * 8);
@@ -207,8 +208,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
     const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone) {
-  if ((buffer == nullptr) || length < 19) {
-    // Minimum event size is 19 bytes (binlog header)
+  if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
+    // Minimum event size is header length bytes (binlog header)
     return {};
   }
 
@@ -495,8 +496,8 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
   // sid (16 bytes, UUID)
   // gno (8 bytes, transaction number)
 
-  // Skip header (19 bytes) and commit_flag (1 byte)
-  const unsigned char* sid_ptr = buffer + 20;
+  // Skip header and commit_flag (1 byte)
+  const unsigned char* sid_ptr = buffer + mygram::constants::kBinlogEventHeaderLen + 1;
 
   // Extract GNO (8 bytes, little-endian)
   const unsigned char* gno_ptr = sid_ptr + 16;
@@ -530,7 +531,7 @@ std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned c
   //   Field 2 (SPEC): type=1, GNO as uint64
   //   Field 3 (COMMIT_TIMESTAMP): type=2, original(7B) + immediate(7B)
 
-  const unsigned char* pos = buffer + 19;  // Skip common header
+  const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
   const unsigned char* buf_end = buffer + length;
 
   if (pos >= buf_end) {
@@ -632,8 +633,8 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   // Standard binlog event header: LOG_EVENT_HEADER_LEN = 19 bytes
   //   [timestamp(4)][type(1)][server_id(4)][event_size(4)][log_pos(4)][flags(2)]
   // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h)
-  const unsigned char* ptr = buffer + 19;
-  unsigned long remaining = length - 19;
+  const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;
+  unsigned long remaining = length - mygram::constants::kBinlogEventHeaderLen;
 
   mygram::utils::StructuredLog()
       .Event("binlog_debug")
@@ -957,8 +958,8 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
 }
 
 std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
-  if ((buffer == nullptr) || length < 19) {
-    // Minimum: 19 bytes header
+  if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
+    // Minimum: header bytes
     return {};
   }
 
@@ -983,8 +984,8 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
     effective_length = length - 4;
   }
 
-  const unsigned char* pos = buffer + 19;  // Skip common header
-  size_t remaining = effective_length - 19;
+  const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
+  size_t remaining = effective_length - mygram::constants::kBinlogEventHeaderLen;
 
   if (remaining < 13) {  // Minimum: 4+4+1+2+2
     return {};

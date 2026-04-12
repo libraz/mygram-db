@@ -99,7 +99,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
   DocumentStore store1;
 
   // Create and save a snapshot
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int32_t>(1);
 
   for (int i = 0; i < 100; i++) {
@@ -191,7 +191,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
     threads.emplace_back([&store, &stop, &add_calls, i]() {
       int doc_id = 1000 + i * 1000;
       while (!stop) {
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["thread_id"] = static_cast<int32_t>(i);
         (void)store.AddDocument("add_" + std::to_string(doc_id++), filters);
         add_calls++;

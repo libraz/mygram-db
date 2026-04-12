@@ -21,6 +21,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <sstream>
 #include <unordered_set>
@@ -349,6 +350,14 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   // Add documents to document store
   auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
   if (!doc_ids_result) {
+    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", connection_.GetLastError())
+          .Warn();
+    }
     return MakeUnexpected(doc_ids_result.error());
   }
   std::vector<storage::DocId> doc_ids = *doc_ids_result;
@@ -448,14 +457,30 @@ std::string InitialLoader::BuildSelectQuery() const {
     // These values come from configuration, but we escape them as a safety measure.
     auto escape_sql_value = [](const std::string& value) -> std::string {
       std::string escaped;
-      escaped.reserve(value.size());
+      escaped.reserve(value.size() + value.size() / 8);  // slight overalloc for safety
       for (char chr : value) {
-        if (chr == '\'') {
-          escaped += "''";
-        } else if (chr == '\\') {
-          escaped += "\\\\";
-        } else {
-          escaped += chr;
+        switch (chr) {
+          case '\0':
+            escaped += "\\0";
+            break;
+          case '\'':
+            escaped += "''";
+            break;
+          case '\\':
+            escaped += "\\\\";
+            break;
+          case '\n':
+            escaped += "\\n";
+            break;
+          case '\r':
+            escaped += "\\r";
+            break;
+          case '\x1a':
+            escaped += "\\Z";
+            break;  // Ctrl+Z (EOF on Windows)
+          default:
+            escaped += chr;
+            break;
         }
       }
       return escaped;
@@ -575,9 +600,8 @@ std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields,
   return "";
 }
 
-std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields,
-                                                                                    unsigned int num_fields) const {
-  std::unordered_map<std::string, storage::FilterValue> filters;
+storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const {
+  storage::FilterMap filters;
 
   for (const auto& filter_config : table_config_.filters) {
     int idx = FindFieldIndex(filter_config.name, fields, num_fields);
@@ -588,26 +612,69 @@ std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilt
     std::string value_str(row[idx]);
     const std::string& type = filter_config.type;
 
-    try {
-      // Integer types
-      if (type == "tinyint") {
-        filters[filter_config.name] = static_cast<int8_t>(std::stoi(value_str));
-      } else if (type == "tinyint_unsigned") {
-        filters[filter_config.name] = static_cast<uint8_t>(std::stoul(value_str));
-      } else if (type == "smallint") {
-        filters[filter_config.name] = static_cast<int16_t>(std::stoi(value_str));
-      } else if (type == "smallint_unsigned") {
-        filters[filter_config.name] = static_cast<uint16_t>(std::stoul(value_str));
-      } else if (type == "int") {
-        filters[filter_config.name] = static_cast<int32_t>(std::stoi(value_str));
-      } else if (type == "int_unsigned") {
-        filters[filter_config.name] = static_cast<uint32_t>(std::stoul(value_str));
-      } else if (type == "bigint") {
-        filters[filter_config.name] = std::stoll(value_str);
+    // Helper lambda for integer parsing via std::from_chars
+    auto parse_integer = [&](auto& out_val) -> bool {
+      auto [ptr, ec] = std::from_chars(value_str.data(), value_str.data() + value_str.size(), out_val);
+      if (ec != std::errc()) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "extract_filters")
+            .Field("type", "filter_parse_failed")
+            .Field("filter_type", type)
+            .Field("field", filter_config.name)
+            .Field("value", value_str)
+            .Warn();
+        return false;
       }
-      // Float types
+      return true;
+    };
+
+    {
+      // Integer types (using std::from_chars)
+      if (type == "tinyint") {
+        int8_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "tinyint_unsigned") {
+        uint8_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "smallint") {
+        int16_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "smallint_unsigned") {
+        uint16_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "int") {
+        int32_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "int_unsigned") {
+        uint32_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      } else if (type == "bigint") {
+        int64_t val = 0;
+        if (parse_integer(val))
+          filters[filter_config.name] = val;
+      }
+      // Float types (std::stod — from_chars for double not reliably available in C++17)
       else if (type == "float" || type == "double") {
-        filters[filter_config.name] = std::stod(value_str);
+        try {
+          filters[filter_config.name] = std::stod(value_str);
+        } catch (const std::exception& e) {
+          mygram::utils::StructuredLog()
+              .Event("loader_warning")
+              .Field("operation", "extract_filters")
+              .Field("type", "filter_parse_failed")
+              .Field("filter_type", type)
+              .Field("field", filter_config.name)
+              .Field("value", value_str)
+              .Field("error", e.what())
+              .Warn();
+        }
       }
       // String types
       else if (type == "string" || type == "varchar" || type == "text") {
@@ -631,16 +698,16 @@ std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilt
         }
       } else if (type == "timestamp") {
         // TIMESTAMP: Already in epoch seconds (UTC)
-        try {
-          filters[filter_config.name] = static_cast<uint64_t>(std::stoull(value_str));
-        } catch (const std::exception& e) {
+        uint64_t val = 0;
+        if (parse_integer(val)) {
+          filters[filter_config.name] = val;
+        } else {
           mygram::utils::StructuredLog()
               .Event("loader_warning")
               .Field("operation", "extract_filters")
               .Field("type", "timestamp_conversion_failed")
               .Field("value", value_str)
               .Field("field", filter_config.name)
-              .Field("error", e.what())
               .Warn();
         }
       } else if (type == "time") {
@@ -678,16 +745,6 @@ std::unordered_map<std::string, storage::FilterValue> InitialLoader::ExtractFilt
             .Field("field", filter_config.name)
             .Warn();
       }
-    } catch (const std::exception& e) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "extract_filters")
-          .Field("type", "filter_parse_failed")
-          .Field("filter_type", type)
-          .Field("field", filter_config.name)
-          .Field("value", value_str)
-          .Field("error", e.what())
-          .Warn();
     }
   }
 

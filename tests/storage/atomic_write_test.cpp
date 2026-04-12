@@ -36,7 +36,7 @@ class AtomicWriteTest : public ::testing::Test {
     // Add some test documents
     for (int i = 0; i < 100; ++i) {
       std::string pk = "pk" + std::to_string(i);
-      std::unordered_map<std::string, FilterValue> filters;
+      FilterMap filters;
       filters["status"] = static_cast<int64_t>(i % 10);
       doc_store_->AddDocument(pk, filters);
     }

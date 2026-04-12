@@ -57,4 +57,18 @@ constexpr int kSecondsPerHour = 3600;
 /// Seconds per day
 constexpr int kSecondsPerDay = 86400;
 
+// ============================================================================
+// MySQL binlog constants
+// ============================================================================
+
+/// Standard MySQL binlog event header length (LOG_EVENT_HEADER_LEN)
+constexpr size_t kBinlogEventHeaderLen = 19;
+
+// ============================================================================
+// GTID constants
+// ============================================================================
+
+/// Length of the "gtid=" prefix in start_from configuration
+constexpr size_t kGtidPrefixLength = 5;
+
 }  // namespace mygram::constants

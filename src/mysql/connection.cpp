@@ -14,6 +14,7 @@
 #include <sstream>
 #include <utility>
 
+#include "mysql/gtid_encoder.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
@@ -29,16 +30,16 @@ mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::strin
   using mygram::utils::MakeUnexpected;
 
   // Format: "UUID:transaction_id" or "UUID:start-end"
-  // For simplicity, we'll parse the simple format
-  size_t colon_pos = gtid_str.find(':');
-  if (colon_pos == std::string::npos) {
+  std::string uuid = GtidEncoder::ExtractUuid(gtid_str);
+  if (uuid.empty()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: missing colon separator", gtid_str));
   }
 
   GTID gtid;
-  gtid.server_uuid = gtid_str.substr(0, colon_pos);
+  gtid.server_uuid = uuid;
 
+  size_t colon_pos = gtid_str.find(':');
   std::string txn_part = gtid_str.substr(colon_pos + 1);
 
   // Handle range format (UUID:1-10) - take the end value

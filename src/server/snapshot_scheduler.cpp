@@ -55,7 +55,7 @@ SnapshotScheduler::~SnapshotScheduler() {
 }
 
 void SnapshotScheduler::Start() {
-  if (running_) {
+  if (running_.load()) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("component", "snapshot_scheduler")
@@ -80,12 +80,15 @@ void SnapshotScheduler::Start() {
 }
 
 void SnapshotScheduler::Stop() {
-  if (!running_) {
+  // Use compare_exchange to ensure only one thread performs the stop sequence.
+  // Without this, two concurrent Stop() calls could both pass the running_
+  // check and double-join the thread, causing std::terminate.
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
     return;
   }
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();
-  running_ = false;
 
   if (scheduler_thread_ && scheduler_thread_->joinable()) {
     scheduler_thread_->join();

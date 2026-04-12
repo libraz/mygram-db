@@ -20,9 +20,9 @@
 
 namespace mygramdb::mysql {
 
-bool BinlogFilterEvaluator::EvaluateRequiredFilters(
-    const std::unordered_map<std::string, storage::FilterValue>& filters, const config::TableConfig& table_config,
-    const std::string& datetime_timezone) {
+bool BinlogFilterEvaluator::EvaluateRequiredFilters(const storage::FilterMap& filters,
+                                                    const config::TableConfig& table_config,
+                                                    const std::string& datetime_timezone) {
   // If no required_filters, all data is accepted
   if (table_config.required_filters.empty()) {
     return true;
@@ -443,9 +443,10 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
   return false;
 }
 
-std::unordered_map<std::string, storage::FilterValue> BinlogFilterEvaluator::ExtractAllFilters(
-    const RowData& row_data, const config::TableConfig& table_config, const std::string& datetime_timezone) {
-  std::unordered_map<std::string, storage::FilterValue> all_filters;
+storage::FilterMap BinlogFilterEvaluator::ExtractAllFilters(const RowData& row_data,
+                                                            const config::TableConfig& table_config,
+                                                            const std::string& datetime_timezone) {
+  storage::FilterMap all_filters;
 
   // Convert required_filters to FilterConfig format for extraction
   std::vector<config::FilterConfig> required_as_filters;

@@ -50,7 +50,7 @@ TEST_F(StressTest, DISABLED_LargeScale100K) {
 
   for (int i = 0; i < num_docs; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, storage::FilterValue> filters;
+    storage::FilterMap filters;
     filters["category"] = static_cast<int64_t>(i % 100);
 
     auto doc_id = doc_store_->AddDocument(pk, filters);
@@ -111,7 +111,7 @@ TEST_F(StressTest, DISABLED_LargeScale1M) {
 
   for (int i = 0; i < num_docs; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, storage::FilterValue> filters;
+    storage::FilterMap filters;
     filters["category"] = static_cast<int64_t>(i % 1000);
 
     auto doc_id = doc_store_->AddDocument(pk, filters);

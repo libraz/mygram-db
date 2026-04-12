@@ -419,18 +419,23 @@ uint64_t Index::Count(std::string_view term) const {
 }
 
 size_t Index::MemoryUsage() const {
-  // Acquire shared lock for read-only access (allows concurrent readers)
+  // Acquire shared lock for read-only access (allows concurrent readers).
+  // Use SizeUnsafe/MemoryUsageUnsafe to avoid redundant inner lock acquisition
+  // on each PostingList — the outer shared lock on postings_mutex_ already
+  // prevents structural changes to the map and its entries.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   size_t total = 0;
   for (const auto& [term, posting] : term_postings_) {
-    total += term.size();             // Term string
-    total += posting->MemoryUsage();  // Posting list
+    total += term.size();                   // Term string
+    total += posting->MemoryUsageUnsafe();  // Posting list (no inner lock)
   }
   return total;
 }
 
 Index::IndexStatistics Index::GetStatistics() const {
-  // Acquire shared lock for read-only access (allows concurrent readers)
+  // Acquire shared lock for read-only access (allows concurrent readers).
+  // Use SizeUnsafe/MemoryUsageUnsafe to avoid redundant inner lock acquisition
+  // on each PostingList — the outer shared lock prevents structural changes.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   IndexStatistics stats;
   stats.total_terms = term_postings_.size();
@@ -440,8 +445,8 @@ Index::IndexStatistics Index::GetStatistics() const {
   stats.memory_usage_bytes = 0;
 
   for (const auto& [term, posting] : term_postings_) {
-    // Count postings
-    stats.total_postings += posting->Size();
+    // Count postings (no inner lock — outer shared lock is sufficient)
+    stats.total_postings += posting->SizeUnsafe();
 
     // Count strategy types
     if (posting->GetStrategy() == PostingStrategy::kDeltaCompressed) {
@@ -450,9 +455,9 @@ Index::IndexStatistics Index::GetStatistics() const {
       stats.roaring_bitmap_lists++;
     }
 
-    // Memory usage
-    stats.memory_usage_bytes += term.size();             // Term string
-    stats.memory_usage_bytes += posting->MemoryUsage();  // Posting list
+    // Memory usage (no inner lock — outer shared lock is sufficient)
+    stats.memory_usage_bytes += term.size();
+    stats.memory_usage_bytes += posting->MemoryUsageUnsafe();
   }
 
   return stats;

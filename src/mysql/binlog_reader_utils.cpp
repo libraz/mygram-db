@@ -22,6 +22,7 @@
 #include "mysql/binlog_event_processor.h"
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/connection_validator.h"
+#include "mysql/gtid_encoder.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
@@ -308,7 +309,7 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
 
   // It's a single transaction number (e.g., "uuid:101")
   // Convert to range "uuid:1-101" so the server excludes transactions 1 through 101
-  std::string uuid = gtid.substr(0, colon_pos);
+  std::string uuid = GtidEncoder::ExtractUuid(gtid);
   return uuid + ":1-" + after_colon;
 }
 

@@ -358,7 +358,11 @@ std::string TcpServer::StartSync(const std::string& table_name) {
   if (!sync_manager_) {
     return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
-  return sync_manager_->StartSync(table_name);
+  auto result = sync_manager_->StartSync(table_name);
+  if (!result) {
+    return ResponseFormatter::FormatError(result.error().message());
+  }
+  return *result;
 }
 
 std::string TcpServer::GetSyncStatus() {

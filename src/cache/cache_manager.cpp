@@ -122,7 +122,7 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 }
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
-                          const std::set<std::string>& ngrams, double query_cost_ms, int ngram_size,
+                          const std::vector<std::string>& ngrams, double query_cost_ms, int ngram_size,
                           int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;

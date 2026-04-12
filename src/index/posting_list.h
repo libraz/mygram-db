@@ -41,6 +41,8 @@ enum class PostingStrategy : uint8_t {
  * - Roaring bitmap for dense postings (auto-selected based on threshold)
  */
 class PostingList {
+  friend class Index;  // Allow Index to call lock-free accessors
+
  public:
   /**
    * @brief Construct empty posting list
@@ -184,6 +186,9 @@ class PostingList {
   // Delta-compressed storage
   std::vector<uint32_t> delta_compressed_;
 
+  // Cached last DocId for O(1) fast-path append in Add()
+  DocId last_doc_id_ = 0;
+
   // Roaring bitmap storage
   roaring_bitmap_t* roaring_bitmap_ = nullptr;
 
@@ -195,6 +200,24 @@ class PostingList {
   // Protects all data members for thread-safe read/write operations
   // Uses shared_mutex to allow concurrent reads while serializing writes
   mutable std::shared_mutex mutex_;
+
+  /**
+   * @brief Get document count without acquiring mutex
+   * @note Caller must already hold mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] uint64_t SizeUnsafe() const;
+
+  /**
+   * @brief Get memory usage without acquiring mutex
+   * @note Caller must already hold mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] size_t MemoryUsageUnsafe() const;
+
+  /**
+   * @brief Recompute and cache last_doc_id_ from delta_compressed_
+   * @note Caller must already hold mutex_ exclusively
+   */
+  void RecomputeLastDocId();
 
   /**
    * @brief Convert from delta to Roaring

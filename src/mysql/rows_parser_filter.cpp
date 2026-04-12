@@ -18,10 +18,9 @@
 
 namespace mygramdb::mysql {
 
-std::unordered_map<std::string, storage::FilterValue> ExtractFilters(
-    const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
-    const std::string& datetime_timezone) {
-  std::unordered_map<std::string, storage::FilterValue> filters;
+storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
+                                  const std::string& datetime_timezone) {
+  storage::FilterMap filters;
 
   for (const auto& filter_config : filter_configs) {
     // Check if column exists in row data

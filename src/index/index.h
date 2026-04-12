@@ -301,6 +301,10 @@ class Index {
   // Shared mutex for read/write protection
   // - Readers (Search): shared_lock (multiple concurrent readers allowed)
   // - Writers (Add/Update/Remove/Optimize): unique_lock (exclusive access)
+  // Lock ordering (acquire in this order to prevent deadlock):
+  //   postings_mutex_ → PostingList::mutex_
+  // When postings_mutex_ is held (shared or exclusive), it is safe to call
+  // PostingList's lock-free accessors (SizeUnsafe, MemoryUsageUnsafe).
   mutable std::shared_mutex postings_mutex_;
 
   // Flag to prevent concurrent optimization

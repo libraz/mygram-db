@@ -422,7 +422,9 @@ void QueryCache::RefreshLRU() {
   // Load TTL once for consistent use throughout this refresh cycle
   const int refresh_ttl = ttl_seconds_.load();
 
-  // Update LRU for entries that were accessed since last refresh
+  // Update LRU for entries that were accessed since last refresh.
+  // Collect keys to touch separately to avoid modifying map values during iteration.
+  std::vector<CacheKey> keys_to_touch;
   for (auto& [key, entry_pair] : cache_map_) {
     // Check TTL expiration
     if (refresh_ttl > 0) {
@@ -437,10 +439,14 @@ void QueryCache::RefreshLRU() {
     }
 
     if (entry_pair.first.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
-      // Entry was accessed, move to front of LRU list
-      Touch(key);
+      keys_to_touch.push_back(key);
       entry_pair.first.metadata.last_accessed = now;
     }
+  }
+
+  // Apply LRU updates after iteration completes
+  for (const auto& key : keys_to_touch) {
+    Touch(key);
   }
 
   // Remove Lookup-detected expired entries (stats already counted by Lookup)

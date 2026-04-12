@@ -60,7 +60,7 @@ struct BinlogEvent {
   std::string primary_key;
   std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
   std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
-  std::unordered_map<std::string, storage::FilterValue> filters;
+  storage::FilterMap filters;
   std::string gtid;  // GTID for this event
 
   /**

@@ -250,7 +250,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
     absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
-    std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
+    std::unordered_map<DocId, FilterMap> new_doc_filters;
     std::unordered_map<DocId, std::string> new_doc_texts;
 
     // Read doc_id -> pk mappings and filters
@@ -295,7 +295,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
       }
 
       if (filter_count > 0) {
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
 
         for (uint32_t j = 0; j < filter_count; ++j) {
           // Read filter name
@@ -658,7 +658,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     std::unordered_map<DocId, std::string> new_doc_id_to_pk;
     absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
         new_pk_to_doc_id;
-    std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> new_doc_filters;
+    std::unordered_map<DocId, FilterMap> new_doc_filters;
     std::unordered_map<DocId, std::string> new_doc_texts;
 
     // Read doc_id -> pk mappings and filters
@@ -715,7 +715,7 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
       }
 
       if (filter_count > 0) {
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
 
         for (uint32_t j = 0; j < filter_count; ++j) {
           // Read filter name

@@ -333,10 +333,10 @@ TEST(SyncOperationManagerTest, ConcurrentStartSyncThreadSafe) {
 
   for (int i = 0; i < num_threads; ++i) {
     threads.emplace_back([&]() {
-      std::string result = sync_mgr.StartSync("test_table");
-      if (result.find("OK SYNC STARTED") != std::string::npos) {
+      auto result = sync_mgr.StartSync("test_table");
+      if (result && result->find("OK SYNC STARTED") != std::string::npos) {
         success_count.fetch_add(1);
-      } else if (result.find("already in progress") != std::string::npos) {
+      } else if (!result && result.error().message().find("already in progress") != std::string::npos) {
         already_running_count.fetch_add(1);
       }
     });

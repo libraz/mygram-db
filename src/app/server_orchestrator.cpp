@@ -13,13 +13,13 @@
 #include "loader/initial_loader.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
 
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
-constexpr size_t kGtidPrefixLength = 5;           // "gtid="
 constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
 }  // namespace
 
@@ -373,7 +373,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     }
   } else if (start_from.find("gtid=") == 0) {
     // Extract GTID from "gtid=<UUID:txn>" format
-    start_gtid = start_from.substr(kGtidPrefixLength);
+    start_gtid = start_from.substr(mygram::constants::kGtidPrefixLength);
     mygram::utils::StructuredLog()
         .Event("server_debug")
         .Field("action", "replication_from_specified_gtid")

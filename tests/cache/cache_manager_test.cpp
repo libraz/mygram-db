@@ -70,7 +70,7 @@ TEST(CacheManagerTest, BasicWorkflow) {
 
   auto query = CreateQuery("posts", "golang");
   std::vector<DocId> result = {1, 2, 3, 4, 5};
-  std::set<std::string> ngrams = {"gol", "ola", "lan", "ang"};
+  std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
 
   // Insert
   EXPECT_TRUE(mgr.Insert(query, result, ngrams, 15.0));
@@ -104,13 +104,13 @@ TEST(CacheManagerTest, PreciseInvalidation) {
   // Query 1: "golang"
   auto query1 = CreateQuery("posts", "golang");
   std::vector<DocId> result1 = {1, 2, 3};
-  std::set<std::string> ngrams1 = {"gol", "ola", "lan", "ang"};
+  std::vector<std::string> ngrams1 = {"ang", "gol", "lan", "ola"};
   mgr.Insert(query1, result1, ngrams1, 15.0);
 
   // Query 2: "python"
   auto query2 = CreateQuery("posts", "python");
   std::vector<DocId> result2 = {4, 5, 6};
-  std::set<std::string> ngrams2 = {"pyt", "yth", "tho", "hon"};
+  std::vector<std::string> ngrams2 = {"hon", "pyt", "tho", "yth"};
   mgr.Insert(query2, result2, ngrams2, 15.0);
 
   // INSERT document with "golang" - should only invalidate query1
@@ -139,13 +139,13 @@ TEST(CacheManagerTest, UpdateInvalidation) {
   // Query for "rust"
   auto query1 = CreateQuery("posts", "rust");
   std::vector<DocId> result1 = {1, 2};
-  std::set<std::string> ngrams1 = {"rus", "ust"};
+  std::vector<std::string> ngrams1 = {"rus", "ust"};
   mgr.Insert(query1, result1, ngrams1, 15.0);
 
   // Query for "golang"
   auto query2 = CreateQuery("posts", "golang");
   std::vector<DocId> result2 = {3, 4};
-  std::set<std::string> ngrams2 = {"gol", "ola", "lan", "ang"};
+  std::vector<std::string> ngrams2 = {"ang", "gol", "lan", "ola"};
   mgr.Insert(query2, result2, ngrams2, 15.0);
 
   // UPDATE: change "rust" to "golang"
@@ -172,13 +172,13 @@ TEST(CacheManagerTest, DeleteInvalidation) {
   // Query for "docker"
   auto query1 = CreateQuery("posts", "docker");
   std::vector<DocId> result1 = {1, 2};
-  std::set<std::string> ngrams1 = {"doc", "ock", "cke", "ker"};
+  std::vector<std::string> ngrams1 = {"cke", "doc", "ker", "ock"};
   mgr.Insert(query1, result1, ngrams1, 15.0);
 
   // Query for "kubernetes"
   auto query2 = CreateQuery("posts", "kubernetes");
   std::vector<DocId> result2 = {3, 4};
-  std::set<std::string> ngrams2 = {"kub", "ube", "ber", "ern", "rne", "net", "ete", "tes"};
+  std::vector<std::string> ngrams2 = {"ber", "ern", "ete", "kub", "net", "rne", "tes", "ube"};
   mgr.Insert(query2, result2, ngrams2, 15.0);
 
   // DELETE document with "docker"
@@ -205,7 +205,7 @@ TEST(CacheManagerTest, TableIsolation) {
   // Query for "posts" table
   auto query1 = CreateQuery("posts", "golang");
   std::vector<DocId> result1 = {1, 2};
-  std::set<std::string> ngrams = {"gol", "ola", "lan", "ang"};
+  std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
   mgr.Insert(query1, result1, ngrams, 15.0);
 
   // Query for "comments" table with same search text
@@ -234,7 +234,7 @@ TEST(CacheManagerTest, ClearTable) {
 
   CacheManager mgr(config, table_contexts);
 
-  std::set<std::string> ngrams = {"tes", "est"};
+  std::vector<std::string> ngrams = {"est", "tes"};
 
   // Insert into multiple tables
   auto query1 = CreateQuery("posts", "test");
@@ -266,7 +266,7 @@ TEST(CacheManagerTest, ClearAll) {
 
   CacheManager mgr(config, table_contexts);
 
-  std::set<std::string> ngrams = {"tes", "est"};
+  std::vector<std::string> ngrams = {"est", "tes"};
 
   auto query1 = CreateQuery("posts", "test");
   mgr.Insert(query1, {1, 2}, ngrams, 15.0);
@@ -296,7 +296,7 @@ TEST(CacheManagerTest, EnableDisable) {
   CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
-  std::set<std::string> ngrams = {"tes", "est"};
+  std::vector<std::string> ngrams = {"est", "tes"};
 
   // Insert while enabled
   mgr.Insert(query, {1, 2}, ngrams, 15.0);
@@ -338,7 +338,7 @@ TEST(CacheManagerTest, Statistics) {
   CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
-  std::set<std::string> ngrams = {"tes", "est"};
+  std::vector<std::string> ngrams = {"est", "tes"};
 
   // Insert
   mgr.Insert(query, {1, 2, 3}, ngrams, 15.0);
@@ -372,7 +372,7 @@ TEST(CacheManagerTest, MinQueryCostThreshold) {
   CacheManager mgr(config, table_contexts);
 
   auto query = CreateQuery("posts", "test");
-  std::set<std::string> ngrams = {"tes", "est"};
+  std::vector<std::string> ngrams = {"est", "tes"};
 
   // Try to insert query with cost < threshold (should fail)
   EXPECT_FALSE(mgr.Insert(query, {1, 2, 3}, ngrams, 10.0));
@@ -455,14 +455,14 @@ TEST(CacheManagerTest, PerTableNgramSettings) {
   auto query1 = CreateQuery("posts", "test");
   std::vector<DocId> result1 = {1, 2, 3};
   // With ngram_size=3, "test" generates: "tes", "est"
-  std::set<std::string> ngrams1 = {"tes", "est"};
+  std::vector<std::string> ngrams1 = {"est", "tes"};
   mgr.Insert(query1, result1, ngrams1, 15.0);
 
   // Cache query for "comments" table (ngram_size=2)
   auto query2 = CreateQuery("comments", "test");
   std::vector<DocId> result2 = {4, 5, 6};
   // With ngram_size=2, "test" generates: "te", "es", "st"
-  std::set<std::string> ngrams2 = {"te", "es", "st"};
+  std::vector<std::string> ngrams2 = {"es", "st", "te"};
   mgr.Insert(query2, result2, ngrams2, 15.0);
 
   // Verify both queries are cached
@@ -522,7 +522,7 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
       result.push_back(static_cast<DocId>(i * 1000 + j));
     }
 
-    std::set<std::string> ngrams = {"tes", "est", "test"};
+    std::vector<std::string> ngrams = {"est", "tes", "test"};
     cache_mgr.Insert(query, result, ngrams, 10.0);
     queries.push_back(query);
   }
@@ -546,7 +546,7 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
       result.push_back(static_cast<DocId>(i * 1000 + j));
     }
 
-    std::set<std::string> ngrams = {"tes", "est", "test"};
+    std::vector<std::string> ngrams = {"est", "tes", "test"};
     cache_mgr.Insert(query, result, ngrams, 10.0);
   }
 
@@ -558,7 +558,7 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
   auto new_query = CreateQuery("posts", "latest query");
 
   std::vector<DocId> new_result = {999};
-  std::set<std::string> new_ngrams = {"lat", "ate", "test"};
+  std::vector<std::string> new_ngrams = {"ate", "lat", "test"};
 
   ASSERT_TRUE(cache_mgr.Insert(new_query, new_result, new_ngrams, 10.0));
 
@@ -603,7 +603,7 @@ TEST(CacheManagerTest, DestructorSafeWithShortTTLEntries) {
       for (int j = 0; j < 50; ++j) {
         result.push_back(static_cast<DocId>(i * 100 + j));
       }
-      std::set<std::string> ngrams = {"des", "est", "str", "tru"};
+      std::vector<std::string> ngrams = {"des", "est", "str", "tru"};
       mgr.Insert(query, result, ngrams, 15.0);
     }
 
@@ -642,7 +642,7 @@ TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
       for (int j = 0; j < 100; ++j) {
         result.push_back(static_cast<DocId>(i * 1000 + j));
       }
-      std::set<std::string> ngrams = {"evi", "vic", "ict"};
+      std::vector<std::string> ngrams = {"evi", "ict", "vic"};
       mgr.Insert(query, result, ngrams, 10.0);
     }
 

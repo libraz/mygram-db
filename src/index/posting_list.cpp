@@ -89,9 +89,11 @@ PostingList::PostingList(PostingList&& other) noexcept
     : strategy_(other.strategy_),
       roaring_threshold_(other.roaring_threshold_),
       delta_compressed_(std::move(other.delta_compressed_)),
+      last_doc_id_(other.last_doc_id_),
       roaring_bitmap_(other.roaring_bitmap_),
       version_(other.version_.load(std::memory_order_relaxed)) {
   other.roaring_bitmap_ = nullptr;
+  other.last_doc_id_ = 0;
 }
 
 PostingList& PostingList::operator=(PostingList&& other) noexcept {
@@ -102,9 +104,11 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
     strategy_ = other.strategy_;
     roaring_threshold_ = other.roaring_threshold_;
     delta_compressed_ = std::move(other.delta_compressed_);
+    last_doc_id_ = other.last_doc_id_;
     roaring_bitmap_ = other.roaring_bitmap_;
     version_.store(other.version_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.roaring_bitmap_ = nullptr;
+    other.last_doc_id_ = 0;
   }
   return *this;
 }
@@ -115,27 +119,24 @@ void PostingList::Add(DocId doc_id) {
     if (delta_compressed_.empty()) {
       // First entry: store doc_id as-is (delta encoding stores first value raw)
       delta_compressed_.push_back(doc_id);
+      last_doc_id_ = doc_id;
     } else {
-      // Compute the last stored doc_id by summing all deltas
-      DocId last_id = 0;
-      for (DocId delta : delta_compressed_) {
-        last_id += delta;
-      }
-
-      if (doc_id > last_id) {
+      if (doc_id > last_doc_id_) {
         // Fast path: monotonically increasing insertion (O(1) append)
         // Common case during binlog replication where DocIds arrive in order
-        delta_compressed_.push_back(doc_id - last_id);
-      } else if (doc_id != last_id) {
+        delta_compressed_.push_back(doc_id - last_doc_id_);
+        last_doc_id_ = doc_id;
+      } else if (doc_id != last_doc_id_) {
         // Slow path: out-of-order insertion requires full decode-sort-encode
         auto docs = DecodeDelta(delta_compressed_);
         auto iter = std::lower_bound(docs.begin(), docs.end(), doc_id);
         if (iter == docs.end() || *iter != doc_id) {
           docs.insert(iter, doc_id);
           delta_compressed_ = EncodeDelta(docs);
+          // last_doc_id_ unchanged since new doc_id < last_doc_id_
         }
       }
-      // If doc_id == last_id, it's a duplicate; skip silently
+      // If doc_id == last_doc_id_, it's a duplicate; skip silently
     }
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
@@ -156,6 +157,9 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     merged.reserve(existing.size() + doc_ids.size());
     std::set_union(existing.begin(), existing.end(), doc_ids.begin(), doc_ids.end(), std::back_inserter(merged));
     delta_compressed_ = EncodeDelta(merged);
+    if (!merged.empty()) {
+      last_doc_id_ = merged.back();
+    }
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
@@ -168,10 +172,11 @@ void PostingList::Remove(DocId doc_id) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
-    auto iter = std::find(docs.begin(), docs.end(), doc_id);
-    if (iter != docs.end()) {
+    auto iter = std::lower_bound(docs.begin(), docs.end(), doc_id);
+    if (iter != docs.end() && *iter == doc_id) {
       docs.erase(iter);
       delta_compressed_ = EncodeDelta(docs);
+      last_doc_id_ = docs.empty() ? 0 : docs.back();
     }
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
@@ -311,6 +316,10 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
 
 uint64_t PostingList::Size() const {
   std::shared_lock lock(mutex_);  // Protect read access
+  return SizeUnsafe();
+}
+
+uint64_t PostingList::SizeUnsafe() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size();
   }
@@ -319,10 +328,26 @@ uint64_t PostingList::Size() const {
 
 size_t PostingList::MemoryUsage() const {
   std::shared_lock lock(mutex_);  // Protect read access
+  return MemoryUsageUnsafe();
+}
+
+size_t PostingList::MemoryUsageUnsafe() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size() * sizeof(uint32_t);
   }
   return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
+}
+
+void PostingList::RecomputeLastDocId() {
+  if (delta_compressed_.empty()) {
+    last_doc_id_ = 0;
+    return;
+  }
+  DocId id = 0;
+  for (DocId delta : delta_compressed_) {
+    id += delta;
+  }
+  last_doc_id_ = id;
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
@@ -493,6 +518,7 @@ void PostingList::ConvertToRoaring() {
 
   delta_compressed_.clear();
   delta_compressed_.shrink_to_fit();
+  last_doc_id_ = 0;  // Not used for Roaring strategy
   strategy_ = PostingStrategy::kRoaringBitmap;
 }
 
@@ -508,6 +534,7 @@ void PostingList::ConvertToDelta() {
   std::vector<DocId> docs(size);
   roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
   delta_compressed_ = EncodeDelta(docs);
+  last_doc_id_ = docs.empty() ? 0 : docs.back();
 
   roaring_bitmap_free(roaring_bitmap_);
   roaring_bitmap_ = nullptr;
@@ -652,6 +679,8 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       delta_compressed_.push_back(val);
       offset += 4;
     }
+
+    RecomputeLastDocId();
 
     if (roaring_bitmap_ != nullptr) {
       roaring_bitmap_free(roaring_bitmap_);

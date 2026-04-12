@@ -43,14 +43,13 @@ class FilterIndex {
   FilterIndex& operator=(FilterIndex&&) = delete;
 
   /// Add doc_id to bitmaps for each filter value
-  void AddDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
+  void AddDocument(DocId doc_id, const FilterMap& filters);
 
   /// Update bitmaps when filter values change
-  void UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& old_filters,
-                      const std::unordered_map<std::string, FilterValue>& new_filters);
+  void UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters);
 
   /// Remove doc_id from all bitmaps for its filter values
-  void RemoveDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
+  void RemoveDocument(DocId doc_id, const FilterMap& filters);
 
   /// Get a copy of bitmap for (column, value) pair. Returns null ptr if not found.
   /// The returned bitmap is an independent copy safe to use without holding any lock.
@@ -67,7 +66,7 @@ class FilterIndex {
 
  private:
   /// Remove doc_id from bitmaps for given filters. Caller must hold unique_lock on mutex_.
-  void RemoveDocFromBitmapsLocked(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
+  void RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters);
 
   /// Protects all bitmap data from concurrent read/write access.
   /// Readers (GetEqBitmap, MemoryUsage) take shared_lock;

@@ -86,10 +86,17 @@ using FilterValue = std::variant<std::monostate,  // NULL value
 /**
  * @brief Document metadata
  */
+/// Filter map type with transparent hash for heterogeneous lookup (string_view → no allocation)
+using FilterMap = absl::flat_hash_map<std::string, FilterValue, mygram::utils::TransparentStringHash,
+                                      mygram::utils::TransparentStringEqual>;
+
+/**
+ * @brief Document metadata
+ */
 struct Document {
   DocId doc_id = 0;
   std::string primary_key;
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
 };
 
 /**
@@ -113,7 +120,7 @@ class DocumentStore {
    */
   struct DocumentItem {
     std::string primary_key;
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     std::string normalized_text;  ///< Normalized text for n-gram verification
   };
 
@@ -128,8 +135,7 @@ class DocumentStore {
    * @return Expected<DocId, Error> Assigned DocID (or existing DocID if duplicate primary key),
    *         or error (e.g., DocID exhausted)
    */
-  [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key,
-                                                   const std::unordered_map<std::string, FilterValue>& filters = {},
+  [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key, const FilterMap& filters = {},
                                                    std::string_view normalized_text = "");
 
   /**
@@ -156,7 +162,7 @@ class DocumentStore {
    * @param filters New filter values
    * @return true if document exists
    */
-  bool UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
+  bool UpdateDocument(DocId doc_id, const FilterMap& filters);
 
   /**
    * @brief Remove document
@@ -256,6 +262,16 @@ class DocumentStore {
                                                                              const std::string& column) const;
 
   /**
+   * @brief Enable or disable storing normalized text for documents
+   *
+   * When disabled, AddDocument and AddDocumentBatch skip populating doc_texts_,
+   * saving memory when verify_text is not needed. Enabled by default.
+   *
+   * @param enabled Whether to store normalized text
+   */
+  void SetStoreTexts(bool enabled) { store_texts_ = enabled; }
+
+  /**
    * @brief Set normalized text for a document (for n-gram verification)
    *
    * @param doc_id Document ID
@@ -344,11 +360,14 @@ class DocumentStore {
   absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       pk_to_doc_id_;
 
-  // DocID -> Filter values
-  std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
+  // DocID -> Filter values (inner map uses transparent hash for string_view lookup)
+  std::unordered_map<DocId, FilterMap> doc_filters_;
 
   // DocID -> Normalized text (for n-gram post-filter verification)
   std::unordered_map<DocId, std::string> doc_texts_;
+
+  // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off)
+  bool store_texts_ = true;
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
   // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,

@@ -11,7 +11,6 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
-#include <set>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
@@ -287,13 +286,21 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
     parsed_values.push_back(ParseFilterValue(filter_cond.value));
   }
 
-  for (const auto& doc_id : results) {
+  // Pre-fetch all filter values in batch (one lock acquisition per filter column)
+  // instead of per-doc * per-filter individual GetFilterValue calls
+  std::vector<std::vector<std::optional<storage::FilterValue>>> batch_filter_values;
+  batch_filter_values.reserve(filters.size());
+  for (const auto& filter_cond : filters) {
+    batch_filter_values.push_back(doc_store->GetFilterValuesBatch(results, filter_cond.column));
+  }
+
+  for (size_t doc_idx = 0; doc_idx < results.size(); ++doc_idx) {
     bool matches_all_filters = true;
 
     for (size_t i = 0; i < filters.size(); ++i) {
       const auto& filter_cond = filters[i];
       const auto& parsed_value = parsed_values[i];
-      auto stored_value = doc_store->GetFilterValue(doc_id, filter_cond.column);
+      const auto& stored_value = batch_filter_values[i][doc_idx];
 
       // NULL values: only match for NE operator
       if (!stored_value) {
@@ -443,7 +450,7 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
     }
 
     if (matches_all_filters) {
-      filtered_results.push_back(doc_id);
+      filtered_results.push_back(results[doc_idx]);
     }
   }
 
@@ -557,10 +564,17 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
   if (results.empty()) {
     return false;
   }
+  // Sample doc IDs and check in batch (one lock acquisition instead of N individual ones)
   size_t sample_size = std::min(results.size(), std::max(size_t{10}, results.size() / 10));
   size_t step = std::max(size_t{1}, results.size() / sample_size);
+  std::vector<storage::DocId> sampled_ids;
+  sampled_ids.reserve(sample_size);
   for (size_t i = 0; i < results.size() && i / step < sample_size; i += step) {
-    if (!doc_store->GetPrimaryKey(results[i]).has_value()) {
+    sampled_ids.push_back(results[i]);
+  }
+  auto pks = doc_store->GetPrimaryKeysBatch(sampled_ids);
+  for (const auto& pk : pks) {
+    if (pk.empty()) {
       return true;
     }
   }
@@ -573,10 +587,14 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
     return;
   }
-  // Collect all ngrams from term_infos
-  std::set<std::string> all_ngrams;
+  // Merge already-sorted ngram vectors from term_infos using set_union (O(N) merge)
+  std::vector<std::string> all_ngrams;
   for (const auto& term_info : term_infos) {
-    all_ngrams.insert(term_info.ngrams.begin(), term_info.ngrams.end());
+    std::vector<std::string> merged;
+    merged.reserve(all_ngrams.size() + term_info.ngrams.size());
+    std::set_union(all_ngrams.begin(), all_ngrams.end(), term_info.ngrams.begin(), term_info.ngrams.end(),
+                   std::back_inserter(merged));
+    all_ngrams = std::move(merged);
   }
   cache_manager->Insert(query, results, all_ngrams, query_time_ms, ngram_size, kanji_ngram_size, cross_boundary);
 }

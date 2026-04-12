@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace mygram::utils {
@@ -127,6 +128,13 @@ std::string SanitizeUtf8(std::string_view text);
  * @return Uppercase copy of the string
  */
 std::string ToUpper(std::string_view str);
+
+/// Replace all occurrences of `from` with `to` in the string
+std::string ReplaceAll(std::string_view str, std::string_view from, std::string_view to);
+
+/// Split string on first occurrence of delimiter, returns {before, after}
+/// If delimiter not found, returns {str, ""}
+std::pair<std::string, std::string> SplitOnFirst(std::string_view str, std::string_view delimiter);
 
 /// @brief Sort and remove duplicate elements from a vector in-place.
 template <typename T>

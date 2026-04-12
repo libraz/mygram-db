@@ -80,8 +80,7 @@ std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, std::stri
     return std::nullopt;
   }
 
-  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
-  auto filter_it = doc_it->second.find(std::string(filter_name));
+  auto filter_it = doc_it->second.find(filter_name);
   if (filter_it == doc_it->second.end()) {
     return std::nullopt;
   }
@@ -117,10 +116,8 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
   std::shared_lock lock(mutex_);
   std::vector<DocId> results;
 
-  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
-  std::string filter_name_str(filter_name);
   for (const auto& [doc_id, filters] : doc_filters_) {
-    auto iterator = filters.find(filter_name_str);
+    auto iterator = filters.find(filter_name);
     if (iterator != filters.end() && iterator->second == value) {
       results.push_back(doc_id);
     }
@@ -135,11 +132,9 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
 bool DocumentStore::HasFilterColumn(std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
 
-  // C++17: unordered_map doesn't support heterogeneous lookup, convert to std::string
-  std::string filter_name_str(filter_name);
   // Check if any document has this filter column
-  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name_str](const auto& doc_filter) {
-    return doc_filter.second.find(filter_name_str) != doc_filter.second.end();
+  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name](const auto& doc_filter) {
+    return doc_filter.second.find(filter_name) != doc_filter.second.end();
   });
 }
 

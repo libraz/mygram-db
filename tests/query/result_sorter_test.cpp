@@ -748,7 +748,7 @@ TEST_F(ResultSorterTest, SchwartzianTransformFallbackForFilterColumn) {
     doc_ids.push_back(*doc_id);
 
     // Add age filter using UpdateDocument
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["age"] = FilterValue{age};
     ASSERT_TRUE(doc_store_.UpdateDocument(*doc_id, filters));
   }

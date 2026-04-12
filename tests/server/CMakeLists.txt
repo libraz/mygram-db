@@ -395,10 +395,13 @@ target_link_libraries(rate_limiter_cleanup_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+# SLOW: MemoryUsageDoesntGrowUnbounded takes 5.5+ seconds
 gtest_discover_tests(rate_limiter_cleanup_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
 )
 
 # ConnectionLimit tests (SECURITY: Resource exhaustion prevention)
@@ -534,10 +537,13 @@ target_link_libraries(snapshot_scheduler_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+# SLOW: StartStopRapidly takes 5.1+ seconds
 gtest_discover_tests(snapshot_scheduler_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK storage_io
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK storage_io
 )
 
 # SearchHandler tests

@@ -20,6 +20,7 @@
 #include <thread>
 #include <utility>
 
+#include "server/protocol_constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -29,12 +30,22 @@ namespace mygramdb::client {
 
 namespace {
 
-// Protocol constants
-constexpr size_t kErrorPrefixLen = 6;      // Length of "ERROR "
-constexpr size_t kOkSavedPrefixLen = 9;    // Length of "OK SAVED "
-constexpr size_t kOkLoadedPrefixLen = 10;  // Length of "OK LOADED "
+// Protocol constants from shared header
+constexpr size_t kErrorPrefixLen = mygramdb::server::protocol::kErrorPrefixLen;
+constexpr size_t kOkSavedPrefixLen = mygramdb::server::protocol::kOkSavedPrefixLen;
+constexpr size_t kOkLoadedPrefixLen = mygramdb::server::protocol::kOkLoadedPrefixLen;
 constexpr int kMillisecondsPerSecond = 1000;
 constexpr int kMicrosecondsPerMillisecond = 1000;
+
+/**
+ * @brief Check if response is an error and return appropriate Expected
+ */
+Expected<void, Error> CheckErrorResponse(const std::string& response) {
+  if (response.find("ERROR") == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
+  }
+  return {};
+}
 
 /**
  * @brief Parse key=value pairs from string
@@ -379,9 +390,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Parse response: OK RESULTS <total_count> [<id1> <id2> ...] [DEBUG ...]
     if (response.find("OK RESULTS") != 0) {
@@ -476,9 +487,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Parse response: OK COUNT <n> [DEBUG ...]
     if (response.find("OK COUNT") != 0) {
@@ -525,9 +536,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
     if (response.find("OK DOC") != 0) {
@@ -557,9 +568,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     if (response.find("OK INFO") != 0) {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
@@ -627,9 +638,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Return raw config response (already formatted)
     return response;
@@ -650,9 +661,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Parse: OK SAVED <filepath>
     if (response.find("OK SAVED") != 0) {
@@ -673,9 +684,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     // Parse: OK LOADED <filepath>
     if (response.find("OK LOADED") != 0) {
@@ -692,9 +703,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     if (response.find("OK REPLICATION") != 0) {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
@@ -722,9 +733,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     return {};
   }
@@ -736,9 +747,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     return {};
   }
@@ -750,9 +761,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     return {};
   }
@@ -764,9 +775,9 @@ class MygramClient::Impl {
     }
 
     std::string response = *result;
-    if (response.find("ERROR") == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(kErrorPrefixLen)));
-    }
+    auto err = CheckErrorResponse(response);
+    if (!err)
+      return MakeUnexpected(err.error());
 
     return {};
   }

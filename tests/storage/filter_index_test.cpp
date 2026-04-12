@@ -21,7 +21,7 @@ class FilterIndexTest : public ::testing::Test {
 };
 
 TEST_F(FilterIndexTest, AddAndGetEqBitmap) {
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["category"] = std::string("tech");
 
   index_.AddDocument(1, filters);
@@ -77,8 +77,8 @@ TEST_F(FilterIndexTest, RemoveLastDocCleansUpBitmap) {
 TEST_F(FilterIndexTest, UpdateDocument) {
   index_.AddDocument(1, {{"category", FilterValue{std::string("tech")}}});
 
-  std::unordered_map<std::string, FilterValue> old_filters = {{"category", FilterValue{std::string("tech")}}};
-  std::unordered_map<std::string, FilterValue> new_filters = {{"category", FilterValue{std::string("news")}}};
+  FilterMap old_filters = {{"category", FilterValue{std::string("tech")}}};
+  FilterMap new_filters = {{"category", FilterValue{std::string("news")}}};
 
   index_.UpdateDocument(1, old_filters, new_filters);
 
@@ -137,7 +137,7 @@ TEST_F(FilterIndexTest, MemoryUsageNonZero) {
 }
 
 TEST_F(FilterIndexTest, MultipleColumns) {
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["category"] = std::string("tech");
   filters["status"] = static_cast<int64_t>(1);
 

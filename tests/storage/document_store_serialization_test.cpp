@@ -44,7 +44,7 @@ class DocumentStoreSerializationTest : public ::testing::Test {
 TEST_F(DocumentStoreSerializationTest, MonostateNullValue) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["null_field"] = std::monostate{};
 
   EXPECT_TRUE(store1.AddDocument("doc1", filters));
@@ -65,7 +65,7 @@ TEST_F(DocumentStoreSerializationTest, MonostateNullValue) {
 TEST_F(DocumentStoreSerializationTest, BoolValue) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["bool_true"] = true;
   filters["bool_false"] = false;
 
@@ -87,7 +87,7 @@ TEST_F(DocumentStoreSerializationTest, BoolValue) {
 TEST_F(DocumentStoreSerializationTest, Int8Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["int8_min"] = static_cast<int8_t>(-128);
   filters["int8_max"] = static_cast<int8_t>(127);
   filters["int8_zero"] = static_cast<int8_t>(0);
@@ -111,7 +111,7 @@ TEST_F(DocumentStoreSerializationTest, Int8Value) {
 TEST_F(DocumentStoreSerializationTest, UInt8Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["uint8_min"] = static_cast<uint8_t>(0);
   filters["uint8_max"] = static_cast<uint8_t>(255);
 
@@ -133,7 +133,7 @@ TEST_F(DocumentStoreSerializationTest, UInt8Value) {
 TEST_F(DocumentStoreSerializationTest, Int16Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["int16_min"] = static_cast<int16_t>(-32768);
   filters["int16_max"] = static_cast<int16_t>(32767);
 
@@ -155,7 +155,7 @@ TEST_F(DocumentStoreSerializationTest, Int16Value) {
 TEST_F(DocumentStoreSerializationTest, UInt16Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["uint16_min"] = static_cast<uint16_t>(0);
   filters["uint16_max"] = static_cast<uint16_t>(65535);
 
@@ -177,7 +177,7 @@ TEST_F(DocumentStoreSerializationTest, UInt16Value) {
 TEST_F(DocumentStoreSerializationTest, Int32Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["int32_min"] = static_cast<int32_t>(-2147483648);
   filters["int32_max"] = static_cast<int32_t>(2147483647);
 
@@ -199,7 +199,7 @@ TEST_F(DocumentStoreSerializationTest, Int32Value) {
 TEST_F(DocumentStoreSerializationTest, UInt32Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["uint32_min"] = static_cast<uint32_t>(0);
   filters["uint32_max"] = static_cast<uint32_t>(4294967295);
 
@@ -221,7 +221,7 @@ TEST_F(DocumentStoreSerializationTest, UInt32Value) {
 TEST_F(DocumentStoreSerializationTest, Int64Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["int64_min"] = static_cast<int64_t>(-9223372036854775807LL - 1);
   filters["int64_max"] = static_cast<int64_t>(9223372036854775807LL);
 
@@ -243,7 +243,7 @@ TEST_F(DocumentStoreSerializationTest, Int64Value) {
 TEST_F(DocumentStoreSerializationTest, UInt64Value) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["uint64_min"] = static_cast<uint64_t>(0);
   filters["uint64_max"] = static_cast<uint64_t>(18446744073709551615ULL);
 
@@ -265,7 +265,7 @@ TEST_F(DocumentStoreSerializationTest, UInt64Value) {
 TEST_F(DocumentStoreSerializationTest, StringValue) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["str_empty"] = std::string("");
   filters["str_simple"] = std::string("hello");
   filters["str_unicode"] = std::string("こんにちは世界");
@@ -291,7 +291,7 @@ TEST_F(DocumentStoreSerializationTest, StringValue) {
 TEST_F(DocumentStoreSerializationTest, DoubleValue) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["double_zero"] = 0.0;
   filters["double_positive"] = 123.456;
   filters["double_negative"] = -987.654;
@@ -319,7 +319,7 @@ TEST_F(DocumentStoreSerializationTest, DoubleValue) {
 TEST_F(DocumentStoreSerializationTest, AllTypesInOneDocument) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["null"] = std::monostate{};
   filters["bool"] = true;
   filters["int8"] = static_cast<int8_t>(-42);
@@ -363,16 +363,16 @@ TEST_F(DocumentStoreSerializationTest, AllTypesInOneDocument) {
 TEST_F(DocumentStoreSerializationTest, MultipleDocumentsMixedTypes) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters1;
+  FilterMap filters1;
   filters1["status"] = static_cast<int32_t>(1);
   filters1["name"] = std::string("Alice");
 
-  std::unordered_map<std::string, FilterValue> filters2;
+  FilterMap filters2;
   filters2["status"] = static_cast<int32_t>(2);
   filters2["name"] = std::string("Bob");
   filters2["score"] = 95.5;
 
-  std::unordered_map<std::string, FilterValue> filters3;
+  FilterMap filters3;
   filters3["status"] = static_cast<int32_t>(0);
   filters3["active"] = false;
 
@@ -410,7 +410,7 @@ TEST_F(DocumentStoreSerializationTest, MultipleDocumentsMixedTypes) {
 TEST_F(DocumentStoreSerializationTest, StreamSerializationAllTypes) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["null"] = std::monostate{};
   filters["bool"] = true;
   filters["int8"] = static_cast<int8_t>(-42);
@@ -458,7 +458,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationAllTypes) {
 TEST_F(DocumentStoreSerializationTest, StreamSerializationWithGTID) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["id"] = static_cast<int32_t>(42);
   filters["name"] = std::string("test");
 
@@ -488,7 +488,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationWithGTID) {
 TEST_F(DocumentStoreSerializationTest, StreamSerializationEmptyGTID) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["value"] = static_cast<int32_t>(123);
 
   EXPECT_TRUE(store1.AddDocument("doc1", filters));
@@ -517,7 +517,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationMultipleDocuments) {
 
   // Add 100 documents with various data
   for (int i = 1; i <= 100; ++i) {
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["id"] = static_cast<int32_t>(i);
     filters["value"] = static_cast<double>(i * 1.5);
     filters["name"] = std::string("doc_") + std::to_string(i);
@@ -645,7 +645,7 @@ TEST_F(DocumentStoreSerializationTest, CorruptedStreamTruncatedDocCount) {
 TEST_F(DocumentStoreSerializationTest, SaveToFileAtomicWritePattern) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["id"] = static_cast<int32_t>(42);
   filters["name"] = std::string("atomic_test");
 
@@ -675,7 +675,7 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileAtomicWritePattern) {
 TEST_F(DocumentStoreSerializationTest, SaveToFilePreservesOriginalOnFailure) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["id"] = static_cast<int32_t>(1);
   EXPECT_TRUE(store1.AddDocument("doc1", filters));
 
@@ -717,7 +717,7 @@ TEST_F(DocumentStoreSerializationTest, SaveToFilePreservesOriginalOnFailure) {
 TEST_F(DocumentStoreSerializationTest, SaveToFileTempFileCleanedOnError) {
   DocumentStore store1;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["id"] = static_cast<int32_t>(42);
   EXPECT_TRUE(store1.AddDocument("doc1", filters));
 

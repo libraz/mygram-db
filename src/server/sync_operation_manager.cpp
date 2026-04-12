@@ -55,23 +55,29 @@ SyncOperationManager::~SyncOperationManager() {
   }
 }
 
-std::string SyncOperationManager::StartSync(const std::string& table_name) {
+mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager::StartSync(
+    const std::string& table_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   std::lock_guard<std::mutex> lock(sync_mutex_);
 
   // Check if table exists
   if (table_contexts_.find(table_name) == table_contexts_.end()) {
-    return ResponseFormatter::FormatError("Table '" + table_name + "' not found");
+    return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
   }
 
   // Check if already running
   if (sync_states_[table_name].is_running) {
-    return ResponseFormatter::FormatError("SYNC already in progress for '" + table_name + "'");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kSyncAlreadyInProgress, "SYNC already in progress for '" + table_name + "'"));
   }
 
   // Check memory health
   auto health = mygram::utils::GetMemoryHealthStatus();
   if (health == mygram::utils::MemoryHealthStatus::CRITICAL) {
-    return ResponseFormatter::FormatError("Memory critically low. Cannot start SYNC.");
+    return MakeUnexpected(MakeError(ErrorCode::kSyncMemoryCritical, "Memory critically low. Cannot start SYNC."));
   }
 
   // Log session timeout warning
@@ -340,7 +346,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   }
 
   // Helper to update state safely
-  auto update_state = [this, &table_name](auto&& updater) {
+  auto update_state = [this, table_name](auto&& updater) {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     updater(sync_states_[table_name]);
   };

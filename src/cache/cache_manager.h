@@ -8,7 +8,6 @@
 #include <atomic>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -91,7 +90,7 @@ class CacheManager {
    * @param cross_boundary_ngrams Cross-boundary setting used for this query
    * @return true if cached, false otherwise
    */
-  bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::set<std::string>& ngrams,
+  bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::vector<std::string>& ngrams,
               double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
 
   /**

@@ -208,7 +208,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
           // Save old filters for rollback in case index update fails
           auto old_doc = doc_store.GetDocument(doc_id);
-          std::unordered_map<std::string, storage::FilterValue> old_filters;
+          storage::FilterMap old_filters;
           if (old_doc.has_value()) {
             old_filters = std::move(old_doc->filters);
           }
