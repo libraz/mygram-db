@@ -135,8 +135,7 @@ class ReactorConnectionTest : public ::testing::Test {
     rc_fd_ = fds[1];
     SetNonBlocking(rc_fd_);
 
-    conn_ = ReactorConnection::Create(rc_fd_, /*reactor=*/nullptr,
-                                      harness_.dispatcher.get(), pool_.get());
+    conn_ = ReactorConnection::Create(rc_fd_, /*reactor=*/nullptr, harness_.dispatcher.get(), pool_.get());
   }
 
   void TearDown() override {
@@ -238,7 +237,8 @@ TEST_F(ReactorConnectionTest, OnReadableParsesMultipleFramesPerRead) {
     }
     char buf[256] = {};
     ssize_t n = ::recv(peer_fd_, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) break;
+    if (n <= 0)
+      break;
     received.append(buf, static_cast<size_t>(n));
     size_t pos = 0;
     responses = 0;
@@ -401,8 +401,7 @@ TEST_F(ReactorConnectionTest, DrainTaskDispatchesAndSends) {
   ssize_t n = ::recv(peer_fd_, buf, sizeof(buf) - 1, 0);
   ASSERT_GT(n, 0);
   std::string response(buf, static_cast<size_t>(n));
-  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0)
-      << "Unexpected response: " << response;
+  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0) << "Unexpected response: " << response;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +426,8 @@ TEST_F(ReactorConnectionTest, DrainTaskOrderingPreserved) {
     }
     char buf[1024] = {};
     ssize_t n = ::recv(peer_fd_, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) break;
+    if (n <= 0)
+      break;
     received.append(buf, static_cast<size_t>(n));
     size_t pos = 0;
     responses = 0;

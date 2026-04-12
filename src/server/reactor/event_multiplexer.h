@@ -128,8 +128,7 @@ class EventMultiplexer {
    *                    preserved so the hot path does not allocate steady-state.
    *                    On error, `out` is left empty.
    */
-  virtual mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms,
-                                                                    std::vector<ReadyEvent>& out) = 0;
+  virtual mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) = 0;
 
   /**
    * @brief Backend identifier for metrics and log fields.

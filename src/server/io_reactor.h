@@ -197,7 +197,7 @@ class IoReactor {
   /// without holding the connections_mutex_.
   std::shared_ptr<ReactorConnection> Lookup(int fd) const;
 
-  ThreadPool* pool_;              // non-owning
+  ThreadPool* pool_;               // non-owning
   RequestDispatcher* dispatcher_;  // non-owning
   ReactorConfig config_;
 

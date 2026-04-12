@@ -99,15 +99,13 @@ EpollMultiplexer::~EpollMultiplexer() {
 Expected<void, Error> EpollMultiplexer::Open() {
   if (epoll_fd_ >= 0) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorAlreadyOpen,
-                  "EpollMultiplexer::Open called on already-open multiplexer"));
+        MakeError(ErrorCode::kNetworkReactorAlreadyOpen, "EpollMultiplexer::Open called on already-open multiplexer"));
   }
 
   const int fd = ::epoll_create1(EPOLL_CLOEXEC);
   if (fd < 0) {
     const int en = errno;
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("epoll_create1", en)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("epoll_create1", en)));
   }
   epoll_fd_ = fd;
   return {};
@@ -120,8 +118,7 @@ Expected<void, Error> EpollMultiplexer::Add(int fd, uint8_t interest) {
 
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
     const int en = errno;
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorRegisterFailed, FormatErrno("epoll_ctl(ADD)", en)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRegisterFailed, FormatErrno("epoll_ctl(ADD)", en)));
   }
   return {};
 }
@@ -133,8 +130,7 @@ Expected<void, Error> EpollMultiplexer::Modify(int fd, uint8_t interest) {
 
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) != 0) {
     const int en = errno;
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorModifyFailed, FormatErrno("epoll_ctl(MOD)", en)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed, FormatErrno("epoll_ctl(MOD)", en)));
   }
   return {};
 }
@@ -148,8 +144,7 @@ Expected<void, Error> EpollMultiplexer::Remove(int fd) {
     if (en == ENOENT || en == EBADF) {
       return {};
     }
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("epoll_ctl(DEL)", en)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("epoll_ctl(DEL)", en)));
   }
   return {};
 }
@@ -157,8 +152,7 @@ Expected<void, Error> EpollMultiplexer::Remove(int fd) {
 Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEvent>& out) {
   out.clear();
 
-  const int n =
-      ::epoll_wait(epoll_fd_, events_.data(), static_cast<int>(events_.size()), timeout_ms);
+  const int n = ::epoll_wait(epoll_fd_, events_.data(), static_cast<int>(events_.size()), timeout_ms);
   if (n < 0) {
     const int en = errno;
     // EINTR is not an error condition: a signal interrupted the wait and the
@@ -166,8 +160,7 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
     if (en == EINTR) {
       return {};
     }
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorPollFailed, FormatErrno("epoll_wait", en)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorPollFailed, FormatErrno("epoll_wait", en)));
   }
 
   out.reserve(static_cast<std::size_t>(n));
@@ -178,7 +171,9 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
   return {};
 }
 
-const char* EpollMultiplexer::Name() const { return "epoll"; }
+const char* EpollMultiplexer::Name() const {
+  return "epoll";
+}
 
 }  // namespace mygramdb::server::reactor
 

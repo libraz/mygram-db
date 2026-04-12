@@ -46,8 +46,7 @@ class MockEventMultiplexer final : public EventMultiplexer {
   mygram::utils::Expected<void, mygram::utils::Error> Add(int fd, uint8_t interest) override;
   mygram::utils::Expected<void, mygram::utils::Error> Modify(int fd, uint8_t interest) override;
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
-  mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms,
-                                                           std::vector<ReadyEvent>& out) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
   const char* Name() const override { return "mock"; }
 
   // -------------------------------------------------------------------------

@@ -9,6 +9,9 @@
  * so the test binary compiles on every platform without dead-code warnings.
  */
 
+#include "server/reactor/event_multiplexer.h"
+
+#include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,10 +21,7 @@
 #include <thread>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "mock_event_multiplexer.h"
-#include "server/reactor/event_multiplexer.h"
 
 #if defined(__linux__)
 #include "server/reactor/epoll_multiplexer.h"
@@ -37,17 +37,16 @@ namespace mygramdb::server::reactor {
 // Type list
 // ---------------------------------------------------------------------------
 
-using BackendTypes = ::testing::Types<
-    MockEventMultiplexer
+using BackendTypes = ::testing::Types<MockEventMultiplexer
 #if defined(__linux__)
-    ,
-    EpollMultiplexer
+                                      ,
+                                      EpollMultiplexer
 #endif
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
-    ,
-    KqueueMultiplexer
+                                      ,
+                                      KqueueMultiplexer
 #endif
-    >;
+                                      >;
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -86,9 +85,7 @@ class EventMultiplexerTest : public ::testing::Test {
   void SetNonblocking(int /*fd*/) {}
 
   /// Remove fd from the tracked cleanup set (caller will close it manually).
-  void UntrackFd(int fd) {
-    open_fds_.erase(std::remove(open_fds_.begin(), open_fds_.end(), fd), open_fds_.end());
-  }
+  void UntrackFd(int fd) { open_fds_.erase(std::remove(open_fds_.begin(), open_fds_.end(), fd), open_fds_.end()); }
 
  private:
   std::vector<int> open_fds_;
@@ -103,8 +100,7 @@ TYPED_TEST(EventMultiplexerTest, OpenReturnsAlreadyOpenOnSecondCall) {
   // SetUp already called Open() once.
   auto result = this->mux->Open();
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(),
-            mygram::utils::ErrorCode::kNetworkReactorAlreadyOpen);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkReactorAlreadyOpen);
 }
 
 // ---------------------------------------------------------------------------

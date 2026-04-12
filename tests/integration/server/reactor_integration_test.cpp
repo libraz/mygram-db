@@ -12,8 +12,7 @@
 
 // Platform guard: compile-time skip for unsupported platforms.
 // macOS (kqueue) and Linux (epoll) are the two real targets.
-#if !defined(__linux__) && !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
-    !defined(__OpenBSD__)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
 #include <gtest/gtest.h>
 // Provide a trivially-passing placeholder so the binary links cleanly.
 TEST(ReactorIntegrationTest, PlatformNotSupported) {
@@ -87,7 +86,7 @@ class ReactorIntegrationTest : public ::testing::Test {
    * @brief Start a TcpServer and return it.
    */
   std::unique_ptr<TcpServer> StartServer(int worker_threads = 8, int max_connections = 512,
-                                          int64_t max_write_queue_bytes = 0) {
+                                         int64_t max_write_queue_bytes = 0) {
     ServerConfig cfg;
     cfg.host = "127.0.0.1";
     cfg.port = 0;  // OS assigns
@@ -100,8 +99,7 @@ class ReactorIntegrationTest : public ::testing::Test {
 
     auto s = std::make_unique<TcpServer>(cfg, table_contexts_);
     auto res = s->Start();
-    EXPECT_TRUE(res) << "Failed to start TcpServer: "
-                     << (res ? std::string{} : res.error().to_string());
+    EXPECT_TRUE(res) << "Failed to start TcpServer: " << (res ? std::string{} : res.error().to_string());
     // Give the accept loop a moment to reach its main loop.
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     return s;
@@ -117,10 +115,12 @@ class ReactorIntegrationTest : public ::testing::Test {
    */
   int Connect(uint16_t port, int timeout_ms = 2000) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return -1;
+    if (sock < 0)
+      return -1;
 
     int flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0)
+      fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -155,7 +155,8 @@ class ReactorIntegrationTest : public ::testing::Test {
     }
 
     // Restore flags; set I/O timeout for blocking reads
-    if (flags >= 0) fcntl(sock, F_SETFL, flags);
+    if (flags >= 0)
+      fcntl(sock, F_SETFL, flags);
     struct timeval io {};
     io.tv_sec = 5;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
@@ -190,12 +191,15 @@ class ReactorIntegrationTest : public ::testing::Test {
     std::array<char, 512> buf{};
     while (out.size() < 65536) {
       ssize_t n = recv(sock, buf.data(), buf.size(), 0);
-      if (n <= 0) return "";
+      if (n <= 0)
+        return "";
       out.append(buf.data(), static_cast<size_t>(n));
-      if (out.find("\r\n") != std::string::npos) break;
+      if (out.find("\r\n") != std::string::npos)
+        break;
     }
     auto pos = out.find("\r\n");
-    if (pos != std::string::npos) out.resize(pos);
+    if (pos != std::string::npos)
+      out.resize(pos);
     return out;
   }
 
@@ -224,10 +228,10 @@ class ReactorIntegrationTest : public ::testing::Test {
     std::array<char, 1024> buf{};
     while (out.size() < 1 * 1024 * 1024) {
       ssize_t n = recv(sock, buf.data(), buf.size(), 0);
-      if (n <= 0) return "";
+      if (n <= 0)
+        return "";
       out.append(buf.data(), static_cast<size_t>(n));
-      if (out.size() >= kTerminatorLen &&
-          out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
+      if (out.size() >= kTerminatorLen && out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
         return out;
       }
     }
@@ -240,7 +244,8 @@ class ReactorIntegrationTest : public ::testing::Test {
    */
   static rlim_t RaiseFdLimit(rlim_t desired) {
     struct rlimit rl {};
-    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return 0;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+      return 0;
     rlim_t target = std::min<rlim_t>(desired, rl.rlim_max);
     if (rl.rlim_cur < target) {
       rl.rlim_cur = target;
@@ -389,11 +394,12 @@ TEST_F(ReactorIntegrationTest, ConcurrentClients100) {
 
   std::vector<std::thread> threads;
   threads.reserve(kClients);
-  for (int i = 0; i < kClients; ++i) threads.emplace_back(client_task);
-  for (auto& t : threads) t.join();
+  for (int i = 0; i < kClients; ++i)
+    threads.emplace_back(client_task);
+  for (auto& t : threads)
+    t.join();
 
-  EXPECT_EQ(failures.load(), 0)
-      << failures.load() << " out of " << kClients << " clients encountered errors";
+  EXPECT_EQ(failures.load(), 0) << failures.load() << " out of " << kClients << " clients encountered errors";
   server->Stop();
 }
 
@@ -425,8 +431,7 @@ TEST_F(ReactorIntegrationTest, ConcurrentClientsMany) {
                  << "re-run with ulimit -n 2048";
   }
 
-  std::cout << "[ConcurrentClientsMany] using " << max_clients << " clients (rlimit=" << effective << ")"
-            << std::endl;
+  std::cout << "[ConcurrentClientsMany] using " << max_clients << " clients (rlimit=" << effective << ")" << std::endl;
 
   constexpr int kCmdsPerClient = 5;
   std::atomic<int> failures{0};
@@ -468,11 +473,12 @@ TEST_F(ReactorIntegrationTest, ConcurrentClientsMany) {
 
   std::vector<std::thread> threads;
   threads.reserve(max_clients);
-  for (int i = 0; i < max_clients; ++i) threads.emplace_back(client_task);
-  for (auto& t : threads) t.join();
+  for (int i = 0; i < max_clients; ++i)
+    threads.emplace_back(client_task);
+  for (auto& t : threads)
+    t.join();
 
-  EXPECT_EQ(failures.load(), 0)
-      << failures.load() << " out of " << max_clients << " clients failed";
+  EXPECT_EQ(failures.load(), 0) << failures.load() << " out of " << max_clients << " clients failed";
   server->Stop();
 }
 
@@ -504,7 +510,8 @@ TEST_F(ReactorIntegrationTest, ClientDisconnectMidRequest) {
   // until the server reports zero active connections (or timeout).
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (server->GetConnectionCount() == 0) break;
+    if (server->GetConnectionCount() == 0)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
@@ -552,7 +559,8 @@ TEST_F(ReactorIntegrationTest, ClientDisconnectDuringResponse) {
   // Wait for the abrupt client to be cleaned up
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (server->GetConnectionCount() == 0) break;
+    if (server->GetConnectionCount() == 0)
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
@@ -691,11 +699,11 @@ TEST_F(ReactorIntegrationTest, ReactorModeDoesNotStarvePersistentFleet) {
 
   EXPECT_EQ(resp.substr(0, 7), "OK INFO")
       << "9th client starved in reactor mode with " << kPinned << " idle connections";
-  EXPECT_LT(elapsed_ms, 500)
-      << "9th client responded but took " << elapsed_ms << "ms (>500ms) in reactor mode";
+  EXPECT_LT(elapsed_ms, 500) << "9th client responded but took " << elapsed_ms << "ms (>500ms) in reactor mode";
 
   close(late);
-  for (int s : pinned) close(s);
+  for (int s : pinned)
+    close(s);
   server->Stop();
 }
 
@@ -729,7 +737,8 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     size_t sent_total = 0;
     while (sent_total < big_cmd.size()) {
       ssize_t n = send(s, big_cmd.data() + sent_total, big_cmd.size() - sent_total, 0);
-      if (n <= 0) break;
+      if (n <= 0)
+        break;
       sent_total += static_cast<size_t>(n);
     }
     // We don't assert a specific response here — just that the connection is
@@ -755,8 +764,8 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     size_t sent_total = 0;
     bool got_epipe = false;
     while (sent_total < huge_cmd.size()) {
-      ssize_t n = send(s, huge_cmd.data() + sent_total,
-                       std::min<size_t>(65536, huge_cmd.size() - sent_total), MSG_NOSIGNAL);
+      ssize_t n =
+          send(s, huge_cmd.data() + sent_total, std::min<size_t>(65536, huge_cmd.size() - sent_total), MSG_NOSIGNAL);
       if (n <= 0) {
         got_epipe = (errno == EPIPE || errno == ECONNRESET);
         break;
@@ -839,11 +848,13 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
   // 64 KiB cap once the slow reader's recv buffer is full.
   std::string burst;
   burst.reserve(8 * 1024);
-  for (int i = 0; i < 1024; ++i) burst.append("INFO\r\n");
+  for (int i = 0; i < 1024; ++i)
+    burst.append("INFO\r\n");
   ssize_t sent = 0;
   while (sent < static_cast<ssize_t>(burst.size())) {
     ssize_t n = send(slow, burst.data() + sent, burst.size() - sent, MSG_NOSIGNAL);
-    if (n <= 0) break;
+    if (n <= 0)
+      break;
     sent += n;
   }
   // Slow reader deliberately does NOT recv().
@@ -884,13 +895,14 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
 
   std::vector<std::thread> fast_threads;
   fast_threads.reserve(kFastClients);
-  for (int i = 0; i < kFastClients; ++i) fast_threads.emplace_back(fast_client_task);
-  for (auto& t : fast_threads) t.join();
+  for (int i = 0; i < kFastClients; ++i)
+    fast_threads.emplace_back(fast_client_task);
+  for (auto& t : fast_threads)
+    t.join();
 
   // Invariant: every fast client request must have succeeded.
-  EXPECT_EQ(fast_failures.load(), 0)
-      << fast_failures.load() << " fast-client failures while slow reader was "
-      << "backpressured; reactor should have isolated the slow reader but did not";
+  EXPECT_EQ(fast_failures.load(), 0) << fast_failures.load() << " fast-client failures while slow reader was "
+                                     << "backpressured; reactor should have isolated the slow reader but did not";
   EXPECT_EQ(fast_successes.load(), kFastClients * kFastCommandsPerClient);
 
   // The slow reader should eventually be force-closed by the reactor once
@@ -923,9 +935,8 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
     // until the buffer is empty and FIN shows up.
   }
 
-  EXPECT_TRUE(slow_closed)
-      << "Slow reader was never force-closed by the reactor within 5s "
-      << "despite piling up responses against a 64 KiB write queue cap";
+  EXPECT_TRUE(slow_closed) << "Slow reader was never force-closed by the reactor within 5s "
+                           << "despite piling up responses against a 64 KiB write queue cap";
 
   close(slow);
   server->Stop();
@@ -981,7 +992,8 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
     if (s < 0) {
       // Couldn't open all the sockets we wanted; run with what we got if
       // we still have at least kMinIdleClientsToRun.
-      if (static_cast<int>(idle_socks.size()) >= kMinIdleClientsToRun) break;
+      if (static_cast<int>(idle_socks.size()) >= kMinIdleClientsToRun)
+        break;
       GTEST_SKIP() << "Failed to open idle client " << i << "; fd budget exhausted";
     }
     if (!SendLine(s, "INFO")) {
@@ -997,8 +1009,7 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
   }
 
   std::cout << "[ManyIdleConnectionsDoNotBlockActiveClient] "
-            << "idle_clients=" << idle_socks.size() << " workers=" << kWorkers
-            << " rlimit=" << effective << std::endl;
+            << "idle_clients=" << idle_socks.size() << " workers=" << kWorkers << " rlimit=" << effective << std::endl;
   ASSERT_GE(static_cast<int>(idle_socks.size()), kMinIdleClientsToRun)
       << "Not enough idle clients opened to meaningfully stress the server";
 
@@ -1014,22 +1025,20 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
 
   auto t0 = std::chrono::steady_clock::now();
   std::string resp = RecvMultilineResponse(active, /*timeout_ms=*/500);
-  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0)
-                        .count();
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
-  EXPECT_FALSE(resp.empty())
-      << "Active client starved with " << idle_socks.size()
-      << " idle persistent connections — the G1 invariant failed";
+  EXPECT_FALSE(resp.empty()) << "Active client starved with " << idle_socks.size()
+                             << " idle persistent connections — the G1 invariant failed";
   if (!resp.empty()) {
     EXPECT_EQ(resp.substr(0, 7), "OK INFO");
-    EXPECT_LT(elapsed_ms, 500)
-        << "Active client responded but took " << elapsed_ms << "ms (>500ms) with "
-        << idle_socks.size() << " idle persistent connections";
+    EXPECT_LT(elapsed_ms, 500) << "Active client responded but took " << elapsed_ms << "ms (>500ms) with "
+                               << idle_socks.size() << " idle persistent connections";
   }
 
   close(active);
-  for (int s : idle_socks) close(s);
+  for (int s : idle_socks)
+    close(s);
   server->Stop();
 }
 
@@ -1067,7 +1076,8 @@ TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
 
   auto open_and_info = [&](int idx) -> std::string {
     int s = Connect(port);
-    if (s < 0) return std::string("__connect_failed__");
+    if (s < 0)
+      return std::string("__connect_failed__");
     std::string result;
     if (SendLine(s, "INFO")) {
       result = RecvMultilineResponse(s, /*timeout_ms=*/1500);
@@ -1089,10 +1099,9 @@ TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
   // may accept the TCP SYN (so connect() succeeds) but must close the fd
   // without sending a response.
   const std::string r2 = open_and_info(2);
-  EXPECT_TRUE(r2.empty())
-      << "Rate limiter did not enforce the per-IP cap under reactor mode: "
-         "expected connection 2 to be closed without a response, but got: "
-      << r2;
+  EXPECT_TRUE(r2.empty()) << "Rate limiter did not enforce the per-IP cap under reactor mode: "
+                             "expected connection 2 to be closed without a response, but got: "
+                          << r2;
 
   server->Stop();
 }
@@ -1151,9 +1160,8 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
   // The reactor path must either close the connection or return an error
   // line. It must NOT dispatch the oversized query as if it were valid.
   const bool is_ok_response = resp.find("OK RESULTS") == 0 || resp.find("OK COUNT") == 0;
-  EXPECT_FALSE(is_ok_response)
-      << "max_query_length=" << cfg.max_query_length
-      << " but reactor accepted a 4 KiB query and returned: " << resp;
+  EXPECT_FALSE(is_ok_response) << "max_query_length=" << cfg.max_query_length
+                               << " but reactor accepted a 4 KiB query and returned: " << resp;
 
   server->Stop();
 }
@@ -1170,9 +1178,8 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
 TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   // Unique socket path per run so parallel test runs don't collide.
   const auto pid = ::getpid();
-  const auto ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count();
+  const auto ts =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
   std::filesystem::path sock_path =
       std::filesystem::temp_directory_path() /
       ("mygramdb_reactor_uds_test_" + std::to_string(pid) + "_" + std::to_string(ts) + ".sock");
@@ -1207,8 +1214,7 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
 
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
   int rc = ::connect(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-  ASSERT_EQ(rc, 0) << "connect(AF_UNIX) failed: " << strerror(errno)
-                   << " (path=" << sock_path << ")";
+  ASSERT_EQ(rc, 0) << "connect(AF_UNIX) failed: " << strerror(errno) << " (path=" << sock_path << ")";
 
   struct timeval io {};
   io.tv_sec = 3;
@@ -1219,8 +1225,7 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   // Send INFO and read the multiline response. We reuse the helper by
   // wrapping send() + RecvMultilineResponse() logic inline.
   const std::string wire = "INFO\r\n";
-  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0),
-            static_cast<ssize_t>(wire.size()));
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0), static_cast<ssize_t>(wire.size()));
 
   static constexpr const char kTerminator[] = "\r\nEND\r\n";
   static constexpr size_t kTerminatorLen = 7;
@@ -1228,18 +1233,17 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   std::array<char, 1024> buf{};
   while (out.size() < 256 * 1024) {
     ssize_t n = recv(s, buf.data(), buf.size(), 0);
-    if (n <= 0) break;
+    if (n <= 0)
+      break;
     out.append(buf.data(), static_cast<size_t>(n));
-    if (out.size() >= kTerminatorLen &&
-        out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
+    if (out.size() >= kTerminatorLen && out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
       break;
     }
   }
   close(s);
 
   EXPECT_FALSE(out.empty()) << "UDS client received no response";
-  EXPECT_EQ(out.substr(0, 7), "OK INFO")
-      << "UDS INFO response was not OK INFO: " << out;
+  EXPECT_EQ(out.substr(0, 7), "OK INFO") << "UDS INFO response was not OK INFO: " << out;
 
   server->Stop();
   // Best-effort socket file cleanup.
@@ -1273,8 +1277,7 @@ TEST_F(ReactorIntegrationTest, HalfCloseStillReceivesResponse) {
   // OnReadable's recv()==0 path must schedule a drain task that flushes the
   // INFO response before unregistering.
   const std::string wire = "INFO\r\n";
-  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0),
-            static_cast<ssize_t>(wire.size()));
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0), static_cast<ssize_t>(wire.size()));
   ASSERT_EQ(::shutdown(s, SHUT_WR), 0) << "shutdown(SHUT_WR) failed: " << strerror(errno);
 
   // Read raw bytes until the server closes or we time out. We cannot use
@@ -1291,18 +1294,17 @@ TEST_F(ReactorIntegrationTest, HalfCloseStillReceivesResponse) {
   std::array<char, 4096> buf{};
   while (out.size() < 256 * 1024) {
     ssize_t n = recv(s, buf.data(), buf.size(), 0);
-    if (n <= 0) break;  // EOF or timeout — keep whatever we already buffered
+    if (n <= 0)
+      break;  // EOF or timeout — keep whatever we already buffered
     out.append(buf.data(), static_cast<size_t>(n));
   }
   close(s);
 
-  EXPECT_FALSE(out.empty())
-      << "Server did not send any bytes after client half-closed write side "
-         "— reactor likely treated recv()==0 as a hard close and dropped "
-         "the buffered INFO response.";
+  EXPECT_FALSE(out.empty()) << "Server did not send any bytes after client half-closed write side "
+                               "— reactor likely treated recv()==0 as a hard close and dropped "
+                               "the buffered INFO response.";
   if (!out.empty()) {
-    EXPECT_EQ(out.substr(0, 7), "OK INFO")
-        << "Unexpected INFO response after half-close: " << out.substr(0, 64);
+    EXPECT_EQ(out.substr(0, 7), "OK INFO") << "Unexpected INFO response after half-close: " << out.substr(0, 64);
   }
 
   server->Stop();

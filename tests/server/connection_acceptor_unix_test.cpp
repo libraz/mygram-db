@@ -81,7 +81,6 @@ TEST_F(ConnectionAcceptorUnixTest, StartAndStopUnixSocket) {
 
   // Socket file should be removed after stop
   EXPECT_FALSE(std::filesystem::exists(socket_path_));
-
 }
 
 TEST_F(ConnectionAcceptorUnixTest, AcceptsUnixConnection) {
@@ -160,7 +159,6 @@ TEST_F(ConnectionAcceptorUnixTest, PathTooLongError) {
   auto result = acceptor.Start();
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkUnixSocketPathTooLong);
-
 }
 
 TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
@@ -180,7 +178,6 @@ TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
 
   acceptor.Stop();
   EXPECT_FALSE(std::filesystem::exists(socket_path_));
-
 }
 
 TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {

@@ -245,10 +245,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
       return MakeUnexpected(r.error());
     }
   }
-  mygram::utils::StructuredLog()
-      .Event("reactor_mode_enabled")
-      .Field("backend", reactor_->BackendName())
-      .Info();
+  mygram::utils::StructuredLog().Event("reactor_mode_enabled").Field("backend", reactor_->BackendName()).Info();
 
   // Install the acceptor reactor handler.
   //
@@ -268,53 +265,53 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     const size_t max_write_bytes = config_.max_write_queue_bytes > 0
                                        ? static_cast<size_t>(config_.max_write_queue_bytes)
                                        : ReactorConnection::kDefaultMaxWriteQueueBytes;
-    acceptor_->SetReactorHandler([reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, rate_limiter_ptr,
-                                  max_write_bytes](int client_fd) -> bool {
-      // Rate limit check (TCP only; rate_limiter_ptr is null on UDS acceptors).
-      // Extract the peer IP via getpeername() and call AllowRequest(). On
-      // rejection we return false so the acceptor emits SERVER_BUSY + closes
-      // the fd (see ConnectionAcceptor::AcceptLoop).
-      if (rate_limiter_ptr != nullptr) {
-        struct sockaddr_storage addr_storage {};
-        socklen_t addr_len = sizeof(addr_storage);
-        std::string client_ip;
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-        if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0 &&
-            addr_storage.ss_family == AF_INET) {
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-          auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
-          char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          client_ip = ip_str;
-        } else {
-          client_ip = "unknown";
-        }
-        if (!rate_limiter_ptr->AllowRequest(client_ip)) {
-          mygram::utils::StructuredLog()
-              .Event("server_warning")
-              .Field("type", "rate_limit_exceeded")
-              .Field("client_ip", client_ip)
-              .Warn();
-          return false;
-        }
-      }
+    acceptor_->SetReactorHandler(
+        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, rate_limiter_ptr, max_write_bytes](int client_fd) -> bool {
+          // Rate limit check (TCP only; rate_limiter_ptr is null on UDS acceptors).
+          // Extract the peer IP via getpeername() and call AllowRequest(). On
+          // rejection we return false so the acceptor emits SERVER_BUSY + closes
+          // the fd (see ConnectionAcceptor::AcceptLoop).
+          if (rate_limiter_ptr != nullptr) {
+            struct sockaddr_storage addr_storage {};
+            socklen_t addr_len = sizeof(addr_storage);
+            std::string client_ip;
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+            if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0 &&
+                addr_storage.ss_family == AF_INET) {
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+              auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+              char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+              inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+              client_ip = ip_str;
+            } else {
+              client_ip = "unknown";
+            }
+            if (!rate_limiter_ptr->AllowRequest(client_ip)) {
+              mygram::utils::StructuredLog()
+                  .Event("server_warning")
+                  .Field("type", "rate_limit_exceeded")
+                  .Field("client_ip", client_ip)
+                  .Warn();
+              return false;
+            }
+          }
 
-      auto conn = ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr,
-                                            max_write_bytes);
-      auto reg = reactor_ptr->Register(conn);
-      if (reg.has_value()) {
-        // Count this as an active connection so GetConnectionCount() and the
-        // mygramdb_active_connections metric report the live reactor
-        // population. The matching decrement happens in the close callback
-        // installed above.
-        stats_ptr->IncrementConnections();
-        stats_ptr->IncrementTotalConnections();
-        return true;
-      }
-      return false;
-    });
+          auto conn =
+              ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes);
+          auto reg = reactor_ptr->Register(conn);
+          if (reg.has_value()) {
+            // Count this as an active connection so GetConnectionCount() and the
+            // mygramdb_active_connections metric report the live reactor
+            // population. The matching decrement happens in the close callback
+            // installed above.
+            stats_ptr->IncrementConnections();
+            stats_ptr->IncrementTotalConnections();
+            return true;
+          }
+          return false;
+        });
   }
 
   mygram::utils::StructuredLog()

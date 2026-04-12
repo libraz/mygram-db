@@ -138,7 +138,6 @@ class TcpServer {
    */
   ServerStats* GetMutableStats() { return &stats_; }
 
-
   /**
    * @brief Get dump load in progress flag pointer (for HttpServer)
    */

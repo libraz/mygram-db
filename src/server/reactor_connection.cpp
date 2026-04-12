@@ -43,8 +43,8 @@ std::shared_ptr<ReactorConnection> ReactorConnection::Create(int fd, IoReactor* 
   return std::make_shared<ReactorConnection>(fd, reactor, dispatcher, thread_pool, stats, max_write_queue_bytes);
 }
 
-ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
-                                     ThreadPool* thread_pool, ServerStats* stats, size_t max_write_queue_bytes)
+ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher, ThreadPool* thread_pool,
+                                     ServerStats* stats, size_t max_write_queue_bytes)
     : fd_(fd),
       max_write_queue_bytes_(max_write_queue_bytes),
       reactor_(reactor),
@@ -239,8 +239,7 @@ size_t ReactorConnection::ExtractFramesLocked() {
 
 bool ReactorConnection::ScheduleDrainTask() {
   bool expected = false;
-  if (!drain_scheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+  if (!drain_scheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
     // A drain task is already running or queued; it will pick up the new
     // frames when it next checks `pending_frames_`.
     return true;
@@ -256,10 +255,7 @@ bool ReactorConnection::ScheduleDrainTask() {
   const bool submitted = thread_pool_->Submit([self]() { self->DrainTask(); });
   if (!submitted) {
     drain_scheduled_.store(false, std::memory_order_release);
-    mygram::utils::StructuredLog()
-        .Event("reactor_drain_submit_failed")
-        .Field("fd", static_cast<int64_t>(fd_))
-        .Warn();
+    mygram::utils::StructuredLog().Event("reactor_drain_submit_failed").Field("fd", static_cast<int64_t>(fd_)).Warn();
     closing_.store(true, std::memory_order_release);
     return false;
   }

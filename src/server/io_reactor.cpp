@@ -175,9 +175,13 @@ void IoReactor::Unregister(int fd) {
   }
 }
 
-void IoReactor::SetCloseCallback(std::function<void(int)> cb) { close_callback_ = std::move(cb); }
+void IoReactor::SetCloseCallback(std::function<void(int)> cb) {
+  close_callback_ = std::move(cb);
+}
 
-void IoReactor::SetMultiplexerFactoryForTest(MultiplexerFactory f) { mux_factory_ = std::move(f); }
+void IoReactor::SetMultiplexerFactoryForTest(MultiplexerFactory f) {
+  mux_factory_ = std::move(f);
+}
 
 Expected<void, Error> IoReactor::ArmWrite(int fd) {
   std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);

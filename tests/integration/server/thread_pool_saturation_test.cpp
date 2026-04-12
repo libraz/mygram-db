@@ -160,8 +160,7 @@ class ThreadPoolSaturationTest : public ::testing::Test {
     cfg.allow_cidrs = {"127.0.0.1/32"};
     auto s = std::make_unique<TcpServer>(cfg, table_contexts_);
     auto res = s->Start();
-    EXPECT_TRUE(res) << "Failed to start TcpServer: "
-                     << (res ? std::string{} : res.error().to_string());
+    EXPECT_TRUE(res) << "Failed to start TcpServer: " << (res ? std::string{} : res.error().to_string());
     // Give the accept loop a moment to reach its main loop.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return s;
@@ -198,8 +197,7 @@ TEST_F(ThreadPoolSaturationTest, LateClientServedDespitePinnedIdleClientsInDefau
     ASSERT_GE(s, 0) << "Failed to open pinning client " << i;
     ASSERT_TRUE(SendLine(s, "INFO"));
     std::string resp = RecvLine(s);
-    ASSERT_EQ(resp.substr(0, 7), "OK INFO")
-        << "Pinning client " << i << " did not receive INFO reply; got: " << resp;
+    ASSERT_EQ(resp.substr(0, 7), "OK INFO") << "Pinning client " << i << " did not receive INFO reply; got: " << resp;
     pinned.push_back(s);
   }
 
@@ -214,18 +212,15 @@ TEST_F(ThreadPoolSaturationTest, LateClientServedDespitePinnedIdleClientsInDefau
   auto t0 = std::chrono::steady_clock::now();
   std::string resp = RecvLine(late, /*timeout_ms=*/1500);
   auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-          .count();
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
-  EXPECT_FALSE(resp.empty())
-      << "Late INFO was NOT served under the reactor I/O model even though "
-         "the worker pool was small and all persistent clients were idle. "
-         "The reactor must not couple connection lifetime to worker lifetime.";
+  EXPECT_FALSE(resp.empty()) << "Late INFO was NOT served under the reactor I/O model even though "
+                                "the worker pool was small and all persistent clients were idle. "
+                                "The reactor must not couple connection lifetime to worker lifetime.";
   if (!resp.empty()) {
     EXPECT_EQ(resp.substr(0, 7), "OK INFO");
-    EXPECT_LT(elapsed_ms, 500)
-        << "Late client was served but took " << elapsed_ms
-        << "ms (>500ms). Reactor latency degraded?";
+    EXPECT_LT(elapsed_ms, 500) << "Late client was served but took " << elapsed_ms
+                               << "ms (>500ms). Reactor latency degraded?";
   }
 
   close(late);
@@ -262,8 +257,7 @@ TEST_F(ThreadPoolSaturationTest, DefaultAutoSizeServesManyPersistentClients) {
     int s = Connect(port);
     ASSERT_GE(s, 0) << "Failed to open pinning client " << i;
     ASSERT_TRUE(SendLine(s, "INFO"));
-    ASSERT_EQ(RecvLine(s).substr(0, 7), "OK INFO")
-        << "Pinning client " << i << " did not receive INFO reply";
+    ASSERT_EQ(RecvLine(s).substr(0, 7), "OK INFO") << "Pinning client " << i << " did not receive INFO reply";
     pinned.push_back(s);
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -275,17 +269,14 @@ TEST_F(ThreadPoolSaturationTest, DefaultAutoSizeServesManyPersistentClients) {
   auto t0 = std::chrono::steady_clock::now();
   std::string resp = RecvLine(late, /*timeout_ms=*/1500);
   auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-          .count();
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
-  EXPECT_FALSE(resp.empty())
-      << "Late client starved with " << kPinned
-      << " pinned persistent clients — has the reactor regressed, or did the "
-         "thread pool auto-size floor drop below 4?";
+  EXPECT_FALSE(resp.empty()) << "Late client starved with " << kPinned
+                             << " pinned persistent clients — has the reactor regressed, or did the "
+                                "thread pool auto-size floor drop below 4?";
   if (!resp.empty()) {
     EXPECT_EQ(resp.substr(0, 7), "OK INFO");
-    EXPECT_LT(elapsed_ms, 500)
-        << "Late client responded but took " << elapsed_ms << "ms";
+    EXPECT_LT(elapsed_ms, 500) << "Late client responded but took " << elapsed_ms << "ms";
   }
 
   close(late);

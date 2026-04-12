@@ -10,6 +10,7 @@
 #include "server/io_reactor.h"
 
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -18,8 +19,6 @@
 #include <memory>
 #include <thread>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 #include "mock_event_multiplexer.h"
 #include "server/reactor/event_multiplexer.h"
@@ -44,13 +43,12 @@ namespace {
 struct SocketPair {
   int fds[2]{-1, -1};
 
-  SocketPair() {
-    EXPECT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-  }
+  SocketPair() { EXPECT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0); }
 
   ~SocketPair() {
     for (int fd : fds) {
-      if (fd >= 0) ::close(fd);
+      if (fd >= 0)
+        ::close(fd);
     }
   }
 
@@ -151,9 +149,7 @@ TEST_F(IoReactorTest, StartIsIdempotent) {
 // ---------------------------------------------------------------------------
 
 TEST_F(IoReactorTest, StartReturnsErrorIfFactoryReturnsNull) {
-  reactor_->SetMultiplexerFactoryForTest([]() {
-    return std::unique_ptr<reactor::EventMultiplexer>{nullptr};
-  });
+  reactor_->SetMultiplexerFactoryForTest([]() { return std::unique_ptr<reactor::EventMultiplexer>{nullptr}; });
 
   auto result = reactor_->Start();
   ASSERT_FALSE(result);
@@ -199,8 +195,7 @@ TEST_F(IoReactorTest, RegisterDuplicateFdFails) {
 
   // Second connection with the same fd.
   auto conn2 = std::make_shared<ReactorConnection>(client_fd, reactor_.get(), /*dispatcher=*/nullptr, pool_.get(),
-                                                   /*stats=*/nullptr,
-                                                   ReactorConnection::kDefaultMaxWriteQueueBytes);
+                                                   /*stats=*/nullptr, ReactorConnection::kDefaultMaxWriteQueueBytes);
   auto r2 = reactor_->Register(conn2);
   ASSERT_FALSE(r2);
   EXPECT_EQ(r2.error().code(), ErrorCode::kInternalError);

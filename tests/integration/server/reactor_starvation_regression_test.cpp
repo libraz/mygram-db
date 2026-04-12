@@ -88,7 +88,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
       fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     }
 
-    struct sockaddr_in addr{};
+    struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
@@ -104,7 +104,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
       fd_set ws;
       FD_ZERO(&ws);
       FD_SET(sock, &ws);
-      struct timeval tv{};
+      struct timeval tv {};
       tv.tv_sec = timeout_ms / 1000;
       tv.tv_usec = (timeout_ms % 1000) * 1000;
       int ready = select(sock + 1, nullptr, &ws, nullptr, &tv);
@@ -146,7 +146,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
    * trailing `\r\nEND\r\n`), or empty string on timeout / peer close.
    */
   std::string RecvMultilineResponse(int sock, int timeout_ms = 5000) {
-    struct timeval tv{};
+    struct timeval tv {};
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -162,8 +162,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
         return "";
       }
       out.append(buf.data(), static_cast<size_t>(n));
-      if (out.size() >= kTerminatorLen &&
-          out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
+      if (out.size() >= kTerminatorLen && out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
         return out;
       }
     }
@@ -185,8 +184,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
     cfg.recv_timeout_sec = 0;
     auto s = std::make_unique<TcpServer>(cfg, table_contexts_);
     auto res = s->Start();
-    EXPECT_TRUE(res) << "Failed to start TcpServer: "
-                     << (res ? std::string{} : res.error().to_string());
+    EXPECT_TRUE(res) << "Failed to start TcpServer: " << (res ? std::string{} : res.error().to_string());
     // Give the accept loop a moment to reach its main select/epoll/kqueue call.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return s;
@@ -196,7 +194,7 @@ class ReactorStarvationRegressionTest : public ::testing::Test {
   // FD limit helper
   // -------------------------------------------------------------------------
   static rlim_t RaiseFdLimit(rlim_t desired) {
-    struct rlimit rl{};
+    struct rlimit rl {};
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
       return 0;
     }
@@ -261,7 +259,8 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
   }
 
   if (pin_failures > 0) {
-    for (int s : pinned) close(s);
+    for (int s : pinned)
+      close(s);
     server->Stop();
     GTEST_SKIP() << "Could only open " << pinned.size() << " of " << kPinnedClients
                  << " pinned client sockets (fd budget?). Skipping.";
@@ -287,10 +286,9 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
     }
   }
 
-  EXPECT_EQ(pinned_ok.load(), kPinnedClients)
-      << "Only " << pinned_ok.load() << " of " << kPinnedClients
-      << " pinned clients received their initial INFO response. "
-         "The reactor event loop did not dispatch all connections.";
+  EXPECT_EQ(pinned_ok.load(), kPinnedClients) << "Only " << pinned_ok.load() << " of " << kPinnedClients
+                                              << " pinned clients received their initial INFO response. "
+                                                 "The reactor event loop did not dispatch all connections.";
 
   // All pinned clients are now idle. In reactor mode the workers are free;
   // the event loop is the only thing monitoring those fds.
@@ -303,21 +301,17 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
   auto t0 = std::chrono::steady_clock::now();
   std::string late_resp = RecvMultilineResponse(late, /*timeout_ms=*/500);
   auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-          .count();
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
   // --- Assertions ---
-  EXPECT_FALSE(late_resp.empty())
-      << "Late client received no response within 500 ms despite reactor mode "
-         "being active. Starvation regression: reactor is not decoupling "
-         "worker count from persistent-client count.";
+  EXPECT_FALSE(late_resp.empty()) << "Late client received no response within 500 ms despite reactor mode "
+                                     "being active. Starvation regression: reactor is not decoupling "
+                                     "worker count from persistent-client count.";
 
   if (!late_resp.empty()) {
-    EXPECT_EQ(late_resp.substr(0, 7), "OK INFO")
-        << "Late client response was not OK INFO: " << late_resp;
-    EXPECT_LT(elapsed_ms, 500)
-        << "Late client responded (" << late_resp << ") but took " << elapsed_ms
-        << "ms (> 500ms limit).";
+    EXPECT_EQ(late_resp.substr(0, 7), "OK INFO") << "Late client response was not OK INFO: " << late_resp;
+    EXPECT_LT(elapsed_ms, 500) << "Late client responded (" << late_resp << ") but took " << elapsed_ms
+                               << "ms (> 500ms limit).";
 
     std::cout << "[T1] late_client_latency_ms=" << elapsed_ms << " pinned_ok=" << pinned_ok.load()
               << " workers=" << kWorkers << std::endl;
@@ -325,7 +319,8 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
 
   // Cleanup
   close(late);
-  for (int s : pinned) close(s);
+  for (int s : pinned)
+    close(s);
   server->Stop();
 }
 
@@ -362,15 +357,16 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
   clients.reserve(kClients);
   for (int i = 0; i < kClients; ++i) {
     int s = Connect(port);
-    if (s < 0) break;
+    if (s < 0)
+      break;
     clients.push_back(s);
   }
 
   if (static_cast<int>(clients.size()) < kClients) {
-    for (int s : clients) close(s);
+    for (int s : clients)
+      close(s);
     server->Stop();
-    GTEST_SKIP() << "Could only open " << clients.size() << " of " << kClients
-                 << " client sockets (fd budget?).";
+    GTEST_SKIP() << "Could only open " << clients.size() << " of " << kClients << " client sockets (fd budget?).";
   }
 
   // Snapshot request counter before the burst.
@@ -416,13 +412,12 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
   uint64_t reqs_after = server->GetStats().GetTotalRequests();
 
   std::cout << "[T2] total_ok=" << total_ok.load() << " total_busy=" << total_busy.load()
-            << " total_error=" << total_error.load()
-            << " stat_requests_delta=" << (reqs_after - reqs_before) << std::endl;
+            << " total_error=" << total_error.load() << " stat_requests_delta=" << (reqs_after - reqs_before)
+            << std::endl;
 
   // --- Assertions ---
-  EXPECT_EQ(total_busy.load(), 0)
-      << "Reactor mode sent ERR SERVER_BUSY " << total_busy.load()
-      << " times. The worker pool should not saturate when the reactor is active.";
+  EXPECT_EQ(total_busy.load(), 0) << "Reactor mode sent ERR SERVER_BUSY " << total_busy.load()
+                                  << " times. The worker pool should not saturate when the reactor is active.";
 
   EXPECT_EQ(total_ok.load(), kExpectedTotal)
       << "Expected " << kExpectedTotal << " OK INFO responses but got " << total_ok.load()
@@ -432,7 +427,8 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
       << "Server stats counted fewer total requests than expected.";
 
   // Cleanup
-  for (int s : clients) close(s);
+  for (int s : clients)
+    close(s);
   server->Stop();
 }
 

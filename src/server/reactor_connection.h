@@ -159,9 +159,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   bool OnError();
 
   /// Current bytes held in the pending write accounting (for metrics / tests).
-  [[nodiscard]] size_t PendingWriteBytes() const {
-    return pending_write_bytes_.load(std::memory_order_relaxed);
-  }
+  [[nodiscard]] size_t PendingWriteBytes() const { return pending_write_bytes_.load(std::memory_order_relaxed); }
 
   /// Whether `closing_` has been set. Exposed for tests.
   [[nodiscard]] bool IsClosing() const { return closing_.load(std::memory_order_acquire); }

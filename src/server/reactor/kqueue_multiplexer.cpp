@@ -88,7 +88,8 @@ Expected<void, Error> KqueueMultiplexer::Open() {
   if (::fcntl(kq, F_SETFD, FD_CLOEXEC) < 0) {
     const int en = errno;
     ::close(kq);
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("fcntl(F_SETFD, FD_CLOEXEC)", en)));
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("fcntl(F_SETFD, FD_CLOEXEC)", en)));
   }
 
   kqueue_fd_ = kq;
@@ -96,7 +97,7 @@ Expected<void, Error> KqueueMultiplexer::Open() {
 }
 
 Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_interest, uint8_t old_interest,
-                                                      bool is_add) {
+                                                       bool is_add) {
   // kqueue has no single-call "set the interest set of this fd to X" primitive
   // the way `epoll_ctl(MOD)` does, so we diff the new interest against the
   // previously-armed interest and emit at most two change records: one per
@@ -136,8 +137,7 @@ Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_inter
 
   if (::kevent(kqueue_fd_, changes.data(), nchanges, nullptr, 0, nullptr) < 0) {
     const int en = errno;
-    const ErrorCode code =
-        is_add ? ErrorCode::kNetworkReactorRegisterFailed : ErrorCode::kNetworkReactorModifyFailed;
+    const ErrorCode code = is_add ? ErrorCode::kNetworkReactorRegisterFailed : ErrorCode::kNetworkReactorModifyFailed;
     return MakeUnexpected(
         MakeError(code, FormatErrno(is_add ? "kevent(EV_ADD)" : "kevent(modify)", en), "fd=" + std::to_string(fd)));
   }
@@ -234,8 +234,8 @@ Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
     if (en == ENOENT || en == EBADF) {
       return {};
     }
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("kevent(EV_DELETE)", en), "fd=" + std::to_string(fd)));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("kevent(EV_DELETE)", en),
+                                    "fd=" + std::to_string(fd)));
   }
 
   return {};

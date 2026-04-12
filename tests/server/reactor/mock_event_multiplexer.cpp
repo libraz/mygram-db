@@ -20,7 +20,9 @@ using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 }  // namespace
 
-MockEventMultiplexer::~MockEventMultiplexer() { Shutdown(); }
+MockEventMultiplexer::~MockEventMultiplexer() {
+  Shutdown();
+}
 
 // ---------------------------------------------------------------------------
 // EventMultiplexer interface
@@ -29,9 +31,8 @@ MockEventMultiplexer::~MockEventMultiplexer() { Shutdown(); }
 Expected<void, Error> MockEventMultiplexer::Open() {
   std::unique_lock<std::mutex> lock(mu_);
   if (opened_) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorAlreadyOpen,
-                  "MockEventMultiplexer::Open called on already-open multiplexer"));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorAlreadyOpen,
+                                    "MockEventMultiplexer::Open called on already-open multiplexer"));
   }
   opened_ = true;
   return {};
@@ -41,8 +42,7 @@ Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest) {
   std::unique_lock<std::mutex> lock(mu_);
   if (interest_.count(fd) != 0U) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorRegisterFailed,
-                  "MockEventMultiplexer::Add: fd already registered"));
+        MakeError(ErrorCode::kNetworkReactorRegisterFailed, "MockEventMultiplexer::Add: fd already registered"));
   }
   interest_[fd] = interest;
   return {};
@@ -53,8 +53,7 @@ Expected<void, Error> MockEventMultiplexer::Modify(int fd, uint8_t interest) {
   auto it = interest_.find(fd);
   if (it == interest_.end()) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kNetworkReactorModifyFailed,
-                  "MockEventMultiplexer::Modify: unknown fd"));
+        MakeError(ErrorCode::kNetworkReactorModifyFailed, "MockEventMultiplexer::Modify: unknown fd"));
   }
   it->second = interest;
   return {};
@@ -67,15 +66,12 @@ Expected<void, Error> MockEventMultiplexer::Remove(int fd) {
   return {};
 }
 
-Expected<void, Error> MockEventMultiplexer::Poll(int timeout_ms,
-                                                  std::vector<ReadyEvent>& out) {
+Expected<void, Error> MockEventMultiplexer::Poll(int timeout_ms, std::vector<ReadyEvent>& out) {
   out.clear();
 
   std::unique_lock<std::mutex> lock(mu_);
 
-  auto has_events_or_done = [this]() {
-    return !injected_.empty() || shutdown_;
-  };
+  auto has_events_or_done = [this]() { return !injected_.empty() || shutdown_; };
 
   if (timeout_ms == 0) {
     // Non-blocking: drain whatever is already queued, then return.
@@ -128,12 +124,9 @@ void MockEventMultiplexer::InjectRaw(ReadyEvent ev) {
   poll_cv_.notify_all();
 }
 
-bool MockEventMultiplexer::WaitForPollCalled(int min_calls,
-                                              std::chrono::milliseconds timeout) {
+bool MockEventMultiplexer::WaitForPollCalled(int min_calls, std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(mu_);
-  return poll_cv_.wait_for(lock, timeout, [this, min_calls]() {
-    return poll_call_count_ >= min_calls;
-  });
+  return poll_cv_.wait_for(lock, timeout, [this, min_calls]() { return poll_call_count_ >= min_calls; });
 }
 
 std::vector<int> MockEventMultiplexer::RegisteredFds() const {

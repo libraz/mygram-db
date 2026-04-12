@@ -76,8 +76,7 @@ class KqueueMultiplexer final : public EventMultiplexer {
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
 
   /// @copydoc EventMultiplexer::Poll
-  mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms,
-                                                           std::vector<ReadyEvent>& out) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
 
   /// Backend identifier for metrics and logging.
   const char* Name() const override { return "kqueue"; }
@@ -99,8 +98,8 @@ class KqueueMultiplexer final : public EventMultiplexer {
    * single `kevent()` call. Returns `kNetworkReactorRegisterFailed` (on add)
    * or `kNetworkReactorModifyFailed` (on modify) if the syscall fails.
    */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyInterest(int fd, uint8_t new_interest,
-                                                                    uint8_t old_interest, bool is_add);
+  mygram::utils::Expected<void, mygram::utils::Error> ApplyInterest(int fd, uint8_t new_interest, uint8_t old_interest,
+                                                                    bool is_add);
 
   int kqueue_fd_ = -1;
 
