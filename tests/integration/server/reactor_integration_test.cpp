@@ -912,7 +912,13 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
   // reactor's perspective, but the client still has to consume any bytes
   // that were sent BEFORE the cap fired — so we drain aggressively with a
   // large buffer so the FIN shows up within the deadline.
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  //
+  // The deadline is generous (15s) because under coverage instrumentation
+  // request dispatch is 3–10x slower, which in turn slows both the
+  // dispatch loop that eventually trips the 64 KiB cap and the
+  // close-propagation path after Unregister. A passing run normally
+  // finishes in well under a second.
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   bool slow_closed = false;
   while (std::chrono::steady_clock::now() < deadline) {
     std::array<char, 8192> drain{};
@@ -935,7 +941,7 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
     // until the buffer is empty and FIN shows up.
   }
 
-  EXPECT_TRUE(slow_closed) << "Slow reader was never force-closed by the reactor within 5s "
+  EXPECT_TRUE(slow_closed) << "Slow reader was never force-closed by the reactor within 15s "
                            << "despite piling up responses against a 64 KiB write queue cap";
 
   close(slow);
