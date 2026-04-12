@@ -221,6 +221,9 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Start after DUMP SAVE
         const std::string& token = tokens[i];
+        if (token.empty()) {
+          continue;  // Skip empty tokens (e.g., from empty quoted strings)
+        }
         if (token == "--with-stats") {
           query.dump_with_stats = true;
         } else if (token[0] != '-') {

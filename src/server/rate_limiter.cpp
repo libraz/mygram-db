@@ -137,7 +137,7 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   }
 
   // Update last access time
-  bucket_iter->second->last_access = std::chrono::steady_clock::now();
+  bucket_iter->second->last_access = now;
 
   // Try to consume token
   bool allowed = bucket_iter->second->bucket->TryConsume();
@@ -162,6 +162,7 @@ RateLimiter::Stats RateLimiter::GetStats() const {
 }
 
 void RateLimiter::ResetStats() {
+  std::lock_guard<std::mutex> lock(mutex_);
   total_requests_.store(0, std::memory_order_relaxed);
   allowed_requests_.store(0, std::memory_order_relaxed);
   blocked_requests_.store(0, std::memory_order_relaxed);

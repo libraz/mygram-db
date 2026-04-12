@@ -397,3 +397,51 @@ TEST_F(RateLimiterTest, AtomicStatsConsistencyUnderConcurrency) {
   EXPECT_EQ(stats.blocked_requests, total_blocked.load());
   EXPECT_EQ(stats.total_requests, stats.allowed_requests + stats.blocked_requests);
 }
+
+/**
+ * @brief Test that ResetStats is thread-safe with concurrent AllowRequest/GetStats
+ *
+ * Regression test: ResetStats previously did not acquire mutex_, causing
+ * GetStats (which reads under mutex) to observe inconsistent counter values
+ * where total < allowed + blocked.
+ */
+TEST_F(RateLimiterTest, ResetStatsConcurrentConsistency) {
+  RateLimiter limiter(5, 5, 10000, std::chrono::seconds(2), 300);
+
+  constexpr int kIterations = 2000;
+  std::atomic<bool> inconsistency_found{false};
+  std::atomic<bool> stop{false};
+
+  // Thread 1: AllowRequest continuously
+  std::thread requester([&]() {
+    for (int i = 0; i < kIterations && !stop.load(std::memory_order_relaxed); ++i) {
+      limiter.AllowRequest("10.0.0." + std::to_string(i % 100));
+    }
+  });
+
+  // Thread 2: ResetStats continuously
+  std::thread resetter([&]() {
+    for (int i = 0; i < kIterations && !stop.load(std::memory_order_relaxed); ++i) {
+      limiter.ResetStats();
+    }
+  });
+
+  // Thread 3: GetStats and check consistency
+  std::thread checker([&]() {
+    for (int i = 0; i < kIterations && !stop.load(std::memory_order_relaxed); ++i) {
+      auto stats = limiter.GetStats();
+      // total must always equal allowed + blocked
+      if (stats.total_requests != stats.allowed_requests + stats.blocked_requests) {
+        inconsistency_found.store(true, std::memory_order_relaxed);
+        stop.store(true, std::memory_order_relaxed);
+        break;
+      }
+    }
+  });
+
+  requester.join();
+  resetter.join();
+  checker.join();
+
+  EXPECT_FALSE(inconsistency_found.load()) << "Stats counters were inconsistent during concurrent ResetStats";
+}

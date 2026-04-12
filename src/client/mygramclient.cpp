@@ -325,10 +325,14 @@ class MygramClient::Impl {
 
     // Send command with \r\n terminator
     std::string msg = command + "\r\n";
-    ssize_t sent = send(sock_, msg.c_str(), msg.length(), 0);
-    if (sent < 0) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to send command: ") + strerror(errno)));
+    size_t total_sent = 0;
+    while (total_sent < msg.size()) {
+      ssize_t sent = send(sock_, msg.c_str() + total_sent, msg.size() - total_sent, 0);
+      if (sent < 0) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to send command: ") + strerror(errno)));
+      }
+      total_sent += static_cast<size_t>(sent);
     }
 
     // Receive response (loop until complete response is received)
@@ -353,14 +357,6 @@ class MygramClient::Impl {
       if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
         // Response is complete
         break;
-      }
-
-      // If we received less than buffer size, server has no more data (for now)
-      // But response doesn't end with \r\n yet, so keep reading
-      // This handles the case where server sends data in chunks
-      if (static_cast<size_t>(received) < buffer.size() - 1) {
-        // Small delay to allow more data to arrive
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
 
@@ -598,6 +594,11 @@ class MygramClient::Impl {
 
     // Parse Redis-style INFO response (multi-line key: value format)
     ServerInfo info;
+    auto safe_parse_u64 = [](const std::string& str, uint64_t default_val = 0) -> uint64_t {
+      uint64_t val = default_val;
+      std::from_chars(str.data(), str.data() + str.size(), val);
+      return val;
+    };
     std::istringstream iss(response);
     std::string line;
 
@@ -626,15 +627,15 @@ class MygramClient::Impl {
         if (key == "version") {
           info.version = value;
         } else if (key == "uptime_seconds") {
-          info.uptime_seconds = std::stoull(value);
+          info.uptime_seconds = safe_parse_u64(value);
         } else if (key == "total_requests") {
-          info.total_requests = std::stoull(value);
+          info.total_requests = safe_parse_u64(value);
         } else if (key == "active_connections") {
-          info.active_connections = std::stoull(value);
+          info.active_connections = safe_parse_u64(value);
         } else if (key == "index_size_bytes") {
-          info.index_size_bytes = std::stoull(value);
+          info.index_size_bytes = safe_parse_u64(value);
         } else if (key == "doc_count" || key == "total_documents") {
-          info.doc_count = std::stoull(value);
+          info.doc_count = safe_parse_u64(value);
         } else if (key == "tables") {
           // Parse comma-separated table names
           std::istringstream table_iss(value);

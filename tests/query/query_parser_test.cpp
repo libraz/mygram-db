@@ -1426,6 +1426,34 @@ TEST(QueryParserTest, DumpSaveWithFilepath) {
 }
 
 /**
+ * @brief Test DUMP SAVE with empty quoted string does not cause UB
+ *
+ * Regression test: an empty quoted argument (e.g., DUMP SAVE "") previously
+ * caused undefined behavior by accessing token[0] on an empty string.
+ */
+TEST(QueryParserTest, DumpSaveEmptyQuotedString) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE \"\"");
+
+  // Should parse successfully - empty string is treated as empty filepath
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
+}
+
+/**
+ * @brief Test DUMP SAVE with empty token from consecutive spaces
+ */
+TEST(QueryParserTest, DumpSaveWithOnlyFlags) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE --with-stats");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
+  EXPECT_TRUE(query->dump_with_stats);
+  EXPECT_TRUE(query->filepath.empty());
+}
+
+/**
  * @brief Test DUMP LOAD without filepath
  *
  * "DUMP LOAD" is parsed as DUMP_LOAD with "LOAD" as the filepath (edge case).
