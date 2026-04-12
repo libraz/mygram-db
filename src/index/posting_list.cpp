@@ -316,10 +316,10 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
 
 uint64_t PostingList::Size() const {
   std::shared_lock lock(mutex_);  // Protect read access
-  return SizeUnsafe();
+  return SizeApprox();
 }
 
-uint64_t PostingList::SizeUnsafe() const {
+uint64_t PostingList::SizeApprox() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size();
   }
@@ -328,10 +328,10 @@ uint64_t PostingList::SizeUnsafe() const {
 
 size_t PostingList::MemoryUsage() const {
   std::shared_lock lock(mutex_);  // Protect read access
-  return MemoryUsageUnsafe();
+  return MemoryUsageApprox();
 }
 
-size_t PostingList::MemoryUsageUnsafe() const {
+size_t PostingList::MemoryUsageApprox() const {
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     return delta_compressed_.size() * sizeof(uint32_t);
   }

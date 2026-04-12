@@ -970,7 +970,8 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
   search_query.search_text = "hello";
 
   std::vector<DocId> dummy_results = {1, 2, 3};
-  std::set<std::string> ngrams = {"he", "el", "ll", "lo"};
+  std::set<std::string> ngram_set = {"he", "el", "ll", "lo"};
+  std::vector<std::string> ngrams(ngram_set.begin(), ngram_set.end());
   bool inserted = cache_manager->Insert(search_query, dummy_results, ngrams,
                                         /*query_cost_ms=*/100.0);
   ASSERT_TRUE(inserted) << "Failed to insert into cache";

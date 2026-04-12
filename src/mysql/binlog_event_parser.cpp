@@ -125,15 +125,7 @@ std::optional<RowsEventContext> InitRowsEventContext(
   }
 
   // Prepare required_filters config
-  ctx.required_as_filters.reserve(ctx.current_config->required_filters.size());
-  for (const auto& req_filter : ctx.current_config->required_filters) {
-    config::FilterConfig filter_config;
-    filter_config.name = req_filter.name;
-    filter_config.type = req_filter.type;
-    filter_config.dict_compress = false;
-    filter_config.bitmap_index = req_filter.bitmap_index;
-    ctx.required_as_filters.push_back(filter_config);
-  }
+  ctx.required_as_filters = config::ToFilterConfigs(ctx.current_config->required_filters);
 
   return ctx;
 }
@@ -774,13 +766,12 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   remaining -= packed_int_size;
 
   // SECURITY: Validate column count to prevent integer overflow and excessive allocation
-  constexpr uint64_t MAX_COLUMNS = 4096;  // MySQL limit is 4096 columns
-  if (column_count > MAX_COLUMNS) {
+  if (column_count > mygram::constants::kMySQLMaxColumns) {
     mygram::utils::StructuredLog()
         .Event("mysql_binlog_warning")
         .Field("type", "column_count_exceeds_maximum")
         .Field("column_count", column_count)
-        .Field("max_columns", MAX_COLUMNS)
+        .Field("max_columns", mygram::constants::kMySQLMaxColumns)
         .Warn();
     return {};
   }

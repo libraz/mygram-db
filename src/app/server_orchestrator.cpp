@@ -20,7 +20,7 @@ namespace mygramdb::app {
 
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
-constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
+constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ServerOrchestrator>, mygram::utils::Error> ServerOrchestrator::Create(

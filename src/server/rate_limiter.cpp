@@ -9,6 +9,7 @@
 
 #include <algorithm>
 
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -57,8 +58,8 @@ void TokenBucket::Refill() {
 
   if (elapsed > 0) {
     // Add tokens based on elapsed time
-    constexpr double kMillisecondsPerSecond = 1000.0;
-    double tokens_to_add = (static_cast<double>(refill_rate_) * static_cast<double>(elapsed)) / kMillisecondsPerSecond;
+    double tokens_to_add = (static_cast<double>(refill_rate_) * static_cast<double>(elapsed)) /
+                           static_cast<double>(mygram::constants::kMillisecondsPerSecond);
     tokens_ = std::min(static_cast<double>(capacity_), tokens_ + tokens_to_add);
     last_refill_ = now;
   }

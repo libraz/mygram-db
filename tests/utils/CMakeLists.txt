@@ -256,6 +256,20 @@ gtest_discover_tests(endian_utils_test
 
 # AtomicFileWriter tests
 
+add_executable(comparison_utils_test
+  comparison_utils_test.cpp
+)
+
+target_link_libraries(comparison_utils_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(comparison_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(atomic_file_writer_test
   atomic_file_writer_test.cpp
 )

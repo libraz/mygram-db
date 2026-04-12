@@ -737,7 +737,6 @@ Config ParseConfigFromJson(const json& root) {
       config.cache.enabled = cache["enabled"].get<bool>();
     }
     if (cache.contains("max_memory_mb")) {
-      constexpr size_t kBytesPerMB = 1024 * 1024;    // Bytes in one megabyte
       constexpr int64_t kMaxMemoryMB = 1024 * 1024;  // 1TB max (reasonable upper limit)
       int64_t max_memory_mb = cache["max_memory_mb"].get<int64_t>();
 
@@ -751,7 +750,7 @@ Config ParseConfigFromJson(const json& root) {
                                  std::to_string(kMaxMemoryMB) + " MB). Got: " + std::to_string(max_memory_mb) + " MB");
       }
 
-      config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * kBytesPerMB;
+      config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * mygram::constants::kBytesPerMegabyte;
     }
     if (cache.contains("min_query_cost_ms")) {
       config.cache.min_query_cost_ms = cache["min_query_cost_ms"].get<double>();
@@ -782,8 +781,7 @@ Config ParseConfigFromJson(const json& root) {
     if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
       auto system_info = mygram::utils::GetSystemMemoryInfo();
       if (system_info) {
-        constexpr double kMaxCacheRatio = 0.5;       // Maximum 50% of physical memory
-        constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
+        constexpr double kMaxCacheRatio = 0.5;  // Maximum 50% of physical memory
         auto max_allowed_cache =
             static_cast<uint64_t>(static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
 
@@ -795,11 +793,12 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache)
                   << "\n";
           err_msg << "  Recommendation:\n";
-          err_msg << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMB) << " MB\n";
+          err_msg << "    - Set cache.max_memory_mb to at most "
+                  << (max_allowed_cache / mygram::constants::kBytesPerMegabyte) << " MB\n";
           err_msg << "    - Consider system memory requirements for index and operations\n";
           err_msg << "  Example:\n";
           err_msg << "    cache:\n";
-          err_msg << "      max_memory_mb: " << (max_allowed_cache / kBytesPerMB);
+          err_msg << "      max_memory_mb: " << (max_allowed_cache / mygram::constants::kBytesPerMegabyte);
           throw std::runtime_error(err_msg.str());
         }
       } else {

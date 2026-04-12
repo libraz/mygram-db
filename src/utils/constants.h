@@ -64,11 +64,35 @@ constexpr int kSecondsPerDay = 86400;
 /// Standard MySQL binlog event header length (LOG_EVENT_HEADER_LEN)
 constexpr size_t kBinlogEventHeaderLen = 19;
 
+/// Maximum number of columns in a MySQL table
+constexpr uint64_t kMySQLMaxColumns = 4096;
+
+/// Estimated average bytes per binlog row (for reserve heuristics)
+constexpr size_t kEstimatedBytesPerBinlogRow = 100;
+
+/// Maximum number of rows to pre-reserve in binlog parsing
+constexpr size_t kMaxPreReserveRows = 10000;
+
 // ============================================================================
 // GTID constants
 // ============================================================================
 
 /// Length of the "gtid=" prefix in start_from configuration
 constexpr size_t kGtidPrefixLength = 5;
+
+// ============================================================================
+// Character encoding constants
+// ============================================================================
+
+/// First byte value outside the ASCII range (0x80 = 128)
+constexpr unsigned char kFirstNonAsciiByte = 0x80;
+
+// ============================================================================
+// Floating-point comparison constants
+// ============================================================================
+
+/// Absolute epsilon for filter value floating-point comparisons.
+/// Appropriate for user-facing numbers (prices, ratings, etc.).
+constexpr double kFilterValueEpsilon = 1e-9;
 
 }  // namespace mygram::constants

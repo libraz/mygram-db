@@ -12,9 +12,56 @@
 #ifdef USE_MYSQL
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
+#include "mysql/binlog_event_types.h"
+#include "mysql/table_metadata.h"
+
 namespace mygramdb::mysql::internal {
+
+/**
+ * @brief Parsed header data from a ROWS event (WRITE/UPDATE/DELETE)
+ *
+ * Contains all fields extracted from the common post-header, var_header,
+ * column_count, first column bitmap, and PK/text column index lookup.
+ * For UPDATE events, the caller must parse the second (after-image) bitmap
+ * starting at row_data_ptr.
+ */
+struct RowsEventHeader {
+  const unsigned char* row_data_ptr;     ///< Pointer to where row data (or second bitmap) starts
+  const unsigned char* end;              ///< Pointer to end of parseable data (before CRC32)
+  uint64_t column_count;                 ///< Number of columns in the event
+  const unsigned char* columns_present;  ///< First column bitmap (before-image for UPDATE)
+  size_t bitmap_size;                    ///< Size of each column bitmap in bytes
+  size_t null_bitmap_size;               ///< Size of per-row null bitmap in bytes
+  int pk_col_idx;                        ///< Index of primary key column, or -1 if not found
+  int text_col_idx;                      ///< Index of text column, or -1 if not found
+};
+
+/**
+ * @brief Parse the common header of a ROWS event (post-header, var_header,
+ *        column_count, first column bitmap, PK/text column indices).
+ *
+ * This handles the identical prologue shared by WRITE, UPDATE, and DELETE
+ * row events. For UPDATE events the returned row_data_ptr points to the
+ * start of the after-image column bitmap (which the caller must parse).
+ * For WRITE/DELETE events row_data_ptr points to the first row.
+ *
+ * @param buffer       Raw event buffer (after OK byte, includes event header)
+ * @param length       Total buffer length
+ * @param event_type   Binlog event type (determines V1 vs V2 format)
+ * @param table_metadata Table metadata from the preceding TABLE_MAP event
+ * @param pk_column_name  Primary key column name to look up
+ * @param text_column_name Text column name to look up
+ * @param event_type_label Short label for log messages (e.g. "write_rows")
+ * @return Parsed header on success, std::nullopt on any parse error
+ */
+std::optional<RowsEventHeader> ParseRowsEventHeader(const unsigned char* buffer, unsigned long length,
+                                                    MySQLBinlogEventType event_type,
+                                                    const TableMetadata* table_metadata,
+                                                    const std::string& pk_column_name,
+                                                    const std::string& text_column_name, const char* event_type_label);
 
 /**
  * @brief Convert fractional seconds to microseconds based on precision metadata.

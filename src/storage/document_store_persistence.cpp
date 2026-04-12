@@ -620,12 +620,20 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     // Read next_doc_id (will be set later under lock)
     uint32_t next_id = 0;
     ReadBinary(input_stream, next_id);
+    if (!input_stream.good()) {
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read next_doc_id from snapshot stream"));
+    }
 
     // Read GTID (for replication position)
     constexpr uint32_t kMaxGTIDLength = 1024;
     constexpr uint64_t kMaxDocumentCount = 1000000000;  // 1 billion documents
     uint32_t gtid_len = 0;
     ReadBinary(input_stream, gtid_len);
+    if (!input_stream.good()) {
+      return MakeUnexpected(
+          MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID length from snapshot stream"));
+    }
     if (gtid_len > kMaxGTIDLength) {
       return MakeUnexpected(MakeError(
           mygram::utils::ErrorCode::kStorageCorrupted,
@@ -634,6 +642,10 @@ Expected<void, Error> DocumentStore::LoadFromStream(std::istream& input_stream, 
     if (gtid_len > 0) {
       std::string gtid(gtid_len, '\0');
       input_stream.read(gtid.data(), static_cast<std::streamsize>(gtid_len));
+      if (!input_stream.good()) {
+        return MakeUnexpected(
+            MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID data from snapshot stream"));
+      }
       if (replication_gtid != nullptr) {
         *replication_gtid = gtid;
       }

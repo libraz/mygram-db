@@ -202,16 +202,20 @@ class PostingList {
   mutable std::shared_mutex mutex_;
 
   /**
-   * @brief Get document count without acquiring mutex
-   * @note Caller must already hold mutex_ (shared or exclusive)
+   * @brief Get approximate document count without acquiring mutex
+   *
+   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
+   * under concurrent writes.
    */
-  [[nodiscard]] uint64_t SizeUnsafe() const;
+  [[nodiscard]] uint64_t SizeApprox() const;
 
   /**
-   * @brief Get memory usage without acquiring mutex
-   * @note Caller must already hold mutex_ (shared or exclusive)
+   * @brief Get approximate memory usage without acquiring mutex
+   *
+   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
+   * under concurrent writes.
    */
-  [[nodiscard]] size_t MemoryUsageUnsafe() const;
+  [[nodiscard]] size_t MemoryUsageApprox() const;
 
   /**
    * @brief Recompute and cache last_doc_id_ from delta_compressed_

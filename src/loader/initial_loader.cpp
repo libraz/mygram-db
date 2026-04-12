@@ -108,8 +108,9 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
   // read inside the transaction reflects the snapshot point.
   mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
-  if (!connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT")) {
-    std::string error_msg = "Failed to start consistent snapshot: " + connection_.GetLastError();
+  auto start_txn_result = connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
+  if (!start_txn_result) {
+    std::string error_msg = "Failed to start consistent snapshot: " + start_txn_result.error().message();
     mygram::utils::StructuredLog()
         .Event("loader_error")
         .Field("operation", "initial_load")
@@ -153,7 +154,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
       mygram::utils::StructuredLog()
           .Event("loader_warning")
           .Field("operation", "rollback")
-          .Field("error", connection_.GetLastError())
+          .Field("error", rollback_result_gtid.error().message())
           .Warn();
     }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
@@ -170,13 +171,13 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // Execute query (within the consistent snapshot transaction)
   auto result_exp = connection_.Execute(query);
   if (!result_exp) {
-    std::string error_msg = "Failed to execute SELECT query: " + connection_.GetLastError();
+    std::string error_msg = "Failed to execute SELECT query: " + result_exp.error().message();
     auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
     if (!rollback_result_query) {
       mygram::utils::StructuredLog()
           .Event("loader_warning")
           .Field("operation", "rollback")
-          .Field("error", connection_.GetLastError())
+          .Field("error", rollback_result_query.error().message())
           .Warn();
     }
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
@@ -226,7 +227,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
         mygram::utils::StructuredLog()
             .Event("loader_warning")
             .Field("operation", "rollback")
-            .Field("error", connection_.GetLastError())
+            .Field("error", rollback_result.error().message())
             .Warn();
       }
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
@@ -287,13 +288,16 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // result automatically freed by MySQLResult destructor
 
   // Commit the transaction (releases the snapshot)
-  if (!connection_.ExecuteUpdate("COMMIT")) {
+  auto commit_result = connection_.ExecuteUpdate("COMMIT");
+  if (!commit_result) {
+    std::string error_msg = "Failed to commit transaction: " + commit_result.error().message();
     mygram::utils::StructuredLog()
-        .Event("loader_warning")
+        .Event("loader_error")
         .Field("operation", "initial_load")
         .Field("type", "commit_failed")
-        .Field("error", connection_.GetLastError())
-        .Warn();
+        .Field("error", error_msg)
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
   if (cancelled_) {
@@ -341,10 +345,20 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
       mygram::utils::StructuredLog()
           .Event("loader_warning")
           .Field("operation", "rollback")
-          .Field("error", connection_.GetLastError())
+          .Field("error", rollback_result.error().message())
           .Warn();
     }
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
+
+  // Collect existing doc_ids before batch add to detect duplicates
+  std::unordered_set<storage::DocId> existing_doc_ids;
+  existing_doc_ids.reserve(doc_batch.size());
+  for (const auto& doc : doc_batch) {
+    auto existing_id = doc_store_.GetDocId(doc.primary_key);
+    if (existing_id) {
+      existing_doc_ids.insert(*existing_id);
+    }
   }
 
   // Add documents to document store
@@ -355,7 +369,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
       mygram::utils::StructuredLog()
           .Event("loader_warning")
           .Field("operation", "rollback")
-          .Field("error", connection_.GetLastError())
+          .Field("error", rollback_result.error().message())
           .Warn();
     }
     return MakeUnexpected(doc_ids_result.error());
@@ -378,19 +392,24 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
       mygram::utils::StructuredLog()
           .Event("loader_warning")
           .Field("operation", "rollback")
-          .Field("error", connection_.GetLastError())
+          .Field("error", rollback_result.error().message())
           .Warn();
     }
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Update index_batch with assigned doc_ids
+  // Build filtered index batch excluding duplicate PKs (which returned existing doc_ids)
+  std::vector<index::Index::DocumentItem> filtered_index_batch;
+  filtered_index_batch.reserve(doc_ids.size());
   for (size_t i = 0; i < doc_ids.size(); ++i) {
-    index_batch[i].doc_id = doc_ids[i];
+    if (existing_doc_ids.count(doc_ids[i]) == 0) {
+      index_batch[i].doc_id = doc_ids[i];
+      filtered_index_batch.push_back(index_batch[i]);
+    }
   }
 
-  // Add to index
-  index_.AddDocumentBatch(index_batch);
+  // Add to index (only new documents, not duplicates)
+  index_.AddDocumentBatch(filtered_index_batch);
 
   processed_rows_ += doc_batch.size();
 
@@ -404,6 +423,9 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
 std::string InitialLoader::BuildSelectQuery() const {
   std::ostringstream query;
   query << "SELECT ";
+
+  // Helper to backtick-quote SQL identifiers (column/table names)
+  auto quote_identifier = [](const std::string& name) -> std::string { return "`" + name + "`"; };
 
   // Collect all columns to SELECT (avoiding duplicates, preserving order)
   std::vector<std::string> selected_columns;
@@ -445,11 +467,11 @@ std::string InitialLoader::BuildSelectQuery() const {
     if (!first) {
       query << ", ";
     }
-    query << col;
+    query << quote_identifier(col);
     first = false;
   }
 
-  query << " FROM " << table_config_.name;
+  query << " FROM " << quote_identifier(table_config_.name);
 
   // Add WHERE clause from required_filters
   if (!table_config_.required_filters.empty()) {
@@ -494,7 +516,7 @@ std::string InitialLoader::BuildSelectQuery() const {
       }
       first = false;
 
-      query << filter.name << " ";
+      query << quote_identifier(filter.name) << " ";
 
       if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
         query << filter.op;
@@ -518,7 +540,7 @@ std::string InitialLoader::BuildSelectQuery() const {
   }
 
   // Add ORDER BY for efficient processing
-  query << " ORDER BY " << table_config_.primary_key;
+  query << " ORDER BY " << quote_identifier(table_config_.primary_key);
 
   return query.str();
 }

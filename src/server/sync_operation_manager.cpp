@@ -110,7 +110,21 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     thread_iter->second.join();
   }
   // Launch async build (store thread instead of detaching)
-  sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  // Wrap in try/catch to rollback state if thread creation fails
+  try {
+    sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  } catch (const std::system_error& e) {
+    // Rollback: remove from syncing_tables_ and reset sync state
+    {
+      std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
+      syncing_tables_.erase(table_name);
+    }
+    sync_states_[table_name].is_running = false;
+    sync_states_[table_name].status = "FAILED";
+    sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kSyncThreadCreationFailed, "Failed to create sync thread: " + std::string(e.what())));
+  }
 
   return "OK SYNC STARTED table=" + table_name + " job_id=1";
 }
@@ -232,35 +246,35 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
   }
 
   // Stop specific table
-  {
-    std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
-    if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
-      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
-    }
-  }
-
-  // Cancel the loader
-  {
-    std::lock_guard<std::mutex> lock(loaders_mutex_);
-    auto iter = active_loaders_.find(table_name);
-    if (iter != active_loaders_.end()) {
-      mygram::utils::StructuredLog()
-          .Event("sync_stop")
-          .Field("table", table_name)
-          .Field("source", "user_request")
-          .Info();
-      iter->second->Cancel();
-    } else {
-      return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
-    }
-  }
-
-  // Move thread out of sync_threads_ under lock, then join WITHOUT holding
-  // the lock. This mirrors the destructor pattern and avoids deadlock: the
-  // background thread's update_state lambda also acquires sync_mutex_.
+  // Acquire locks in documented order: sync_mutex_ -> syncing_tables_mutex_ -> loaders_mutex_
+  // to avoid TOCTOU window where sync could complete between separate lock acquisitions.
   std::thread thread_to_join;
   {
-    std::lock_guard<std::mutex> lock(sync_mutex_);
+    std::lock_guard<std::mutex> sync_lock(sync_mutex_);
+    {
+      std::lock_guard<std::mutex> syncing_lock(syncing_tables_mutex_);
+      if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
+        return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+      }
+    }
+
+    // Cancel the loader (still under sync_mutex_, acquire loaders_mutex_ per lock order)
+    {
+      std::lock_guard<std::mutex> loader_lock(loaders_mutex_);
+      auto iter = active_loaders_.find(table_name);
+      if (iter != active_loaders_.end()) {
+        mygram::utils::StructuredLog()
+            .Event("sync_stop")
+            .Field("table", table_name)
+            .Field("source", "user_request")
+            .Info();
+        iter->second->Cancel();
+      } else {
+        return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
+      }
+    }
+
+    // Move thread out of sync_threads_ (already under sync_mutex_)
     auto thread_iter = sync_threads_.find(table_name);
     if (thread_iter != sync_threads_.end()) {
       thread_to_join = std::move(thread_iter->second);
@@ -268,7 +282,8 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     }
   }
 
-  // Join thread WITHOUT holding sync_mutex_
+  // Join thread WITHOUT holding sync_mutex_ to avoid deadlock with
+  // the background thread's update_state lambda.
   if (thread_to_join.joinable()) {
     thread_to_join.join();
   }
@@ -396,8 +411,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
-    if (!mysql_conn->Connect()) {
-      std::string error_msg = "Failed to connect: " + mysql_conn->GetLastError();
+    auto connect_result = mysql_conn->Connect();
+    if (!connect_result) {
+      std::string error_msg = "Failed to connect: " + connect_result.error().message();
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
         state.error_message = error_msg;

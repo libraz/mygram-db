@@ -143,4 +143,21 @@ inline void DeduplicateSorted(std::vector<T>& vec) {
   vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 }
 
+/**
+ * @brief Generate n-grams for a query term using the appropriate strategy
+ *
+ * Encapsulates the 3-branch n-gram selection logic:
+ * - kanji_ngram_size > 0: Use GenerateHybridNgrams with both sizes
+ * - ngram_size == 0: Use GenerateHybridNgrams with default parameters
+ * - Otherwise: Use GenerateNgrams with the given ngram_size
+ *
+ * @param normalized Normalized text to generate n-grams from
+ * @param ngram_size N-gram size for ASCII/alphanumeric characters
+ * @param kanji_ngram_size N-gram size for CJK characters (0 = not configured)
+ * @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
+ * @return Vector of n-gram strings
+ */
+std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ngram_size, int kanji_ngram_size,
+                                             bool cross_boundary_ngrams);
+
 }  // namespace mygram::utils

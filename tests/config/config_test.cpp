@@ -853,3 +853,72 @@ network:
 
   std::remove("test_session_timeout_max.yaml");
 }
+
+/**
+ * @brief Test ToFilterConfig converts a single RequiredFilterConfig correctly
+ */
+TEST(ConfigTest, ToFilterConfigConvertsSingleConfig) {
+  RequiredFilterConfig req;
+  req.name = "status";
+  req.type = "int";
+  req.op = "=";
+  req.value = "1";
+  req.bitmap_index = true;
+
+  FilterConfig result = ToFilterConfig(req);
+
+  EXPECT_EQ(result.name, "status");
+  EXPECT_EQ(result.type, "int");
+  EXPECT_TRUE(result.bitmap_index);
+  EXPECT_FALSE(result.dict_compress);
+  // bucket and other FilterConfig-only fields should be default (empty)
+  EXPECT_TRUE(result.bucket.empty());
+}
+
+/**
+ * @brief Test ToFilterConfigs converts a vector of RequiredFilterConfigs
+ */
+TEST(ConfigTest, ToFilterConfigsConvertsVector) {
+  std::vector<RequiredFilterConfig> required;
+
+  RequiredFilterConfig req1;
+  req1.name = "status";
+  req1.type = "int";
+  req1.op = "=";
+  req1.value = "1";
+  req1.bitmap_index = true;
+  required.push_back(req1);
+
+  RequiredFilterConfig req2;
+  req2.name = "category";
+  req2.type = "string";
+  req2.op = "!=";
+  req2.value = "deleted";
+  req2.bitmap_index = false;
+  required.push_back(req2);
+
+  std::vector<FilterConfig> result = ToFilterConfigs(required);
+
+  ASSERT_EQ(result.size(), 2);
+
+  EXPECT_EQ(result[0].name, "status");
+  EXPECT_EQ(result[0].type, "int");
+  EXPECT_TRUE(result[0].bitmap_index);
+  EXPECT_FALSE(result[0].dict_compress);
+
+  EXPECT_EQ(result[1].name, "category");
+  EXPECT_EQ(result[1].type, "string");
+  EXPECT_FALSE(result[1].bitmap_index);
+  EXPECT_FALSE(result[1].dict_compress);
+}
+
+/**
+ * @brief Test ToFilterConfigs with empty input returns empty vector
+ */
+TEST(ConfigTest, ToFilterConfigsEmptyInput) {
+  std::vector<RequiredFilterConfig> empty_required;
+
+  std::vector<FilterConfig> result = ToFilterConfigs(empty_required);
+
+  EXPECT_TRUE(result.empty());
+}

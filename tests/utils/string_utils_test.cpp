@@ -791,3 +791,210 @@ TEST(StringUtilsTest, ToUpperMixedCaseNumbersSymbols) {
   EXPECT_EQ(ToUpper("test-value_1.0"), "TEST-VALUE_1.0");
   EXPECT_EQ(ToUpper("foo@bar!"), "FOO@BAR!");
 }
+
+// ============================================================================
+// GenerateQueryNgrams tests
+// ============================================================================
+
+/**
+ * @brief Test GenerateQueryNgrams: kanji path (kanji_ngram_size > 0)
+ *
+ * When kanji_ngram_size > 0, should delegate to GenerateHybridNgrams
+ * with the given ngram_size, kanji_ngram_size, and cross_boundary_ngrams.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsKanjiPath) {
+  // kanji_ngram_size=1, ngram_size=2 -> GenerateHybridNgrams("東方Project", 2, 1, true)
+  auto ngrams = GenerateQueryNgrams("東方Project", 2, 1, true);
+
+  // Same result as GenerateHybridNgrams("東方Project", 2, 1, true)
+  auto expected = GenerateHybridNgrams("東方Project", 2, 1, true);
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+
+  // Verify CJK unigrams and ASCII bigrams are present
+  EXPECT_EQ(ngrams[0], "東");
+  EXPECT_EQ(ngrams[1], "方");
+  EXPECT_EQ(ngrams[2], "Pr");
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: kanji path with kanji bigrams
+ *
+ * When kanji_ngram_size=2, CJK characters should also produce bigrams.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsKanjiPathBigrams) {
+  // kanji_ngram_size=2, ngram_size=3 -> GenerateHybridNgrams("漢字ABC", 3, 2, true)
+  auto ngrams = GenerateQueryNgrams("漢字ABC", 3, 2, true);
+  auto expected = GenerateHybridNgrams("漢字ABC", 3, 2, true);
+
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: default hybrid path (ngram_size == 0)
+ *
+ * When ngram_size == 0 and kanji_ngram_size == 0, should delegate to
+ * GenerateHybridNgrams with default parameters (ascii=2, kanji=1, cross=true).
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsDefaultHybridPath) {
+  // ngram_size=0, kanji_ngram_size=0 -> GenerateHybridNgrams("東方Project")
+  auto ngrams = GenerateQueryNgrams("東方Project", 0, 0, false);
+
+  // Defaults: ascii_ngram_size=2, kanji_ngram_size=1, cross_boundary=true
+  auto expected = GenerateHybridNgrams("東方Project");
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: default hybrid path with ASCII-only text
+ *
+ * Even with ASCII-only text, ngram_size=0 uses hybrid defaults (bigrams).
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsDefaultHybridPathASCII) {
+  auto ngrams = GenerateQueryNgrams("hello", 0, 0, true);
+  auto expected = GenerateHybridNgrams("hello");
+
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+
+  // Defaults produce bigrams for ASCII
+  ASSERT_EQ(ngrams.size(), 4);
+  EXPECT_EQ(ngrams[0], "he");
+  EXPECT_EQ(ngrams[1], "el");
+  EXPECT_EQ(ngrams[2], "ll");
+  EXPECT_EQ(ngrams[3], "lo");
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: normal ngram path (ngram_size > 0, kanji_ngram_size == 0)
+ *
+ * When ngram_size > 0 and kanji_ngram_size == 0, should delegate to
+ * GenerateNgrams with the given ngram_size (no CJK-aware splitting).
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsNormalNgramPath) {
+  // ngram_size=2, kanji_ngram_size=0 -> GenerateNgrams("hello", 2)
+  auto ngrams = GenerateQueryNgrams("hello", 2, 0, true);
+  auto expected = GenerateNgrams("hello", 2);
+
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+
+  ASSERT_EQ(ngrams.size(), 4);
+  EXPECT_EQ(ngrams[0], "he");
+  EXPECT_EQ(ngrams[1], "el");
+  EXPECT_EQ(ngrams[2], "ll");
+  EXPECT_EQ(ngrams[3], "lo");
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: normal ngram path with unigrams
+ *
+ * ngram_size=1 should produce character-level unigrams via GenerateNgrams.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsNormalNgramPathUnigrams) {
+  auto ngrams = GenerateQueryNgrams("abc", 1, 0, false);
+  auto expected = GenerateNgrams("abc", 1);
+
+  ASSERT_EQ(ngrams.size(), expected.size());
+  for (size_t i = 0; i < ngrams.size(); ++i) {
+    EXPECT_EQ(ngrams[i], expected[i]);
+  }
+
+  ASSERT_EQ(ngrams.size(), 3);
+  EXPECT_EQ(ngrams[0], "a");
+  EXPECT_EQ(ngrams[1], "b");
+  EXPECT_EQ(ngrams[2], "c");
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: normal ngram path treats CJK like any other character
+ *
+ * When using the plain GenerateNgrams path (kanji_ngram_size=0, ngram_size>0),
+ * CJK characters are not treated specially - bigrams span across CJK/ASCII boundaries.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsNormalNgramPathMixed) {
+  // ngram_size=2, kanji_ngram_size=0 -> GenerateNgrams("東方", 2)
+  // Plain ngrams treat everything uniformly
+  auto ngrams = GenerateQueryNgrams("東方", 2, 0, true);
+  auto expected = GenerateNgrams("東方", 2);
+
+  ASSERT_EQ(ngrams.size(), expected.size());
+  ASSERT_EQ(ngrams.size(), 1);
+  EXPECT_EQ(ngrams[0], "東方");
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: empty input returns empty vector for all branches
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsEmptyInput) {
+  // Kanji path (kanji_ngram_size > 0)
+  auto ngrams1 = GenerateQueryNgrams("", 2, 1, true);
+  EXPECT_TRUE(ngrams1.empty());
+
+  // Default hybrid path (ngram_size == 0)
+  auto ngrams2 = GenerateQueryNgrams("", 0, 0, true);
+  EXPECT_TRUE(ngrams2.empty());
+
+  // Normal ngram path (ngram_size > 0, kanji_ngram_size == 0)
+  auto ngrams3 = GenerateQueryNgrams("", 2, 0, false);
+  EXPECT_TRUE(ngrams3.empty());
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: cross_boundary_ngrams flag is passed through
+ *
+ * The flag should only affect the kanji path (kanji_ngram_size > 0).
+ * Test that enabling/disabling it produces different results for mixed text.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsCrossBoundaryFlag) {
+  // With cross_boundary=true: "字A" cross-boundary ngram should be generated
+  auto ngrams_enabled = GenerateQueryNgrams("漢字ABC", 3, 2, true);
+  // With cross_boundary=false: "字A" should be rejected
+  auto ngrams_disabled = GenerateQueryNgrams("漢字ABC", 3, 2, false);
+
+  // Verify they produce different results
+  EXPECT_NE(ngrams_enabled.size(), ngrams_disabled.size());
+
+  // Enabled should match GenerateHybridNgrams with cross_boundary=true
+  auto expected_enabled = GenerateHybridNgrams("漢字ABC", 3, 2, true);
+  ASSERT_EQ(ngrams_enabled.size(), expected_enabled.size());
+  for (size_t i = 0; i < ngrams_enabled.size(); ++i) {
+    EXPECT_EQ(ngrams_enabled[i], expected_enabled[i]);
+  }
+
+  // Disabled should match GenerateHybridNgrams with cross_boundary=false
+  auto expected_disabled = GenerateHybridNgrams("漢字ABC", 3, 2, false);
+  ASSERT_EQ(ngrams_disabled.size(), expected_disabled.size());
+  for (size_t i = 0; i < ngrams_disabled.size(); ++i) {
+    EXPECT_EQ(ngrams_disabled[i], expected_disabled[i]);
+  }
+}
+
+/**
+ * @brief Test GenerateQueryNgrams: cross_boundary flag is ignored in default hybrid path
+ *
+ * When ngram_size == 0, GenerateHybridNgrams is called with defaults,
+ * so the cross_boundary_ngrams parameter is not forwarded.
+ */
+TEST(StringUtilsTest, GenerateQueryNgramsCrossBoundaryIgnoredInDefaultPath) {
+  // Both should produce the same result since default path ignores the flag
+  auto ngrams_true = GenerateQueryNgrams("漢字ABC", 0, 0, true);
+  auto ngrams_false = GenerateQueryNgrams("漢字ABC", 0, 0, false);
+
+  ASSERT_EQ(ngrams_true.size(), ngrams_false.size());
+  for (size_t i = 0; i < ngrams_true.size(); ++i) {
+    EXPECT_EQ(ngrams_true[i], ngrams_false[i]);
+  }
+}

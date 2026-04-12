@@ -596,4 +596,15 @@ std::pair<std::string, std::string> SplitOnFirst(std::string_view str, std::stri
   return {std::string(str.substr(0, pos)), std::string(str.substr(pos + delimiter.size()))};
 }
 
+std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ngram_size, int kanji_ngram_size,
+                                             bool cross_boundary_ngrams) {
+  if (kanji_ngram_size > 0) {
+    return GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  }
+  if (ngram_size == 0) {
+    return GenerateHybridNgrams(normalized);
+  }
+  return GenerateNgrams(normalized, ngram_size);
+}
+
 }  // namespace mygram::utils

@@ -263,6 +263,8 @@ void DocumentStore::Compact() {
       .Debug();
 }
 
+// NOTE: O(N) scan of all maps under shared lock. See header comment for
+// guidance on call frequency.
 size_t DocumentStore::MemoryUsage() const {
   std::shared_lock lock(mutex_);
   size_t total = 0;

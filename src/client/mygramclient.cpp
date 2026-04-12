@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
@@ -21,6 +22,7 @@
 #include <utility>
 
 #include "server/protocol_constants.h"
+#include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -34,7 +36,7 @@ namespace {
 constexpr size_t kErrorPrefixLen = mygramdb::server::protocol::kErrorPrefixLen;
 constexpr size_t kOkSavedPrefixLen = mygramdb::server::protocol::kOkSavedPrefixLen;
 constexpr size_t kOkLoadedPrefixLen = mygramdb::server::protocol::kOkLoadedPrefixLen;
-constexpr int kMillisecondsPerSecond = 1000;
+constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
 constexpr int kMicrosecondsPerMillisecond = 1000;
 
 /**
@@ -75,6 +77,28 @@ std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens, 
     return std::nullopt;
   }
 
+  // Safe double parser (from_chars for double is not reliably available in C++17)
+  auto safe_stod = [](const std::string& str, double default_val = 0.0) -> double {
+    try {
+      return std::stod(str);
+    } catch (const std::exception&) {
+      return default_val;
+    }
+  };
+
+  // Safe integer parser using std::from_chars (no exceptions)
+  auto safe_parse_u64 = [](const std::string& str, uint64_t default_val = 0) -> uint64_t {
+    uint64_t val = default_val;
+    std::from_chars(str.data(), str.data() + str.size(), val);
+    return val;
+  };
+
+  auto safe_parse_u32 = [](const std::string& str, uint32_t default_val = 0) -> uint32_t {
+    uint32_t val = default_val;
+    std::from_chars(str.data(), str.data() + str.size(), val);
+    return val;
+  };
+
   DebugInfo info;
   for (size_t i = start_index + 1; i < tokens.size(); ++i) {
     const auto& token = tokens[i];
@@ -87,25 +111,25 @@ std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens, 
     std::string value = token.substr(pos + 1);
 
     if (key == "query_time") {
-      info.query_time_ms = std::stod(value);
+      info.query_time_ms = safe_stod(value);
     } else if (key == "index_time") {
-      info.index_time_ms = std::stod(value);
+      info.index_time_ms = safe_stod(value);
     } else if (key == "filter_time") {
-      info.filter_time_ms = std::stod(value);
+      info.filter_time_ms = safe_stod(value);
     } else if (key == "terms") {
-      info.terms = static_cast<uint32_t>(std::stoul(value));
+      info.terms = safe_parse_u32(value);
     } else if (key == "ngrams") {
-      info.ngrams = static_cast<uint32_t>(std::stoul(value));
+      info.ngrams = safe_parse_u32(value);
     } else if (key == "candidates") {
-      info.candidates = std::stoull(value);
+      info.candidates = safe_parse_u64(value);
     } else if (key == "after_intersection") {
-      info.after_intersection = std::stoull(value);
+      info.after_intersection = safe_parse_u64(value);
     } else if (key == "after_not") {
-      info.after_not = std::stoull(value);
+      info.after_not = safe_parse_u64(value);
     } else if (key == "after_filters") {
-      info.after_filters = std::stoull(value);
+      info.after_filters = safe_parse_u64(value);
     } else if (key == "final") {
-      info.final = std::stoull(value);
+      info.final = safe_parse_u64(value);
     } else if (key == "optimization") {
       info.optimization = value;
     }

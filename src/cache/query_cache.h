@@ -262,7 +262,10 @@ class QueryCache {
    * @brief Set callback to be notified when entries are evicted
    * @param callback Function to call when an entry is evicted via LRU
    */
-  void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
+  void SetEvictionCallback(EvictionCallback callback) {
+    std::unique_lock lock(mutex_);
+    eviction_callback_ = std::move(callback);
+  }
 
   /**
    * @brief Set minimum query cost threshold for caching

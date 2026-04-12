@@ -151,6 +151,13 @@ class CacheManager {
   void SetTtl(int ttl_seconds);
 
  private:
+  /**
+   * @brief Resolve cache key from a query
+   * @param query Parsed query
+   * @return Resolved CacheKey, or nullopt if the query is not cacheable
+   */
+  [[nodiscard]] std::optional<CacheKey> ResolveCacheKey(const query::Query& query) const;
+
   std::atomic<bool> enabled_;
   std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
 

@@ -10,9 +10,12 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 
 #include "mysql/rows_parser.h"
+#include "utils/comparison_utils.h"
+#include "utils/constants.h"
 #include "utils/datetime_converter.h"
 #include "utils/structured_log.h"
 
@@ -79,159 +82,48 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     // Integer comparison
     int64_t val = std::get<int64_t>(value);
     int64_t target = 0;
-    try {
-      size_t pos = 0;
-      target = std::stoll(filter.value, &pos);
-      // SECURITY: Validate that entire string was consumed (no trailing garbage)
-      if (pos != filter.value.length()) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "invalid_integer_filter")
-            .Field("reason", "trailing_characters")
-            .Field("value", filter.value)
-            .Field("column_name", filter.name)
-            .Warn();
-        return false;  // Fail-closed: reject document on invalid filter
-      }
-    } catch (const std::invalid_argument& e) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+    auto [ptr, ec] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
+    if (ec != std::errc() || ptr != filter.value.data() + filter.value.size()) {
+      std::string reason = (ec == std::errc::result_out_of_range) ? "out_of_range" : "parse_error";
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
           .Field("type", "invalid_integer_filter")
-          .Field("reason", "parse_error")
-          .Field("value", filter.value)
-          .Field("column_name", filter.name)
-          .Warn();
-      return false;  // Fail-closed: reject document on invalid filter
-    } catch (const std::out_of_range& e) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_binlog_warning")
-          .Field("type", "invalid_integer_filter")
-          .Field("reason", "out_of_range")
+          .Field("reason", reason)
           .Field("value", filter.value)
           .Field("column_name", filter.name)
           .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
-    if (filter.op == "=") {
-      return val == target;
-    }
-    if (filter.op == "!=") {
-      return val != target;
-    }
-    if (filter.op == "<") {
-      return val < target;
-    }
-    if (filter.op == ">") {
-      return val > target;
-    }
-    if (filter.op == "<=") {
-      return val <= target;
-    }
-    if (filter.op == ">=") {
-      return val >= target;
-    }
+    return mygram::utils::CompareValues(val, target, filter.op);
 
   } else if (std::holds_alternative<double>(value)) {
     // Float comparison
     double val = std::get<double>(value);
     double target = 0.0;
-    try {
-      size_t pos = 0;
-      target = std::stod(filter.value, &pos);
-      // SECURITY: Validate that entire string was consumed (no trailing garbage)
-      if (pos != filter.value.length()) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "invalid_float_filter")
-            .Field("reason", "trailing_characters")
-            .Field("value", filter.value)
-            .Field("column_name", filter.name)
-            .Warn();
-        return false;  // Fail-closed: reject document on invalid filter
-      }
-    } catch (const std::invalid_argument& e) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+    auto [ptr, ec] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
+    if (ec != std::errc() || ptr != filter.value.data() + filter.value.size()) {
+      std::string reason = (ec == std::errc::result_out_of_range) ? "out_of_range" : "parse_error";
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
           .Field("type", "invalid_float_filter")
-          .Field("reason", "parse_error")
-          .Field("value", filter.value)
-          .Field("column_name", filter.name)
-          .Warn();
-      return false;  // Fail-closed: reject document on invalid filter
-    } catch (const std::out_of_range& e) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_binlog_warning")
-          .Field("type", "invalid_float_filter")
-          .Field("reason", "out_of_range")
+          .Field("reason", reason)
           .Field("value", filter.value)
           .Field("column_name", filter.name)
           .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
-    if (filter.op == "=") {
-      return std::abs(val - target) < 1e-9;
-    }
-    if (filter.op == "!=") {
-      return std::abs(val - target) >= 1e-9;
-    }
-    if (filter.op == "<") {
-      return val < target;
-    }
-    if (filter.op == ">") {
-      return val > target;
-    }
-    if (filter.op == "<=") {
-      return val <= target;
-    }
-    if (filter.op == ">=") {
-      return val >= target;
-    }
-
-    // Unknown operator for double type
-    mygram::utils::StructuredLog()
-        .Event("mysql_binlog_warning")
-        .Field("type", "unsupported_filter_operator")
-        .Field("operator", filter.op)
-        .Field("column_name", filter.name)
-        .Field("column_type", "double")
-        .Warn();
-    return false;  // Fail-closed: reject document on unknown operator
+    return mygram::utils::CompareDoubleValues(val, target, filter.op, mygram::constants::kFilterValueEpsilon);
 
   } else if (std::holds_alternative<std::string>(value)) {
     // String comparison
     const auto& val = std::get<std::string>(value);
     const std::string& target = filter.value;
 
-    if (filter.op == "=") {
-      return val == target;
-    }
-    if (filter.op == "!=") {
-      return val != target;
-    }
-    if (filter.op == "<") {
-      return val < target;
-    }
-    if (filter.op == ">") {
-      return val > target;
-    }
-    if (filter.op == "<=") {
-      return val <= target;
-    }
-    if (filter.op == ">=") {
-      return val >= target;
-    }
-
-    // Unknown operator for string type
-    mygram::utils::StructuredLog()
-        .Event("mysql_binlog_warning")
-        .Field("type", "unsupported_filter_operator")
-        .Field("operator", filter.op)
-        .Field("column_name", filter.name)
-        .Field("column_type", "string")
-        .Warn();
-    return false;  // Fail-closed: reject document on unknown operator
+    return mygram::utils::CompareValues(val, target, filter.op);
 
   } else if (std::holds_alternative<uint64_t>(value)) {
     // Datetime/timestamp (stored as uint64_t epoch)
@@ -253,34 +145,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     uint64_t target = *target_opt;
 
     // Perform comparison
-    if (filter.op == "=") {
-      return val == target;
-    }
-    if (filter.op == "!=") {
-      return val != target;
-    }
-    if (filter.op == "<") {
-      return val < target;
-    }
-    if (filter.op == ">") {
-      return val > target;
-    }
-    if (filter.op == "<=") {
-      return val <= target;
-    }
-    if (filter.op == ">=") {
-      return val >= target;
-    }
-
-    // Unknown operator for uint64_t (datetime) type
-    mygram::utils::StructuredLog()
-        .Event("mysql_binlog_warning")
-        .Field("type", "unsupported_filter_operator")
-        .Field("operator", filter.op)
-        .Field("column_name", filter.name)
-        .Field("column_type", "uint64_t")
-        .Warn();
-    return false;  // Fail-closed: reject document on unknown operator
+    return mygram::utils::CompareValues(val, target, filter.op);
 
   } else if (std::holds_alternative<storage::TimeValue>(value)) {
     // TIME comparison (stored as TimeValue with seconds)
@@ -288,67 +153,28 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
 
     // Parse target value: support both seconds (numeric) and HH:MM:SS format
     int64_t target = 0;
-    try {
-      size_t pos = 0;
-      target = std::stoll(filter.value, &pos);
-      // If entire string was consumed, it's a valid integer
-      if (pos != filter.value.length()) {
-        // Not a pure integer, try HH:MM:SS format using DateTimeProcessor
-        // TimeToSeconds is a static method that doesn't require timezone
-        auto seconds_result = mygram::utils::DateTimeProcessor::TimeToSeconds(filter.value);
-        if (seconds_result) {
-          target = *seconds_result;
-        } else {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "invalid_time_filter")
-              .Field("reason", "unsupported_format")
-              .Field("value", filter.value)
-              .Field("column_name", filter.name)
-              .Warn();
-          return false;  // Fail-closed: reject document on invalid filter
-        }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+    auto [ptr_t, ec_t] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
+    if (ec_t != std::errc() || ptr_t != filter.value.data() + filter.value.size()) {
+      // Not a pure integer, try HH:MM:SS format using DateTimeProcessor
+      // TimeToSeconds is a static method that doesn't require timezone
+      auto seconds_result = mygram::utils::DateTimeProcessor::TimeToSeconds(filter.value);
+      if (seconds_result) {
+        target = *seconds_result;
+      } else {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_time_filter")
+            .Field("reason", "unsupported_format")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
+        return false;  // Fail-closed: reject document on invalid filter
       }
-    } catch (const std::exception& e) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_binlog_warning")
-          .Field("type", "invalid_time_filter")
-          .Field("reason", "parse_error")
-          .Field("value", filter.value)
-          .Field("column_name", filter.name)
-          .Warn();
-      return false;  // Fail-closed: reject document on invalid filter
     }
 
     // Perform comparison
-    if (filter.op == "=") {
-      return val.seconds == target;
-    }
-    if (filter.op == "!=") {
-      return val.seconds != target;
-    }
-    if (filter.op == "<") {
-      return val.seconds < target;
-    }
-    if (filter.op == ">") {
-      return val.seconds > target;
-    }
-    if (filter.op == "<=") {
-      return val.seconds <= target;
-    }
-    if (filter.op == ">=") {
-      return val.seconds >= target;
-    }
-
-    // Unknown operator for datetime type
-    mygram::utils::StructuredLog()
-        .Event("mysql_binlog_warning")
-        .Field("type", "unsupported_filter_operator")
-        .Field("operator", filter.op)
-        .Field("column_name", filter.name)
-        .Field("column_type", "datetime")
-        .Warn();
-    return false;  // Fail-closed: reject document on unknown operator
+    return mygram::utils::CompareValues(val.seconds, target, filter.op);
 
   } else if (std::holds_alternative<int32_t>(value) || std::holds_alternative<uint32_t>(value) ||
              std::holds_alternative<int16_t>(value) || std::holds_alternative<uint16_t>(value) ||
@@ -371,68 +197,21 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     }
 
     int64_t target = 0;
-    try {
-      size_t pos = 0;
-      target = std::stoll(filter.value, &pos);
-      // SECURITY: Validate that entire string was consumed (no trailing garbage)
-      if (pos != filter.value.length()) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "invalid_integer_filter")
-            .Field("reason", "trailing_characters")
-            .Field("value", filter.value)
-            .Field("column_name", filter.name)
-            .Warn();
-        return false;  // Fail-closed: reject document on invalid filter
-      }
-    } catch (const std::invalid_argument& e) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+    auto [ptr_i, ec_i] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
+    if (ec_i != std::errc() || ptr_i != filter.value.data() + filter.value.size()) {
+      std::string reason = (ec_i == std::errc::result_out_of_range) ? "out_of_range" : "parse_error";
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
           .Field("type", "invalid_integer_filter")
-          .Field("reason", "parse_error")
-          .Field("value", filter.value)
-          .Field("column_name", filter.name)
-          .Warn();
-      return false;  // Fail-closed: reject document on invalid filter
-    } catch (const std::out_of_range& e) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_binlog_warning")
-          .Field("type", "invalid_integer_filter")
-          .Field("reason", "out_of_range")
+          .Field("reason", reason)
           .Field("value", filter.value)
           .Field("column_name", filter.name)
           .Warn();
       return false;  // Fail-closed: reject document on invalid filter
     }
 
-    if (filter.op == "=") {
-      return val == target;
-    }
-    if (filter.op == "!=") {
-      return val != target;
-    }
-    if (filter.op == "<") {
-      return val < target;
-    }
-    if (filter.op == ">") {
-      return val > target;
-    }
-    if (filter.op == "<=") {
-      return val <= target;
-    }
-    if (filter.op == ">=") {
-      return val >= target;
-    }
-
-    // Unknown operator for integer type
-    mygram::utils::StructuredLog()
-        .Event("mysql_binlog_warning")
-        .Field("type", "unsupported_filter_operator")
-        .Field("operator", filter.op)
-        .Field("column_name", filter.name)
-        .Field("column_type", "integer")
-        .Warn();
-    return false;  // Fail-closed: reject document on unknown operator
+    return mygram::utils::CompareValues(val, target, filter.op);
   }
 
   mygram::utils::StructuredLog()
@@ -449,15 +228,7 @@ storage::FilterMap BinlogFilterEvaluator::ExtractAllFilters(const RowData& row_d
   storage::FilterMap all_filters;
 
   // Convert required_filters to FilterConfig format for extraction
-  std::vector<config::FilterConfig> required_as_filters;
-  for (const auto& req_filter : table_config.required_filters) {
-    config::FilterConfig filter_config;
-    filter_config.name = req_filter.name;
-    filter_config.type = req_filter.type;
-    filter_config.dict_compress = false;
-    filter_config.bitmap_index = req_filter.bitmap_index;
-    required_as_filters.push_back(filter_config);
-  }
+  auto required_as_filters = config::ToFilterConfigs(table_config.required_filters);
 
   // Extract required_filters columns
   auto required_filters = ExtractFilters(row_data, required_as_filters, datetime_timezone);

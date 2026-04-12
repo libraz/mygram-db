@@ -368,14 +368,15 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
 
   // From here, no lock is held - search operates on immutable snapshots
   std::vector<DocId> result;
+  std::vector<DocId> temp;
 
   for (const auto& snapshot : snapshots) {
     if (snapshot != nullptr) {
       auto term_docs = snapshot->GetAll();
-      std::vector<DocId> union_result;
-      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
-                     std::back_inserter(union_result));
-      result = std::move(union_result);
+      temp.clear();
+      temp.reserve(result.size() + term_docs.size());
+      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(), std::back_inserter(temp));
+      result.swap(temp);
     }
   }
 
@@ -393,14 +394,16 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   // From here, no lock is held - search operates on immutable snapshots
   // Get union of all documents containing any of the NOT terms
   std::vector<DocId> excluded_docs;
+  std::vector<DocId> temp;
 
   for (const auto& snapshot : snapshots) {
     if (snapshot != nullptr) {
       auto term_docs = snapshot->GetAll();
-      std::vector<DocId> union_result;
+      temp.clear();
+      temp.reserve(excluded_docs.size() + term_docs.size());
       std::set_union(excluded_docs.begin(), excluded_docs.end(), term_docs.begin(), term_docs.end(),
-                     std::back_inserter(union_result));
-      excluded_docs = std::move(union_result);
+                     std::back_inserter(temp));
+      excluded_docs.swap(temp);
     }
   }
 
@@ -420,21 +423,21 @@ uint64_t Index::Count(std::string_view term) const {
 
 size_t Index::MemoryUsage() const {
   // Acquire shared lock for read-only access (allows concurrent readers).
-  // Use SizeUnsafe/MemoryUsageUnsafe to avoid redundant inner lock acquisition
+  // Use SizeApprox/MemoryUsageApprox to avoid redundant inner lock acquisition
   // on each PostingList — the outer shared lock on postings_mutex_ already
   // prevents structural changes to the map and its entries.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   size_t total = 0;
   for (const auto& [term, posting] : term_postings_) {
     total += term.size();                   // Term string
-    total += posting->MemoryUsageUnsafe();  // Posting list (no inner lock)
+    total += posting->MemoryUsageApprox();  // Posting list (no inner lock)
   }
   return total;
 }
 
 Index::IndexStatistics Index::GetStatistics() const {
   // Acquire shared lock for read-only access (allows concurrent readers).
-  // Use SizeUnsafe/MemoryUsageUnsafe to avoid redundant inner lock acquisition
+  // Use SizeApprox/MemoryUsageApprox to avoid redundant inner lock acquisition
   // on each PostingList — the outer shared lock prevents structural changes.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   IndexStatistics stats;
@@ -446,7 +449,7 @@ Index::IndexStatistics Index::GetStatistics() const {
 
   for (const auto& [term, posting] : term_postings_) {
     // Count postings (no inner lock — outer shared lock is sufficient)
-    stats.total_postings += posting->SizeUnsafe();
+    stats.total_postings += posting->SizeApprox();
 
     // Count strategy types
     if (posting->GetStrategy() == PostingStrategy::kDeltaCompressed) {
@@ -457,7 +460,7 @@ Index::IndexStatistics Index::GetStatistics() const {
 
     // Memory usage (no inner lock — outer shared lock is sufficient)
     stats.memory_usage_bytes += term.size();
-    stats.memory_usage_bytes += posting->MemoryUsageUnsafe();
+    stats.memory_usage_bytes += posting->MemoryUsageApprox();
   }
 
   return stats;

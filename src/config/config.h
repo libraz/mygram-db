@@ -135,6 +135,34 @@ struct FilterConfig {
 };
 
 /**
+ * @brief Convert RequiredFilterConfig to FilterConfig
+ * @param req Required filter configuration
+ * @return FilterConfig with dict_compress=false and matching name/type/bitmap_index
+ */
+inline FilterConfig ToFilterConfig(const RequiredFilterConfig& req) {
+  FilterConfig filter;
+  filter.name = req.name;
+  filter.type = req.type;
+  filter.dict_compress = false;
+  filter.bitmap_index = req.bitmap_index;
+  return filter;
+}
+
+/**
+ * @brief Convert a vector of RequiredFilterConfig to FilterConfig
+ * @param required_filters Vector of required filter configurations
+ * @return Vector of FilterConfig
+ */
+inline std::vector<FilterConfig> ToFilterConfigs(const std::vector<RequiredFilterConfig>& required_filters) {
+  std::vector<FilterConfig> result;
+  result.reserve(required_filters.size());
+  for (const auto& req : required_filters) {
+    result.push_back(ToFilterConfig(req));
+  }
+  return result;
+}
+
+/**
  * @brief Text source configuration
  */
 struct TextSourceConfig {

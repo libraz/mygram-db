@@ -291,7 +291,12 @@ class DocumentStore {
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 
   /**
-   * @brief Get memory usage estimate
+   * @brief Get memory usage estimate.
+   *
+   * WARNING: O(N) complexity -- iterates all document maps under a shared lock,
+   * blocking writers for the entire scan duration. Callers should avoid invoking
+   * this on hot paths or at high frequency. Suitable for periodic health/metrics
+   * endpoints (e.g., once every 30-60 seconds).
    */
   [[nodiscard]] size_t MemoryUsage() const;
 

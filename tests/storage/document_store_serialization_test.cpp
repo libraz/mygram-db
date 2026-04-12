@@ -743,3 +743,85 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileTempFileCleanedOnError) {
   // Clean up
   std::filesystem::remove_all(temp_dir);
 }
+
+/**
+ * @brief Helper to create a valid snapshot stream with a GTID and one document
+ */
+static std::string CreateValidSnapshotData() {
+  DocumentStore store;
+  FilterMap filters;
+  filters["status"] = static_cast<int32_t>(1);
+  filters["name"] = std::string("test_doc");
+  auto result = store.AddDocument("pk_1", filters);
+  EXPECT_TRUE(result.has_value());
+
+  std::stringstream ss;
+  auto save_result = store.SaveToStream(ss, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-42");
+  EXPECT_TRUE(save_result.has_value());
+  return ss.str();
+}
+
+/**
+ * @brief Test LoadFromStream with stream truncated after header (before GTID content)
+ *
+ * The binary format is: [4 magic] [4 version] [4 next_doc_id] [4 gtid_len] [gtid_len GTID] ...
+ * Truncating after gtid_len but before GTID data should return an error.
+ */
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamTruncatedAfterHeader) {
+  std::string valid_data = CreateValidSnapshotData();
+  ASSERT_GT(valid_data.size(), 16);
+
+  // Truncate after: magic(4) + version(4) + next_doc_id(4) + gtid_len(4) = 16 bytes
+  // The gtid_len field will indicate a non-zero length, but no GTID data follows.
+  std::string truncated(valid_data.begin(), valid_data.begin() + 16);
+  std::istringstream truncated_stream(truncated);
+
+  DocumentStore store;
+  auto result = store.LoadFromStream(truncated_stream);
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @brief Test LoadFromStream with stream truncated mid-GTID
+ *
+ * Provide only a few bytes of the GTID string when more are expected.
+ */
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamTruncatedMidGTID) {
+  std::string valid_data = CreateValidSnapshotData();
+
+  // The GTID starts at offset 16 (after magic+version+next_doc_id+gtid_len).
+  // The GTID "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-42" is 42 bytes.
+  // Truncate partway through the GTID (e.g., at offset 20 = 4 bytes into GTID).
+  constexpr size_t kTruncateOffset = 20;
+  ASSERT_GT(valid_data.size(), kTruncateOffset);
+
+  std::string truncated(valid_data.begin(), valid_data.begin() + kTruncateOffset);
+  std::istringstream truncated_stream(truncated);
+
+  DocumentStore store;
+  auto result = store.LoadFromStream(truncated_stream);
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @brief Test LoadFromStream with stream truncated before doc_count
+ *
+ * Provide full header and GTID but stop before the 8-byte doc_count field.
+ */
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamTruncatedBeforeDocCount) {
+  std::string valid_data = CreateValidSnapshotData();
+
+  // Header: magic(4) + version(4) + next_doc_id(4) + gtid_len(4) = 16
+  // GTID string: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-42" = 42 bytes
+  // doc_count starts at offset 16 + 42 = 58
+  // Truncate right before doc_count.
+  constexpr size_t kDocCountOffset = 16 + 42;
+  ASSERT_GT(valid_data.size(), kDocCountOffset);
+
+  std::string truncated(valid_data.begin(), valid_data.begin() + kDocCountOffset);
+  std::istringstream truncated_stream(truncated);
+
+  DocumentStore store;
+  auto result = store.LoadFromStream(truncated_stream);
+  EXPECT_FALSE(result.has_value());
+}
