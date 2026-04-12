@@ -158,8 +158,7 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
       (void)mux_->Remove(fd);
       std::unique_lock<std::shared_mutex> lock(connections_mutex_);
       connections_.erase(fd);  // no-op if Stop() already cleared the map
-      return MakeUnexpected(
-          MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register raced with Stop"));
+      return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register raced with Stop"));
     }
   }
 
