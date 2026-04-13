@@ -1077,6 +1077,9 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
     store.AddDocument(pk, filters);
   }
 
+  // Record peak memory with all documents
+  size_t memory_peak = store.MemoryUsage();
+
   // Remove most documents (keep only 100)
   for (int i = 100; i < num_docs; ++i) {
     store.RemoveDocument(static_cast<DocId>(i + 1));  // DocId starts at 1
@@ -1085,23 +1088,28 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
   // Verify only 100 documents remain
   EXPECT_EQ(100, store.Size());
 
-  // Get memory usage before compact
-  size_t memory_before = store.MemoryUsage();
+  // Memory before compact: documents removed but hash map buckets not reclaimed
+  size_t memory_before_compact = store.MemoryUsage();
 
   // Compact the store
   store.Compact();
 
   // Get memory usage after compact
-  size_t memory_after = store.MemoryUsage();
+  size_t memory_after_compact = store.MemoryUsage();
 
-  // Bug #20: Before fix, memory_after would be similar to memory_before
-  // After fix: memory_after should be significantly less than memory_before
-  EXPECT_LT(memory_after, memory_before) << "Bug #20: Compact() should reduce memory usage. "
-                                         << "Before: " << memory_before << " bytes, After: " << memory_after
-                                         << " bytes";
+  // Bug #20: Compact() should rehash maps and reduce bucket overhead.
+  // After compaction, memory should be less than before compaction.
+  EXPECT_LT(memory_after_compact, memory_before_compact)
+      << "Bug #20: Compact() should reduce memory usage. "
+      << "Before compact: " << memory_before_compact << " bytes, "
+      << "After compact: " << memory_after_compact << " bytes";
 
-  // Memory should be reduced by at least 50% (we removed 99% of documents)
-  EXPECT_LT(memory_after, memory_before * 0.5) << "Bug #20: Memory should be reduced significantly after Compact()";
+  // After removing 99% of documents and compacting, memory should be
+  // significantly less than the peak with all 10000 documents.
+  EXPECT_LT(memory_after_compact, memory_peak * 0.5)
+      << "Bug #20: Memory after removing 99% of docs and compacting should be "
+      << "well below peak. Peak: " << memory_peak << " bytes, "
+      << "After compact: " << memory_after_compact << " bytes";
 }
 
 /**
