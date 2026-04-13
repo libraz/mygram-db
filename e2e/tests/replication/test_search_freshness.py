@@ -38,13 +38,18 @@ class TestSearchFreshnessNocache:
     def test_insert_appears_in_search(self, mysql, mygramdb, seed_data):
         """INSERT a row and verify SEARCH returns it by keyword."""
         marker = f"freshins_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Freshness Test",
-            "content": f"This document contains {marker} for freshness verification",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Freshness Test",
+                    "content": f"This document contains {marker} for freshness verification",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         def _search_finds_marker():
             result = mygramdb.search("articles", marker, limit=10)
@@ -62,13 +67,18 @@ class TestSearchFreshnessNocache:
         old_marker = f"freshold_{uuid.uuid4().hex[:8]}"
         new_marker = f"freshnew_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Freshness Update Test",
-            "content": f"Original content with {old_marker} keyword",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Freshness Update Test",
+                    "content": f"Original content with {old_marker} keyword",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # Wait for INSERT to propagate
         wait_until(
@@ -80,7 +90,7 @@ class TestSearchFreshnessNocache:
 
         # Capture the document ID
         result_before = mygramdb.search("articles", old_marker, limit=10)
-        doc_id = result_before["ids"][0]
+        result_before["ids"][0]
 
         # UPDATE the text column
         mysql.update(
@@ -107,13 +117,18 @@ class TestSearchFreshnessNocache:
     def test_delete_removes_from_search(self, mysql, mygramdb, seed_data):
         """DELETE a row and verify SEARCH no longer returns it."""
         marker = f"freshdel_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Freshness Delete Test",
-            "content": f"Content with {marker} to be deleted",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Freshness Delete Test",
+                    "content": f"Content with {marker} to be deleted",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -141,13 +156,15 @@ class TestSearchFreshnessNocache:
         for i in range(20):
             row_marker = f"{batch_marker}_r{i}"
             row_markers.append(row_marker)
-            rows.append({
-                "title": f"Bulk {i}",
-                "content": f"Bulk content with {batch_marker} and unique {row_marker}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            })
+            rows.append(
+                {
+                    "title": f"Bulk {i}",
+                    "content": f"Bulk content with {batch_marker} and unique {row_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            )
         mysql.insert_rows("articles", rows)
 
         # Wait for all rows via batch marker
@@ -190,13 +207,18 @@ class TestSearchFreshnessWithCache:
         assert result_before["total"] == 0
 
         # INSERT a matching row
-        mysql.insert_rows("articles", [{
-            "title": "Cache Freshness",
-            "content": f"Document with {marker} for cache test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Freshness",
+                    "content": f"Document with {marker} for cache test",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # SEARCH should eventually return the new doc (cache must be invalidated)
         wait_until(
@@ -211,13 +233,18 @@ class TestSearchFreshnessWithCache:
         old_marker = f"cacheold_{uuid.uuid4().hex[:8]}"
         new_marker = f"cachenew_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Cache Update Test",
-            "content": f"Content with {old_marker} for cache update test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Update Test",
+                    "content": f"Content with {old_marker} for cache update test",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # Wait and cache the old result
         wait_until(
@@ -258,13 +285,18 @@ class TestSearchFreshnessWithCache:
         """DELETE after cached SEARCH — deleted doc must vanish."""
         marker = f"cachedel_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Cache Delete Test",
-            "content": f"Content with {marker} to be deleted",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Delete Test",
+                    "content": f"Content with {marker} to be deleted",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -291,13 +323,18 @@ class TestSearchFreshnessWithCache:
         """UPDATE filter column after cached filtered SEARCH — results must change."""
         marker = f"cachefilt_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Cache Filter Test",
-            "content": f"Content with {marker} for filter cache test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Filter Test",
+                    "content": f"Content with {marker} for filter cache test",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -315,7 +352,9 @@ class TestSearchFreshnessWithCache:
 
         # Filtered search with status=1 should now return 0
         wait_until(
-            lambda: mygramdb.search("articles", marker, filters={"status": 1}, limit=10)["total"] == 0,
+            lambda: (
+                mygramdb.search("articles", marker, filters={"status": 1}, limit=10)["total"] == 0
+            ),
             timeout=20,
             interval=0.5,
             description=f"cached filtered SEARCH to drop {marker} after status UPDATE",
@@ -349,13 +388,18 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
         mygramdb.cache_clear()
 
-        mysql.insert_rows("articles", [{
-            "title": "Toggle Test",
-            "content": f"Content with {marker} for toggle test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Toggle Test",
+                    "content": f"Content with {marker} for toggle test",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -392,7 +436,8 @@ class TestSearchFreshnessCacheToggle:
         # 5. Search must return fresh data, not stale cached entry
         result_new = mygramdb.search("articles", new_marker, limit=10)
         assert result_new["total"] >= 1, (
-            f"After cache re-enable, SEARCH should find '{new_marker}' but got total={result_new['total']}"
+            f"After cache re-enable, SEARCH should find '{new_marker}' "
+            f"but got total={result_new['total']}"
         )
 
         result_old = mygramdb.search("articles", marker, limit=10)
@@ -420,13 +465,18 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE DISABLE")
 
         # 3. INSERT while cache off
-        mysql.insert_rows("articles", [{
-            "title": "Toggle Insert Test",
-            "content": f"New document with {marker} inserted while cache off",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Toggle Insert Test",
+                    "content": f"New document with {marker} inserted while cache off",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -453,13 +503,18 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
         mygramdb.cache_clear()
 
-        mysql.insert_rows("articles", [{
-            "title": "Toggle Delete Test",
-            "content": f"Content with {marker} to be deleted during cache off",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Toggle Delete Test",
+                    "content": f"Content with {marker} to be deleted during cache off",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
@@ -503,13 +558,16 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.cache_clear()
 
         # Insert 5 documents
-        rows = [{
-            "title": f"Rapid Toggle {i}",
-            "content": f"Content with {marker} for rapid toggle test row {i}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(5)]
+        rows = [
+            {
+                "title": f"Rapid Toggle {i}",
+                "content": f"Content with {marker} for rapid toggle test row {i}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(5)
+        ]
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(

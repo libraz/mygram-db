@@ -29,8 +29,7 @@ class BinlogFilterEvaluator {
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
    * @return true if all required_filters conditions are satisfied
    */
-  static bool EvaluateRequiredFilters(const std::unordered_map<std::string, storage::FilterValue>& filters,
-                                      const config::TableConfig& table_config,
+  static bool EvaluateRequiredFilters(const storage::FilterMap& filters, const config::TableConfig& table_config,
                                       const std::string& datetime_timezone = "+00:00");
 
   /**
@@ -50,9 +49,8 @@ class BinlogFilterEvaluator {
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
    * @return Map of filter name to FilterValue
    */
-  static std::unordered_map<std::string, storage::FilterValue> ExtractAllFilters(
-      const RowData& row_data, const config::TableConfig& table_config,
-      const std::string& datetime_timezone = "+00:00");
+  static storage::FilterMap ExtractAllFilters(const RowData& row_data, const config::TableConfig& table_config,
+                                              const std::string& datetime_timezone = "+00:00");
 };
 
 }  // namespace mygramdb::mysql

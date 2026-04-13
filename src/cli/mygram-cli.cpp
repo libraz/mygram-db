@@ -427,6 +427,12 @@ class MygramClient {
         continue;
       }
 
+      // Set receive timeout (30 seconds) to prevent indefinite blocking
+      struct timeval recv_timeout {};
+      recv_timeout.tv_sec = 30;
+      recv_timeout.tv_usec = 0;
+      setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+
       // Connected successfully
       if (attempts > 0) {
         std::cerr << "\nConnected successfully after " << attempts << " retry(ies)!\n\n";
@@ -495,16 +501,23 @@ class MygramClient {
       return "(error) Not connected";
     }
 
-    // Send command with \r\n
+    // Send command with \r\n (handle partial sends)
     std::string msg = command + "\r\n";
-    ssize_t sent = send(sock_, msg.c_str(), msg.length(), 0);
-    if (sent < 0) {
-      int saved_errno = errno;
-      if (saved_errno == EPIPE || saved_errno == ECONNRESET) {
-        return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may have "
-               "crashed or been shut down.";
+    size_t total_sent = 0;
+    while (total_sent < msg.length()) {
+      ssize_t sent = send(sock_, msg.c_str() + total_sent, msg.length() - total_sent, 0);
+      if (sent < 0) {
+        int saved_errno = errno;
+        if (saved_errno == EPIPE || saved_errno == ECONNRESET) {
+          return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may have "
+                 "crashed or been shut down.";
+        }
+        if (saved_errno == EINTR) {
+          continue;  // Retry on interrupt
+        }
+        return "(error) Failed to send command: " + std::string(strerror(saved_errno));
       }
-      return "(error) Failed to send command: " + std::string(strerror(saved_errno));
+      total_sent += static_cast<size_t>(sent);
     }
 
     // Receive response

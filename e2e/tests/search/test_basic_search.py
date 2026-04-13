@@ -23,13 +23,18 @@ class TestBasicSearch:
         from lib.wait import wait_until_gte
 
         marker = f"basicsrch_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Basic Search",
-            "content": f"This document contains {marker} for testing",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Basic Search",
+                    "content": f"This document contains {marker} for testing",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -70,14 +75,10 @@ class TestBasicSearch:
 
         count = mygramdb.count("articles", marker)
         search = mygramdb.search("articles", marker, limit=100)
-        assert count == search["total"], (
-            f"COUNT ({count}) != SEARCH total ({search['total']})"
-        )
+        assert count == search["total"], f"COUNT ({count}) != SEARCH total ({search['total']})"
 
     def test_empty_result(self, mygramdb, seed_data):
         """Search for non-existent term should return empty."""
-        result = mygramdb.search(
-            "articles", "zzzznonexistentterm99999xyz", limit=10
-        )
+        result = mygramdb.search("articles", "zzzznonexistentterm99999xyz", limit=10)
         assert result["total"] == 0
         assert len(result["ids"]) == 0

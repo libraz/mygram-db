@@ -439,6 +439,11 @@ TableConfig ParseTableConfig(const json& json_obj) {
   }
   if (json_obj.contains("kanji_ngram_size")) {
     config.kanji_ngram_size = json_obj["kanji_ngram_size"].get<int>();
+    if (config.kanji_ngram_size < 0 || config.kanji_ngram_size > 10) {
+      throw std::runtime_error("Configuration error in table '" + config.name +
+                               "': kanji_ngram_size must be between 0 and 10 (got " +
+                               std::to_string(config.kanji_ngram_size) + ")");
+    }
   }
   // If kanji_ngram_size is 0 or not specified, use ngram_size
   if (config.kanji_ngram_size == 0) {

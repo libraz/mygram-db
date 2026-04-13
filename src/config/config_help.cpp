@@ -651,7 +651,9 @@ std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path
 bool IsSensitiveField(const std::string& path) {
   std::string lower_path = ToLower(path);
   return lower_path.find("password") != std::string::npos || lower_path.find("secret") != std::string::npos ||
-         lower_path.find("key") != std::string::npos || lower_path.find("token") != std::string::npos;
+         lower_path.find("ssl_key") != std::string::npos || lower_path.find("api_key") != std::string::npos ||
+         lower_path.find("auth_key") != std::string::npos || lower_path.find("private_key") != std::string::npos ||
+         lower_path.find("access_key") != std::string::npos || lower_path.find("token") != std::string::npos;
 }
 
 std::string MaskSensitiveValue(const std::string& path, const std::string& value) {

@@ -48,6 +48,10 @@ class AtomicFileWriter {
 
   /// @brief Fsync the temp file, atomically rename to final path, fsync directory.
   /// @return Success or error
+  ///
+  /// @note The caller MUST close (or flush+sync) their write stream before calling Commit().
+  /// Commit() opens the temp file read-only for fsync, which only guarantees durability
+  /// if all prior writes have been flushed to the OS by the caller.
   Expected<void, Error> Commit();
 
   /// @brief Remove the temp file without renaming.

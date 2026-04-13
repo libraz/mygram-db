@@ -1,8 +1,9 @@
 """Test search operations during concurrent writes."""
 
-import pytest
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pytest
 
 from lib.data_generator import DataGenerator
 

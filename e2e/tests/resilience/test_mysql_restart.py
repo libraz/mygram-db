@@ -53,13 +53,18 @@ class TestMySQLRestart:
         from lib.wait import wait_until_gte
 
         marker = f"rstprsv_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Restart Test",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Restart Test",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),

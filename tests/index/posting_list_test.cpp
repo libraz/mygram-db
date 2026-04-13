@@ -795,6 +795,87 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
 }
 
 // =============================================================================
+// Intersect/Union doc_count_ and last_doc_id_ tests
+// =============================================================================
+
+/**
+ * @brief Test that Intersect sets Size() correctly on the result
+ */
+TEST_F(PostingListTest, IntersectSetsSizeCorrectly) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {1, 2, 3, 4, 5}
+  for (DocId id = 1; id <= 5; ++id) {
+    pl1.Add(id);
+  }
+
+  // pl2: {3, 4, 5, 6, 7}
+  for (DocId id = 3; id <= 7; ++id) {
+    pl2.Add(id);
+  }
+
+  auto result = pl1.Intersect(pl2);
+  // Intersection should be {3, 4, 5}
+  EXPECT_EQ(result->Size(), 3);
+  EXPECT_GT(result->Size(), 0);
+}
+
+/**
+ * @brief Test that Union sets Size() correctly on the result
+ */
+TEST_F(PostingListTest, UnionSetsSizeCorrectly) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {1, 2, 3}
+  for (DocId id = 1; id <= 3; ++id) {
+    pl1.Add(id);
+  }
+
+  // pl2: {3, 4, 5}
+  for (DocId id = 3; id <= 5; ++id) {
+    pl2.Add(id);
+  }
+
+  auto result = pl1.Union(pl2);
+  // Union should be {1, 2, 3, 4, 5}
+  EXPECT_EQ(result->Size(), 5);
+  EXPECT_GT(result->Size(), 0);
+}
+
+/**
+ * @brief Test that Intersect sets last doc ID correctly
+ */
+TEST_F(PostingListTest, IntersectSetsLastDocId) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {10, 20, 30, 40, 50}
+  for (DocId id = 10; id <= 50; id += 10) {
+    pl1.Add(id);
+  }
+
+  // pl2: {20, 30, 40, 60, 70}
+  pl2.Add(20);
+  pl2.Add(30);
+  pl2.Add(40);
+  pl2.Add(60);
+  pl2.Add(70);
+
+  auto result = pl1.Intersect(pl2);
+  // Intersection should be {20, 30, 40}
+  EXPECT_EQ(result->Size(), 3);
+
+  // Verify the actual doc IDs to confirm last doc ID
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 3);
+  EXPECT_EQ(all[0], 20);
+  EXPECT_EQ(all[1], 30);
+  EXPECT_EQ(all[2], 40);
+}
+
+// =============================================================================
 // Delta encoding roundtrip tests (#3)
 // =============================================================================
 

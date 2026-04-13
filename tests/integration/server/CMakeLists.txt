@@ -176,5 +176,6 @@ gtest_discover_tests(reactor_integration_test
   PROPERTIES
     LABELS "INTEGRATION"
     RESOURCE_LOCK server_port
+    RUN_SERIAL TRUE
     TIMEOUT 120  # 2 minutes: concurrent-clients tests can take ~30 s
 )

@@ -218,9 +218,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   mysql_config.user = deps_.config.mysql.user;
   mysql_config.password = deps_.config.mysql.password;
   mysql_config.database = deps_.config.mysql.database;
-  mysql_config.connect_timeout = deps_.config.mysql.connect_timeout_ms / kMillisecondsPerSecond;
-  mysql_config.read_timeout = deps_.config.mysql.read_timeout_ms / kMillisecondsPerSecond;
-  mysql_config.write_timeout = deps_.config.mysql.write_timeout_ms / kMillisecondsPerSecond;
+  // Use ceiling division to avoid truncating sub-second timeouts to zero
+  auto ceil_div_ms = [](int ms) -> int {
+    if (ms <= 0)
+      return 0;
+    return (ms + kMillisecondsPerSecond - 1) / kMillisecondsPerSecond;
+  };
+  mysql_config.connect_timeout = ceil_div_ms(deps_.config.mysql.connect_timeout_ms);
+  mysql_config.read_timeout = ceil_div_ms(deps_.config.mysql.read_timeout_ms);
+  mysql_config.write_timeout = ceil_div_ms(deps_.config.mysql.write_timeout_ms);
   mysql_config.session_timeout_sec = deps_.config.mysql.session_timeout_sec;
   mysql_config.ssl_enable = deps_.config.mysql.ssl_enable;
   mysql_config.ssl_ca = deps_.config.mysql.ssl_ca;

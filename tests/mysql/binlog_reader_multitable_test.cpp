@@ -293,11 +293,11 @@ TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
   BinlogReader multi_reader(connection_, contexts, mysql_config, reader_config_);
 
   // Filters with status = 1
-  std::unordered_map<std::string, storage::FilterValue> filters_published;
+  storage::FilterMap filters_published;
   filters_published["status"] = static_cast<int64_t>(1);
 
   // Filters with status = 0
-  std::unordered_map<std::string, storage::FilterValue> filters_draft;
+  storage::FilterMap filters_draft;
   filters_draft["status"] = static_cast<int64_t>(0);
 
   // Published table should accept status=1, reject status=0

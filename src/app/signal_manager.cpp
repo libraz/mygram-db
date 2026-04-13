@@ -5,6 +5,7 @@
 
 #include "app/signal_manager.h"
 
+#include <csignal>
 #include <cstring>  // for memset
 
 namespace mygramdb::app {
@@ -57,11 +58,19 @@ bool SignalManager::IsShutdownRequested() {  // static
 }
 
 bool SignalManager::ConsumeLogReopenRequest() {  // static
-  if (signal_flags_.log_reopen_requested != 0) {
-    signal_flags_.log_reopen_requested = 0;
-    return true;
-  }
-  return false;
+  // Block SIGUSR1 around the check-and-clear to prevent a signal from arriving
+  // between the read and the write (non-atomic read-modify-write on sig_atomic_t).
+  sigset_t block_set;
+  sigset_t old_set;
+  sigemptyset(&block_set);
+  sigaddset(&block_set, SIGUSR1);
+  pthread_sigmask(SIG_BLOCK, &block_set, &old_set);
+
+  bool was_requested = (signal_flags_.log_reopen_requested != 0);
+  signal_flags_.log_reopen_requested = 0;
+
+  pthread_sigmask(SIG_SETMASK, &old_set, nullptr);
+  return was_requested;
 }
 
 Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {

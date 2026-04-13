@@ -970,7 +970,8 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
   search_query.search_text = "hello";
 
   std::vector<DocId> dummy_results = {1, 2, 3};
-  std::set<std::string> ngrams = {"he", "el", "ll", "lo"};
+  std::set<std::string> ngram_set = {"he", "el", "ll", "lo"};
+  std::vector<std::string> ngrams(ngram_set.begin(), ngram_set.end());
   bool inserted = cache_manager->Insert(search_query, dummy_results, ngrams,
                                         /*query_cost_ms=*/100.0);
   ASSERT_TRUE(inserted) << "Failed to insert into cache";
@@ -1040,7 +1041,7 @@ class MockBinlogReader : public mysql::IBinlogReader {
     last_set_gtid_ = gtid;
   }
 
-  const std::string& GetLastError() const override { return last_error_; }
+  std::string GetLastError() const override { return last_error_; }
 
   uint64_t GetProcessedEvents() const override { return processed_events_; }
 
@@ -1672,10 +1673,7 @@ class MockBinlogReaderForDumpTest : public mysql::IBinlogReader {
   void SetCurrentGTID(const std::string& gtid) override { gtid_ = gtid; }
   size_t GetQueueSize() const override { return 0; }
   uint64_t GetProcessedEvents() const override { return 0; }
-  const std::string& GetLastError() const override {
-    static const std::string empty;
-    return empty;
-  }
+  std::string GetLastError() const override { return {}; }
 
   void SetRunningForTest(bool running) { running_ = running; }
   void SetGtidForTest(const std::string& gtid) { gtid_ = gtid; }

@@ -7,6 +7,7 @@ to validate actual document retrieval.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
 
@@ -72,9 +73,7 @@ def _ensure_replication_running(mygramdb):
     return False
 
 
-ADD_FULLTEXT_SQL = (
-    "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
-)
+ADD_FULLTEXT_SQL = "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
 
 
 def _reseed_table(mysql, mygramdb, table, count=50):
@@ -83,10 +82,8 @@ def _reseed_table(mysql, mygramdb, table, count=50):
     if table == "articles":
         mysql.execute(CREATE_ARTICLES_SQL)
         # Restore FULLTEXT index for cross-verify tests
-        try:
+        with contextlib.suppress(Exception):
             mysql.execute(ADD_FULLTEXT_SQL)
-        except Exception:
-            pass
         rows = gen.generate_articles(count=count)
     else:
         mysql.execute(CREATE_PRODUCTS_SQL)
@@ -105,16 +102,30 @@ class TestMultiTableSearch:
         art_marker = f"bothsrch_{uuid.uuid4().hex[:8]}"
         prod_marker = f"bothsrch_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Both Tables Test",
-            "content": f"Article content {art_marker} searchable",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Both Tables Product",
-            "description": f"Product content {prod_marker} searchable",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Both Tables Test",
+                    "content": f"Article content {art_marker} searchable",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Both Tables Product",
+                    "description": f"Product content {prod_marker} searchable",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # Sync both tables (sequential to avoid SYNC STATUS race)
         mygramdb.sync("articles", timeout=30)
@@ -142,25 +153,41 @@ class TestMultiTableSearch:
         article_marker = f"artonly_{uuid.uuid4().hex[:8]}"
         product_marker = f"prodonly_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Article Only",
-            "content": f"Unique article content {article_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Product Only",
-            "description": f"Unique product content {product_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Article Only",
+                    "content": f"Unique article content {article_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Product Only",
+                    "description": f"Unique product content {product_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", article_marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"articles SEARCH to find {article_marker}",
         )
         wait_until(
             lambda: mygramdb.search("products", product_marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"products SEARCH to find {product_marker}",
         )
 
@@ -178,25 +205,41 @@ class TestMultiTableSearch:
         """Filter operations on one table must not affect the other."""
         marker = f"filtiso_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Filter Iso Article",
-            "content": f"Content with {marker} in articles",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Filter Iso Product",
-            "description": f"Description with {marker} in products",
-            "status": 2, "category": "news", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Filter Iso Article",
+                    "content": f"Content with {marker} in articles",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Filter Iso Product",
+                    "description": f"Description with {marker} in products",
+                    "status": 2,
+                    "category": "news",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"articles to find {marker}",
         )
         wait_until(
             lambda: mygramdb.search("products", marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"products to find {marker}",
         )
 
@@ -217,21 +260,38 @@ class TestMultiTableReplication:
         art_marker = f"dualins_a_{uuid.uuid4().hex[:8]}"
         prod_marker = f"dualins_p_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Dual Insert Art",
-            "content": f"Article content {art_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Dual Insert Prod",
-            "description": f"Product desc {prod_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Dual Insert Art",
+                    "content": f"Article content {art_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Dual Insert Prod",
+                    "description": f"Product desc {prod_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
-            lambda: (mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
-                     and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1),
-            timeout=20, interval=0.5,
+            lambda: (
+                mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
+                and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1
+            ),
+            timeout=20,
+            interval=0.5,
             description="both tables to reflect INSERTs",
         )
 
@@ -240,21 +300,38 @@ class TestMultiTableReplication:
         shared_marker = f"updiso_{uuid.uuid4().hex[:8]}"
         new_marker = f"updiso_new_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Update Iso Art",
-            "content": f"Content {shared_marker} in articles",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Update Iso Prod",
-            "description": f"Description {shared_marker} in products",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Update Iso Art",
+                    "content": f"Content {shared_marker} in articles",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Update Iso Prod",
+                    "description": f"Description {shared_marker} in products",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
-            lambda: (mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
-                     and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1),
-            timeout=20, interval=0.5,
+            lambda: (
+                mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
+                and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1
+            ),
+            timeout=20,
+            interval=0.5,
             description="both tables synced",
         )
 
@@ -267,7 +344,8 @@ class TestMultiTableReplication:
 
         wait_until(
             lambda: mygramdb.search("articles", new_marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description="articles UPDATE reflected",
         )
 
@@ -282,21 +360,38 @@ class TestMultiTableReplication:
         """DELETE from articles should not remove products SEARCH results."""
         shared_marker = f"deliso_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Delete Iso Art",
-            "content": f"Content {shared_marker} in articles",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Delete Iso Prod",
-            "description": f"Description {shared_marker} in products",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Delete Iso Art",
+                    "content": f"Content {shared_marker} in articles",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Delete Iso Prod",
+                    "description": f"Description {shared_marker} in products",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
-            lambda: (mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
-                     and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1),
-            timeout=20, interval=0.5,
+            lambda: (
+                mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
+                and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1
+            ),
+            timeout=20,
+            interval=0.5,
             description="both tables synced",
         )
 
@@ -305,7 +400,8 @@ class TestMultiTableReplication:
 
         wait_until(
             lambda: mygramdb.search("articles", shared_marker, limit=10)["total"] == 0,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description="articles DELETE reflected",
         )
 
@@ -324,15 +420,23 @@ class TestMultiTableDDL:
         """DROP articles — products SEARCH must still work. Then restore."""
         prod_marker = f"dropiso_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("products", [{
-            "name": "Drop Iso Product",
-            "description": f"Product {prod_marker} survives article drop",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Drop Iso Product",
+                    "description": f"Product {prod_marker} survives article drop",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("products", prod_marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"products to find {prod_marker}",
         )
 
@@ -358,21 +462,38 @@ class TestMultiTableDDL:
         art_marker = f"truncart_{uuid.uuid4().hex[:8]}"
         prod_marker = f"truncprod_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Truncate Test Art",
-            "content": f"Article content {art_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
-        mysql.insert_rows("products", [{
-            "name": "Truncate Test Prod",
-            "description": f"Product content {prod_marker}",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Truncate Test Art",
+                    "content": f"Article content {art_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Truncate Test Prod",
+                    "description": f"Product content {prod_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
-            lambda: (mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
-                     and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1),
-            timeout=20, interval=0.5,
+            lambda: (
+                mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
+                and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1
+            ),
+            timeout=20,
+            interval=0.5,
             description="both markers synced",
         )
 
@@ -411,7 +532,8 @@ class TestMultiTableDDL:
             # Wait for SYNC to complete and verify data is searchable
             wait_until(
                 lambda: mygramdb.search("articles", "test", limit=10)["total"] >= 1,
-                timeout=60, interval=1,
+                timeout=60,
+                interval=1,
                 description="articles SEARCH to work after recreate+sync",
             )
 
@@ -421,17 +543,25 @@ class TestMultiTableDDL:
 
             # Insert a new unique row via replication
             marker = f"recreate_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows("articles", [{
-                "title": "Post-Recreate",
-                "content": f"Content after recreation {marker}",
-                "status": 1, "category": "tech", "enabled": 1,
-            }])
+            mysql.insert_rows(
+                "articles",
+                [
+                    {
+                        "title": "Post-Recreate",
+                        "content": f"Content after recreation {marker}",
+                        "status": 1,
+                        "category": "tech",
+                        "enabled": 1,
+                    }
+                ],
+            )
 
             # If replication doesn't recover in time, fall back to SYNC
             try:
                 wait_until(
                     lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
-                    timeout=30, interval=1,
+                    timeout=30,
+                    interval=1,
                     description=f"articles SEARCH to find {marker} via replication",
                 )
             except Exception:
@@ -440,7 +570,8 @@ class TestMultiTableDDL:
                 mygramdb.sync("articles", timeout=60)
                 wait_until(
                     lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
-                    timeout=30, interval=1,
+                    timeout=30,
+                    interval=1,
                     description=f"articles SEARCH to find {marker} via SYNC fallback",
                 )
         except Exception:
@@ -451,15 +582,23 @@ class TestMultiTableDDL:
         """SYNC articles should not affect products SEARCH results."""
         prod_marker = f"synciso_{uuid.uuid4().hex[:8]}"
 
-        mysql.insert_rows("products", [{
-            "name": "Sync Iso Product",
-            "description": f"Product {prod_marker} should survive articles sync",
-            "status": 1, "category": "tech", "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Sync Iso Product",
+                    "description": f"Product {prod_marker} should survive articles sync",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
             lambda: mygramdb.search("products", prod_marker, limit=10)["total"] >= 1,
-            timeout=20, interval=0.5,
+            timeout=20,
+            interval=0.5,
             description=f"products to find {prod_marker}",
         )
 

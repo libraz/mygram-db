@@ -13,27 +13,16 @@
 #include <cstring>
 #include <variant>
 
+#include "query/query_parser_internal.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::query {
 
-namespace {
+using internal::EqualsIgnoreCase;
 
-/**
- * @brief Case-insensitive string comparison for column names
- *
- * MySQL column names are case-insensitive, so PK comparisons must ignore case.
- */
-inline bool EqualsIgnoreCase(const std::string& lhs, const std::string& rhs) {
-  if (lhs.size() != rhs.size()) {
-    return false;
-  }
-  return std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](unsigned char lhs_c, unsigned char rhs_c) {
-    return std::tolower(lhs_c) == std::tolower(rhs_c);
-  });
-}
+namespace {
 
 // Format widths for zero-padded strings
 constexpr int kDocIdWidth = 10;
@@ -145,6 +134,52 @@ inline std::string ToZeroPaddedDoubleString(double value, int width) {
   return ToZeroPaddedString(bits, width);
 }
 
+/**
+ * @brief Convert a FilterValue variant to a sort-key string
+ *
+ * Centralizes the conversion logic used by GetSortKey, SortWithSchwartzianTransform,
+ * and SortWithSchwartzianTransformPartial.
+ */
+static std::string FilterValueToSortKey(const storage::FilterValue& val) {
+  return std::visit(
+      [](const auto& arg) -> std::string {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) {
+          return "";  // NULL
+        } else if constexpr (std::is_same_v<T, bool>) {
+          return arg ? "1" : "0";
+        } else if constexpr (std::is_same_v<T, std::string>) {
+          return arg;
+        } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+          return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
+        } else {
+          if constexpr (std::is_same_v<T, double>) {
+            return ToZeroPaddedDoubleString(arg, kDoubleWidth);
+          } else if constexpr (std::is_signed_v<T>) {
+            return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
+          } else {
+            return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
+          }
+        }
+      },
+      val);
+}
+
+/**
+ * @brief Apply offset and limit to a sorted results vector
+ *
+ * @param results Sorted document IDs
+ * @param offset Number of results to skip
+ * @param limit Maximum number of results to return
+ * @return Paginated slice of results
+ */
+static std::vector<DocId> ApplyOffsetLimit(const std::vector<DocId>& results, uint32_t offset, uint32_t limit) {
+  size_t start = std::min(static_cast<size_t>(offset), results.size());
+  size_t end = std::min(start + static_cast<size_t>(limit), results.size());
+  return std::vector<DocId>(results.begin() + static_cast<std::ptrdiff_t>(start),
+                            results.begin() + static_cast<std::ptrdiff_t>(end));
+}
+
 }  // namespace
 
 std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore& doc_store,
@@ -183,68 +218,14 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
   // Ordering by filter column
   auto filter_val = doc_store.GetFilterValue(doc_id, order_by.column);
   if (!filter_val.has_value()) {
-    // Filter column not found - check if the column name matches the primary key column
-    // This allows sorting by primary key column name (e.g., SORT id DESC)
-    if (EqualsIgnoreCase(order_by.column, primary_key_column)) {
-      // Treat as primary key sort
-      auto pk_opt = doc_store.GetPrimaryKey(doc_id);
-      if (pk_opt.has_value()) {
-        const auto& pk_str = pk_opt.value();
-
-        // Numeric primary keys: pad with zeros for proper lexicographic ordering
-        if (!pk_str.empty() &&
-            std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          try {
-            uint64_t num = std::stoull(pk_str);
-            // Using std::to_chars (locale-independent, no lock contention)
-            return ToZeroPaddedString(num, kNumericWidth);
-          } catch (const std::exception&) {
-            // Overflow or parse error - fall through to string comparison
-          }
-        }
-
-        // String primary key or numeric overflow: use as-is
-        return pk_str;
-      }
-    }
-
-    // Filter column not found and not primary key column: treat as NULL (empty string)
+    // Filter column not found: treat as NULL (empty string)
     // NULL values sort first in ascending order, last in descending order
+    // Note: PK column name match is already handled by the first if-block above.
     return "";
   }
 
   // Convert FilterValue to string for comparison
-  // Use static buffer to reduce allocations for numeric types
-  return std::visit(
-      [](auto&& arg) -> std::string {
-        using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, std::monostate>) {
-          return "";  // NULL
-        } else if constexpr (std::is_same_v<T, bool>) {
-          return arg ? "1" : "0";
-        } else if constexpr (std::is_same_v<T, std::string>) {
-          return arg;
-        } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-          // TimeValue: sort by seconds (can be negative)
-          // Add offset to make all values positive for sorting
-          // Using std::to_chars (locale-independent, no lock contention)
-          return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
-        } else {
-          // Numeric types: pad with zeros for lexicographic comparison
-          // This ensures proper numeric ordering
-          // Using std::to_chars (locale-independent, no lock contention in parallel sorting)
-          if constexpr (std::is_same_v<T, double>) {
-            return ToZeroPaddedDoubleString(arg, kDoubleWidth);
-          } else if constexpr (std::is_signed_v<T>) {
-            // Signed: add offset to make all values positive for sorting
-            return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
-          } else {
-            // Unsigned
-            return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
-          }
-        }
-      },
-      filter_val.value());
+  return FilterValueToSortKey(filter_val.value());
 }
 
 std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<DocId>& results,
@@ -307,26 +288,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
     for (size_t i = 0; i < results.size(); ++i) {
       std::string sort_key;
       if (batch_values[i].has_value()) {
-        sort_key = std::visit(
-            [](auto&& arg) -> std::string {
-              using T = std::decay_t<decltype(arg)>;
-              if constexpr (std::is_same_v<T, std::monostate>) {
-                return "";
-              } else if constexpr (std::is_same_v<T, bool>) {
-                return arg ? "1" : "0";
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                return arg;
-              } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-                return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
-              } else if constexpr (std::is_same_v<T, double>) {
-                return ToZeroPaddedDoubleString(arg, kDoubleWidth);
-              } else if constexpr (std::is_signed_v<T>) {
-                return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
-              } else {
-                return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
-              }
-            },
-            batch_values[i].value());
+        sort_key = FilterValueToSortKey(batch_values[i].value());
       }
       entries.push_back({results[i], std::move(sort_key)});
     }
@@ -422,26 +384,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
     for (size_t i = 0; i < results.size(); ++i) {
       std::string sort_key;
       if (batch_values[i].has_value()) {
-        sort_key = std::visit(
-            [](auto&& arg) -> std::string {
-              using T = std::decay_t<decltype(arg)>;
-              if constexpr (std::is_same_v<T, std::monostate>) {
-                return "";
-              } else if constexpr (std::is_same_v<T, bool>) {
-                return arg ? "1" : "0";
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                return arg;
-              } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-                return ToZeroPaddedSignedString(arg.seconds, kNumericWidth);
-              } else if constexpr (std::is_same_v<T, double>) {
-                return ToZeroPaddedDoubleString(arg, kDoubleWidth);
-              } else if constexpr (std::is_signed_v<T>) {
-                return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
-              } else {
-                return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
-              }
-            },
-            batch_values[i].value());
+        sort_key = FilterValueToSortKey(batch_values[i].value());
       }
       entries.push_back({results[i], std::move(sort_key)});
     }
@@ -542,21 +485,9 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   //   (This is acceptable - non-existent columns are treated as NULL)
   bool is_primary_key_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
   if (!is_primary_key_order && !results.empty()) {
-    // Sample-based validation: check first 100 documents (or all if fewer)
-    // This is a heuristic - if column doesn't exist in first 100, likely doesn't exist
-    constexpr size_t kSampleSize = 100;
-    size_t check_count = std::min(results.size(), kSampleSize);
-
-    bool column_found_as_filter = false;
+    // Use HasFilterColumn for O(1) validation instead of sampling documents
+    bool column_found_as_filter = doc_store.HasFilterColumn(order_by.column);
     bool column_found_as_primary_key = false;
-
-    for (size_t i = 0; i < check_count; ++i) {
-      auto filter_val = doc_store.GetFilterValue(results[i], order_by.column);
-      if (filter_val.has_value()) {
-        column_found_as_filter = true;
-        break;
-      }
-    }
 
     // If not found as filter column, check if the column name matches the primary key column
     // This allows sorting by primary key column name (e.g., SORT id DESC)
@@ -565,13 +496,12 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     }
 
     if (!column_found_as_filter && !column_found_as_primary_key) {
-      // Error: column not found in sample
+      // Error: column not found
       // Return error since this likely indicates a typo in the column name
       mygram::utils::StructuredLog()
           .Event("query_error")
           .Field("type", "order_by_column_not_found")
           .Field("column", order_by.column)
-          .Field("check_count", static_cast<uint64_t>(check_count))
           .Error();
 
       return MakeUnexpected(MakeError(
@@ -624,12 +554,8 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
       // Success - return directly (already paginated to total_needed)
       spdlog::trace("Used Schwartzian Transform + partial_sort for {} out of {} results", total_needed, results.size());
 
-      // Apply OFFSET (skip first query.offset elements)
-      auto start = std::min(static_cast<size_t>(query.offset), sorted_results.size());
-      auto end = sorted_results.size();
-      auto start_iter = sorted_results.begin() + static_cast<ptrdiff_t>(start);
-      auto end_iter = sorted_results.begin() + static_cast<ptrdiff_t>(end);
-      return std::vector<DocId>{start_iter, end_iter};
+      // Apply OFFSET within the partial-sorted results, with limit clamped to remaining size
+      return ApplyOffsetLimit(sorted_results, query.offset, query.limit);
     }
     // Fall through to traditional partial_sort if Schwartzian failed
     spdlog::trace("Schwartzian Transform failed, falling back to traditional partial_sort");
@@ -662,13 +588,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   }
 
   // Apply OFFSET and LIMIT after sorting
-  auto start = std::min(static_cast<size_t>(query.offset), results.size());
-  auto end = std::min(start + static_cast<size_t>(query.limit), results.size());
-
-  // Return paginated slice (minimal copy, only final results)
-  auto start_iter = results.begin() + static_cast<ptrdiff_t>(start);
-  auto end_iter = results.begin() + static_cast<ptrdiff_t>(end);
-  return std::vector<DocId>{start_iter, end_iter};
+  return ApplyOffsetLimit(results, query.offset, query.limit);
 }
 
 }  // namespace mygramdb::query

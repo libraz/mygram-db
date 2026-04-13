@@ -300,34 +300,18 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
       std::filesystem::create_directories(dump_path);
     }
 
-    // SECURITY: Validate that the dump directory is within allowed bounds
-    // Resolve to canonical path to prevent directory traversal attacks
-    std::filesystem::path canonical_dump = std::filesystem::canonical(dump_path);
+    // SECURITY: Reject paths containing ".." components to prevent directory traversal attacks.
+    // Use weakly_canonical to resolve symlinks without requiring the path to exist,
+    // then check the normalized form for any remaining ".." components.
+    std::filesystem::path canonical_dump = std::filesystem::weakly_canonical(dump_path);
+    std::filesystem::path normalized = canonical_dump.lexically_normal();
 
-    // Define the base allowed directory (current working directory or parent)
-    // This prevents malicious configurations like "../../../etc/" from writing outside project
-    std::filesystem::path current_dir = std::filesystem::current_path();
-    std::filesystem::path allowed_base = current_dir.parent_path();  // Allow one level up for flexibility
-
-    // Check if canonical dump path starts with allowed base
-    auto dump_parts = canonical_dump.begin();
-    auto base_parts = allowed_base.begin();
-    bool within_bounds = true;
-
-    while (base_parts != allowed_base.end()) {
-      if (dump_parts == canonical_dump.end() || *dump_parts != *base_parts) {
-        within_bounds = false;
-        break;
+    for (const auto& component : normalized) {
+      if (component == "..") {
+        return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+            mygram::utils::ErrorCode::kPermissionDenied,
+            "Dump directory path contains '..' component after normalization: " + normalized.string()));
       }
-      ++dump_parts;
-      ++base_parts;
-    }
-
-    if (!within_bounds) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kPermissionDenied,
-          "Dump directory path traversal detected. Path must be within allowed directory: " + canonical_dump.string() +
-              " is outside " + allowed_base.string()));
     }
 
     // Check if directory is writable by attempting to create a test file

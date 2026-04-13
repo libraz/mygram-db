@@ -6,6 +6,7 @@ bulk DELETE) occur while searches are actively running.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 import uuid
@@ -13,7 +14,7 @@ import uuid
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.wait import wait_until, wait_until_gte
+from lib.wait import wait_until_gte
 
 
 @pytest.mark.concurrency
@@ -25,14 +26,17 @@ class TestDDLDuringQueries:
         marker = f"trunctest_{uuid.uuid4().hex[:8]}"
 
         # Insert identifiable rows
-        gen = DataGenerator(seed=77)
-        rows = [{
-            "title": f"{marker} row {i}",
-            "content": f"{marker} content for truncate test item {i}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(20)]
+        DataGenerator(seed=77)
+        rows = [
+            {
+                "title": f"{marker} row {i}",
+                "content": f"{marker} content for truncate test item {i}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(20)
+        ]
         mysql.insert_rows("articles", rows)
         mygramdb.sync("articles", timeout=30)
         time.sleep(2)
@@ -102,11 +106,9 @@ class TestDDLDuringQueries:
 
         time.sleep(0.5)
 
-        # Add a column
-        try:
+        # Add a column (may already exist or DDL may fail — that's OK)
+        with contextlib.suppress(Exception):
             mysql.execute(f"ALTER TABLE articles ADD COLUMN {col_name} VARCHAR(50) DEFAULT NULL")
-        except Exception:
-            pass  # Column may already exist or DDL may fail — that's OK
 
         mygramdb.sync("articles", timeout=15)
         time.sleep(2)
@@ -118,23 +120,24 @@ class TestDDLDuringQueries:
         assert not errors, f"Search errors during ALTER: {errors[:5]}"
 
         # Cleanup: drop the added column
-        try:
+        with contextlib.suppress(Exception):
             mysql.execute(f"ALTER TABLE articles DROP COLUMN {col_name}")
-        except Exception:
-            pass
 
     def test_bulk_delete_during_search(self, mysql, mygramdb, seed_data):
         """DELETE 80% of rows while searches run — results should decrease."""
         marker = f"bulkdel_{uuid.uuid4().hex[:8]}"
 
         # Insert rows for this test
-        rows = [{
-            "title": f"{marker} item {i}",
-            "content": f"{marker} bulk delete test content number {i}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(50)]
+        rows = [
+            {
+                "title": f"{marker} item {i}",
+                "content": f"{marker} bulk delete test content number {i}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(50)
+        ]
         mysql.insert_rows("articles", rows)
         mygramdb.sync("articles", timeout=15)
 
@@ -176,6 +179,4 @@ class TestDDLDuringQueries:
 
         # Final count should reflect deletions
         final_count = mygramdb.count("articles", marker)
-        assert final_count <= 15, (
-            f"Expected <=15 results after deleting 40/50, got {final_count}"
-        )
+        assert final_count <= 15, f"Expected <=15 results after deleting 40/50, got {final_count}"

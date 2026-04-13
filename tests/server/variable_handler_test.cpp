@@ -121,6 +121,75 @@ TEST_F(VariableHandlerTest, ShowVariablesWithPrefix) {
   EXPECT_TRUE(response.find("cache.enabled") == std::string::npos) << "Response: " << response;
 }
 
+TEST_F(VariableHandlerTest, ShowVariablesLikeMultipleWildcards) {
+  // Pattern "log%level" should match "logging.level" but not "logging.format"
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "log%level";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("logging.level") != std::string::npos) << "Response: " << response;
+  EXPECT_TRUE(response.find("logging.format") == std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikeUnderscoreWildcard) {
+  // Pattern with _ (single char wildcard)
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "cache.t_l%";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  // "cache.ttl_seconds" should match "cache.t_l%" (t + any-char + l...)
+  EXPECT_TRUE(response.find("cache.ttl_seconds") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikeNoMatch) {
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "nonexistent%";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("0 rows") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikeExactMatch) {
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "logging.level";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("logging.level") != std::string::npos) << "Response: " << response;
+  EXPECT_TRUE(response.find("1 row") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikeAllPercent) {
+  // "%" should match everything
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "%";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("logging.level") != std::string::npos) << "Response: " << response;
+  EXPECT_TRUE(response.find("cache.enabled") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikeConsecutivePercents) {
+  // "%%" should also match everything
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "%%logging%%";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("logging.level") != std::string::npos) << "Response: " << response;
+  EXPECT_TRUE(response.find("logging.format") != std::string::npos) << "Response: " << response;
+}
+
 // ============================================================================
 // SET Tests
 // ============================================================================
@@ -144,7 +213,7 @@ TEST_F(VariableHandlerTest, SetVariableImmutable) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  EXPECT_TRUE(response.find("-ERR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
   EXPECT_TRUE(response.find("immutable") != std::string::npos) << "Response: " << response;
 }
 
@@ -155,7 +224,7 @@ TEST_F(VariableHandlerTest, SetVariableUnknown) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  EXPECT_TRUE(response.find("-ERR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
   EXPECT_TRUE(response.find("Unknown variable") != std::string::npos) << "Response: " << response;
 }
 

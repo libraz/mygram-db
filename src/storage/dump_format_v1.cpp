@@ -18,6 +18,7 @@
 
 #include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
+#include "utils/memory_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef _WIN32
@@ -992,7 +993,9 @@ Expected<void, Error> WriteDumpV1(
 
     // Prepare Version 1 header
     HeaderV1 header;
-    header.header_size = 0;  // Will be calculated
+    // Calculate actual header size: header_size(4) + flags(4) + dump_timestamp(8) +
+    // total_file_size(8) + file_crc32(4) + gtid_length(4) + gtid_data(N)
+    header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + gtid.size());
     header.flags = dump_format::flags_v1::kNone;
     if (stats != nullptr) {
       header.flags |= dump_format::flags_v1::kWithStatistics;
@@ -1411,6 +1414,13 @@ Expected<void, Error> ReadDumpV1(
         ifs.seekg(table_stats_len, std::ios::cur);
       }
 
+      // Maximum allowed size for table data sections (prevents OOM from malicious/corrupt dumps)
+      // Use physical memory as the upper bound; fall back to 64 GB if unavailable
+      const uint64_t kMaxTableDataSectionLength = [] {
+        auto mem_info = mygram::utils::GetSystemMemoryInfo();
+        return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
+      }();
+
       // Check if table context exists
       if (table_contexts.count(table_name) == 0) {
         StructuredLog()
@@ -1425,11 +1435,19 @@ Expected<void, Error> ReadDumpV1(
         if (!ReadBinary(ifs, index_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
         }
+        if (index_len > kMaxTableDataSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
+        }
         ifs.seekg(static_cast<std::streamoff>(index_len), std::ios::cur);
 
         uint64_t doc_len = 0;
         if (!ReadBinary(ifs, doc_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
+        if (doc_len > kMaxTableDataSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
         }
         ifs.seekg(static_cast<std::streamoff>(doc_len), std::ios::cur);
         continue;
@@ -1443,6 +1461,9 @@ Expected<void, Error> ReadDumpV1(
       uint64_t index_len = 0;
       if (!ReadBinary(ifs, index_len)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
+      if (index_len > kMaxTableDataSectionLength) {
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
       }
 
       if (index_len > 0) {
@@ -1476,6 +1497,10 @@ Expected<void, Error> ReadDumpV1(
       uint64_t doc_len = 0;
       if (!ReadBinary(ifs, doc_len)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
+      if (doc_len > kMaxTableDataSectionLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
       }
       std::string doc_data(doc_len, '\0');
       ifs.read(doc_data.data(), static_cast<std::streamsize>(doc_len));

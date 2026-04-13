@@ -403,6 +403,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_hits: " << cache_stats.cache_hits << "\r\n";
     oss << "cache_misses: " << cache_stats.cache_misses << "\r\n";
     oss << "cache_misses_not_found: " << cache_stats.cache_misses_not_found << "\r\n";
+    oss << "cache_misses_ttl_expired: " << cache_stats.cache_misses_ttl_expired << "\r\n";
     oss << "cache_misses_invalidated: " << cache_stats.cache_misses_invalidated << "\r\n";
     oss << "cache_total_queries: " << cache_stats.total_queries << "\r\n";
     oss << "cache_hit_rate: " << std::fixed << std::setprecision(4) << cache_stats.HitRate() << "\r\n";
@@ -817,6 +818,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "# HELP mygramdb_cache_misses_total Total number of cache misses\n";
     oss << "# TYPE mygramdb_cache_misses_total counter\n";
     oss << "mygramdb_cache_misses_total{reason=\"not_found\"} " << cache_stats.cache_misses_not_found << "\n";
+    oss << "mygramdb_cache_misses_total{reason=\"ttl_expired\"} " << cache_stats.cache_misses_ttl_expired << "\n";
     oss << "mygramdb_cache_misses_total{reason=\"invalidated\"} " << cache_stats.cache_misses_invalidated << "\n";
     oss << "\n";
 

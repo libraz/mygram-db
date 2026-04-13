@@ -158,6 +158,20 @@ gtest_discover_tests(fd_guard_test
   DISCOVERY_TIMEOUT 30
 )
 
+add_executable(flag_guard_test
+  flag_guard_test.cpp
+)
+
+target_link_libraries(flag_guard_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(flag_guard_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(binary_io_test
   binary_io_test.cpp
 )
@@ -238,4 +252,36 @@ target_link_libraries(endian_utils_test PRIVATE
 gtest_discover_tests(endian_utils_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+)
+
+# AtomicFileWriter tests
+
+add_executable(comparison_utils_test
+  comparison_utils_test.cpp
+)
+
+target_link_libraries(comparison_utils_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(comparison_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+add_executable(atomic_file_writer_test
+  atomic_file_writer_test.cpp
+)
+
+target_link_libraries(atomic_file_writer_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+gtest_discover_tests(atomic_file_writer_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
 )

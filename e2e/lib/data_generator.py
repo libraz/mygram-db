@@ -71,8 +71,10 @@ class DataGenerator:
     ) -> list[dict[str, Any]]:
         """Generate article rows."""
         rows: list[dict[str, Any]] = []
-        for i in range(count):
-            title_words = [self.rng.choice(self.english_words) for _ in range(self.rng.randint(3, 8))]
+        for _i in range(count):
+            title_words = [
+                self.rng.choice(self.english_words) for _ in range(self.rng.randint(3, 8))
+            ]
             title = " ".join(title_words).title()
 
             if mixed and self.japanese_phrases:
@@ -84,28 +86,34 @@ class DataGenerator:
             if self.rng.random() < 0.05:  # 5% soft-deleted
                 deleted_at = "2024-01-01 00:00:00"
 
-            rows.append({
-                "title": title,
-                "content": content,
-                "status": self.rng.choice(self.STATUSES),
-                "category": self.rng.choice(self.CATEGORIES),
-                "enabled": 1,
-                "deleted_at": deleted_at,
-            })
+            rows.append(
+                {
+                    "title": title,
+                    "content": content,
+                    "status": self.rng.choice(self.STATUSES),
+                    "category": self.rng.choice(self.CATEGORIES),
+                    "enabled": 1,
+                    "deleted_at": deleted_at,
+                }
+            )
         return rows
 
     def generate_products(self, count: int = 100) -> list[dict[str, Any]]:
         """Generate product rows."""
         rows: list[dict[str, Any]] = []
         for _ in range(count):
-            name_words = [self.rng.choice(self.english_words) for _ in range(self.rng.randint(2, 5))]
-            rows.append({
-                "name": " ".join(name_words).title(),
-                "description": self._random_paragraph(1, 3),
-                "status": self.rng.choice(self.STATUSES),
-                "category": self.rng.choice(self.CATEGORIES),
-                "enabled": 1,
-            })
+            name_words = [
+                self.rng.choice(self.english_words) for _ in range(self.rng.randint(2, 5))
+            ]
+            rows.append(
+                {
+                    "name": " ".join(name_words).title(),
+                    "description": self._random_paragraph(1, 3),
+                    "status": self.rng.choice(self.STATUSES),
+                    "category": self.rng.choice(self.CATEGORIES),
+                    "enabled": 1,
+                }
+            )
         return rows
 
     def generate_edge_cases(self) -> list[dict[str, Any]]:
@@ -115,15 +123,47 @@ class DataGenerator:
             {"content": "a", "status": 1, "enabled": 1},  # single char
             {"content": "ab", "status": 1, "enabled": 1},  # minimum bigram
             {"content": "Hello World", "status": 1, "enabled": 1},  # basic
-            {"content": "\uff28\uff45\uff4c\uff4c\uff4f\u3000\uff37\uff4f\uff52\uff4c\uff44", "status": 1, "enabled": 1},  # fullwidth
+            {
+                "content": "\uff28\uff45\uff4c\uff4c\uff4f\u3000\uff37\uff4f\uff52\uff4c\uff44",
+                "status": 1,
+                "enabled": 1,
+            },  # fullwidth
             {"content": "\ufb01\ufb02\ufb03\ufb04", "status": 1, "enabled": 1},  # ligatures (NFKC)
-            {"content": "caf\u00e9 r\u00e9sum\u00e9 na\u00efve", "status": 1, "enabled": 1},  # accented
-            {"content": "\u6771\u4eac\u30bf\u30ef\u30fc\u306f\u6771\u4eac\u90fd\u6e2f\u533a\u306b\u3042\u308a\u307e\u3059", "status": 1, "enabled": 1},  # Japanese
-            {"content": "\u5317\u4eac\u5e02\u662f\u4e2d\u534e\u4eba\u6c11\u5171\u548c\u56fd\u7684\u9996\u90fd", "status": 1, "enabled": 1},  # Chinese
-            {"content": "Hello \u4e16\u754c \u3053\u3093\u306b\u3061\u306f World", "status": 1, "enabled": 1},  # mixed script
-            {"content": "\U0001f389\U0001f38a\U0001f388 Party time! \U0001f973", "status": 1, "enabled": 1},  # emoji
-            {"content": "zero\u200bwidth\u200bjoin\u200btest", "status": 1, "enabled": 1},  # zero-width
-            {"content": "Robert'); DROP TABLE articles;--", "status": 1, "enabled": 1},  # SQL injection
+            {
+                "content": "caf\u00e9 r\u00e9sum\u00e9 na\u00efve",
+                "status": 1,
+                "enabled": 1,
+            },  # accented
+            {
+                "content": "\u6771\u4eac\u30bf\u30ef\u30fc\u306f\u6771\u4eac\u90fd\u6e2f\u533a\u306b\u3042\u308a\u307e\u3059",  # noqa: E501
+                "status": 1,
+                "enabled": 1,
+            },  # Japanese
+            {
+                "content": "\u5317\u4eac\u5e02\u662f\u4e2d\u534e\u4eba\u6c11\u5171\u548c\u56fd\u7684\u9996\u90fd",  # noqa: E501
+                "status": 1,
+                "enabled": 1,
+            },  # Chinese
+            {
+                "content": "Hello \u4e16\u754c \u3053\u3093\u306b\u3061\u306f World",
+                "status": 1,
+                "enabled": 1,
+            },  # mixed script
+            {
+                "content": "\U0001f389\U0001f38a\U0001f388 Party time! \U0001f973",
+                "status": 1,
+                "enabled": 1,
+            },  # emoji
+            {
+                "content": "zero\u200bwidth\u200bjoin\u200btest",
+                "status": 1,
+                "enabled": 1,
+            },  # zero-width
+            {
+                "content": "Robert'); DROP TABLE articles;--",
+                "status": 1,
+                "enabled": 1,
+            },  # SQL injection
             {"content": "<script>alert('xss')</script>", "status": 1, "enabled": 1},  # XSS
             {"content": "a" * 10000, "status": 1, "enabled": 1},  # long repeated
         ]

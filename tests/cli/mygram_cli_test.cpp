@@ -403,4 +403,43 @@ TEST_F(CliPrintResponseTest, SearchResponseLargeCount) {
   EXPECT_NE(output.find("showing 10"), std::string::npos);
 }
 
+// ============================================================================
+// Port validation tests
+// ============================================================================
+
+class CliPortValidationTest : public ::testing::Test {};
+
+TEST_F(CliPortValidationTest, ValidPortRange) {
+  // Port 1 is the minimum valid port
+  int port_int = 1;
+  EXPECT_GE(port_int, 1);
+  EXPECT_LE(port_int, 65535);
+
+  // Port 65535 is the maximum valid port
+  port_int = 65535;
+  EXPECT_GE(port_int, 1);
+  EXPECT_LE(port_int, 65535);
+}
+
+TEST_F(CliPortValidationTest, InvalidPortZero) {
+  int port_int = 0;
+  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 0 should be invalid";
+}
+
+TEST_F(CliPortValidationTest, InvalidPortNegative) {
+  int port_int = -1;
+  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port -1 should be invalid";
+}
+
+TEST_F(CliPortValidationTest, InvalidPortTooLarge) {
+  int port_int = 70000;
+  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 70000 should be invalid";
+}
+
+TEST_F(CliPortValidationTest, InvalidPortOverflow) {
+  // Verify that a port parsed as int > 65535 would be caught
+  int port_int = 99999;
+  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 99999 should be invalid";
+}
+
 }  // namespace

@@ -272,6 +272,8 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   // Per-request context passed to `RequestDispatcher::Dispatch`. Filled in at
   // construction with client_fd = fd_.
+  // Thread safety: `conn_ctx_.debug_mode` is `std::atomic<bool>`, safe for
+  // cross-thread reads (event-loop) and writes (drain task / command handler).
   ConnectionContext conn_ctx_{};
 
   // Read-side state — touched only by the event-loop thread.

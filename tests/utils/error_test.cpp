@@ -84,7 +84,7 @@ TEST(ErrorTest, ToString) {
 
 TEST(ErrorTest, StringConversion) {
   Error error(ErrorCode::kInvalidArgument, "Invalid input");
-  std::string str = error;
+  std::string str = error.to_string();
   EXPECT_EQ(str, "[Invalid argument (2)] Invalid input");
 }
 
@@ -294,14 +294,42 @@ TEST(ErrorCodeTest, AllStorageErrorCodes) {
 TEST(ErrorCodeTest, AllNetworkErrorCodes) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkListenFailed), "Listen failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkAcceptFailed), "Accept failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkConnectionRefused), "Connection refused");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkConnectionClosed), "Connection closed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkSendFailed), "Send failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReceiveFailed), "Receive failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkInvalidRequest), "Invalid request");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkProtocolError), "Protocol error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkIPNotAllowed), "IP not allowed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkServerNotStarted), "Server not started");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkAlreadyRunning), "Server already running");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkSocketCreationFailed), "Socket creation failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkInvalidBindAddress), "Invalid bind address");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkUnixSocketPathTooLong), "Unix socket path too long");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkUnixSocketStale), "Unix socket already in use");
+}
+
+TEST(ErrorCodeTest, AllReactorErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorUnsupported),
+               "Event multiplexer not supported on this platform");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorInitFailed), "Event multiplexer initialization failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorRegisterFailed), "Event multiplexer register failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorModifyFailed), "Event multiplexer modify failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorRemoveFailed), "Event multiplexer remove failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorPollFailed), "Event multiplexer poll failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorQueueFull), "Reactor per-connection write queue full");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorAlreadyOpen), "Event multiplexer already opened");
+}
+
+TEST(ErrorCodeTest, ReactorErrorCodeValues) {
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorUnsupported), 6016);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorInitFailed), 6017);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorRegisterFailed), 6018);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorModifyFailed), 6019);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorRemoveFailed), 6020);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorPollFailed), 6021);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorQueueFull), 6022);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorAlreadyOpen), 6023);
 }
 
 TEST(ErrorCodeTest, AllClientErrorCodes) {
@@ -316,6 +344,9 @@ TEST(ErrorCodeTest, AllClientErrorCodes) {
 }
 
 TEST(ErrorCodeTest, AllCacheErrorCodes) {
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheMiss), "Cache miss");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheDisabled), "Cache disabled");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheCompressionFailed), "Cache compression failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheDecompressionFailed), "Cache decompression failed");
 }
 
@@ -327,4 +358,44 @@ TEST(ErrorCodeTest, UnknownErrorCode) {
 TEST(ErrorCodeTest, StorageDumpErrorCodes) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpReadError), "Storage dump read error");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageDumpWriteError), "Storage dump write error");
+}
+
+// ========== Test MakeErrorWithLocation ==========
+
+TEST(ErrorTest, MakeErrorWithLocation) {
+  auto error = MakeErrorWithLocation(ErrorCode::kInternalError, "test failure");
+  EXPECT_EQ(error.code(), ErrorCode::kInternalError);
+  EXPECT_EQ(error.message(), "test failure");
+  // Context should contain file:line from __builtin_FILE()/__builtin_LINE()
+  EXPECT_FALSE(error.context().empty());
+  EXPECT_NE(error.context().find("error_test.cpp"), std::string::npos);
+}
+
+// ========== Test Error class edge cases ==========
+
+TEST(ErrorTest, SuccessIsNotError) {
+  Error success(ErrorCode::kSuccess);
+  EXPECT_FALSE(success.is_error());
+  EXPECT_EQ(success.code(), ErrorCode::kSuccess);
+}
+
+TEST(ErrorTest, ToStringEmptyMessage) {
+  Error error;  // Default constructor: kSuccess, empty message
+  std::string str = error.to_string();
+  EXPECT_NE(str.find("Success"), std::string::npos);
+}
+
+TEST(ErrorTest, WhatReturnsNullTerminated) {
+  Error error(ErrorCode::kNotFound, "missing resource");
+  const char* w = error.what();
+  EXPECT_NE(w, nullptr);
+  EXPECT_STREQ(w, "missing resource");
+}
+
+TEST(ErrorTest, ExplicitStringConversion) {
+  Error error(ErrorCode::kTimeout, "op timed out", "ctx");
+  std::string s = error.to_string();
+  EXPECT_NE(s.find("Timeout"), std::string::npos);
+  EXPECT_NE(s.find("op timed out"), std::string::npos);
+  EXPECT_NE(s.find("ctx"), std::string::npos);
 }

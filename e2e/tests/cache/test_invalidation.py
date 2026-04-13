@@ -13,13 +13,18 @@ class TestCacheInvalidation:
     def test_insert_invalidates_cache(self, mysql, mygramdb, seed_data):
         """INSERT should invalidate relevant cache entries."""
         marker = "cache_inval_marker"
-        mysql.insert_rows("articles", [{
-            "title": "Cache Inval",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Inval",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -34,13 +39,18 @@ class TestCacheInvalidation:
         result1 = mygramdb.search("articles", marker, limit=100)
 
         # Insert another row
-        mysql.insert_rows("articles", [{
-            "title": "Cache Inval 2",
-            "content": f"Another content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Inval 2",
+                    "content": f"Another content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),

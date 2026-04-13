@@ -35,6 +35,7 @@ struct CacheStatisticsSnapshot {
   uint64_t cache_misses = 0;
   uint64_t cache_misses_invalidated = 0;
   uint64_t cache_misses_not_found = 0;
+  uint64_t cache_misses_ttl_expired = 0;
 
   // Invalidation statistics
   uint64_t invalidations_immediate = 0;
@@ -93,6 +94,7 @@ struct CacheStatistics {
   std::atomic<uint64_t> cache_misses{0};
   std::atomic<uint64_t> cache_misses_invalidated{0};
   std::atomic<uint64_t> cache_misses_not_found{0};
+  std::atomic<uint64_t> cache_misses_ttl_expired{0};
 
   // Invalidation statistics
   std::atomic<uint64_t> invalidations_immediate{0};
@@ -227,6 +229,7 @@ class QueryCache {
     snapshot.cache_misses = stats_.cache_misses.load();
     snapshot.cache_misses_invalidated = stats_.cache_misses_invalidated.load();
     snapshot.cache_misses_not_found = stats_.cache_misses_not_found.load();
+    snapshot.cache_misses_ttl_expired = stats_.cache_misses_ttl_expired.load();
     snapshot.invalidations_immediate = stats_.invalidations_immediate.load();
     snapshot.invalidations_deferred = stats_.invalidations_deferred.load();
     snapshot.invalidations_batches = stats_.invalidations_batches.load();

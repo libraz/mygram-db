@@ -13,6 +13,7 @@
 #include <sstream>
 #include <thread>
 
+#include "cache/cache_manager.h"
 #include "loader/initial_loader.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
@@ -28,8 +29,16 @@ constexpr int kSyncPollIntervalMs = 100;
 }  // namespace
 
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader)
-    : table_contexts_(table_contexts), full_config_(full_config), binlog_reader_(binlog_reader) {}
+                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                                           cache::CacheManager* cache_manager)
+    : table_contexts_(table_contexts),
+      full_config_(full_config),
+      binlog_reader_(binlog_reader),
+      cache_manager_(cache_manager) {}
+
+void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) {
+  cache_manager_ = cache_manager;
+}
 
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();
@@ -55,23 +64,29 @@ SyncOperationManager::~SyncOperationManager() {
   }
 }
 
-std::string SyncOperationManager::StartSync(const std::string& table_name) {
+mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager::StartSync(
+    const std::string& table_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   std::lock_guard<std::mutex> lock(sync_mutex_);
 
   // Check if table exists
   if (table_contexts_.find(table_name) == table_contexts_.end()) {
-    return ResponseFormatter::FormatError("Table '" + table_name + "' not found");
+    return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
   }
 
   // Check if already running
   if (sync_states_[table_name].is_running) {
-    return ResponseFormatter::FormatError("SYNC already in progress for '" + table_name + "'");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kSyncAlreadyInProgress, "SYNC already in progress for '" + table_name + "'"));
   }
 
   // Check memory health
   auto health = mygram::utils::GetMemoryHealthStatus();
   if (health == mygram::utils::MemoryHealthStatus::CRITICAL) {
-    return ResponseFormatter::FormatError("Memory critically low. Cannot start SYNC.");
+    return MakeUnexpected(MakeError(ErrorCode::kSyncMemoryCritical, "Memory critically low. Cannot start SYNC."));
   }
 
   // Log session timeout warning
@@ -104,7 +119,21 @@ std::string SyncOperationManager::StartSync(const std::string& table_name) {
     thread_iter->second.join();
   }
   // Launch async build (store thread instead of detaching)
-  sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  // Wrap in try/catch to rollback state if thread creation fails
+  try {
+    sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+  } catch (const std::system_error& e) {
+    // Rollback: remove from syncing_tables_ and reset sync state
+    {
+      std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
+      syncing_tables_.erase(table_name);
+    }
+    sync_states_[table_name].is_running = false;
+    sync_states_[table_name].status = "FAILED";
+    sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kSyncThreadCreationFailed, "Failed to create sync thread: " + std::string(e.what())));
+  }
 
   return "OK SYNC STARTED table=" + table_name + " job_id=1";
 }
@@ -200,15 +229,25 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       }
     }
 
-    // Wait for threads to finish
+    // Move threads out of sync_threads_ under lock, then join WITHOUT holding
+    // the lock. This mirrors the destructor pattern and avoids deadlock: the
+    // background thread's update_state lambda also acquires sync_mutex_.
+    std::unordered_map<std::string, std::thread> threads_to_join;
     {
       std::lock_guard<std::mutex> lock(sync_mutex_);
       for (const auto& tbl : tables_to_stop) {
         auto thread_iter = sync_threads_.find(tbl);
-        if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-          thread_iter->second.join();
+        if (thread_iter != sync_threads_.end()) {
+          threads_to_join[tbl] = std::move(thread_iter->second);
           sync_threads_.erase(thread_iter);
         }
+      }
+    }
+
+    // Join threads WITHOUT holding sync_mutex_
+    for (auto& [tbl, thread] : threads_to_join) {
+      if (thread.joinable()) {
+        thread.join();
       }
     }
 
@@ -216,37 +255,57 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
   }
 
   // Stop specific table
+  // Acquire locks in documented order: sync_mutex_ -> syncing_tables_mutex_ -> loaders_mutex_
+  // to avoid TOCTOU window where sync could complete between separate lock acquisitions.
+  std::thread thread_to_join;
   {
-    std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
-    if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
-      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+    std::lock_guard<std::mutex> sync_lock(sync_mutex_);
+    {
+      std::lock_guard<std::mutex> syncing_lock(syncing_tables_mutex_);
+      if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
+        return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+      }
     }
-  }
 
-  // Cancel the loader
-  {
-    std::lock_guard<std::mutex> lock(loaders_mutex_);
-    auto iter = active_loaders_.find(table_name);
-    if (iter != active_loaders_.end()) {
-      mygram::utils::StructuredLog()
-          .Event("sync_stop")
-          .Field("table", table_name)
-          .Field("source", "user_request")
-          .Info();
-      iter->second->Cancel();
-    } else {
-      return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
+    // Cancel the loader (still under sync_mutex_, acquire loaders_mutex_ per lock order)
+    {
+      std::lock_guard<std::mutex> loader_lock(loaders_mutex_);
+      auto iter = active_loaders_.find(table_name);
+      if (iter != active_loaders_.end()) {
+        mygram::utils::StructuredLog()
+            .Event("sync_stop")
+            .Field("table", table_name)
+            .Field("source", "user_request")
+            .Info();
+        iter->second->Cancel();
+      } else {
+        // Clean up sync state before returning error to avoid stuck state
+        auto state_it = sync_states_.find(table_name);
+        if (state_it != sync_states_.end()) {
+          state_it->second.is_running = false;
+          state_it->second.status = "FAILED";
+          state_it->second.error_message = "Loader not found during stop";
+        }
+        {
+          std::lock_guard<std::mutex> tables_lock(syncing_tables_mutex_);
+          syncing_tables_.erase(table_name);
+        }
+        return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
+      }
     }
-  }
 
-  // Wait for thread to finish
-  {
-    std::lock_guard<std::mutex> lock(sync_mutex_);
+    // Move thread out of sync_threads_ (already under sync_mutex_)
     auto thread_iter = sync_threads_.find(table_name);
-    if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-      thread_iter->second.join();
+    if (thread_iter != sync_threads_.end()) {
+      thread_to_join = std::move(thread_iter->second);
       sync_threads_.erase(thread_iter);
     }
+  }
+
+  // Join thread WITHOUT holding sync_mutex_ to avoid deadlock with
+  // the background thread's update_state lambda.
+  if (thread_to_join.joinable()) {
+    thread_to_join.join();
   }
 
   return "OK SYNC STOPPED table=" + table_name;
@@ -322,7 +381,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   }
 
   // Helper to update state safely
-  auto update_state = [this, &table_name](auto&& updater) {
+  auto update_state = [this, table_name](auto&& updater) {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     updater(sync_states_[table_name]);
   };
@@ -372,8 +431,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
-    if (!mysql_conn->Connect()) {
-      std::string error_msg = "Failed to connect: " + mysql_conn->GetLastError();
+    auto connect_result = mysql_conn->Connect();
+    if (!connect_result) {
+      std::string error_msg = "Failed to connect: " + connect_result.error().message();
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
         state.error_message = error_msg;
@@ -411,18 +471,41 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       return;
     }
 
+    // Stop replication BEFORE clearing data to prevent the reader/worker
+    // threads from re-adding documents into the cleared index/doc_store.
+    mysql::BinlogReader* reader = binlog_reader_;
+    bool replication_was_running = false;
+    if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {
+      mygram::utils::StructuredLog()
+          .Event("replication_restart")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("reason", "stop_before_clear")
+          .Info();
+      reader->Stop();
+      replication_was_running = true;
+    }
+
+    // Clear index and doc_store before SYNC to ensure a clean rebuild.
+    // Without this, stale data from a previous (possibly failed) SYNC can
+    // persist: the InitialLoader skips index updates for documents whose PK
+    // already exists in the doc_store, causing content mismatches where
+    // doc_store has new data but the index retains old posting lists.
+    ctx->index->Clear();
+    ctx->doc_store->Clear();
+
     // Build initial data load
     loader::InitialLoader loader(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
                                  full_config_->build);
 
     RegisterLoader(table_name, &loader);
 
-    auto result = loader.Load([&](const auto& progress) {
-      // Update progress atomically (these fields are atomic in SyncState)
-      std::lock_guard<std::mutex> lock(sync_mutex_);
-      sync_states_[table_name].total_rows = progress.total_rows;
-      sync_states_[table_name].processed_rows = progress.processed_rows;
-      // Note: No need to call loader.Cancel() here as RequestShutdown() already handles it
+    // Capture reference to SyncState to avoid map lookup in hot path
+    auto& state = sync_states_[table_name];  // Safe: key was created under sync_mutex_ in StartSync
+    auto result = loader.Load([&state](const auto& progress) {
+      // Update progress atomically without mutex (these fields are std::atomic)
+      state.total_rows.store(progress.total_rows, std::memory_order_relaxed);
+      state.processed_rows.store(progress.processed_rows, std::memory_order_relaxed);
     });
 
     UnregisterLoader(table_name);
@@ -478,13 +561,18 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.processed_rows = processed;
       });
 
-      // Start replication if configured
-      // NOTE: binlog_reader_ is owned by Application and guaranteed to outlive
-      // SyncOperationManager. We check for nullptr for defensive programming.
-      // SAFETY: Capture binlog_reader_ to local variable to prevent TOCTOU issues
-      // (Time-Of-Check-Time-Of-Use) if binlog_reader_ were to be modified by another thread.
-      mysql::BinlogReader* reader = binlog_reader_;
+      // Clear search cache for this table after SYNC replaces the index
+      if (cache_manager_ != nullptr) {
+        cache_manager_->ClearTable(table_name);
+        mygram::utils::StructuredLog()
+            .Event("sync_cache_cleared")
+            .Field("table", table_name)
+            .Field("rows", processed)
+            .Info();
+      }
 
+      // Restart replication from the SYNC GTID position.
+      // Replication was stopped before Clear() above; now set the new GTID and restart.
       // Log replication configuration for debugging
       mygram::utils::StructuredLog()
           .Event("sync_replication_check")
@@ -496,18 +584,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Info();
 
       if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
-        // reader is guaranteed non-null here due to the check above
-        // If replication is already running, stop it first to update GTID
-        // This handles cases where:
-        // 1. Replication failed with non-recoverable error but running_ flag wasn't cleared
-        // 2. GTID needs to be updated to the snapshot position
+        // If replication is still running (e.g., was not stopped earlier because
+        // it wasn't enabled at that point), stop it now before updating GTID.
         if (reader->IsRunning()) {
-          mygram::utils::StructuredLog()
-              .Event("replication_restart")
-              .Field("operation", "sync")
-              .Field("table", table_name)
-              .Field("reason", "update_gtid_after_sync")
-              .Info();
           reader->Stop();
         }
 

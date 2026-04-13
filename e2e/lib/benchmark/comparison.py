@@ -63,12 +63,8 @@ class ComparisonOrchestrator:
         mg_queries = build_mygramdb_commands(scenario)
         my_queries = build_mysql_commands(scenario)
 
-        mg_runner = BenchmarkRunner(
-            self._mg_pool, warmup_queries=warmup_queries
-        )
-        my_runner = BenchmarkRunner(
-            self._my_pool, warmup_queries=warmup_queries
-        )
+        mg_runner = BenchmarkRunner(self._mg_pool, warmup_queries=warmup_queries)
+        my_runner = BenchmarkRunner(self._my_pool, warmup_queries=warmup_queries)
 
         # Pre-establish all connections
         mg_runner.ensure_connections()

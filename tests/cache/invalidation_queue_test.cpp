@@ -1036,4 +1036,57 @@ TEST(InvalidationQueueTest, ConcurrentEnqueueStop) {
   EXPECT_FALSE(queue.IsRunning());
 }
 
+/**
+ * @brief Test that table names containing ':' are handled correctly
+ *
+ * Regression test for: composite key "table:cache_key_hex" was split using
+ * find(':') which broke when table name contained ':'. Using rfind(':')
+ * fixes this since the hex cache key (32 chars) never contains ':'.
+ */
+TEST(InvalidationQueueTest, TableNameWithColonInvalidatesCorrectly) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+
+  // Create a table context with a colon in the name
+  auto ctx = std::make_unique<server::TableContext>();
+  ctx->name = "my:table";
+  ctx->config.name = "my:table";
+  ctx->config.ngram_size = 3;
+  ctx->config.kanji_ngram_size = 2;
+  ctx->index = std::make_unique<index::Index>(3, 2);
+  ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts["my:table"] = ctx.get();
+  owned_contexts.push_back(std::move(ctx));
+
+  InvalidationQueue queue(&cache, &mgr, table_contexts);
+
+  // Register a cache entry for the "my:table" table
+  auto key = CacheKeyGenerator::Generate("colon_query");
+  CacheMetadata meta;
+  meta.table = "my:table";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  // Start worker
+  queue.Start();
+
+  // Enqueue invalidation for the colon-containing table
+  queue.Enqueue("my:table", "", "golang tutorial");
+
+  // Give worker time to process
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // Stop worker
+  queue.Stop();
+
+  // Entry should be erased (composite key correctly parsed with rfind)
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
 }  // namespace mygramdb::cache

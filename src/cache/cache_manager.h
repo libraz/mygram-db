@@ -5,9 +5,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -90,7 +90,7 @@ class CacheManager {
    * @param cross_boundary_ngrams Cross-boundary setting used for this query
    * @return true if cached, false otherwise
    */
-  bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::set<std::string>& ngrams,
+  bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::vector<std::string>& ngrams,
               double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
 
   /**
@@ -151,8 +151,15 @@ class CacheManager {
   void SetTtl(int ttl_seconds);
 
  private:
-  bool enabled_;
-  int ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
+  /**
+   * @brief Resolve cache key from a query
+   * @param query Parsed query
+   * @return Resolved CacheKey, or nullopt if the query is not cacheable
+   */
+  [[nodiscard]] std::optional<CacheKey> ResolveCacheKey(const query::Query& query) const;
+
+  std::atomic<bool> enabled_;
+  std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
 
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;

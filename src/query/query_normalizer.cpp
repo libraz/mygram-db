@@ -7,18 +7,19 @@
 
 #include <algorithm>
 #include <cctype>
-#include <sstream>
+#include <string>
 
 namespace mygramdb::cache {
 
 std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column) {
-  std::ostringstream oss;
+  std::string result;
+  result.reserve(128);  // Pre-allocate to reduce reallocations
 
   // Start with command type
   switch (query.type) {
     case query::QueryType::SEARCH:
     case query::QueryType::COUNT:
-      oss << "Q";  // Unified prefix: both SEARCH and COUNT cache full results
+      result += 'Q';  // Unified prefix: both SEARCH and COUNT cache full results
       break;
     default:
       // Only SEARCH and COUNT queries are cacheable
@@ -29,37 +30,43 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
   std::string lowercase_table = query.table;
   std::transform(lowercase_table.begin(), lowercase_table.end(), lowercase_table.begin(),
                  [](unsigned char chr) { return std::tolower(chr); });
-  oss << " " << lowercase_table;
+  result += ' ';
+  result += lowercase_table;
 
   // Add main search text
   if (!query.search_text.empty()) {
-    oss << " " << NormalizeSearchText(query.search_text);
+    result += ' ';
+    result += NormalizeSearchText(query.search_text);
   }
 
   // Add AND terms
   if (!query.and_terms.empty()) {
-    oss << " " << NormalizeAndTerms(query.and_terms);
+    result += ' ';
+    result.append(NormalizeAndTerms(query.and_terms));
   }
 
   // Add NOT terms
   if (!query.not_terms.empty()) {
-    oss << " " << NormalizeNotTerms(query.not_terms);
+    result += ' ';
+    result.append(NormalizeNotTerms(query.not_terms));
   }
 
   // Add filters (sorted for consistency)
   if (!query.filters.empty()) {
-    oss << " " << NormalizeFilters(query.filters);
+    result += ' ';
+    result.append(NormalizeFilters(query.filters));
   }
 
   // Add SORT clause (with default if not specified)
-  oss << " " << NormalizeSortClause(query.order_by, query.table, primary_key_column);
+  result += ' ';
+  result.append(NormalizeSortClause(query.order_by, query.table, primary_key_column));
 
   // Note: LIMIT and OFFSET are intentionally excluded from cache key.
   // The cache stores full results (before pagination), and LIMIT/OFFSET
   // are applied when retrieving from cache. This allows a single cache
   // entry to serve all pagination requests for the same query.
 
-  return oss.str();
+  return result;
 }
 
 std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
@@ -160,14 +167,15 @@ std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& a
   std::vector<std::string> sorted_terms = and_terms;
   std::sort(sorted_terms.begin(), sorted_terms.end());
 
-  std::ostringstream oss;
+  std::string result;
   for (size_t i = 0; i < sorted_terms.size(); ++i) {
     if (i > 0) {
-      oss << " ";
+      result += ' ';
     }
-    oss << "AND " << sorted_terms[i];
+    result.append("AND ");
+    result += sorted_terms[i];
   }
-  return oss.str();
+  return result;
 }
 
 std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& not_terms) {
@@ -175,14 +183,15 @@ std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& n
   std::vector<std::string> sorted_terms = not_terms;
   std::sort(sorted_terms.begin(), sorted_terms.end());
 
-  std::ostringstream oss;
+  std::string result;
   for (size_t i = 0; i < sorted_terms.size(); ++i) {
     if (i > 0) {
-      oss << " ";
+      result += ' ';
     }
-    oss << "NOT " << sorted_terms[i];
+    result.append("NOT ");
+    result += sorted_terms[i];
   }
-  return oss.str();
+  return result;
 }
 
 std::string QueryNormalizer::NormalizeFilters(const std::vector<query::FilterCondition>& filters) {
@@ -192,22 +201,25 @@ std::string QueryNormalizer::NormalizeFilters(const std::vector<query::FilterCon
       sorted_filters.begin(), sorted_filters.end(),
       [](const query::FilterCondition& lhs, const query::FilterCondition& rhs) { return lhs.column < rhs.column; });
 
-  std::ostringstream oss;
+  std::string result;
   for (size_t i = 0; i < sorted_filters.size(); ++i) {
     if (i > 0) {
-      oss << " ";
+      result += ' ';
     }
-    oss << "FILTER " << sorted_filters[i].column << " " << FilterOpToString(sorted_filters[i].op) << " "
-        << sorted_filters[i].value;
+    result.append("FILTER ");
+    result += sorted_filters[i].column;
+    result += ' ';
+    result.append(FilterOpToString(sorted_filters[i].op));
+    result += ' ';
+    result += sorted_filters[i].value;
   }
-  return oss.str();
+  return result;
 }
 
 std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::OrderByClause>& sort,
                                                  const std::string& /* table */,
                                                  const std::string& primary_key_column) {
-  std::ostringstream oss;
-  oss << "SORT ";
+  std::string result("SORT ");
 
   if (sort.has_value()) {
     // Normalize PK column name to canonical placeholder (case-insensitive)
@@ -218,17 +230,18 @@ std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::Orde
     std::transform(pk_col_lower.begin(), pk_col_lower.end(), pk_col_lower.begin(),
                    [](unsigned char chr) { return std::tolower(chr); });
     if (sort->column.empty() || sort_col_lower == pk_col_lower) {
-      oss << "__pk__";
+      result.append("__pk__");
     } else {
-      oss << sort->column;
+      result += sort->column;
     }
-    oss << " " << (sort->order == query::SortOrder::ASC ? "ASC" : "DESC");
+    result += ' ';
+    result.append(sort->order == query::SortOrder::ASC ? "ASC" : "DESC");
   } else {
     // Default: primary key DESC
-    oss << "__pk__ DESC";
+    result.append("__pk__ DESC");
   }
 
-  return oss.str();
+  return result;
 }
 
 std::string QueryNormalizer::FilterOpToString(query::FilterOp filter_op) {

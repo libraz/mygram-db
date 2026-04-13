@@ -41,6 +41,8 @@ enum class PostingStrategy : uint8_t {
  * - Roaring bitmap for dense postings (auto-selected based on threshold)
  */
 class PostingList {
+  friend class Index;  // Allow Index to call lock-free accessors
+
  public:
   /**
    * @brief Construct empty posting list
@@ -96,10 +98,10 @@ class PostingList {
    * @brief Get top N document IDs with optional reverse order
    *
    * Performance optimization for queries with LIMIT and ORDER BY:
-   * - Returns up to 'limit' document IDs without materializing entire posting list
+   * - Returns up to 'limit' document IDs
    * - Reverse order enables efficient "ORDER BY primary_key DESC LIMIT N" queries
    * - For Roaring bitmaps: uses reverse iterator (no full materialization)
-   * - For delta-compressed: decodes and returns last N elements
+   * - For delta-compressed: decodes delta-compressed list and returns the last N elements
    *
    * @param limit Maximum number of documents to return (0 = all documents)
    * @param reverse If true, returns highest DocIds first (descending order)
@@ -133,7 +135,7 @@ class PostingList {
   /**
    * @brief Get current strategy
    */
-  [[nodiscard]] PostingStrategy GetStrategy() const { return strategy_; }
+  [[nodiscard]] PostingStrategy GetStrategy() const { return strategy_.load(std::memory_order_acquire); }
 
   /**
    * @brief Intersect with another posting list
@@ -165,8 +167,9 @@ class PostingList {
   /**
    * @brief Serialize posting list to buffer
    * @param buffer Output buffer
+   * @return true if serialization succeeded, false if data is too large
    */
-  void Serialize(std::vector<uint8_t>& buffer) const;
+  bool Serialize(std::vector<uint8_t>& buffer) const;
 
   /**
    * @brief Deserialize posting list from buffer
@@ -177,14 +180,21 @@ class PostingList {
   bool Deserialize(const std::vector<uint8_t>& buffer, size_t& offset);
 
  private:
-  PostingStrategy strategy_ = PostingStrategy::kDeltaCompressed;
+  std::atomic<PostingStrategy> strategy_{PostingStrategy::kDeltaCompressed};
   double roaring_threshold_;
 
   // Delta-compressed storage
   std::vector<uint32_t> delta_compressed_;
 
+  // Cached last DocId for O(1) fast-path append in Add()
+  DocId last_doc_id_ = 0;
+
   // Roaring bitmap storage
   roaring_bitmap_t* roaring_bitmap_ = nullptr;
+
+  // Approximate document count for lock-free reads (H-14).
+  // Updated atomically inside mutation methods that already hold the exclusive lock.
+  std::atomic<uint64_t> doc_count_{0};
 
   // Mutation version counter for change detection in Index::Optimize().
   // Atomic (not protected by mutex_) - incremented inside mutation methods
@@ -194,6 +204,28 @@ class PostingList {
   // Protects all data members for thread-safe read/write operations
   // Uses shared_mutex to allow concurrent reads while serializing writes
   mutable std::shared_mutex mutex_;
+
+  /**
+   * @brief Get approximate document count without acquiring mutex
+   *
+   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
+   * under concurrent writes.
+   */
+  [[nodiscard]] uint64_t SizeApprox() const;
+
+  /**
+   * @brief Get approximate memory usage without acquiring mutex
+   *
+   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
+   * under concurrent writes.
+   */
+  [[nodiscard]] size_t MemoryUsageApprox() const;
+
+  /**
+   * @brief Recompute and cache last_doc_id_ from delta_compressed_
+   * @note Caller must already hold mutex_ exclusively
+   */
+  void RecomputeLastDocId();
 
   /**
    * @brief Convert from delta to Roaring

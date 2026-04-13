@@ -14,6 +14,8 @@
 
 namespace mygramdb::server {
 
+constexpr unsigned int kFallbackCpuCount = 4;  ///< Fallback when runtime can't detect core count
+
 ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
   // Auto-size the pool when not specified.
   //
@@ -29,7 +31,7 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(
   if (num_threads == 0) {
     unsigned hw = std::thread::hardware_concurrency();
     if (hw == 0) {
-      hw = 4;  // Fallback when the runtime can't detect core count
+      hw = kFallbackCpuCount;  // Fallback when the runtime can't detect core count
     }
     constexpr size_t kMinAutoWorkers = 4;
     num_threads = std::max<size_t>(static_cast<size_t>(hw) * 2, kMinAutoWorkers);

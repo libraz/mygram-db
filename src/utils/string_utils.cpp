@@ -34,8 +34,9 @@ constexpr uint8_t kUtf8FourByteMask = 0xF8;      // 11111000
 constexpr uint8_t kUtf8FourBytePattern = 0xF0;   // 11110000
 
 // UTF-8 continuation byte masks
-constexpr uint8_t kUtf8ContinuationMask = 0x3F;     // 00111111
-constexpr uint8_t kUtf8ContinuationPattern = 0x80;  // 10000000
+constexpr uint8_t kUtf8ContinuationCheckMask = 0xC0;  // 11000000 (mask for verifying continuation bytes)
+constexpr uint8_t kUtf8ContinuationMask = 0x3F;       // 00111111 (mask for extracting data from continuation bytes)
+constexpr uint8_t kUtf8ContinuationPattern = 0x80;    // 10000000
 
 // UTF-8 data extraction masks
 constexpr uint8_t kUtf8TwoByteDatMask = 0x1F;    // 00011111
@@ -63,11 +64,95 @@ constexpr uint32_t kMinThreeByteCodepoint = 0x800;
 constexpr uint32_t kMinFourByteCodepoint = 0x10000;
 
 /**
+ * @brief Try to parse a single UTF-8 character from a byte sequence.
+ *
+ * Returns the number of bytes in a valid UTF-8 sequence starting at data[0],
+ * or -1 if the sequence is invalid. If valid, writes the decoded codepoint to *out_cp.
+ *
+ * @param data Pointer to the start of the byte sequence
+ * @param available Number of bytes available from data onward
+ * @param out_cp Output: decoded Unicode codepoint (only written on success)
+ * @return Number of bytes consumed (1-4), or -1 on invalid sequence
+ */
+int TryParseUtf8Char(const unsigned char* data, size_t available, uint32_t* out_cp) {
+  if (available == 0) {
+    return -1;
+  }
+  auto first_byte = data[0];
+
+  if ((first_byte & kUtf8OneByteMask) == 0) {
+    // ASCII (0xxxxxxx)
+    *out_cp = first_byte;
+    return 1;
+  }
+  if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
+    // 2-byte sequence (110xxxxx 10xxxxxx)
+    if (first_byte < 0xC2) {
+      return -1;  // Overlong encoding
+    }
+    if (available < 2) {
+      return -1;
+    }
+    auto second = data[1];
+    if ((second & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern) {
+      return -1;
+    }
+    *out_cp = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) | (second & kUtf8ContinuationMask);
+    return 2;
+  }
+  if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
+    // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
+    if (available < 3) {
+      return -1;
+    }
+    auto second = data[1];
+    auto third = data[2];
+    if ((second & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern ||
+        (third & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern) {
+      return -1;
+    }
+    uint32_t codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
+                         ((second & kUtf8ContinuationMask) << kUtf8Shift6) | (third & kUtf8ContinuationMask);
+    if (codepoint < kMinThreeByteCodepoint || (codepoint >= kSurrogateStart && codepoint <= kSurrogateEnd)) {
+      return -1;  // Overlong or surrogate
+    }
+    *out_cp = codepoint;
+    return 3;
+  }
+  if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
+    // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+    if (first_byte > 0xF4) {
+      return -1;  // Invalid start byte (F5-FF)
+    }
+    if (available < 4) {
+      return -1;
+    }
+    auto second = data[1];
+    auto third = data[2];
+    auto fourth = data[3];
+    if ((second & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern ||
+        (third & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern ||
+        (fourth & kUtf8ContinuationCheckMask) != kUtf8ContinuationPattern) {
+      return -1;
+    }
+    uint32_t codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
+                         ((second & kUtf8ContinuationMask) << kUtf8Shift12) |
+                         ((third & kUtf8ContinuationMask) << kUtf8Shift6) | (fourth & kUtf8ContinuationMask);
+    if (codepoint < kMinFourByteCodepoint || codepoint > kUnicodeMaxCodepoint) {
+      return -1;  // Overlong or out of range
+    }
+    *out_cp = codepoint;
+    return 4;
+  }
+  // Invalid start byte
+  return -1;
+}
+
+/**
  * @brief Check if a byte is a valid UTF-8 continuation byte (10xxxxxx)
  */
 inline bool IsValidContinuationByte(unsigned char byte) {
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  return (byte & 0xC0) == kUtf8ContinuationPattern;
+  return (byte & kUtf8ContinuationCheckMask) == kUtf8ContinuationPattern;
 }
 
 /**
@@ -200,11 +285,12 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
   return codepoints;
 }
 
-std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
+std::string CodepointsToUtf8(const uint32_t* begin, const uint32_t* end) {
   std::string result;
-  result.reserve(codepoints.size() * 3);  // Estimate
+  result.reserve(static_cast<size_t>(end - begin) * 3);  // Estimate
 
-  for (uint32_t codepoint : codepoints) {
+  for (const uint32_t* it = begin; it != end; ++it) {
+    uint32_t codepoint = *it;
     // Skip invalid codepoints: surrogates and beyond Unicode max
     if (IsSurrogateCodepoint(codepoint) || codepoint > kUnicodeMaxCodepoint) {
       continue;
@@ -230,6 +316,10 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
   return result;
 }
 
+std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
+  return CodepointsToUtf8(codepoints.data(), codepoints.data() + codepoints.size());
+}
+
 #ifdef USE_ICU
 std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view width, bool lower) {
   UErrorCode status = U_ZERO_ERROR;
@@ -241,10 +331,10 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   // NFKC normalization
   if (nfkc) {
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
-    if (U_SUCCESS(status) != 0) {
+    if (U_SUCCESS(status)) {
       icu::UnicodeString normalized;
       normalizer->normalize(ustr, normalized, status);
-      if (U_SUCCESS(status) != 0) {
+      if (U_SUCCESS(status)) {
         ustr = normalized;
       }
     }
@@ -255,14 +345,14 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
     // Full-width to half-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   }
@@ -320,9 +410,7 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
 
   ngrams.reserve(codepoints.size() - n + 1);
   for (size_t i = 0; i <= codepoints.size() - n; ++i) {
-    std::vector<uint32_t> ngram_cp(codepoints.begin() + static_cast<std::ptrdiff_t>(i),
-                                   codepoints.begin() + static_cast<std::ptrdiff_t>(i + n));
-    ngrams.push_back(CodepointsToUtf8(ngram_cp));
+    ngrams.push_back(CodepointsToUtf8(codepoints.data() + i, codepoints.data() + i + n));
   }
 
   return ngrams;
@@ -359,6 +447,10 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
                                               bool cross_boundary_ngrams) {
   std::vector<std::string> ngrams;
 
+  if (ascii_ngram_size <= 0 || kanji_ngram_size <= 0) {
+    return ngrams;
+  }
+
   // Convert to codepoints for proper character-level processing
   std::vector<uint32_t> codepoints = Utf8ToCodepoints(text);
 
@@ -393,12 +485,7 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
       }
     }
 
-    std::vector<uint32_t> ngram_codepoints;
-    ngram_codepoints.reserve(ngram_size);
-    for (int j = 0; j < ngram_size; ++j) {
-      ngram_codepoints.push_back(codepoints[i + j]);
-    }
-    ngrams.push_back(CodepointsToUtf8(ngram_codepoints));
+    ngrams.push_back(CodepointsToUtf8(codepoints.data() + i, codepoints.data() + i + ngram_size));
   }
 
   return ngrams;
@@ -434,86 +521,26 @@ std::string FormatBytes(size_t bytes) {
   return oss.str();
 }
 
-// NOLINTBEGIN(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTBEGIN(readability-identifier-length)
 // Suppressing warnings: Short variable name 'i' is idiomatic for byte-level iteration.
-// Magic numbers are standard UTF-8 byte patterns (0xC0, 0xC2, 0x0F, 0x3F, etc.) well-known in UTF-8 processing.
 bool IsValidUtf8(std::string_view text) {
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
   size_t i = 0;
   while (i < text.size()) {
-    auto first_byte = static_cast<unsigned char>(text[i]);
-
-    if ((first_byte & kUtf8OneByteMask) == 0) {
-      // ASCII (0xxxxxxx)
-      ++i;
-    } else if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
-      // 2-byte sequence (110xxxxx 10xxxxxx)
-      if (i + 2 > text.size()) {
-        return false;
-      }
-      // Check for overlong encoding (C0, C1 are invalid)
-      if (first_byte < 0xC2) {
-        return false;
-      }
-      // Verify continuation byte
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      if ((second & 0xC0) != kUtf8ContinuationPattern) {
-        return false;
-      }
-      i += 2;
-    } else if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
-      // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
-      if (i + 3 > text.size()) {
-        return false;
-      }
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      auto third = static_cast<unsigned char>(text[i + 2]);
-      // Verify continuation bytes
-      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern) {
-        return false;
-      }
-      // Check for overlong encoding and surrogate pairs
-      uint32_t codepoint = ((first_byte & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F);
-      if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
-        return false;
-      }
-      i += 3;
-    } else if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
-      // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
-      if (i + 4 > text.size()) {
-        return false;
-      }
-      // Check for invalid start bytes (F5-FF)
-      if (first_byte > 0xF4) {
-        return false;
-      }
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      auto third = static_cast<unsigned char>(text[i + 2]);
-      auto fourth = static_cast<unsigned char>(text[i + 3]);
-      // Verify continuation bytes
-      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern ||
-          (fourth & 0xC0) != kUtf8ContinuationPattern) {
-        return false;
-      }
-      // Check for overlong encoding and out-of-range codepoints
-      uint32_t codepoint =
-          ((first_byte & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F);
-      if (codepoint < 0x10000 || codepoint > kUnicodeMaxCodepoint) {
-        return false;
-      }
-      i += 4;
-    } else {
-      // Invalid start byte
+    uint32_t codepoint = 0;
+    int char_len = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
+    if (char_len < 0) {
       return false;
     }
+    i += static_cast<size_t>(char_len);
   }
   return true;
 }
-// NOLINTEND(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTEND(readability-identifier-length)
 
-// NOLINTBEGIN(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTBEGIN(readability-identifier-length)
 // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 // Suppressing warnings: Short variable name 'i' is idiomatic for byte-level iteration.
-// Magic numbers are standard UTF-8 byte patterns well-known in UTF-8 processing.
 // C-style array for kReplacementChar is used for efficient string appending.
 std::string SanitizeUtf8(std::string_view text) {
   // U+FFFD replacement character in UTF-8
@@ -522,109 +549,64 @@ std::string SanitizeUtf8(std::string_view text) {
   std::string result;
   result.reserve(text.size());
 
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
   size_t i = 0;
   while (i < text.size()) {
-    auto first_byte = static_cast<unsigned char>(text[i]);
-
-    if ((first_byte & kUtf8OneByteMask) == 0) {
-      // Valid ASCII (0xxxxxxx)
-      result += text[i];
-      ++i;
-    } else if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
-      // Potential 2-byte sequence
-      if (first_byte < 0xC2) {
-        // Invalid overlong encoding
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      if (i + 2 > text.size()) {
-        // Incomplete sequence
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      if ((second & 0xC0) != kUtf8ContinuationPattern) {
-        // Invalid continuation byte
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      // Valid 2-byte sequence
-      result += text[i];
-      result += text[i + 1];
-      i += 2;
-    } else if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
-      // Potential 3-byte sequence
-      if (i + 3 > text.size()) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      auto third = static_cast<unsigned char>(text[i + 2]);
-      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      // Check for overlong encoding and surrogate pairs
-      uint32_t codepoint = ((first_byte & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F);
-      if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      // Valid 3-byte sequence
-      result += text[i];
-      result += text[i + 1];
-      result += text[i + 2];
-      i += 3;
-    } else if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
-      // Potential 4-byte sequence
-      if (first_byte > 0xF4) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      if (i + 4 > text.size()) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      auto second = static_cast<unsigned char>(text[i + 1]);
-      auto third = static_cast<unsigned char>(text[i + 2]);
-      auto fourth = static_cast<unsigned char>(text[i + 3]);
-      if ((second & 0xC0) != kUtf8ContinuationPattern || (third & 0xC0) != kUtf8ContinuationPattern ||
-          (fourth & 0xC0) != kUtf8ContinuationPattern) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      uint32_t codepoint =
-          ((first_byte & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F);
-      if (codepoint < 0x10000 || codepoint > kUnicodeMaxCodepoint) {
-        result += kReplacementChar;
-        ++i;
-        continue;
-      }
-      // Valid 4-byte sequence
-      result += text[i];
-      result += text[i + 1];
-      result += text[i + 2];
-      result += text[i + 3];
-      i += 4;
-    } else {
-      // Invalid start byte (continuation byte or 0xFF/0xFE)
+    uint32_t codepoint = 0;
+    int char_len = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
+    if (char_len < 0) {
+      // Invalid byte - replace with U+FFFD and skip one byte
       result += kReplacementChar;
       ++i;
+    } else {
+      // Valid sequence - append original bytes
+      result.append(text.data() + i, static_cast<size_t>(char_len));
+      i += static_cast<size_t>(char_len);
     }
   }
 
   return result;
 }
 // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-// NOLINTEND(readability-identifier-length,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+// NOLINTEND(readability-identifier-length)
+
+std::string ToUpper(std::string_view str) {
+  std::string result(str);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) { return std::toupper(character); });
+  return result;
+}
+
+std::string ReplaceAll(std::string_view str, std::string_view from, std::string_view to) {
+  std::string result(str);
+  if (from.empty()) {
+    return result;
+  }
+  size_t pos = 0;
+  while ((pos = result.find(from, pos)) != std::string::npos) {
+    result.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  return result;
+}
+
+std::pair<std::string, std::string> SplitOnFirst(std::string_view str, std::string_view delimiter) {
+  auto pos = str.find(delimiter);
+  if (pos == std::string_view::npos) {
+    return {std::string(str), ""};
+  }
+  return {std::string(str.substr(0, pos)), std::string(str.substr(pos + delimiter.size()))};
+}
+
+std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ngram_size, int kanji_ngram_size,
+                                             bool cross_boundary_ngrams) {
+  if (kanji_ngram_size > 0) {
+    return GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  }
+  if (ngram_size == 0) {
+    return GenerateHybridNgrams(normalized);
+  }
+  return GenerateNgrams(normalized, ngram_size);
+}
 
 }  // namespace mygram::utils

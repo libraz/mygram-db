@@ -39,6 +39,20 @@ class GtidEncoder {
    */
   static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Encode(const std::string& gtid_set);
 
+  /**
+   * @brief Extract UUID part from a GTID string
+   * @param gtid_str GTID string like "uuid:1-5" or "uuid:42"
+   * @return UUID portion (e.g., "uuid"), or empty string if format is invalid
+   */
+  static std::string ExtractUuid(const std::string& gtid_str);
+
+  /**
+   * @brief Validate GTID set format
+   * @param gtid_set GTID set string (e.g., "uuid:1-5" or "uuid1:1-3,uuid2:1-5")
+   * @return true if the GTID set has valid format (each entry has UUID:intervals)
+   */
+  static bool IsValidGtidSet(const std::string& gtid_set);
+
  private:
   struct Interval {
     int64_t start;

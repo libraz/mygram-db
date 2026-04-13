@@ -36,7 +36,7 @@ TEST(DocumentStoreTest, AddDocument) {
 TEST(DocumentStoreTest, AddDocumentWithFilters) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
   filters["category"] = static_cast<int64_t>(10);
   filters["score"] = 95.5;
@@ -78,7 +78,7 @@ TEST(DocumentStoreTest, DuplicatePrimaryKey) {
 TEST(DocumentStoreTest, GetDocument) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
 
   DocId doc_id = *store.AddDocument("pk1", filters);
@@ -142,13 +142,13 @@ TEST(DocumentStoreTest, GetPrimaryKey) {
 TEST(DocumentStoreTest, UpdateDocument) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters1;
+  FilterMap filters1;
   filters1["status"] = static_cast<int64_t>(1);
 
   DocId doc_id = *store.AddDocument("pk1", filters1);
 
   // Update filters
-  std::unordered_map<std::string, FilterValue> filters2;
+  FilterMap filters2;
   filters2["status"] = static_cast<int64_t>(2);
   filters2["category"] = static_cast<int64_t>(10);
 
@@ -169,7 +169,7 @@ TEST(DocumentStoreTest, UpdateDocument) {
 TEST(DocumentStoreTest, UpdateNonExistentDocument) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
 
   bool updated = store.UpdateDocument(999, filters);
@@ -216,13 +216,13 @@ TEST(DocumentStoreTest, RemoveNonExistentDocument) {
 TEST(DocumentStoreTest, FilterByValueInt) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters1;
+  FilterMap filters1;
   filters1["status"] = static_cast<int64_t>(1);
 
-  std::unordered_map<std::string, FilterValue> filters2;
+  FilterMap filters2;
   filters2["status"] = static_cast<int64_t>(2);
 
-  std::unordered_map<std::string, FilterValue> filters3;
+  FilterMap filters3;
   filters3["status"] = static_cast<int64_t>(1);
 
   EXPECT_TRUE(store.AddDocument("pk1", filters1));
@@ -247,13 +247,13 @@ TEST(DocumentStoreTest, FilterByValueInt) {
 TEST(DocumentStoreTest, FilterByValueString) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters1;
+  FilterMap filters1;
   filters1["tag"] = std::string("important");
 
-  std::unordered_map<std::string, FilterValue> filters2;
+  FilterMap filters2;
   filters2["tag"] = std::string("normal");
 
-  std::unordered_map<std::string, FilterValue> filters3;
+  FilterMap filters3;
   filters3["tag"] = std::string("important");
 
   EXPECT_TRUE(store.AddDocument("pk1", filters1));
@@ -273,7 +273,7 @@ TEST(DocumentStoreTest, FilterByValueString) {
 TEST(DocumentStoreTest, FilterByNonExistentColumn) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
 
   EXPECT_TRUE(store.AddDocument("pk1", filters));
@@ -290,7 +290,7 @@ TEST(DocumentStoreTest, MemoryUsage) {
 
   size_t initial = store.MemoryUsage();
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
 
   EXPECT_TRUE(store.AddDocument("pk1", filters));
@@ -329,7 +329,7 @@ TEST(DocumentStoreTest, LargeDocumentSet) {
   // Add 10000 documents
   for (int i = 0; i < 10000; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["status"] = static_cast<int64_t>(i % 10);
 
     DocId doc_id = *store.AddDocument(pk, filters);
@@ -360,7 +360,7 @@ TEST(DocumentStoreTest, ConcurrentReads) {
   // Add documents
   for (int i = 0; i < 1000; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["status"] = static_cast<int64_t>(i % 10);
     EXPECT_TRUE(store.AddDocument(pk, filters));
   }
@@ -466,7 +466,7 @@ TEST(DocumentStoreTest, DocIdOverflowDetection) {
 TEST(DocumentStoreTest, MixedFilterTypes) {
   DocumentStore store;
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
   filters["tag"] = std::string("important");
   filters["score"] = 98.5;
@@ -610,7 +610,7 @@ TEST(DocumentStoreTest, EmojiInDocuments) {
   EXPECT_GT(doc_id1, 0);
 
   // Add document with emoji in filter value (string)
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["title"] = FilterValue("Tutorial😀🎉");
   filters["category"] = FilterValue("楽しい😀学習");
   DocId doc_id2 = *store.AddDocument("pk2", filters);
@@ -668,7 +668,7 @@ TEST(DocumentStoreTest, EmojiFilterValues) {
   DocumentStore store;
 
   // Add document with various emoji filter values
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["mood"] = FilterValue("😀");
   filters["celebration"] = FilterValue("🎉");
   filters["rating"] = FilterValue("👍");
@@ -703,7 +703,7 @@ TEST(DocumentStoreTest, EmojiBatchOperations) {
   // Create batch with emoji data
   std::vector<DocumentStore::DocumentItem> batch;
   for (int i = 0; i < 100; ++i) {
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["emoji"] = FilterValue("😀");
     filters["number"] = FilterValue(i);
     batch.push_back({"emoji_pk_" + std::to_string(i), filters});
@@ -729,7 +729,7 @@ TEST(DocumentStoreTest, ComplexEmoji) {
   DocumentStore store;
 
   // Emoji with skin tone modifier
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["thumbs"] = FilterValue("👍🏽");                       // Medium skin tone
   filters["family"] = FilterValue("👨‍👩‍👧‍👦");  // Family with ZWJ
 
@@ -764,7 +764,7 @@ TEST(DocumentStoreTest, ConcurrentWrites) {
     threads.emplace_back([&store, &success_count, t]() {
       for (int i = 0; i < writes_per_thread; ++i) {
         std::string pk = "pk_thread" + std::to_string(t) + "_doc" + std::to_string(i);
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["thread_id"] = static_cast<int64_t>(t);
         filters["doc_num"] = static_cast<int64_t>(i);
 
@@ -804,7 +804,7 @@ TEST(DocumentStoreTest, ConcurrentReadWrite) {
   // Pre-populate store with some documents
   for (int i = 0; i < 100; ++i) {
     std::string pk = "initial_pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["status"] = static_cast<int64_t>(i % 10);
     EXPECT_TRUE(store.AddDocument(pk, filters));
   }
@@ -842,7 +842,7 @@ TEST(DocumentStoreTest, ConcurrentReadWrite) {
     threads.emplace_back([&store, &write_success, t]() {
       for (int i = 0; i < operations_per_thread; ++i) {
         std::string pk = "new_pk_thread" + std::to_string(t) + "_doc" + std::to_string(i);
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["status"] = static_cast<int64_t>(i % 10);
         filters["thread_id"] = static_cast<int64_t>(t);
 
@@ -879,7 +879,7 @@ TEST(DocumentStoreTest, ConcurrentUpdates) {
   std::vector<DocId> doc_ids;
   for (int i = 0; i < 100; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["value"] = static_cast<int64_t>(0);
     doc_ids.push_back(*store.AddDocument(pk, filters));
   }
@@ -894,7 +894,7 @@ TEST(DocumentStoreTest, ConcurrentUpdates) {
     threads.emplace_back([&store, &doc_ids, &update_success, t]() {
       for (int i = 0; i < updates_per_thread; ++i) {
         DocId doc_id = doc_ids[i % doc_ids.size()];
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["thread_" + std::to_string(t)] = static_cast<int64_t>(i);
 
         bool updated = store.UpdateDocument(doc_id, filters);
@@ -990,7 +990,7 @@ TEST(DocumentStoreTest, ConcurrentBatchOperations) {
       std::vector<DocumentStore::DocumentItem> batch;
       for (int i = 0; i < 100; ++i) {
         std::string pk = "batch_thread" + std::to_string(t) + "_doc" + std::to_string(i);
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["batch_id"] = static_cast<int64_t>(t);
         batch.push_back({pk, filters});
       }
@@ -1020,7 +1020,7 @@ TEST(DocumentStoreTest, ConcurrentFilterOperations) {
   // Pre-populate
   for (int i = 0; i < 500; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["category"] = static_cast<int64_t>(i % 20);
     EXPECT_TRUE(store.AddDocument(pk, filters));
   }
@@ -1071,7 +1071,7 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
   const int num_docs = 10000;
   for (int i = 0; i < num_docs; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["category"] = static_cast<int64_t>(i % 100);
     filters["status"] = std::string("active");
     store.AddDocument(pk, filters);
@@ -1113,7 +1113,7 @@ TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
   // Add many documents
   for (int i = 0; i < 5000; ++i) {
     std::string pk = "pk" + std::to_string(i);
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     filters["value"] = static_cast<int64_t>(i);
     store.AddDocument(pk, filters);
   }
@@ -1147,13 +1147,13 @@ TEST(DocumentStoreTest, Bug36_LoadFromFileBasicValidation) {
   DocumentStore store;
 
   // Add documents with various filter types to exercise all read paths
-  std::unordered_map<std::string, FilterValue> filters1;
+  FilterMap filters1;
   filters1["status"] = static_cast<int32_t>(1);
   filters1["name"] = std::string("test document with long name");
   filters1["score"] = 95.5;
   store.AddDocument("pk1", filters1);
 
-  std::unordered_map<std::string, FilterValue> filters2;
+  FilterMap filters2;
   filters2["status"] = static_cast<int64_t>(2);
   filters2["is_active"] = true;
   store.AddDocument("pk2", filters2);
@@ -1385,4 +1385,140 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
   EXPECT_TRUE(store_v1.GetDocId("pk1").has_value());
   auto text_v1 = store_v1.GetNormalizedText(static_cast<DocId>(1));
   EXPECT_FALSE(text_v1.has_value()) << "v1 snapshot should have no doc_texts_";
+}
+
+// =============================================================================
+// UINT32_MAX wraparound tests for AddDocument and AddDocumentBatch
+// =============================================================================
+
+/**
+ * @brief Test helper: DocumentStore subclass that exposes next_doc_id_ for testing
+ *
+ * The protected next_doc_id_ member allows subclasses to set the counter
+ * to values near UINT32_MAX without adding 4 billion documents.
+ */
+class TestableDocumentStore : public DocumentStore {
+ public:
+  void SetNextDocId(DocId id) { next_doc_id_ = id; }
+  DocId GetNextDocId() const { return next_doc_id_; }
+};
+
+/**
+ * @brief Test AddDocument UINT32_MAX boundary: assigns UINT32_MAX then errors
+ *
+ * When next_doc_id_ == UINT32_MAX, AddDocument should:
+ * 1. Successfully assign UINT32_MAX as the DocId
+ * 2. Set next_doc_id_ to 0 (sentinel)
+ * 3. Return an error on the subsequent call
+ */
+TEST(DocumentStoreTest, AddDocument_Uint32MaxBoundary) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Should succeed and assign UINT32_MAX
+  auto result = store.AddDocument("pk_max");
+  ASSERT_TRUE(result.has_value()) << "AddDocument should succeed at UINT32_MAX";
+  EXPECT_EQ(*result, UINT32_MAX);
+
+  // next_doc_id_ should now be 0 (sentinel)
+  EXPECT_EQ(store.GetNextDocId(), 0);
+
+  // Next call should fail with DocID exhaustion
+  auto result2 = store.AddDocument("pk_overflow");
+  EXPECT_FALSE(result2.has_value()) << "AddDocument should fail after UINT32_MAX is assigned";
+}
+
+/**
+ * @brief Test AddDocument: next_doc_id_ == 0 returns error immediately
+ */
+TEST(DocumentStoreTest, AddDocument_ZeroSentinelReturnsError) {
+  TestableDocumentStore store;
+
+  // Set sentinel value
+  store.SetNextDocId(0);
+
+  auto result = store.AddDocument("pk_fail");
+  EXPECT_FALSE(result.has_value()) << "AddDocument should fail when next_doc_id_ == 0";
+}
+
+/**
+ * @brief Test AddDocumentBatch UINT32_MAX boundary: assigns UINT32_MAX then errors
+ *
+ * When next_doc_id_ == UINT32_MAX, AddDocumentBatch should:
+ * 1. Successfully assign UINT32_MAX for the first new document
+ * 2. Set next_doc_id_ to 0 (sentinel)
+ * 3. Return an error for the second new document in the same batch
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxBoundary) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Batch with two new documents - first should succeed, second should fail
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_max", {}, ""});
+  batch.push_back({"pk_overflow", {}, ""});
+
+  auto result = store.AddDocumentBatch(batch);
+  EXPECT_FALSE(result.has_value()) << "AddDocumentBatch should fail when DocID space is exhausted mid-batch";
+}
+
+/**
+ * @brief Test AddDocumentBatch: single document at UINT32_MAX succeeds
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxSingleDoc) {
+  TestableDocumentStore store;
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Single document batch should succeed
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_max", {}, ""});
+
+  auto result = store.AddDocumentBatch(batch);
+  ASSERT_TRUE(result.has_value()) << "Single-doc batch at UINT32_MAX should succeed";
+  EXPECT_EQ(result->size(), 1);
+  EXPECT_EQ((*result)[0], UINT32_MAX);
+
+  // Sentinel should be set
+  EXPECT_EQ(store.GetNextDocId(), 0);
+
+  // Next batch should fail
+  std::vector<DocumentStore::DocumentItem> batch2;
+  batch2.push_back({"pk_next", {}, ""});
+  auto result2 = store.AddDocumentBatch(batch2);
+  EXPECT_FALSE(result2.has_value()) << "Batch after UINT32_MAX should fail";
+}
+
+/**
+ * @brief Test AddDocumentBatch: duplicate at UINT32_MAX does not consume the ID
+ */
+TEST(DocumentStoreTest, AddDocumentBatch_DuplicateAtUint32Max) {
+  TestableDocumentStore store;
+
+  // Add a document first via normal path
+  store.SetNextDocId(1);
+  auto pre = store.AddDocument("pk_existing");
+  ASSERT_TRUE(pre.has_value());
+
+  // Position next_doc_id_ at UINT32_MAX
+  store.SetNextDocId(UINT32_MAX);
+
+  // Batch: duplicate (should return existing ID) + new (should get UINT32_MAX)
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk_existing", {}, ""});  // Duplicate - returns existing DocId
+  batch.push_back({"pk_max", {}, ""});       // New - should get UINT32_MAX
+
+  auto result = store.AddDocumentBatch(batch);
+  ASSERT_TRUE(result.has_value()) << "Batch with duplicate + new at UINT32_MAX should succeed";
+  EXPECT_EQ(result->size(), 2);
+  EXPECT_EQ((*result)[0], *pre);        // Existing DocId for duplicate
+  EXPECT_EQ((*result)[1], UINT32_MAX);  // Last valid DocId for new document
+
+  // Sentinel should be set after using UINT32_MAX
+  EXPECT_EQ(store.GetNextDocId(), 0);
 }

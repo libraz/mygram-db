@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
-import statistics as _statistics
 import subprocess
-import sys
 from datetime import datetime, timezone
 from typing import Any
 
 from lib.benchmark.anomaly import Anomaly
 from lib.benchmark.saturation import SaturationResult
-from lib.stats import BenchmarkResult, ComparisonResult
-
+from lib.stats import ComparisonResult
 
 # ---------------------------------------------------------------------------
 # Console output
@@ -106,9 +104,7 @@ def print_anomalies(anomalies: list[Anomaly]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _print_border(
-    columns: list[tuple[str, int]], position: str, indent: str = ""
-) -> None:
+def _print_border(columns: list[tuple[str, int]], position: str, indent: str = "") -> None:
     chars = {
         "top": ("\u250c", "\u252c", "\u2510"),
         "middle": ("\u251c", "\u253c", "\u2524"),
@@ -119,9 +115,7 @@ def _print_border(
     print(f"{indent}{left}{mid.join(segments)}{right}")
 
 
-def _print_header(
-    columns: list[tuple[str, int]], indent: str = ""
-) -> None:
+def _print_header(columns: list[tuple[str, int]], indent: str = "") -> None:
     cells = [f" {name:^{w - 2}s} " for name, w in columns]
     sep = "\u2502"
     print(f"{indent}{sep}{sep.join(cells)}{sep}")
@@ -170,17 +164,13 @@ def _get_machine_info() -> dict[str, Any]:
 def _get_commit_info() -> dict[str, str]:
     """Gather current git commit hash and branch name."""
     info: dict[str, str] = {"hash": "", "branch": ""}
-    try:
+    with contextlib.suppress(subprocess.CalledProcessError, FileNotFoundError):
         info["hash"] = (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-            )
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
             .decode()
             .strip()
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    try:
+    with contextlib.suppress(subprocess.CalledProcessError, FileNotFoundError):
         info["branch"] = (
             subprocess.check_output(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL
@@ -188,6 +178,4 @@ def _get_commit_info() -> dict[str, str]:
             .decode()
             .strip()
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
     return info

@@ -181,9 +181,11 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
   for (const auto& table : tables) {
     // Validate table name to prevent SQL injection
     // MySQL table names can contain: letters, digits, underscore, dollar sign, hyphen
+    // Also reject null bytes which could truncate the name
     bool valid_name = !table.empty();
     for (char chr : table) {
-      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
+      if (chr == '\0' ||
+          (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-')) {
         valid_name = false;
         break;
       }
@@ -198,9 +200,15 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
       continue;
     }
 
+    // Use mysql_real_escape_string for defense-in-depth SQL injection prevention
+    MYSQL* handle = conn.GetHandle();
+    std::string escaped_table(table.size() * 2 + 1, '\0');
+    auto escaped_len = mysql_real_escape_string(handle, escaped_table.data(), table.c_str(), table.length());
+    escaped_table.resize(escaped_len);
+
     // Query INFORMATION_SCHEMA to check if table exists
     std::string query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" +
-                        table + "' LIMIT 1";
+                        escaped_table + "' LIMIT 1";
 
     auto result = conn.Execute(query);
     if (!result) {

@@ -737,5 +737,95 @@ TEST(QueryASTEvaluationTest, NormalizationParameterConsistency) {
   EXPECT_EQ(results3.size(), 2);  // Should match both doc2 and doc3 (NFKC normalizes to same form)
 }
 
+// ============================================================================
+// Pre-computed all_docs Optimization Tests
+// ============================================================================
+
+TEST(QueryASTEvaluationTest, NotNodeWithPrecomputedAllDocs) {
+  index::Index idx(1);  // unigram
+  storage::DocumentStore doc_store;
+
+  auto id1 = *doc_store.AddDocument("1");
+  auto id2 = *doc_store.AddDocument("2");
+  auto id3 = *doc_store.AddDocument("3");
+
+  idx.AddDocument(id1, "abc");
+  idx.AddDocument(id2, "abd");
+  idx.AddDocument(id3, "cde");
+
+  // Pre-compute all_docs
+  auto all_docs = doc_store.GetAllDocIds();
+
+  QueryASTParser parser;
+  auto ast = parser.Parse("NOT a");
+  ASSERT_NE(ast, nullptr);
+
+  // Evaluate with pre-computed all_docs
+  auto results_with = ast->Evaluate(idx, doc_store, &all_docs);
+
+  // Evaluate without (should give same result)
+  auto results_without = ast->Evaluate(idx, doc_store);
+
+  EXPECT_EQ(results_with, results_without);
+  // "NOT a" should return doc3 (which doesn't contain "a")
+  ASSERT_EQ(results_with.size(), 1);
+  EXPECT_EQ(results_with[0], id3);
+}
+
+TEST(QueryASTEvaluationTest, MultipleNotNodesShareAllDocs) {
+  index::Index idx(1);  // unigram
+  storage::DocumentStore doc_store;
+
+  auto id1 = *doc_store.AddDocument("1");
+  auto id2 = *doc_store.AddDocument("2");
+  auto id3 = *doc_store.AddDocument("3");
+  auto id4 = *doc_store.AddDocument("4");
+
+  idx.AddDocument(id1, "ab");
+  idx.AddDocument(id2, "ac");
+  idx.AddDocument(id3, "bc");
+  idx.AddDocument(id4, "de");
+
+  // "NOT a AND NOT b" should return doc4 (de)
+  QueryASTParser parser;
+  auto ast = parser.Parse("NOT a AND NOT b");
+  ASSERT_NE(ast, nullptr);
+
+  auto all_docs = doc_store.GetAllDocIds();
+  auto results = ast->Evaluate(idx, doc_store, &all_docs);
+
+  ASSERT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], id4);
+}
+
+TEST(QueryASTParserBugFixTest, DeeplyNestedParensRejected) {
+  // 33 levels of nesting should exceed kMaxRecursionDepth (32)
+  std::string expr;
+  for (int i = 0; i < 33; ++i)
+    expr += "(";
+  expr += "term";
+  for (int i = 0; i < 33; ++i)
+    expr += ")";
+
+  QueryASTParser parser;
+  auto result = parser.Parse(expr);
+  EXPECT_EQ(result, nullptr) << "33 levels of paren nesting should be rejected";
+  EXPECT_FALSE(parser.GetError().empty());
+}
+
+TEST(QueryASTParserBugFixTest, ModerateParenNestingAccepted) {
+  // 31 levels should be within limit
+  std::string expr;
+  for (int i = 0; i < 31; ++i)
+    expr += "(";
+  expr += "term";
+  for (int i = 0; i < 31; ++i)
+    expr += ")";
+
+  QueryASTParser parser;
+  auto result = parser.Parse(expr);
+  EXPECT_NE(result, nullptr) << "31 levels of paren nesting should be accepted";
+}
+
 }  // namespace query
 }  // namespace mygramdb

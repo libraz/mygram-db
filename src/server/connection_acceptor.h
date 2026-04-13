@@ -125,11 +125,21 @@ class ConnectionAcceptor {
   void AcceptLoop();
 
   /**
-   * @brief Set socket options (SO_REUSEADDR, SO_KEEPALIVE, etc.)
+   * @brief Set socket options on the listening socket (SO_REUSEADDR, SO_KEEPALIVE)
    * @param socket_fd Socket file descriptor
    * @return true if successful
    */
   bool SetSocketOptions(int socket_fd) const;
+
+  /**
+   * @brief Set per-client socket options (SO_RCVBUF, SO_SNDBUF)
+   *
+   * Called after accept() returns a valid client fd. These options are not
+   * inherited from the listening socket by the kernel.
+   *
+   * @param client_fd Client socket file descriptor
+   */
+  void SetClientSocketOptions(int client_fd) const;
 
   ServerConfig config_;
   ReactorHandler reactor_handler_;

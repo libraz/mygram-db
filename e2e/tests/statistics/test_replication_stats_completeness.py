@@ -17,13 +17,18 @@ class TestReplicationStatsCompleteness:
     def test_update_applied_counter(self, mysql, mygramdb, seed_data):
         """UPDATE on indexed row should increase updates applied + modified."""
         marker = f"upd_applied_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Update Applied Test",
-            "content": f"Original content {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Update Applied Test",
+                    "content": f"Original content {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -35,7 +40,9 @@ class TestReplicationStatsCompleteness:
 
         before = MetricsSnapshot.capture(mygramdb)
 
-        mysql.update("articles", f"content = 'Updated content {marker} new'", f"content LIKE '%{marker}%'")
+        mysql.update(
+            "articles", f"content = 'Updated content {marker} new'", f"content LIKE '%{marker}%'"
+        )
 
         # Wait for replication
         time.sleep(3)
@@ -54,13 +61,18 @@ class TestReplicationStatsCompleteness:
     def test_update_added_counter(self, mysql, mygramdb, seed_data):
         """UPDATE enabled 0->1 should increase updates added counter."""
         marker = f"upd_added_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Update Added Test",
-            "content": f"Content for added {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 0,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Update Added Test",
+                    "content": f"Content for added {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 0,
+                }
+            ],
+        )
 
         # Wait for the INSERT to be processed (it will be skipped for indexing)
         time.sleep(3)
@@ -92,13 +104,18 @@ class TestReplicationStatsCompleteness:
     def test_update_removed_counter(self, mysql, mygramdb, seed_data):
         """UPDATE enabled 1->0 should increase updates removed counter."""
         marker = f"upd_removed_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Update Removed Test",
-            "content": f"Content for removed {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Update Removed Test",
+                    "content": f"Content for removed {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -130,13 +147,18 @@ class TestReplicationStatsCompleteness:
     def test_update_skipped_counter(self, mysql, mygramdb, seed_data):
         """UPDATE on non-indexed row (enabled=0) should increase updates skipped."""
         marker = f"upd_skipped_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Update Skipped Test",
-            "content": f"Content for skipped {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 0,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Update Skipped Test",
+                    "content": f"Content for skipped {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 0,
+                }
+            ],
+        )
 
         # Wait for the INSERT to be processed
         time.sleep(3)
@@ -163,13 +185,18 @@ class TestReplicationStatsCompleteness:
     def test_delete_applied_counter(self, mysql, mygramdb, seed_data):
         """DELETE on indexed row should increase deletes applied."""
         marker = f"del_applied_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Delete Applied Test",
-            "content": f"Content for delete {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Delete Applied Test",
+                    "content": f"Content for delete {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -200,13 +227,18 @@ class TestReplicationStatsCompleteness:
     def test_delete_skipped_counter(self, mysql, mygramdb, seed_data):
         """DELETE on non-indexed row (enabled=0) should increase deletes skipped."""
         marker = f"del_skipped_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Delete Skipped Test",
-            "content": f"Content for skipdelete {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 0,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Delete Skipped Test",
+                    "content": f"Content for skipdelete {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 0,
+                }
+            ],
+        )
 
         # Wait for INSERT to be processed
         time.sleep(3)
@@ -250,9 +282,7 @@ class TestReplicationStatsCompleteness:
         ddl_metrics = {k: v for k, v in diff.items() if "ddl" in k.lower()}
         if ddl_metrics:
             max_increase = max(ddl_metrics.values())
-            assert max_increase >= 1, (
-                f"DDL counter should increase, got {ddl_metrics}"
-            )
+            assert max_increase >= 1, f"DDL counter should increase, got {ddl_metrics}"
 
         # Cleanup
         try:
@@ -267,13 +297,18 @@ class TestReplicationStatsCompleteness:
 
         before_info = mygramdb.info()
 
-        mysql.insert_rows("products", [{
-            "name": f"Product {marker}",
-            "description": f"Description for {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": f"Product {marker}",
+                    "description": f"Description for {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # Wait for the event to be processed
         time.sleep(3)
@@ -281,7 +316,7 @@ class TestReplicationStatsCompleteness:
         after_info = mygramdb.info()
 
         # Articles doc count should not change
-        before_docs = before_info.get("total_documents", before_info.get("doc_count", 0))
+        before_info.get("total_documents", before_info.get("doc_count", 0))
         after_docs = after_info.get("total_documents", after_info.get("doc_count", 0))
 
         # The doc count for articles should not increase from a products insert
@@ -295,13 +330,16 @@ class TestReplicationStatsCompleteness:
         marker = f"combined_{uuid.uuid4().hex[:8]}"
 
         # INSERT 5 rows (enabled=1)
-        rows = [{
-            "title": f"Combined Test {i}",
-            "content": f"Combined content {marker} item {i}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(5)]
+        rows = [
+            {
+                "title": f"Combined Test {i}",
+                "content": f"Combined content {marker} item {i}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(5)
+        ]
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
@@ -317,7 +355,7 @@ class TestReplicationStatsCompleteness:
             mysql.update(
                 "articles",
                 f"content = 'Updated combined {marker} item {i}'",
-                f"content LIKE '%{marker} item {i}%'"
+                f"content LIKE '%{marker} item {i}%'",
             )
 
         time.sleep(3)

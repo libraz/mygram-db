@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 
-from lib.stats import BenchmarkResult
 from lib.data_generator import DataGenerator
+from lib.stats import BenchmarkResult
 from lib.wait import wait_until_gte
 
 pytestmark = pytest.mark.load

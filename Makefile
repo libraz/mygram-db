@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
+.PHONY: help setup build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
 
 # Build directory
 BUILD_DIR := build
@@ -39,6 +39,7 @@ help:
 	@echo "  make rebuild        - Clean and rebuild"
 	@echo "  make install        - Install binaries and files"
 	@echo "  make uninstall      - Uninstall binaries and files"
+	@echo "  make setup          - Set up development environment (git hooks)"
 	@echo "  make format         - Format code with clang-format"
 	@echo "  make format-check   - Check code formatting (CI)"
 	@echo "  make lint           - Check all code with clang-tidy"
@@ -217,6 +218,11 @@ uninstall:
 	rm -rf $(PREFIX)/etc/mygramdb
 	rm -rf $(PREFIX)/share/doc/mygramdb
 	@echo "Uninstall complete!"
+
+# Set up development environment
+setup:
+	@git config core.hooksPath .githooks
+	@echo "Git hooks configured (.githooks/pre-commit)"
 
 # Format code with clang-format
 format:

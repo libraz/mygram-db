@@ -42,6 +42,17 @@ TEST(TimezoneOffsetTest, ParseValidOffsets) {
   EXPECT_EQ(offset5->ToString(), "-08:30");
 }
 
+TEST(TimezoneOffsetTest, ParseMaxTimezoneOffset) {
+  // UTC+14 (Line Islands, Kiribati) is the maximum valid timezone offset
+  auto offset_max = TimezoneOffset::Parse("+14:00");
+  ASSERT_TRUE(offset_max.has_value());
+  EXPECT_EQ(offset_max->GetOffsetSeconds(), 14 * 3600);
+  EXPECT_EQ(offset_max->ToString(), "+14:00");
+
+  // UTC+15 exceeds the maximum and should be rejected
+  EXPECT_FALSE(TimezoneOffset::Parse("+15:00").has_value());
+}
+
 TEST(TimezoneOffsetTest, ParseInvalidOffsets) {
   // Invalid format
   EXPECT_FALSE(TimezoneOffset::Parse("").has_value());
@@ -52,6 +63,7 @@ TEST(TimezoneOffsetTest, ParseInvalidOffsets) {
   EXPECT_FALSE(TimezoneOffset::Parse("+ 09:00").has_value());  // Space after sign
 
   // Out of range
+  EXPECT_FALSE(TimezoneOffset::Parse("+15:00").has_value());  // Hour > 14 (max timezone)
   EXPECT_FALSE(TimezoneOffset::Parse("+24:00").has_value());  // Hour >= 24
   EXPECT_FALSE(TimezoneOffset::Parse("+09:60").has_value());  // Minute >= 60
 }
@@ -286,6 +298,19 @@ TEST(DateTimeProcessorTest, CompareTimeValues) {
   EXPECT_LT(*time1, *time2);  // 10:30:00 < 15:45:30
   EXPECT_GT(*time1, *time3);  // 10:30:00 > -05:00:00
   EXPECT_LT(*time3, 0);       // Negative time
+}
+
+// BUG-4 fix: ConvertToEpoch consistency
+TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
+  // 2000-01-01 00:00:00 UTC = 946684800
+  auto epoch = ConvertToEpoch("2000-01-01 00:00:00", 0);
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, 946684800);
+
+  // Unix epoch
+  auto epoch0 = ConvertToEpoch("1970-01-01 00:00:00", 0);
+  ASSERT_TRUE(epoch0.has_value());
+  EXPECT_EQ(*epoch0, 0);
 }
 
 }  // namespace mygram::utils

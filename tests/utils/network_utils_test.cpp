@@ -213,5 +213,41 @@ TEST(NetworkUtilsTest, IsIPAllowed_InvalidCIDR) {
   EXPECT_FALSE(IsIPAllowed("172.16.0.1", allow_cidrs));
 }
 
+TEST(NetworkUtilsTest, ParseAllowCidrs_ValidEntries) {
+  std::vector<std::string> cidrs = {"192.168.1.0/24", "10.0.0.0/8"};
+  auto parsed = ParseAllowCidrs(cidrs);
+
+  ASSERT_EQ(parsed.size(), 2U);
+  EXPECT_EQ(parsed[0].network, 0xC0A80100);  // 192.168.1.0
+  EXPECT_EQ(parsed[0].prefix_length, 24);
+  EXPECT_EQ(parsed[1].network, 0x0A000000);  // 10.0.0.0
+  EXPECT_EQ(parsed[1].prefix_length, 8);
+}
+
+TEST(NetworkUtilsTest, ParseAllowCidrs_InvalidSkipped) {
+  std::vector<std::string> cidrs = {"not-a-cidr"};
+  auto parsed = ParseAllowCidrs(cidrs);
+
+  EXPECT_TRUE(parsed.empty());
+}
+
+TEST(NetworkUtilsTest, ParseAllowCidrs_Empty) {
+  std::vector<std::string> cidrs;
+  auto parsed = ParseAllowCidrs(cidrs);
+
+  EXPECT_TRUE(parsed.empty());
+}
+
+TEST(NetworkUtilsTest, ParseAllowCidrs_MixedValidInvalid) {
+  std::vector<std::string> cidrs = {"192.168.1.0/24", "invalid", "10.0.0.0/8", "", "bad/99"};
+  auto parsed = ParseAllowCidrs(cidrs);
+
+  ASSERT_EQ(parsed.size(), 2U);
+  EXPECT_EQ(parsed[0].network, 0xC0A80100);  // 192.168.1.0
+  EXPECT_EQ(parsed[0].prefix_length, 24);
+  EXPECT_EQ(parsed[1].network, 0x0A000000);  // 10.0.0.0
+  EXPECT_EQ(parsed[1].prefix_length, 8);
+}
+
 }  // namespace utils
 }  // namespace mygram

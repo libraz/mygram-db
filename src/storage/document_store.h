@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -86,10 +88,17 @@ using FilterValue = std::variant<std::monostate,  // NULL value
 /**
  * @brief Document metadata
  */
+/// Filter map type with transparent hash for heterogeneous lookup (string_view → no allocation)
+using FilterMap = absl::flat_hash_map<std::string, FilterValue, mygram::utils::TransparentStringHash,
+                                      mygram::utils::TransparentStringEqual>;
+
+/**
+ * @brief Document metadata
+ */
 struct Document {
   DocId doc_id = 0;
   std::string primary_key;
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
 };
 
 /**
@@ -113,32 +122,43 @@ class DocumentStore {
    */
   struct DocumentItem {
     std::string primary_key;
-    std::unordered_map<std::string, FilterValue> filters;
+    FilterMap filters;
     std::string normalized_text;  ///< Normalized text for n-gram verification
   };
 
   /**
-   * @brief Add document
+   * @brief Add document (upsert semantic)
+   *
+   * If a document with the same primary key already exists, the existing DocId
+   * is returned without modifying the document. No error is raised for duplicates.
    *
    * @param primary_key Primary key from MySQL
    * @param filters Filter column values
-   * @return Expected<DocId, Error> Assigned DocID or error (e.g., DocID exhausted)
+   * @return Expected<DocId, Error> Assigned DocID (or existing DocID if duplicate primary key),
+   *         or error (e.g., DocID exhausted)
    */
-  [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key,
-                                                   const std::unordered_map<std::string, FilterValue>& filters = {},
+  [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key, const FilterMap& filters = {},
                                                    std::string_view normalized_text = "");
 
   /**
-   * @brief Add multiple documents (batch operation, thread-safe)
+   * @brief Add multiple documents (batch operation, thread-safe, upsert semantic)
    *
    * This method is optimized for bulk insertions during snapshot builds.
    * It processes documents in a single lock acquisition for better performance.
    *
+   * If a document with a duplicate primary key is encountered, the existing DocId
+   * is placed in the result vector at the corresponding position without modifying
+   * the existing document. No error is raised for duplicates.
+   *
    * @param documents Vector of documents to add
-   * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input) or error
+   * @param existing_doc_ids_out If non-null, populated with DocIds of documents
+   *        that already existed (duplicates). Caller can use this to skip indexing.
+   * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input,
+   *         existing DocIDs for duplicates) or error (e.g., DocID exhausted mid-batch)
    * @note This method is thread-safe
    */
-  [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(const std::vector<DocumentItem>& documents);
+  [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(
+      const std::vector<DocumentItem>& documents, std::unordered_set<DocId>* existing_doc_ids_out = nullptr);
 
   /**
    * @brief Update document
@@ -147,7 +167,7 @@ class DocumentStore {
    * @param filters New filter values
    * @return true if document exists
    */
-  bool UpdateDocument(DocId doc_id, const std::unordered_map<std::string, FilterValue>& filters);
+  bool UpdateDocument(DocId doc_id, const FilterMap& filters);
 
   /**
    * @brief Remove document
@@ -247,6 +267,16 @@ class DocumentStore {
                                                                              const std::string& column) const;
 
   /**
+   * @brief Enable or disable storing normalized text for documents
+   *
+   * When disabled, AddDocument and AddDocumentBatch skip populating doc_texts_,
+   * saving memory when verify_text is not needed. Enabled by default.
+   *
+   * @param enabled Whether to store normalized text
+   */
+  void SetStoreTexts(bool enabled) { store_texts_.store(enabled, std::memory_order_relaxed); }
+
+  /**
    * @brief Set normalized text for a document (for n-gram verification)
    *
    * @param doc_id Document ID
@@ -266,7 +296,12 @@ class DocumentStore {
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 
   /**
-   * @brief Get memory usage estimate
+   * @brief Get memory usage estimate.
+   *
+   * WARNING: O(N) complexity -- iterates all document maps under a shared lock,
+   * blocking writers for the entire scan duration. Callers should avoid invoking
+   * this on hot paths or at high frequency. Suitable for periodic health/metrics
+   * endpoints (e.g., once every 30-60 seconds).
    */
   [[nodiscard]] size_t MemoryUsage() const;
 
@@ -335,11 +370,14 @@ class DocumentStore {
   absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       pk_to_doc_id_;
 
-  // DocID -> Filter values
-  std::unordered_map<DocId, std::unordered_map<std::string, FilterValue>> doc_filters_;
+  // DocID -> Filter values (inner map uses transparent hash for string_view lookup)
+  std::unordered_map<DocId, FilterMap> doc_filters_;
 
   // DocID -> Normalized text (for n-gram post-filter verification)
   std::unordered_map<DocId, std::string> doc_texts_;
+
+  // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off)
+  std::atomic<bool> store_texts_{true};
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
   // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,
@@ -349,6 +387,15 @@ class DocumentStore {
 
   // Mutex for thread-safe access (shared for reads, exclusive for writes)
   mutable std::shared_mutex mutex_;
+
+  /// Serialize all documents to an output stream (called by SaveToFile and SaveToStream)
+  /// @return true if all writes succeeded, false on stream error
+  bool SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const;
+
+  /// Deserialize all documents from an input stream (called by LoadFromFile and LoadFromStream)
+  /// @param context Identifier for error messages (e.g., filepath or "stream")
+  Expected<void, Error> DeserializeDocuments(std::istream& in, std::string* replication_gtid,
+                                             const std::string& context);
 };
 
 }  // namespace mygramdb::storage

@@ -81,6 +81,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
     spdlog::set_level(spdlog::level::warn);
   } else if (config_.logging.level == "error") {
     spdlog::set_level(spdlog::level::err);
+  } else {
+    spdlog::warn("Unknown log level '{}', keeping current level", config_.logging.level);
   }
 
   // Apply structured log format (JSON or TEXT)

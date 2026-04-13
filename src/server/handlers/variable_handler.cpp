@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "config/runtime_variable_manager.h"
+#include "server/response_formatter.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
 
@@ -35,12 +36,12 @@ std::string VariableHandler::Handle(const Query& query, ConnectionContext& /*con
     return HandleShowVariables(query);
   }
 
-  return "-ERR Unknown variable command\r\n";
+  return ResponseFormatter::FormatError("Unknown variable command");
 }
 
 std::string VariableHandler::HandleSet(const Query& query) {
   if (ctx_.variable_manager == nullptr) {
-    return "-ERR Runtime variable manager not initialized\r\n";
+    return ResponseFormatter::FormatError("Runtime variable manager not initialized");
   }
 
 #ifdef USE_MYSQL
@@ -48,10 +49,9 @@ std::string VariableHandler::HandleSet(const Query& query) {
   for (const auto& [variable_name, value] : query.variable_assignments) {
     if (variable_name == "mysql.host" || variable_name == "mysql.port") {
       if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        std::ostringstream oss;
-        oss << "-ERR Cannot change '" << variable_name << "' while SYNC is in progress. "
-            << "Please wait for SYNC to complete.\r\n";
-        return oss.str();
+        return ResponseFormatter::FormatError("Cannot change '" + variable_name +
+                                              "' while SYNC is in progress. "
+                                              "Please wait for SYNC to complete.");
       }
     }
   }
@@ -62,9 +62,8 @@ std::string VariableHandler::HandleSet(const Query& query) {
     auto result = ctx_.variable_manager->SetVariable(variable_name, value);
     if (!result) {
       // Return error for the first failed assignment
-      std::ostringstream oss;
-      oss << "-ERR Failed to set variable '" << variable_name << "': " << result.error().message() << "\r\n";
-      return oss.str();
+      return ResponseFormatter::FormatError("Failed to set variable '" + variable_name +
+                                            "': " + result.error().message());
     }
   }
 
@@ -83,19 +82,20 @@ std::string VariableHandler::HandleSet(const Query& query) {
 
 std::string VariableHandler::HandleShowVariables(const Query& query) {
   if (ctx_.variable_manager == nullptr) {
-    return "-ERR Runtime variable manager not initialized\r\n";
+    return ResponseFormatter::FormatError("Runtime variable manager not initialized");
   }
 
-  // Get all variables (optionally filtered by LIKE pattern prefix)
+  // Get all variables (optionally filtered by LIKE pattern prefix).
+  // Extract the literal prefix up to the first wildcard character ('%' or '_')
+  // so that GetAllVariables can narrow the candidate set before the full
+  // LIKE match is applied.
   std::string prefix;
   if (!query.variable_like_pattern.empty()) {
-    // Extract prefix from LIKE pattern (e.g., "logging%" -> "logging")
-    // Note: This is a simplified implementation that only supports prefix patterns
-    std::string pattern = query.variable_like_pattern;
-    if (pattern.back() == '%') {
-      prefix = pattern.substr(0, pattern.size() - 1);
+    auto first_wild = query.variable_like_pattern.find_first_of("%_");
+    if (first_wild == std::string::npos) {
+      prefix = query.variable_like_pattern;  // No wildcards: exact match
     } else {
-      prefix = pattern;  // Exact match
+      prefix = query.variable_like_pattern.substr(0, first_wild);
     }
   }
 
@@ -173,54 +173,37 @@ std::string VariableHandler::FormatVariablesTable(const std::map<std::string, co
 }
 
 bool VariableHandler::MatchLikePattern(const std::string& value, const std::string& pattern) {
-  // Simple LIKE pattern matching
-  // Supports: % (any characters), _ (single character)
-  // MySQL LIKE is case-insensitive by default
+  // Two-pointer LIKE pattern matching (O(n*m) worst-case, no allocations).
+  // Supports: % (any sequence of characters), _ (single character).
+  // MySQL LIKE is case-insensitive by default.
+  size_t v = 0;
+  size_t p = 0;
+  size_t star = std::string::npos;
+  size_t match = 0;
 
-  size_t value_pos = 0;
-  size_t pattern_pos = 0;
-
-  while (pattern_pos < pattern.size()) {
-    if (pattern[pattern_pos] == '%') {
-      // % matches any sequence of characters (including empty)
-      pattern_pos++;
-      if (pattern_pos == pattern.size()) {
-        return true;  // % at end matches rest
-      }
-
-      // Try to match rest of pattern at different positions
-      while (value_pos <= value.size()) {
-        if (MatchLikePattern(value.substr(value_pos), pattern.substr(pattern_pos))) {
-          return true;
-        }
-        value_pos++;
-      }
+  while (v < value.size()) {
+    if (p < pattern.size() && (pattern[p] == '_' || std::tolower(static_cast<unsigned char>(pattern[p])) ==
+                                                        std::tolower(static_cast<unsigned char>(value[v])))) {
+      ++v;
+      ++p;
+    } else if (p < pattern.size() && pattern[p] == '%') {
+      star = p;
+      ++p;
+      match = v;
+    } else if (star != std::string::npos) {
+      p = star + 1;
+      ++match;
+      v = match;
+    } else {
       return false;
     }
-
-    if (pattern[pattern_pos] == '_') {
-      // _ matches exactly one character
-      if (value_pos >= value.size()) {
-        return false;
-      }
-      value_pos++;
-      pattern_pos++;
-      continue;
-    }
-
-    // Regular character - must match exactly (case-insensitive)
-    if (value_pos >= value.size()) {
-      return false;
-    }
-    if (std::tolower(value[value_pos]) != std::tolower(pattern[pattern_pos])) {
-      return false;
-    }
-    value_pos++;
-    pattern_pos++;
   }
 
-  // Pattern consumed - value must also be consumed
-  return value_pos == value.size();
+  // Consume trailing '%' wildcards in the pattern.
+  while (p < pattern.size() && pattern[p] == '%') {
+    ++p;
+  }
+  return p == pattern.size();
 }
 
 }  // namespace mygramdb::server

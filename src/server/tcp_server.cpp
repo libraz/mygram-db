@@ -53,57 +53,16 @@
 
 namespace mygramdb::server {
 
+// ToSockaddr / ToSockaddrUn are provided by utils/network_utils.h
+using mygram::utils::ToSockaddr;
+
 namespace {
 // Buffer size for IP address formatting
 constexpr size_t kIpAddressBufferSize = 64;
 
-// Length of "gtid=\"" prefix in meta content
-constexpr size_t kGtidPrefixLength = 7;
-
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 constexpr int kDefaultConnectionRecvTimeoutSec = 60;
-
-/**
- * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
- *
- * POSIX socket API requires sockaddr* but we use sockaddr_in for IPv4.
- * This helper centralizes the required reinterpret_cast to a single location.
- *
- * Why reinterpret_cast is necessary here:
- * - POSIX socket functions (bind, accept, getsockname) require struct sockaddr*
- * - We use struct sockaddr_in for IPv4, which is binary-compatible
- * - This is the standard pattern in all POSIX socket programming
- * - The cast is safe as both types share the same memory layout for the address family
- *
- * @param addr Pointer to sockaddr_in structure
- * @return Pointer to sockaddr (same memory location, different type)
- */
-inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
-  // Suppressing clang-tidy warning for POSIX socket API compatibility
-  // This reinterpret_cast is required and safe for socket address structures
-  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-}
-
-std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<mygram::utils::CIDR> parsed;
-  parsed.reserve(allow_cidrs.size());
-
-  for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
-    if (!cidr) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "invalid_cidr_entry")
-          .Field("cidr", cidr_str)
-          .Warn();
-      continue;
-    }
-    parsed.push_back(*cidr);
-  }
-
-  return parsed;
-}
 
 }  // namespace
 
@@ -120,7 +79,7 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
       dump_dir_(std::move(dump_dir)),
       table_contexts_(std::move(table_contexts)),
       binlog_reader_(binlog_reader) {
-  config_.parsed_allow_cidrs = ParseAllowCidrs(config_.allow_cidrs);
+  config_.parsed_allow_cidrs = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
   // NOTE: Component initialization moved to Start() method
   // This allows for better error handling and resource cleanup
 }
@@ -188,6 +147,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   thread_pool_ = std::move(components.thread_pool);
   table_catalog_ = std::move(components.table_catalog);
   cache_manager_ = std::move(components.cache_manager);
+#ifdef USE_MYSQL
+  // Provide cache manager to sync manager for post-SYNC cache invalidation
+  if (sync_manager_) {
+    sync_manager_->SetCacheManager(cache_manager_.get());
+  }
+#endif
   variable_manager_ = std::move(components.variable_manager);
   handler_context_ = std::move(components.handler_context);
 
@@ -381,7 +346,11 @@ std::string TcpServer::StartSync(const std::string& table_name) {
   if (!sync_manager_) {
     return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
-  return sync_manager_->StartSync(table_name);
+  auto result = sync_manager_->StartSync(table_name);
+  if (!result) {
+    return ResponseFormatter::FormatError(result.error().message());
+  }
+  return *result;
 }
 
 std::string TcpServer::GetSyncStatus() {

@@ -114,10 +114,10 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
       }
     }
 
-    // When filter columns changed but text didn't change (changed_ngrams is empty),
-    // invalidate all cache entries for this table that have filter conditions.
-    // Queries with filters may return different results even though the text is unchanged.
-    if (filter_columns_changed && changed_ngrams.empty()) {
+    // When filter columns changed, invalidate all cache entries for this table
+    // that have filter conditions. Queries with filters may return different
+    // results regardless of whether text also changed.
+    if (filter_columns_changed) {
       for (const auto& [key, meta] : cache_metadata_) {
         if (meta.table == table_name && meta.has_filters) {
           affected_keys.insert(key);

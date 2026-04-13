@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 T = TypeVar("T")
 
 
-class WaitTimeout(Exception):
+class WaitTimeoutError(Exception):
     """Raised when a wait operation times out."""
 
     def __init__(self, description: str, timeout: float) -> None:
@@ -39,7 +40,7 @@ def wait_until(
     msg = f"Timed out waiting for {description} after {timeout}s"
     if last_error:
         msg += f" (last error: {last_error})"
-    raise WaitTimeout(description, timeout)
+    raise WaitTimeoutError(description, timeout)
 
 
 def wait_until_value(
@@ -63,7 +64,7 @@ def wait_until_value(
             pass
         time.sleep(interval)
 
-    raise WaitTimeout(
+    raise WaitTimeoutError(
         f"{description} (expected={expected}, last={last_value})",
         timeout,
     )
@@ -90,7 +91,7 @@ def wait_until_gte(
             pass
         time.sleep(interval)
 
-    raise WaitTimeout(
+    raise WaitTimeoutError(
         f"{description} (expected >= {minimum}, last={last_value})",
         timeout,
     )

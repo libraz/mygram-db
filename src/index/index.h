@@ -159,7 +159,10 @@ class Index {
   /**
    * @brief Get total number of unique terms
    */
-  [[nodiscard]] size_t TermCount() const { return term_postings_.size(); }
+  [[nodiscard]] size_t TermCount() const {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    return term_postings_.size();
+  }
 
   /**
    * @brief Get total memory usage
@@ -301,6 +304,10 @@ class Index {
   // Shared mutex for read/write protection
   // - Readers (Search): shared_lock (multiple concurrent readers allowed)
   // - Writers (Add/Update/Remove/Optimize): unique_lock (exclusive access)
+  // Lock ordering (acquire in this order to prevent deadlock):
+  //   postings_mutex_ → PostingList::mutex_
+  // When postings_mutex_ is held (shared or exclusive), it is safe to call
+  // PostingList's lock-free accessors (SizeApprox, MemoryUsageApprox).
   mutable std::shared_mutex postings_mutex_;
 
   // Flag to prevent concurrent optimization
@@ -310,16 +317,6 @@ class Index {
    * @brief Get or create posting list for term
    */
   PostingList* GetOrCreatePostingList(std::string_view term);
-
-  /**
-   * @brief Internal OR search (no locking)
-   *
-   * @pre Caller MUST hold postings_mutex_ (shared or exclusive).
-   *      Violating this precondition causes undefined behavior.
-   * @param terms Search terms
-   * @return Vector of document IDs containing any of the terms
-   */
-  [[nodiscard]] std::vector<DocId> SearchOrInternal(const std::vector<std::string>& terms) const;
 
   /**
    * @brief RCU snapshot helpers for lock-free search

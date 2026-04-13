@@ -87,11 +87,25 @@ target_link_libraries(query_cache_test PRIVATE
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+# Fast query_cache_test (non-TTL tests run quickly)
 gtest_discover_tests(query_cache_test
+  TEST_PREFIX "QueryCache."
+  TEST_FILTER "-*TTL*"
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
+)
+
+# TTL tests use sleep-based timing (2-3 seconds each)
+gtest_discover_tests(query_cache_test
+  TEST_PREFIX "QueryCacheSlow."
+  TEST_FILTER "*TTL*"
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK cache_state
+    TIMEOUT 30
 )
 
 # CacheManager test
@@ -104,11 +118,14 @@ target_link_libraries(cache_manager_test PRIVATE
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+# CacheManager tests include sleep-based enable/disable tests
 gtest_discover_tests(cache_manager_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK cache_state
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK cache_state
+    TIMEOUT 30
 )
 
 # InvalidationQueue test
@@ -128,6 +145,23 @@ gtest_discover_tests(invalidation_queue_test
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
+# CacheThreadSafety test
+add_executable(cache_thread_safety_test
+  cache_thread_safety_test.cpp
+)
+
+target_link_libraries(cache_thread_safety_test PRIVATE
+  mygramdb_cache
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid cache state conflicts
+gtest_discover_tests(cache_thread_safety_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK cache_state
+)
+
 # CacheMetrics test (validates performance monitoring)
 add_executable(cache_metrics_test
   cache_metrics_test.cpp
@@ -142,5 +176,5 @@ target_link_libraries(cache_metrics_test PRIVATE
 gtest_discover_tests(cache_metrics_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK cache_state
+  PROPERTIES RESOURCE_LOCK cache_state TIMEOUT 60
 )

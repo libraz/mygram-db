@@ -1,5 +1,6 @@
 """Test DDL edge cases: DROP, RENAME, column type changes, sequential DDL+DML."""
 
+import contextlib
 import time
 import uuid
 
@@ -31,9 +32,7 @@ CREATE TABLE IF NOT EXISTS articles (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-ADD_FULLTEXT_SQL = (
-    "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
-)
+ADD_FULLTEXT_SQL = "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
 
 
 def _ensure_replication_running(mygramdb):
@@ -55,13 +54,18 @@ def _ensure_replication_running(mygramdb):
 def _verify_replication_works(mysql, mygramdb, timeout=15):
     """Verify replication is actually processing events by inserting a test row."""
     marker = f"replcheck_{uuid.uuid4().hex[:8]}"
-    mysql.insert_rows("articles", [{
-        "title": "Replication Check",
-        "content": f"Content repl check {marker}",
-        "status": 1,
-        "category": "tech",
-        "enabled": 1,
-    }])
+    mysql.insert_rows(
+        "articles",
+        [
+            {
+                "title": "Replication Check",
+                "content": f"Content repl check {marker}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+        ],
+    )
     try:
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -78,10 +82,8 @@ def _verify_replication_works(mysql, mygramdb, timeout=15):
 def _recreate_articles_table(mysql, mygramdb):
     """Recreate articles table, re-seed data, and re-sync."""
     mysql.execute(CREATE_ARTICLES_SQL)
-    try:
+    with contextlib.suppress(Exception):
         mysql.execute(ADD_FULLTEXT_SQL)
-    except Exception:
-        pass
 
     gen = DataGenerator(seed=42)
     rows = gen.generate_articles(count=100)
@@ -119,13 +121,11 @@ class TestDDLEdgeCases:
             "total_documents", info_before.get("doc_count", info_before.get("documents", 0))
         )
 
-        before = MetricsSnapshot.capture(mygramdb)
+        MetricsSnapshot.capture(mygramdb)
 
         cols = mysql.execute("SHOW COLUMNS FROM products LIKE 'ddl_test_col'")
         if not cols:
-            mysql.execute(
-                "ALTER TABLE products ADD COLUMN ddl_test_col VARCHAR(50) DEFAULT NULL"
-            )
+            mysql.execute("ALTER TABLE products ADD COLUMN ddl_test_col VARCHAR(50) DEFAULT NULL")
         time.sleep(3)
 
         info_after = mygramdb.info()
@@ -160,13 +160,18 @@ class TestDDLEdgeCases:
             time.sleep(2)
 
             for i in range(3):
-                mysql.insert_rows("articles", [{
-                    "title": f"Sequential DDL Test {i}",
-                    "content": f"Content for sequential ddl {marker} batch1 item {i}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }])
+                mysql.insert_rows(
+                    "articles",
+                    [
+                        {
+                            "title": f"Sequential DDL Test {i}",
+                            "content": f"Content for sequential ddl {marker} batch1 item {i}",
+                            "status": 1,
+                            "category": "tech",
+                            "enabled": 1,
+                        }
+                    ],
+                )
 
             mysql.execute("ALTER TABLE articles DROP COLUMN seq_test_col")
             # DDL may cause binlog reader to reconnect; wait for it to stabilize
@@ -174,13 +179,18 @@ class TestDDLEdgeCases:
             _ensure_replication_running(mygramdb)
 
             for i in range(3):
-                mysql.insert_rows("articles", [{
-                    "title": f"Sequential DDL Test Batch2 {i}",
-                    "content": f"Content for sequential ddl {marker} batch2 item {i}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }])
+                mysql.insert_rows(
+                    "articles",
+                    [
+                        {
+                            "title": f"Sequential DDL Test Batch2 {i}",
+                            "content": f"Content for sequential ddl {marker} batch2 item {i}",
+                            "status": 1,
+                            "category": "tech",
+                            "enabled": 1,
+                        }
+                    ],
+                )
 
             wait_until_gte(
                 lambda: mygramdb.count("articles", marker),
@@ -213,13 +223,18 @@ class TestDDLEdgeCases:
             _ensure_replication_running(mygramdb)
 
             marker = f"coltype_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows("articles", [{
-                "title": "Column Type Test",
-                "content": f"Content after column type change {marker}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            }])
+            mysql.insert_rows(
+                "articles",
+                [
+                    {
+                        "title": "Column Type Test",
+                        "content": f"Content after column type change {marker}",
+                        "status": 1,
+                        "category": "tech",
+                        "enabled": 1,
+                    }
+                ],
+            )
 
             wait_until_gte(
                 lambda: mygramdb.count("articles", marker),
@@ -294,10 +309,8 @@ class TestDDLEdgeCases:
 
             assert mygramdb.ping(), "Server should be alive after RENAME back"
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 mysql.execute("RENAME TABLE articles_old TO articles")
-            except Exception:
-                pass
             raise
         finally:
             try:

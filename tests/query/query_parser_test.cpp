@@ -316,9 +316,8 @@ TEST(QueryParserTest, SearchMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles");
 
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->type, QueryType::SEARCH);
-  EXPECT_FALSE(query->IsValid());
+  // After BUG-2 fix: error paths now return MakeUnexpected instead of partial Query
+  EXPECT_FALSE(query.has_value());
 }
 
 /**
@@ -328,9 +327,7 @@ TEST(QueryParserTest, CountMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("COUNT articles");
 
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->type, QueryType::COUNT);
-  EXPECT_FALSE(query->IsValid());
+  EXPECT_FALSE(query.has_value());
 }
 
 /**
@@ -340,12 +337,10 @@ TEST(QueryParserTest, GetMissingArgs) {
   QueryParser parser;
 
   auto query1 = parser.Parse("GET articles");
-  ASSERT_TRUE(query1);
-  EXPECT_FALSE(query1->IsValid());
+  EXPECT_FALSE(query1.has_value());
 
   auto query2 = parser.Parse("GET");
-  ASSERT_TRUE(query2);
-  EXPECT_FALSE(query2->IsValid());
+  EXPECT_FALSE(query2.has_value());
 }
 
 /**
@@ -1426,6 +1421,34 @@ TEST(QueryParserTest, DumpSaveWithFilepath) {
 }
 
 /**
+ * @brief Test DUMP SAVE with empty quoted string does not cause UB
+ *
+ * Regression test: an empty quoted argument (e.g., DUMP SAVE "") previously
+ * caused undefined behavior by accessing token[0] on an empty string.
+ */
+TEST(QueryParserTest, DumpSaveEmptyQuotedString) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE \"\"");
+
+  // Should parse successfully - empty string is treated as empty filepath
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
+}
+
+/**
+ * @brief Test DUMP SAVE with empty token from consecutive spaces
+ */
+TEST(QueryParserTest, DumpSaveWithOnlyFlags) {
+  QueryParser parser;
+  auto query = parser.Parse("DUMP SAVE --with-stats");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
+  EXPECT_TRUE(query->dump_with_stats);
+  EXPECT_TRUE(query->filepath.empty());
+}
+
+/**
  * @brief Test DUMP LOAD without filepath
  *
  * "DUMP LOAD" is parsed as DUMP_LOAD with "LOAD" as the filepath (edge case).
@@ -2121,4 +2144,298 @@ TEST(QueryParserTest, FilterValueAtLimit) {
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].value, value_at_limit);
+}
+
+// =============================================================================
+// CountParensInToken (detail namespace) tests
+// =============================================================================
+
+/**
+ * @brief Test CountParensInToken with no parentheses
+ */
+TEST(CountParensInTokenTest, NoParentheses) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("hello");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with empty string
+ */
+TEST(CountParensInTokenTest, EmptyString) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with simple balanced parentheses
+ */
+TEST(CountParensInTokenTest, SimpleBalanced) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("(hello)");
+  EXPECT_EQ(open, 1);
+  EXPECT_EQ(close, 1);
+}
+
+/**
+ * @brief Test CountParensInToken with nested parentheses
+ */
+TEST(CountParensInTokenTest, NestedParentheses) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("((a))");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 2);
+}
+
+/**
+ * @brief Test CountParensInToken ignores parentheses inside double quotes
+ */
+TEST(CountParensInTokenTest, DoubleQuotedParensIgnored) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("\"(hello)\"");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken ignores parentheses inside single quotes
+ */
+TEST(CountParensInTokenTest, SingleQuotedParensIgnored) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("'(hello)'");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with mixed quoted and unquoted parentheses
+ */
+TEST(CountParensInTokenTest, MixedQuotedAndUnquoted) {
+  // ( outside quote, ")" inside quote, "(" inside quote, then bare (
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("(\")(\"(");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 0);
+}
+
+// ============================================================================
+// LIMIT/OFFSET boundary tests
+// ============================================================================
+
+/**
+ * @brief Test LIMIT with value at INT_MAX+1 (2147483648) — should be valid
+ */
+TEST(QueryParserTest, LimitAboveIntMax) {
+  QueryParser parser;
+  // 2147483648 exceeds INT_MAX but fits in uint32_t; however it exceeds kMaxLimit (1000)
+  // so the query should be parsed but fail validation
+  auto query = parser.Parse("SEARCH articles hello LIMIT 2147483648");
+  // The LIMIT value exceeds kMaxLimit (1000), so it should fail
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT with negative value — should fail
+ */
+TEST(QueryParserTest, LimitNegativeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT -1");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT 0 — should fail
+ */
+TEST(QueryParserTest, LimitZero) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 0");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test OFFSET with very large value — should be handled
+ */
+TEST(QueryParserTest, OffsetVeryLargeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET 4294967295");  // UINT32_MAX
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 4294967295U);
+}
+
+/**
+ * @brief Test OFFSET with value exceeding uint32_t — should fail
+ */
+TEST(QueryParserTest, OffsetExceedsUint32Max) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET 4294967296");  // UINT32_MAX + 1
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test OFFSET with negative value — should fail
+ */
+TEST(QueryParserTest, OffsetNegativeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET -10");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT with comma format and large values
+ */
+TEST(QueryParserTest, LimitCommaFormatLargeOffset) {
+  QueryParser parser;
+  // Large offset with small count — offset exceeds kMaxLimit only applies to count/limit
+  auto query = parser.Parse("SEARCH articles hello LIMIT 100000,10");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 100000U);
+  EXPECT_EQ(query->limit, 10U);
+}
+
+/**
+ * @brief Test LIMIT comma format with negative offset — should fail
+ */
+TEST(QueryParserTest, LimitCommaFormatNegativeOffset) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT -1,10");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test case-insensitive CONFIG command
+ */
+TEST(QueryParserTest, ConfigCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("config show");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::CONFIG_SHOW);
+}
+
+/**
+ * @brief Test case-insensitive REPLICATION command
+ */
+TEST(QueryParserTest, ReplicationCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("replication status");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::REPLICATION_STATUS);
+}
+
+/**
+ * @brief Test case-insensitive SYNC command
+ */
+TEST(QueryParserTest, SyncCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("sync mytable");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SYNC);
+}
+
+/**
+ * @brief Test case-insensitive OPTIMIZE command
+ */
+TEST(QueryParserTest, OptimizeCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("optimize mytable");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::OPTIMIZE);
+}
+
+/**
+ * @brief Test CountParensInToken with double-backslash before quote
+ */
+TEST(CountParensInTokenTest, DoubleBackslashBeforeQuote) {
+  // \\\\" means backslash is escaped, quote should toggle
+  // Input: \\"( — the \\ is an escaped backslash, " starts a quote, ( is inside
+  // Actually, token = R"(\\\"()" with double backslash before quote means
+  // the backslash is escaped and the quote IS significant
+  auto [open, close] = mygramdb::query::detail::CountParensInToken(R"(\\"()");
+  // \\ = escaped backslash, " = opens quote, ( = inside quote, no open parens counted
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with only open parentheses
+ */
+TEST(CountParensInTokenTest, OnlyOpenParens) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("((");
+  EXPECT_EQ(open, 2);
+  EXPECT_EQ(close, 0);
+}
+
+/**
+ * @brief Test CountParensInToken with only close parentheses
+ */
+TEST(CountParensInTokenTest, OnlyCloseParens) {
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("))");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 2);
+}
+
+/**
+ * @brief Test CountParensInToken with escaped quotes (backslash does not end quote)
+ */
+TEST(CountParensInTokenTest, EscapedQuoteDoesNotEndQuoteState) {
+  // "\\\"(" - the \" is escaped, so the quote is not closed; ( is still inside quotes
+  auto [open, close] = mygramdb::query::detail::CountParensInToken("\"\\\"(\"");
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
+// ============================================================================
+// Error return validation tests (BUG-2 fixes)
+// ============================================================================
+
+TEST(QueryParserBugFixTest, SearchMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("SEARCH articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, CountMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("COUNT");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("COUNT articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, GetMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("GET");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("GET articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchTooManyAndTermsRejected) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 65; ++i) {
+    query += " AND t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchTooManyNotTermsRejected) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 65; ++i) {
+    query += " NOT t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchAtLimitAndTermsAccepted) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);  // Allow long queries for this test
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 64; ++i) {
+    query += " AND t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_TRUE(result.has_value());
 }

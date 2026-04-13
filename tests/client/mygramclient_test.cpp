@@ -82,13 +82,14 @@ class MygramClientTest : public ::testing::Test {
   // Helper: Add test documents
   void AddTestDocuments() {
     using storage::DocumentStore;
+    using storage::FilterMap;
     using storage::FilterValue;
 
     // Create filter maps
-    std::unordered_map<std::string, FilterValue> filters_active;
+    FilterMap filters_active;
     filters_active["status"] = FilterValue("active");
 
-    std::unordered_map<std::string, FilterValue> filters_inactive;
+    FilterMap filters_inactive;
     filters_inactive["status"] = FilterValue("inactive");
 
     // Add documents with filters
@@ -615,7 +616,7 @@ TEST_F(MygramClientTest, LargeResponseHandling) {
   const int num_docs = 1000;  // Max allowed by server LIMIT
 
   for (int i = 1; i <= num_docs; i++) {
-    std::unordered_map<std::string, storage::FilterValue> filters;
+    storage::FilterMap filters;
     filters["doc_num"] = static_cast<int64_t>(i);
     doc_store_->AddDocument("doc_" + std::to_string(i), filters);
 

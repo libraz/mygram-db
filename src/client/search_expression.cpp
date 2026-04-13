@@ -297,6 +297,7 @@ class Parser {
     // Save current state
     size_t saved_pos = tokenizer_.GetPosition();
     Token saved_current = current_;
+    auto saved_last_pos = last_pos_;
 
     // Look ahead for OR
     Advance();  // Skip current term
@@ -305,6 +306,7 @@ class Parser {
     // Restore state
     tokenizer_.SetPosition(saved_pos);
     current_ = saved_current;
+    last_pos_ = saved_last_pos;
 
     return has_or;
   }

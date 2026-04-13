@@ -6,9 +6,7 @@ import socket
 import time
 
 
-def raw_tcp_exchange(
-    host: str, port: int, data: bytes, timeout: float = 5.0
-) -> bytes:
+def raw_tcp_exchange(host: str, port: int, data: bytes, timeout: float = 5.0) -> bytes:
     """Send raw bytes over TCP and collect response until close or timeout.
 
     Args:
@@ -35,7 +33,7 @@ def raw_tcp_exchange(
                 if not chunk:
                     break
                 response += chunk
-            except (socket.timeout, ConnectionResetError):
+            except (TimeoutError, ConnectionResetError):
                 break
         return response
     finally:
@@ -89,7 +87,7 @@ def raw_tcp_slow_send(
                 if not chunk_recv:
                     break
                 response += chunk_recv
-            except socket.timeout:
+            except TimeoutError:
                 break
         return response
     finally:

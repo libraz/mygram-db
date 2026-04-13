@@ -53,7 +53,7 @@ CacheManager::~CacheManager() {
   query_cache_.reset();
 }
 
-std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
+std::optional<CacheKey> CacheManager::ResolveCacheKey(const query::Query& query) const {
   if (!enabled_ || !query_cache_) {
     return std::nullopt;
   }
@@ -64,50 +64,39 @@ std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query
   }
 
   // Use precomputed cache key if available (performance optimization)
-  CacheKey key;
   if (query.cache_key.has_value()) {
+    CacheKey key;
     key.hash_high = query.cache_key.value().first;
     key.hash_low = query.cache_key.value().second;
-  } else {
-    // Fallback: compute cache key on-the-fly (for backwards compatibility)
-    const std::string normalized = QueryNormalizer::Normalize(query);
-    if (normalized.empty()) {
-      return std::nullopt;
-    }
-    key = CacheKeyGenerator::Generate(normalized);
+    return key;
   }
 
-  // Lookup in cache
-  return query_cache_->Lookup(key);
+  // Fallback: compute cache key on-the-fly (for backwards compatibility)
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  if (normalized.empty()) {
+    return std::nullopt;
+  }
+  return CacheKeyGenerator::Generate(normalized);
+}
+
+std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
+  auto key = ResolveCacheKey(query);
+  if (!key.has_value()) {
+    return std::nullopt;
+  }
+
+  return query_cache_->Lookup(key.value());
 }
 
 std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Query& query) {
-  if (!enabled_ || !query_cache_) {
+  auto key = ResolveCacheKey(query);
+  if (!key.has_value()) {
     return std::nullopt;
-  }
-
-  // Only cache SEARCH and COUNT queries
-  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT) {
-    return std::nullopt;
-  }
-
-  // Use precomputed cache key if available (performance optimization)
-  CacheKey key;
-  if (query.cache_key.has_value()) {
-    key.hash_high = query.cache_key.value().first;
-    key.hash_low = query.cache_key.value().second;
-  } else {
-    // Fallback: compute cache key on-the-fly (for backwards compatibility)
-    const std::string normalized = QueryNormalizer::Normalize(query);
-    if (normalized.empty()) {
-      return std::nullopt;
-    }
-    key = CacheKeyGenerator::Generate(normalized);
   }
 
   // Lookup in cache with metadata
   QueryCache::LookupMetadata metadata;
-  auto result = query_cache_->LookupWithMetadata(key, metadata);
+  auto result = query_cache_->LookupWithMetadata(key.value(), metadata);
   if (!result.has_value()) {
     return std::nullopt;
   }
@@ -122,7 +111,7 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 }
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
-                          const std::set<std::string>& ngrams, double query_cost_ms, int ngram_size,
+                          const std::vector<std::string>& ngrams, double query_cost_ms, int ngram_size,
                           int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;
@@ -133,13 +122,12 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
     return false;
   }
 
-  // Normalize query and generate cache key
-  const std::string normalized = QueryNormalizer::Normalize(query);
-  if (normalized.empty()) {
+  // Use the same key derivation as Lookup to ensure consistency
+  auto resolved_key = ResolveCacheKey(query);
+  if (!resolved_key.has_value()) {
     return false;
   }
-
-  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  const CacheKey key = resolved_key.value();
 
   // Prepare metadata for invalidation tracking
   CacheMetadata metadata;

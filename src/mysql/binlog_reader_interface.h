@@ -57,7 +57,7 @@ class IBinlogReader {
   /**
    * @brief Get last error message
    */
-  virtual const std::string& GetLastError() const = 0;
+  virtual std::string GetLastError() const = 0;
 
   /**
    * @brief Get total events processed

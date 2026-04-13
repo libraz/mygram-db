@@ -38,9 +38,10 @@ third_party/*
 /var/
 *.snap
 snapshots/
+tmp/
 
 # Test outputs
-/Testing/
+/[Tt]esting/
 *.gcov
 *.gcda
 *.gcno

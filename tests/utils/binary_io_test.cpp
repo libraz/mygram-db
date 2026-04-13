@@ -91,6 +91,16 @@ TEST(BinaryIOTest, RoundTripMultipleValues) {
   EXPECT_EQ(r_u16, u16);
 }
 
+TEST(BinaryIOTest, ReadStringOversizedLengthReturnsFalse) {
+  std::stringstream ss;
+  // Write a length larger than 64 MB (the sanity limit)
+  uint32_t oversized_len = 128 * 1024 * 1024;  // 128 MB
+  ASSERT_TRUE(WriteBinary(ss, oversized_len));
+
+  std::string result;
+  EXPECT_FALSE(ReadString(ss, result));
+}
+
 TEST(BinaryIOTest, WriteThenReadDouble) {
   std::stringstream ss;
   double value = 3.14159265358979;

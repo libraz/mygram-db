@@ -25,12 +25,12 @@ class TestQueryStatsCompleteness:
         after = MetricsSnapshot.capture(mygramdb)
         diff = MetricsSnapshot.diff(before, after)
 
-        info_metrics = {k: v for k, v in diff.items() if "info" in k.lower() and "command" in k.lower()}
+        info_metrics = {
+            k: v for k, v in diff.items() if "info" in k.lower() and "command" in k.lower()
+        }
         if info_metrics:
             max_increase = max(info_metrics.values())
-            assert max_increase >= n, (
-                f"INFO counter increased by {max_increase}, expected >= {n}"
-            )
+            assert max_increase >= n, f"INFO counter increased by {max_increase}, expected >= {n}"
 
     def test_replication_status_counter(self, mygramdb, seed_data):
         """REPLICATION STATUS command counter should increase."""
@@ -69,9 +69,7 @@ class TestQueryStatsCompleteness:
 
         # The INFO calls themselves also count, so total should increase by at least n
         increase = after_total - before_total
-        assert increase >= n, (
-            f"total_commands_processed increased by {increase}, expected >= {n}"
-        )
+        assert increase >= n, f"total_commands_processed increased by {increase}, expected >= {n}"
 
     def test_total_connections_received(self, mygramdb, seed_data):
         """total_connections_received should increase with new TCP connections."""
@@ -87,15 +85,15 @@ class TestQueryStatsCompleteness:
 
         increase = after_conns - before_conns
         # Each tcp_command opens a new connection
-        assert increase >= n, (
-            f"total_connections_received increased by {increase}, expected >= {n}"
-        )
+        assert increase >= n, f"total_connections_received increased by {increase}, expected >= {n}"
 
     def test_total_requests(self, mygramdb, seed_data):
         """total_requests should increase with commands."""
         info_before = mygramdb.info()
         # Try both possible field names
-        before_reqs = info_before.get("total_requests", info_before.get("total_commands_processed", 0))
+        before_reqs = info_before.get(
+            "total_requests", info_before.get("total_commands_processed", 0)
+        )
 
         n = 8
         for _ in range(n):
@@ -105,9 +103,7 @@ class TestQueryStatsCompleteness:
         after_reqs = info_after.get("total_requests", info_after.get("total_commands_processed", 0))
 
         increase = after_reqs - before_reqs
-        assert increase >= n, (
-            f"total_requests increased by {increase}, expected >= {n}"
-        )
+        assert increase >= n, f"total_requests increased by {increase}, expected >= {n}"
 
     def test_cache_invalidation_on_insert(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache invalidation counter should increase on INSERT."""
@@ -118,13 +114,18 @@ class TestQueryStatsCompleteness:
         before = MetricsSnapshot.capture(mygramdb)
 
         marker = f"cacheinv_ins_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Cache Invalidation Insert",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Invalidation Insert",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -147,13 +148,18 @@ class TestQueryStatsCompleteness:
     def test_cache_invalidation_on_update(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache invalidation counter should increase on UPDATE."""
         marker = f"cacheinv_upd_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Cache Invalidation Update",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Invalidation Update",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -169,7 +175,9 @@ class TestQueryStatsCompleteness:
 
         before = MetricsSnapshot.capture(mygramdb)
 
-        mysql.update("articles", f"content = 'Updated {marker} content'", f"content LIKE '%{marker}%'")
+        mysql.update(
+            "articles", f"content = 'Updated {marker} content'", f"content LIKE '%{marker}%'"
+        )
 
         # Wait for replication
         time.sleep(3)
@@ -187,13 +195,18 @@ class TestQueryStatsCompleteness:
     def test_cache_invalidation_on_delete(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache invalidation counter should increase on DELETE."""
         marker = f"cacheinv_del_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Cache Invalidation Delete",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Invalidation Delete",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -234,9 +247,7 @@ class TestQueryStatsCompleteness:
 
         hit_rate_metrics = snapshot.get_matching(r"cache_hit_rate")
         for name, value in hit_rate_metrics.items():
-            assert 0.0 <= value <= 1.0, (
-                f"Cache hit rate {name} = {value}, expected 0.0-1.0"
-            )
+            assert 0.0 <= value <= 1.0, f"Cache hit rate {name} = {value}, expected 0.0-1.0"
 
         entries_metrics = snapshot.get_matching(r"cache_entries")
         for name, value in entries_metrics.items():

@@ -853,3 +853,305 @@ network:
 
   std::remove("test_session_timeout_max.yaml");
 }
+
+/**
+ * @brief Test MySQL port range validation rejects out-of-range ports
+ */
+TEST(ConfigTest, MysqlPortRangeValidation) {
+  // Port 0 should be rejected
+  {
+    std::ofstream f("port_zero.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: 0\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_zero.yaml");
+    EXPECT_FALSE(result) << "Port 0 should be rejected";
+    std::remove("port_zero.yaml");
+  }
+
+  // Negative port should be rejected
+  {
+    std::ofstream f("port_negative.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: -1\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_negative.yaml");
+    EXPECT_FALSE(result) << "Port -1 should be rejected";
+    std::remove("port_negative.yaml");
+  }
+
+  // Port exceeding 65535 should be rejected
+  {
+    std::ofstream f("port_too_large.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "  port: 99999\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("port_too_large.yaml");
+    EXPECT_FALSE(result) << "Port 99999 should be rejected";
+    std::remove("port_too_large.yaml");
+  }
+}
+
+/**
+ * @brief Test ToFilterConfig converts a single RequiredFilterConfig correctly
+ */
+TEST(ConfigTest, ToFilterConfigConvertsSingleConfig) {
+  RequiredFilterConfig req;
+  req.name = "status";
+  req.type = "int";
+  req.op = "=";
+  req.value = "1";
+  req.bitmap_index = true;
+
+  FilterConfig result = ToFilterConfig(req);
+
+  EXPECT_EQ(result.name, "status");
+  EXPECT_EQ(result.type, "int");
+  EXPECT_TRUE(result.bitmap_index);
+  EXPECT_FALSE(result.dict_compress);
+  // bucket and other FilterConfig-only fields should be default (empty)
+  EXPECT_TRUE(result.bucket.empty());
+}
+
+/**
+ * @brief Test ToFilterConfigs converts a vector of RequiredFilterConfigs
+ */
+TEST(ConfigTest, ToFilterConfigsConvertsVector) {
+  std::vector<RequiredFilterConfig> required;
+
+  RequiredFilterConfig req1;
+  req1.name = "status";
+  req1.type = "int";
+  req1.op = "=";
+  req1.value = "1";
+  req1.bitmap_index = true;
+  required.push_back(req1);
+
+  RequiredFilterConfig req2;
+  req2.name = "category";
+  req2.type = "string";
+  req2.op = "!=";
+  req2.value = "deleted";
+  req2.bitmap_index = false;
+  required.push_back(req2);
+
+  std::vector<FilterConfig> result = ToFilterConfigs(required);
+
+  ASSERT_EQ(result.size(), 2);
+
+  EXPECT_EQ(result[0].name, "status");
+  EXPECT_EQ(result[0].type, "int");
+  EXPECT_TRUE(result[0].bitmap_index);
+  EXPECT_FALSE(result[0].dict_compress);
+
+  EXPECT_EQ(result[1].name, "category");
+  EXPECT_EQ(result[1].type, "string");
+  EXPECT_FALSE(result[1].bitmap_index);
+  EXPECT_FALSE(result[1].dict_compress);
+}
+
+/**
+ * @brief Test ToFilterConfigs with empty input returns empty vector
+ */
+TEST(ConfigTest, ToFilterConfigsEmptyInput) {
+  std::vector<RequiredFilterConfig> empty_required;
+
+  std::vector<FilterConfig> result = ToFilterConfigs(empty_required);
+
+  EXPECT_TRUE(result.empty());
+}
+
+/**
+ * @brief Test ngram_size range validation (must be 1-10)
+ */
+TEST(ConfigTest, NgramSizeRangeValidation) {
+  // ngram_size = 0 should be rejected
+  {
+    std::ofstream f("ngram_zero.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    ngram_size: 0\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("ngram_zero.yaml");
+    EXPECT_FALSE(result) << "ngram_size=0 should be rejected";
+    std::remove("ngram_zero.yaml");
+  }
+
+  // ngram_size = 11 should be rejected
+  {
+    std::ofstream f("ngram_too_large.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    ngram_size: 11\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("ngram_too_large.yaml");
+    EXPECT_FALSE(result) << "ngram_size=11 should be rejected";
+    std::remove("ngram_too_large.yaml");
+  }
+
+  // ngram_size = 5 should be accepted
+  {
+    std::ofstream f("ngram_valid.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    ngram_size: 5\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f.close();
+
+    auto result = LoadConfig("ngram_valid.yaml");
+    EXPECT_TRUE(result) << "ngram_size=5 should be accepted";
+    if (result) {
+      EXPECT_EQ(result->tables[0].ngram_size, 5);
+    }
+    std::remove("ngram_valid.yaml");
+  }
+}
+
+/**
+ * @brief Test batch_size range validation (must be positive)
+ */
+TEST(ConfigTest, BatchSizeRangeValidation) {
+  // batch_size = 0 should be rejected
+  {
+    std::ofstream f("batch_zero.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "build:\n";
+    f << "  batch_size: 0\n";
+    f.close();
+
+    auto result = LoadConfig("batch_zero.yaml");
+    EXPECT_FALSE(result) << "batch_size=0 should be rejected";
+    std::remove("batch_zero.yaml");
+  }
+
+  // batch_size = -1 should be rejected
+  {
+    std::ofstream f("batch_negative.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "build:\n";
+    f << "  batch_size: -1\n";
+    f.close();
+
+    auto result = LoadConfig("batch_negative.yaml");
+    EXPECT_FALSE(result) << "batch_size=-1 should be rejected";
+    std::remove("batch_negative.yaml");
+  }
+}
+
+/**
+ * @brief Test queue_size range validation (must be positive)
+ */
+TEST(ConfigTest, QueueSizeRangeValidation) {
+  // queue_size = 0 should be rejected
+  {
+    std::ofstream f("queue_zero.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "replication:\n";
+    f << "  enable: true\n";
+    f << "  server_id: 100\n";
+    f << "  start_from: snapshot\n";
+    f << "  queue_size: 0\n";
+    f.close();
+
+    auto result = LoadConfig("queue_zero.yaml");
+    EXPECT_FALSE(result) << "queue_size=0 should be rejected";
+    std::remove("queue_zero.yaml");
+  }
+
+  // queue_size = -5 should be rejected
+  {
+    std::ofstream f("queue_negative.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "replication:\n";
+    f << "  enable: true\n";
+    f << "  server_id: 100\n";
+    f << "  start_from: snapshot\n";
+    f << "  queue_size: -5\n";
+    f.close();
+
+    auto result = LoadConfig("queue_negative.yaml");
+    EXPECT_FALSE(result) << "queue_size=-5 should be rejected";
+    std::remove("queue_negative.yaml");
+  }
+}

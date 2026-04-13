@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,9 @@ namespace mygramdb::server {
  * Implements the token bucket algorithm for rate limiting.
  * Tokens are added at a fixed rate up to a maximum capacity.
  * Each request consumes one token.
+ *
+ * Not thread-safe on its own. Callers must hold an external lock
+ * (e.g., RateLimiter::mutex_) before accessing any member function.
  */
 class TokenBucket {
  public:
@@ -62,7 +66,6 @@ class TokenBucket {
   size_t refill_rate_;                                 ///< Tokens per second
   double tokens_;                                      ///< Current tokens (float for fractional refill)
   std::chrono::steady_clock::time_point last_refill_;  ///< Last refill time
-  mutable std::mutex mutex_;                           ///< Protects token count
 };
 
 /**
@@ -73,20 +76,20 @@ class TokenBucket {
  */
 class RateLimiter {
  public:
-  static constexpr size_t kDefaultMaxClients = 10000;         ///< Default maximum number of tracked clients
-  static constexpr size_t kDefaultCleanupInterval = 1000;     ///< Default cleanup interval (requests)
-  static constexpr uint32_t kDefaultInactivityTimeout = 300;  ///< Default inactivity timeout (seconds)
+  static constexpr size_t kDefaultMaxClients = 10000;                 ///< Default maximum number of tracked clients
+  static constexpr std::chrono::seconds kDefaultCleanupInterval{60};  ///< Default cleanup interval (time)
+  static constexpr uint32_t kDefaultInactivityTimeout = 300;          ///< Default inactivity timeout (seconds)
 
   /**
    * @brief Construct rate limiter
    * @param capacity Maximum tokens per client (burst size)
    * @param refill_rate Tokens added per second per client
    * @param max_clients Maximum number of tracked clients (for memory management)
-   * @param cleanup_interval Cleanup check interval (number of requests)
+   * @param cleanup_interval Cleanup check interval (time between cleanup sweeps)
    * @param inactivity_timeout Client inactivity timeout in seconds
    */
   RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients = kDefaultMaxClients,
-              size_t cleanup_interval = kDefaultCleanupInterval,
+              std::chrono::seconds cleanup_interval = kDefaultCleanupInterval,
               uint32_t inactivity_timeout_sec = kDefaultInactivityTimeout);
 
   /**
@@ -110,10 +113,10 @@ class RateLimiter {
    * @brief Get statistics for monitoring
    */
   struct Stats {
-    size_t total_requests = 0;    ///< Total requests checked
-    size_t allowed_requests = 0;  ///< Requests allowed
-    size_t blocked_requests = 0;  ///< Requests blocked (rate limited)
-    size_t tracked_clients = 0;   ///< Number of clients currently tracked
+    uint64_t total_requests = 0;    ///< Total requests checked
+    uint64_t allowed_requests = 0;  ///< Requests allowed
+    uint64_t blocked_requests = 0;  ///< Requests blocked (rate limited)
+    size_t tracked_clients = 0;     ///< Number of clients currently tracked
   };
 
   /**
@@ -132,16 +135,12 @@ class RateLimiter {
   void Clear();
 
  private:
-  /**
-   * @brief Clean up old client entries to prevent memory leak
-   */
-  void CleanupOldClients();
-
-  size_t capacity_;                          ///< Token bucket capacity
-  size_t refill_rate_;                       ///< Refill rate (tokens/sec)
-  size_t max_clients_;                       ///< Maximum tracked clients
-  size_t cleanup_interval_;                  ///< Cleanup check interval (requests)
-  std::chrono::seconds inactivity_timeout_;  ///< Client inactivity timeout
+  size_t capacity_;                                          ///< Token bucket capacity
+  size_t refill_rate_;                                       ///< Refill rate (tokens/sec)
+  size_t max_clients_;                                       ///< Maximum tracked clients
+  std::chrono::seconds cleanup_interval_;                    ///< Cleanup check interval (time)
+  std::chrono::seconds inactivity_timeout_;                  ///< Client inactivity timeout
+  std::chrono::steady_clock::time_point last_cleanup_time_;  ///< Last cleanup timestamp
 
   struct ClientBucket {
     std::unique_ptr<TokenBucket> bucket;
@@ -154,11 +153,10 @@ class RateLimiter {
   std::unordered_map<std::string, std::unique_ptr<ClientBucket>> client_buckets_;  ///< Per-client buckets
   mutable std::mutex mutex_;                                                       ///< Protects client_buckets_
 
-  // Statistics
-  mutable std::mutex stats_mutex_;
-  size_t total_requests_ = 0;
-  size_t allowed_requests_ = 0;
-  size_t blocked_requests_ = 0;
+  // Statistics (atomic counters avoid the need for a separate stats_mutex_)
+  std::atomic<uint64_t> total_requests_{0};
+  std::atomic<uint64_t> allowed_requests_{0};
+  std::atomic<uint64_t> blocked_requests_{0};
 };
 
 }  // namespace mygramdb::server

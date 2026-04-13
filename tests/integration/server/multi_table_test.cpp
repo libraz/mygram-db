@@ -222,7 +222,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   table1.index = std::move(index1);
   table1.doc_store = std::move(doc_store1);
 
-  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters1;
+  mygramdb::storage::FilterMap filters1;
   filters1["type"] = std::string("premium");
   auto doc_id1 = table1.doc_store->AddDocument("cust_100", filters1);
   table1.index->AddDocument(*doc_id1, "Alice Johnson");
@@ -235,7 +235,7 @@ TEST(TcpServerMultiTableTest, MultiTableGet) {
   table2.index = std::move(index2);
   table2.doc_store = std::move(doc_store2);
 
-  std::unordered_map<std::string, mygramdb::storage::FilterValue> filters2;
+  mygramdb::storage::FilterMap filters2;
   filters2["status"] = std::string("shipped");
   auto doc_id2 = table2.doc_store->AddDocument("order_200", filters2);
   table2.index->AddDocument(*doc_id2, "Product XYZ");

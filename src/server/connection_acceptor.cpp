@@ -21,7 +21,9 @@
 #define SO_NOSIGPIPE 0x1022
 #endif
 
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #include "server/server_types.h"
 #include "utils/error.h"
@@ -31,21 +33,9 @@
 
 namespace mygramdb::server {
 
-namespace {
-/**
- * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
- *
- * POSIX socket API requires sockaddr* but we use sockaddr_in for IPv4.
- * This helper centralizes the required reinterpret_cast to a single location.
- */
-inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
-  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-}
-
-inline struct sockaddr* ToSockaddrUn(struct sockaddr_un* addr) {
-  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-}
-}  // namespace
+// ToSockaddr / ToSockaddrUn are provided by utils/network_utils.h
+using mygram::utils::ToSockaddr;
+using mygram::utils::ToSockaddrUn;
 
 ConnectionAcceptor::ConnectionAcceptor(ServerConfig config) : config_(std::move(config)) {}
 
@@ -326,14 +316,13 @@ void ConnectionAcceptor::Stop() {
     unix_socket_path_.clear();
   }
 
-  // Close all active connections
+  // active_fds_ is cleared after join() to ensure no accept loop iteration
+  // can insert new entries after this point. Do NOT close the fds here: they
+  // are owned by the reactor (ReactorConnection), which closes them in its
+  // destructor during IoReactor::Stop(). Closing here would cause a
+  // double-close race with the reactor's teardown path.
   {
     std::lock_guard<std::mutex> lock(fds_mutex_);
-    for (int socket_fd : active_fds_) {
-      // Shutdown socket to unblock recv/send calls in other threads
-      shutdown(socket_fd, SHUT_RDWR);
-      close(socket_fd);
-    }
     active_fds_.clear();
   }
 
@@ -368,15 +357,29 @@ void ConnectionAcceptor::AcceptLoop() {
     }
 
     if (client_fd < 0) {
-      if (!should_stop_) {
+      if (should_stop_) {
+        break;
+      }
+      int err = errno;
+      if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
+        continue;  // Transient, retry immediately
+      }
+      if (err == EMFILE || err == ENFILE) {
         mygram::utils::StructuredLog()
             .Event("server_error")
             .Field("operation", "accept")
-            .Field("error", strerror(errno))
+            .Field("error", "file_descriptor_exhaustion")
+            .Field("errno", static_cast<int64_t>(err))
             .Error();
-      } else {
-        mygram::utils::StructuredLog().Event("accept_interrupted_shutdown").Debug();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        continue;
       }
+      // Other errors
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "accept")
+          .Field("error", strerror(err))
+          .Error();
       continue;
     }
 
@@ -427,18 +430,13 @@ void ConnectionAcceptor::AcceptLoop() {
       }
     }
 
-    // Set receive timeout to avoid blocking indefinitely
-    struct timeval timeout {};
-    timeout.tv_sec = 1;  // 1 second timeout (short for quick shutdown)
-    timeout.tv_usec = 0;
-    if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "setsockopt_failed")
-          .Field("option", "SO_RCVTIMEO")
-          .Field("error", strerror(errno))
-          .Warn();
-    }
+    // Note: SO_RCVTIMEO is not set for reactor-mode connections because the
+    // reactor uses non-blocking I/O (O_NONBLOCK). Idle connection detection
+    // should be implemented at the reactor level, not via socket timeouts.
+
+    // Set per-client SO_RCVBUF and SO_SNDBUF (these are not inherited from the
+    // listening socket by the kernel, so they must be applied after accept()).
+    SetClientSocketOptions(client_fd);
 
     // Apply per-connection TCP keepalive on TCP sockets only (not UDS). The
     // stock Linux defaults (2h idle + 9 probes * 75s) are too lax for
@@ -581,31 +579,34 @@ bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {
     return false;
   }
 
-  // SO_RCVBUF: Set receive buffer size
+  // Note: SO_RCVBUF and SO_SNDBUF are NOT set on the listening socket because
+  // the kernel does not inherit them to accepted connections. They are applied
+  // per-client in SetClientSocketOptions() after accept().
+
+  return true;
+}
+
+void ConnectionAcceptor::SetClientSocketOptions(int client_fd) const {
   int rcvbuf = config_.recv_buffer_size;
-  if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+  if (setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("operation", "setsockopt")
         .Field("option", "SO_RCVBUF")
+        .Field("fd", static_cast<uint64_t>(client_fd))
         .Field("error", strerror(errno))
         .Warn();
-    // Non-fatal, continue
   }
-
-  // SO_SNDBUF: Set send buffer size
   int sndbuf = config_.send_buffer_size;
-  if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+  if (setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("operation", "setsockopt")
         .Field("option", "SO_SNDBUF")
+        .Field("fd", static_cast<uint64_t>(client_fd))
         .Field("error", strerror(errno))
         .Warn();
-    // Non-fatal, continue
   }
-
-  return true;
 }
 
 void ConnectionAcceptor::RemoveConnection(int socket_fd) {

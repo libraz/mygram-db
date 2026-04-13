@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <cstdlib>
 #endif
 
 #include <spdlog/spdlog.h>
@@ -41,7 +40,7 @@ bool Daemonize() {
 
   if (pid > 0) {
     // Parent process - exit successfully
-    std::exit(0);
+    _exit(0);
   }
 
   // Step 2: Create a new session
@@ -72,7 +71,7 @@ bool Daemonize() {
 
   if (pid > 0) {
     // First child exits
-    std::exit(0);
+    _exit(0);
   }
 
   // Step 4: Change working directory to root

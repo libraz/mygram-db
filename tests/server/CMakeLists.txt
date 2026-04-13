@@ -238,6 +238,24 @@ gtest_discover_tests(http_server_features_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+# DumpProgress thread safety tests
+
+add_executable(dump_progress_test
+  dump_progress_test.cpp
+)
+
+target_link_libraries(dump_progress_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(dump_progress_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
 # DumpHandler tests
 
 add_executable(dump_handler_test
@@ -267,11 +285,14 @@ target_link_libraries(dump_auto_save_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts (dump files)
+# DumpAutoSave tests use sleep-based timing (2-4 seconds each)
 gtest_discover_tests(dump_auto_save_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK storage_io
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK storage_io
+    TIMEOUT 30
 )
 
 # SyncHandler tests
@@ -358,11 +379,14 @@ target_link_libraries(rate_limiter_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+# TokenBucketTest.CapacityLimit uses sleep-based timing (~2 seconds)
 gtest_discover_tests(rate_limiter_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
+    TIMEOUT 30
 )
 
 # RateLimiter cleanup tests
@@ -377,10 +401,13 @@ target_link_libraries(rate_limiter_cleanup_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+# SLOW: MemoryUsageDoesntGrowUnbounded takes 5.5+ seconds
 gtest_discover_tests(rate_limiter_cleanup_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
 )
 
 # ConnectionLimit tests (SECURITY: Resource exhaustion prevention)
@@ -516,10 +543,13 @@ target_link_libraries(snapshot_scheduler_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
+# SLOW: StartStopRapidly takes 5.1+ seconds
 gtest_discover_tests(snapshot_scheduler_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK storage_io
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK storage_io
 )
 
 # SearchHandler tests
@@ -573,6 +603,40 @@ gtest_discover_tests(connection_acceptor_unix_test
   PROPERTIES RESOURCE_LOCK server_socket
 )
 
+
+# SearchPipeline tests (filter evaluation, text verification, cache staleness)
+
+add_executable(search_pipeline_test
+  search_pipeline_test.cpp
+)
+
+target_link_libraries(search_pipeline_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# ConnectionAcceptor TCP socket tests
+
+add_executable(connection_acceptor_tcp_test
+  connection_acceptor_tcp_test.cpp
+)
+
+target_link_libraries(connection_acceptor_tcp_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(connection_acceptor_tcp_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_socket
+)
 
 add_subdirectory(reactor)
 

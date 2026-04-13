@@ -31,20 +31,20 @@ class HttpServerTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     // Add test documents
-    std::unordered_map<std::string, storage::FilterValue> filters1;
+    storage::FilterMap filters1;
     filters1["status"] = static_cast<int64_t>(1);
     filters1["category"] = std::string("tech");
     filters1["score"] = 3.14159;
     filters1["series"] = std::string("Project X=Beta");
     auto doc_id1 = doc_store->AddDocument("article_1", filters1);
 
-    std::unordered_map<std::string, storage::FilterValue> filters2;
+    storage::FilterMap filters2;
     filters2["status"] = static_cast<int64_t>(1);
     filters2["category"] = std::string("news");
     filters2["score"] = 1.61803;
     auto doc_id2 = doc_store->AddDocument("article_2", filters2);
 
-    std::unordered_map<std::string, storage::FilterValue> filters3;
+    storage::FilterMap filters3;
     filters3["status"] = static_cast<int64_t>(0);
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 
@@ -225,11 +225,11 @@ class HttpServerMultiTableTest : public ::testing::Test {
       auto index = std::make_unique<index::Index>(1);
       auto doc_store = std::make_unique<storage::DocumentStore>();
 
-      std::unordered_map<std::string, storage::FilterValue> filters1;
+      storage::FilterMap filters1;
       filters1["category"] = std::string("tech");
       auto doc_id1 = doc_store->AddDocument("tech_1", filters1);
 
-      std::unordered_map<std::string, storage::FilterValue> filters2;
+      storage::FilterMap filters2;
       filters2["category"] = std::string("tech");
       auto doc_id2 = doc_store->AddDocument("tech_2", filters2);
 
@@ -247,11 +247,11 @@ class HttpServerMultiTableTest : public ::testing::Test {
       auto index = std::make_unique<index::Index>(1);
       auto doc_store = std::make_unique<storage::DocumentStore>();
 
-      std::unordered_map<std::string, storage::FilterValue> filters1;
+      storage::FilterMap filters1;
       filters1["category"] = std::string("news");
       auto doc_id1 = doc_store->AddDocument("news_1", filters1);
 
-      std::unordered_map<std::string, storage::FilterValue> filters2;
+      storage::FilterMap filters2;
       filters2["category"] = std::string("news");
       auto doc_id2 = doc_store->AddDocument("news_2", filters2);
 
@@ -679,7 +679,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   ctx1.config.ngram_size = 1;
   ctx1.index = std::make_unique<index::Index>(1);
   ctx1.doc_store = std::make_unique<storage::DocumentStore>();
-  std::unordered_map<std::string, storage::FilterValue> filters1;
+  storage::FilterMap filters1;
   filters1["status"] = static_cast<int64_t>(1);
   auto doc_id1 = ctx1.doc_store->AddDocument("doc1", filters1);
   ctx1.index->AddDocument(*doc_id1, "hello world");
@@ -690,7 +690,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   ctx2.config.ngram_size = 1;
   ctx2.index = std::make_unique<index::Index>(1);
   ctx2.doc_store = std::make_unique<storage::DocumentStore>();
-  std::unordered_map<std::string, storage::FilterValue> filters2;
+  storage::FilterMap filters2;
   filters2["count"] = static_cast<int64_t>(42);
   auto doc_id2 = ctx2.doc_store->AddDocument("doc2", filters2);
   ctx2.index->AddDocument(*doc_id2, "test data");
@@ -701,7 +701,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   ctx3.config.ngram_size = 1;
   ctx3.index = std::make_unique<index::Index>(1);
   ctx3.doc_store = std::make_unique<storage::DocumentStore>();
-  std::unordered_map<std::string, storage::FilterValue> filters3;
+  storage::FilterMap filters3;
   filters3["value"] = std::string("test");
   auto doc_id3 = ctx3.doc_store->AddDocument("doc3", filters3);
   ctx3.index->AddDocument(*doc_id3, "japanese table");
@@ -761,7 +761,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
 
   // Add documents with various filter values
   for (int i = 1; i <= 10; ++i) {
-    std::unordered_map<std::string, storage::FilterValue> filters;
+    storage::FilterMap filters;
     filters["score"] = static_cast<int64_t>(i * 10);
     filters["name"] = std::string("item_") + std::to_string(i);
     auto doc_id = ctx.doc_store->AddDocument("doc" + std::to_string(i), filters);
@@ -895,17 +895,17 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
   const uint64_t large_timestamp2 = 18000000000000000000ULL;  // Much larger
   const uint64_t large_timestamp3 = 5000000000000000000ULL;   // Below INT64_MAX but still large
 
-  std::unordered_map<std::string, storage::FilterValue> filters1;
+  storage::FilterMap filters1;
   filters1["timestamp"] = large_timestamp1;
   auto doc_id1 = ctx.doc_store->AddDocument("doc1", filters1);
   ctx.index->AddDocument(*doc_id1, "test document 1");
 
-  std::unordered_map<std::string, storage::FilterValue> filters2;
+  storage::FilterMap filters2;
   filters2["timestamp"] = large_timestamp2;
   auto doc_id2 = ctx.doc_store->AddDocument("doc2", filters2);
   ctx.index->AddDocument(*doc_id2, "test document 2");
 
-  std::unordered_map<std::string, storage::FilterValue> filters3;
+  storage::FilterMap filters3;
   filters3["timestamp"] = large_timestamp3;
   auto doc_id3 = ctx.doc_store->AddDocument("doc3", filters3);
   ctx.index->AddDocument(*doc_id3, "test document 3");

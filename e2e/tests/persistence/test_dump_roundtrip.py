@@ -1,9 +1,10 @@
 """Test dump save and load roundtrip."""
 
-import pytest
 import time
 
-from lib.wait import wait_until, wait_until_gte
+import pytest
+
+from lib.wait import wait_until
 
 pytestmark = pytest.mark.persistence
 
@@ -13,9 +14,23 @@ class TestDumpRoundtrip:
 
     def test_dump_save_load(self, mygramdb, seed_data):
         """DUMP SAVE followed by DUMP LOAD should preserve data."""
-        # Get current state
-        info_before = mygramdb.info()
-        doc_count_before = info_before.get("total_documents", info_before.get("doc_count", info_before.get("documents", 0)))
+
+        def _get_doc_count():
+            info = mygramdb.info()
+            return info.get("total_documents", info.get("doc_count", info.get("documents", 0)))
+
+        # Wait for replication to catch up so baseline is stable.
+        # Seed data inserts happen before this test; replication may still be
+        # processing events. Two consecutive identical counts = stable.
+        prev_count = -1
+        for _ in range(15):
+            cur = _get_doc_count()
+            if cur == prev_count:
+                break
+            prev_count = cur
+            time.sleep(1)
+
+        doc_count_before = _get_doc_count()
         assert doc_count_before > 0, "Need data to test dump"
 
         # Save dump and wait for completion (async: stops replication, writes, restarts)
@@ -32,25 +47,40 @@ class TestDumpRoundtrip:
             interval=2,
             description="DUMP LOAD after DUMP SAVE",
         )
-        time.sleep(3)
 
-        # Verify data preserved
-        info_after = mygramdb.info()
-        doc_count_after = info_after.get("total_documents", info_after.get("doc_count", info_after.get("documents", 0)))
-        assert doc_count_after == doc_count_before, (
-            f"Doc count changed: before={doc_count_before}, after={doc_count_after}"
+        # Wait for replication to catch up after DUMP LOAD restart.
+        # DUMP LOAD restores the dump snapshot and restarts replication from
+        # the dump's GTID, so events after that point are re-consumed.
+        prev_count = -1
+        for _ in range(15):
+            cur = _get_doc_count()
+            if cur == prev_count:
+                break
+            prev_count = cur
+            time.sleep(1)
+
+        # Verify data preserved: after catch-up the count should match the
+        # stable baseline (same MySQL state, same GTID convergence point).
+        doc_count_after = _get_doc_count()
+        assert doc_count_after >= doc_count_before, (
+            f"Data lost after DUMP LOAD: before={doc_count_before}, after={doc_count_after}"
         )
 
     def test_search_after_dump_load(self, mysql, mygramdb, seed_data):
         """Search should work correctly after DUMP LOAD."""
         marker = "dump_search_marker"
-        mysql.insert_rows("articles", [{
-            "title": "Dump Search Test",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Dump Search Test",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # Sync to ensure marker data is in the index
         mygramdb.sync("articles", timeout=30)

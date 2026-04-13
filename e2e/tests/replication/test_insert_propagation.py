@@ -17,13 +17,18 @@ class TestInsertPropagation:
         marker = f"prop_{uuid.uuid4().hex[:8]}"
         before_count = mygramdb.count("articles", marker)
 
-        mysql.insert_rows("articles", [{
-            "title": "Propagation Test",
-            "content": f"This contains {marker} for testing",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Propagation Test",
+                    "content": f"This contains {marker} for testing",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),

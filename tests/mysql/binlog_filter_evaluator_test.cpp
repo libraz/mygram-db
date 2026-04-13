@@ -58,14 +58,14 @@ class BinlogFilterEvaluatorTest : public ::testing::Test {};
 
 TEST_F(BinlogFilterEvaluatorTest, EmptyRequiredFiltersAlwaysReturnsTrue) {
   TableConfig config = MakeTableConfig({});
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
 
   EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, EmptyRequiredFiltersWithDataReturnsTrue) {
   TableConfig config = MakeTableConfig({});
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{1};
 
   EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
@@ -412,7 +412,7 @@ TEST_F(BinlogFilterEvaluatorTest, IntegerOutOfRange) {
 TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMatch) {
   TableConfig config = MakeTableConfig({MakeFilter("status", "int", "=", "1")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{1};
 
   EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
@@ -421,7 +421,7 @@ TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMatch) {
 TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMismatch) {
   TableConfig config = MakeTableConfig({MakeFilter("status", "int", "=", "1")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{0};
 
   EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
@@ -431,7 +431,7 @@ TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersAllMatch) {
   TableConfig config =
       MakeTableConfig({MakeFilter("status", "int", "=", "1"), MakeFilter("type", "string", "=", "article")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{1};
   filters["type"] = std::string{"article"};
 
@@ -442,7 +442,7 @@ TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersOneMismatch) {
   TableConfig config =
       MakeTableConfig({MakeFilter("status", "int", "=", "1"), MakeFilter("type", "string", "=", "article")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{1};
   filters["type"] = std::string{"comment"};  // Mismatch
 
@@ -452,7 +452,7 @@ TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersOneMismatch) {
 TEST_F(BinlogFilterEvaluatorTest, RequiredFilterColumnMissing) {
   TableConfig config = MakeTableConfig({MakeFilter("status", "int", "=", "1")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   // "status" column not present
 
   EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
@@ -461,7 +461,7 @@ TEST_F(BinlogFilterEvaluatorTest, RequiredFilterColumnMissing) {
 TEST_F(BinlogFilterEvaluatorTest, ExtraColumnsInFiltersAreIgnored) {
   TableConfig config = MakeTableConfig({MakeFilter("status", "int", "=", "1")});
 
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = int64_t{1};
   filters["extra_column"] = std::string{"ignored"};
 

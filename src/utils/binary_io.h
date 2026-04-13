@@ -118,6 +118,10 @@ inline bool ReadString(std::istream& input_stream, std::string& str) {
   if (!ReadBinary(input_stream, len)) {
     return false;
   }
+  constexpr uint32_t kMaxReasonableStringLength = 64 * 1024 * 1024;  // 64 MB
+  if (len > kMaxReasonableStringLength) {
+    return false;
+  }
   if (len > 0) {
     str.resize(len);
     input_stream.read(str.data(), static_cast<std::streamsize>(len));

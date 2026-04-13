@@ -649,6 +649,37 @@ TEST(IndexConcurrentTest, ConcurrentOptimizeCalls) {
   EXPECT_EQ(results.size(), static_cast<size_t>(num_docs)) << "Index corrupted after concurrent Optimize() calls";
 }
 
+/**
+ * @brief Test TermCount() thread safety during concurrent writes
+ *
+ * TermCount() reads term_postings_.size() which must be protected by
+ * postings_mutex_. Without a shared_lock, concurrent AddDocument() calls
+ * can cause a data race on the hash map.
+ */
+TEST(IndexConcurrentTest, TermCountDuringConcurrentWrites) {
+  Index index(1);
+
+  // Writer thread adds documents
+  std::thread writer([&]() {
+    for (int i = 0; i < 100; ++i) {
+      index.AddDocument(i, "test term " + std::to_string(i));
+    }
+  });
+
+  // Reader thread calls TermCount repeatedly
+  std::thread reader([&]() {
+    for (int i = 0; i < 200; ++i) {
+      auto count = index.TermCount();
+      (void)count;  // Just ensure no crash/UB
+    }
+  });
+
+  writer.join();
+  reader.join();
+
+  EXPECT_GT(index.TermCount(), 0u);
+}
+
 // =============================================================================
 // SaveToStream concurrent access tests
 // =============================================================================

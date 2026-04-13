@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -114,13 +115,13 @@ struct CacheMetadata {
  * eviction, and invalidation decisions.
  */
 struct CacheEntry {
-  CacheKey key;                          ///< Cache key (16 bytes)
-  std::vector<uint8_t> compressed;       ///< LZ4-compressed result
-  size_t original_size = 0;              ///< Uncompressed size (bytes)
-  size_t compressed_size = 0;            ///< Compressed size (bytes)
-  double query_cost_ms = 0.0;            ///< Query execution time (ms)
-  CacheMetadata metadata;                ///< Metadata for invalidation
-  std::atomic<bool> invalidated{false};  ///< Invalidation flag (for two-phase invalidation)
+  CacheKey key;                                            ///< Cache key (16 bytes)
+  std::shared_ptr<const std::vector<uint8_t>> compressed;  ///< LZ4-compressed result (shared for lock-free copy)
+  size_t original_size = 0;                                ///< Uncompressed size (bytes)
+  size_t compressed_size = 0;                              ///< Compressed size (bytes)
+  double query_cost_ms = 0.0;                              ///< Query execution time (ms)
+  CacheMetadata metadata;                                  ///< Metadata for invalidation
+  std::atomic<bool> invalidated{false};                    ///< Invalidation flag (for two-phase invalidation)
 
   // Default constructor
   CacheEntry() = default;
@@ -181,8 +182,11 @@ struct CacheEntry {
    * @return Memory usage in bytes
    */
   [[nodiscard]] size_t MemoryUsage() const {
-    // Compressed data (heap allocation beyond sizeof)
-    size_t size = sizeof(CacheEntry) + compressed.capacity();
+    // Compressed data (shared_ptr + vector heap allocation)
+    size_t size = sizeof(CacheEntry);
+    if (compressed) {
+      size += sizeof(std::vector<uint8_t>) + compressed->capacity();
+    }
 
     // Ngrams: vector buffer + each string's heap allocation
     size += metadata.ngrams.capacity() * sizeof(std::string);

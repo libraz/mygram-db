@@ -16,6 +16,7 @@
 
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
+#include "utils/flag_guard.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -24,49 +25,7 @@
 
 namespace mygramdb::server {
 
-namespace {
-/**
- * @brief RAII guard for atomic boolean flags
- *
- * Automatically sets flag to true on construction and resets to false on destruction.
- * Exception-safe: ensures flag is always reset even if exceptions are thrown.
- */
-class FlagGuard {
- public:
-  explicit FlagGuard(std::atomic<bool>& flag) : flag_(flag) { flag_ = true; }
-  ~FlagGuard() { flag_ = false; }
-
-  // Non-copyable and non-movable
-  FlagGuard(const FlagGuard&) = delete;
-  FlagGuard& operator=(const FlagGuard&) = delete;
-  FlagGuard(FlagGuard&&) = delete;
-  FlagGuard& operator=(FlagGuard&&) = delete;
-
- private:
-  std::atomic<bool>& flag_;
-};
-
-/**
- * @brief RAII guard for resetting atomic boolean flags (does NOT set on construction)
- *
- * Use after successfully acquiring the flag via compare_exchange_strong.
- * Only resets the flag on destruction.
- */
-class FlagResetGuard {
- public:
-  explicit FlagResetGuard(std::atomic<bool>& flag) : flag_(flag) {}
-  ~FlagResetGuard() { flag_ = false; }
-
-  // Non-copyable and non-movable
-  FlagResetGuard(const FlagResetGuard&) = delete;
-  FlagResetGuard& operator=(const FlagResetGuard&) = delete;
-  FlagResetGuard(FlagResetGuard&&) = delete;
-  FlagResetGuard& operator=(FlagResetGuard&&) = delete;
-
- private:
-  std::atomic<bool>& flag_;
-};
-}  // namespace
+constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every second
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
@@ -96,17 +55,19 @@ SnapshotScheduler::~SnapshotScheduler() {
 }
 
 void SnapshotScheduler::Start() {
-  if (running_) {
+  if (config_.interval_sec <= 0) {
+    mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
+    return;
+  }
+
+  // Atomically try to set running_ from false to true to prevent TOCTOU race
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true)) {
     mygram::utils::StructuredLog()
         .Event("server_warning")
         .Field("component", "snapshot_scheduler")
         .Field("type", "already_running")
         .Warn();
-    return;
-  }
-
-  if (config_.interval_sec <= 0) {
-    mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return;
   }
 
@@ -116,17 +77,19 @@ void SnapshotScheduler::Start() {
       .Field("retain", static_cast<uint64_t>(config_.retain))
       .Info();
 
-  running_ = true;
   scheduler_thread_ = std::make_unique<std::thread>(&SnapshotScheduler::SchedulerLoop, this);
 }
 
 void SnapshotScheduler::Stop() {
-  if (!running_) {
+  // Use compare_exchange to ensure only one thread performs the stop sequence.
+  // Without this, two concurrent Stop() calls could both pass the running_
+  // check and double-join the thread, causing std::terminate.
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
     return;
   }
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();
-  running_ = false;
 
   if (scheduler_thread_ && scheduler_thread_->joinable()) {
     scheduler_thread_->join();
@@ -137,7 +100,7 @@ void SnapshotScheduler::Stop() {
 
 void SnapshotScheduler::SchedulerLoop() {
   const int interval_sec = config_.interval_sec;
-  const int check_interval_ms = 1000;  // Check for shutdown every second
+  const int check_interval_ms = kShutdownCheckIntervalMs;
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_started").Info();
 
@@ -178,7 +141,7 @@ void SnapshotScheduler::TakeSnapshot() {
     }
 
     // Flag successfully acquired, use RAII guard to ensure it's reset on exit
-    FlagResetGuard dump_save_guard(dump_save_in_progress_);
+    mygram::utils::AtomicFlagResetGuard dump_save_guard(dump_save_in_progress_);
 
     // Generate timestamp-based filename
     auto timestamp = std::time(nullptr);

@@ -191,12 +191,14 @@ bool ReactorConnection::OnWritable() {
 
   // Peer already half-closed and the drain task has no more work in flight:
   // we just flushed the last response, so unregister now.
+  // Check without acquiring frame_mutex_ to avoid lock ordering issues
+  // (write_mutex_ is already held). drain_scheduled_ == false means DrainTask
+  // is not running/pending, and since we hold write_mutex_, no new responses
+  // can be enqueued. A false positive (pending_frames_ not actually empty) is
+  // harmless — the next OnWritable or DrainTask will handle it.
   if (read_eof_.load(std::memory_order_acquire) && !drain_scheduled_.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> frames_lock(frame_mutex_);
-    if (pending_frames_.empty()) {
-      closing_.store(true, std::memory_order_release);
-      return false;
-    }
+    closing_.store(true, std::memory_order_release);
+    return false;
   }
 
   return true;

@@ -18,6 +18,12 @@
 
 #include "config/config.h"
 #include "server/server_types.h"
+#include "utils/error.h"
+#include "utils/expected.h"
+
+namespace mygramdb::cache {
+class CacheManager;
+}
 
 namespace mygramdb::mysql {
 class BinlogReader;
@@ -79,9 +85,11 @@ class SyncOperationManager {
    * @param table_contexts Reference to table contexts (must outlive this instance)
    * @param full_config Pointer to configuration (must outlive this instance)
    * @param binlog_reader Pointer to binlog reader (must outlive this instance, can be nullptr)
+   * @param cache_manager Pointer to cache manager (must outlive this instance, can be nullptr)
    */
   SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                       const config::Config* full_config, mysql::BinlogReader* binlog_reader);
+                       const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                       cache::CacheManager* cache_manager = nullptr);
 
   ~SyncOperationManager();
 
@@ -94,9 +102,9 @@ class SyncOperationManager {
   /**
    * @brief Start SYNC operation for a table
    * @param table_name Table to synchronize
-   * @return Response string (OK or ERROR)
+   * @return Expected containing success response string, or Error on failure
    */
-  std::string StartSync(const std::string& table_name);
+  mygram::utils::Expected<std::string, mygram::utils::Error> StartSync(const std::string& table_name);
 
   /**
    * @brief Stop SYNC operation for a table
@@ -141,14 +149,31 @@ class SyncOperationManager {
    */
   bool GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const;
 
+  /**
+   * @brief Set the cache manager (for deferred initialization)
+   * @param cache_manager Pointer to cache manager (must outlive this instance, can be nullptr)
+   */
+  void SetCacheManager(cache::CacheManager* cache_manager);
+
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
   mysql::BinlogReader* binlog_reader_;
+  cache::CacheManager* cache_manager_ = nullptr;
 
   // State tracking
-  // Lock ordering (acquire in this order to prevent deadlock):
-  //   sync_mutex_ → syncing_tables_mutex_ → loaders_mutex_
+  //
+  // Lock ordering (when acquiring multiple locks, follow this order):
+  //   sync_mutex_ -> syncing_tables_mutex_ -> loaders_mutex_
+  //
+  // Actual acquisition patterns:
+  //   StartSync:           sync_mutex_ (holds), then syncing_tables_mutex_
+  //   StopSync (specific): sync_mutex_ (holds) -> syncing_tables_mutex_ -> loaders_mutex_
+  //   StopSync (all):      Each lock acquired and released independently (not nested)
+  //   BuildSnapshotAsync:  sync_mutex_ alone (via update_state); syncing_tables_mutex_ alone (via SyncGuard)
+  //   RequestShutdown:     loaders_mutex_ alone
+  //   Destructor:          sync_mutex_ alone, then thread join
+  //
   // sync_mutex_ also protects sync_states_ and sync_threads_
   std::unordered_map<std::string, SyncState> sync_states_;
   mutable std::mutex sync_mutex_;

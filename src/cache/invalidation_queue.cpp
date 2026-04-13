@@ -24,8 +24,8 @@ InvalidationQueue::~InvalidationQueue() {
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
                                 bool filter_columns_changed) {
   // Get ngram settings for this specific table
-  int ngram_size = 3;                 // Default
-  int kanji_ngram_size = 2;           // Default
+  int ngram_size = 2;                 // Default (match index::kDefaultNgramSize)
+  int kanji_ngram_size = 1;           // Default (match index::kDefaultKanjiNgramSize)
   bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
@@ -196,7 +196,7 @@ void InvalidationQueue::ProcessBatch() {
 
   for (const auto& [composite_key, timestamp] : batch) {
     // Parse composite key (format: "table:cache_key_hex")
-    const size_t colon_pos = composite_key.find(':');
+    const size_t colon_pos = composite_key.rfind(':');
     if (colon_pos == std::string::npos) {
       continue;
     }

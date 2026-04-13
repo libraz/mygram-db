@@ -35,10 +35,23 @@ MysqlReconnectionHandler::MysqlReconnectionHandler(mysql::Connection* mysql_conn
       required_tables_(std::move(required_tables)) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
-  // Set reconnecting flag to block manual REPLICATION START
-  if (reconnecting_flag_ != nullptr) {
-    reconnecting_flag_->store(true);
-  }
+  // RAII guard to ensure reconnecting flag is always cleared on exit
+  struct ReconnectingGuard {
+    std::atomic<bool>* flag;
+    explicit ReconnectingGuard(std::atomic<bool>* f) : flag(f) {
+      if (flag != nullptr) {
+        flag->store(true);
+      }
+    }
+    ~ReconnectingGuard() {
+      if (flag != nullptr) {
+        flag->store(false);
+      }
+    }
+    ReconnectingGuard(const ReconnectingGuard&) = delete;
+    ReconnectingGuard& operator=(const ReconnectingGuard&) = delete;
+  };
+  ReconnectingGuard guard(reconnecting_flag_);
 
   mygram::utils::StructuredLog()
       .Event("mysql_reconnection_start")
@@ -77,10 +90,6 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   mysql::Connection new_connection(config);
   auto connect_result = new_connection.Connect("reconnection");
   if (!connect_result) {
-    // Clear reconnecting flag on error - old connection is preserved
-    if (reconnecting_flag_ != nullptr) {
-      reconnecting_flag_->store(false);
-    }
     mygram::utils::StructuredLog()
         .Event("mysql_reconnection_connect_failed")
         .Field("host", new_host)
@@ -97,10 +106,6 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   // Step 4: Validate new connection
   auto validate_result = ValidateConnection(mysql_connection_);
   if (!validate_result) {
-    // Clear reconnecting flag on error
-    if (reconnecting_flag_ != nullptr) {
-      reconnecting_flag_->store(false);
-    }
     mygram::utils::StructuredLog()
         .Event("mysql_reconnection_validation_failed")
         .Field("host", new_host)
@@ -123,10 +128,6 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("gtid", current_gtid).Info();
       auto start_result = binlog_reader_->StartFromGtid(current_gtid);
       if (!start_result) {
-        // Clear reconnecting flag on error
-        if (reconnecting_flag_ != nullptr) {
-          reconnecting_flag_->store(false);
-        }
         mygram::utils::StructuredLog()
             .Event("mysql_reconnection_binlog_restart_failed")
             .Field("error", start_result.error().message())
@@ -138,10 +139,6 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("position", "latest").Info();
       auto start_result = binlog_reader_->Start();
       if (!start_result) {
-        // Clear reconnecting flag on error
-        if (reconnecting_flag_ != nullptr) {
-          reconnecting_flag_->store(false);
-        }
         mygram::utils::StructuredLog()
             .Event("mysql_reconnection_binlog_restart_failed")
             .Field("error", start_result.error().message())
@@ -159,11 +156,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       .Field("new_port", static_cast<int64_t>(new_port))
       .Info();
 
-  // Clear reconnecting flag
-  if (reconnecting_flag_ != nullptr) {
-    reconnecting_flag_->store(false);
-  }
-
+  // reconnecting flag is automatically cleared by RAII guard
   mygram::utils::StructuredLog().Event("mysql_reconnection_completed").Info();
   return {};
 }

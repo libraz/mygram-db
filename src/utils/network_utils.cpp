@@ -12,6 +12,8 @@
 #include <optional>
 #include <sstream>
 
+#include "utils/structured_log.h"
+
 namespace mygram::utils {
 
 constexpr int kIPv4BitCount = 32;
@@ -130,6 +132,22 @@ bool IsIPAllowed(const std::string& ip_str, const std::vector<CIDR>& parsed_allo
   }
 
   return false;
+}
+
+std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
+  std::vector<CIDR> parsed;
+  parsed.reserve(allow_cidrs.size());
+
+  for (const auto& cidr_str : allow_cidrs) {
+    auto cidr = CIDR::Parse(cidr_str);
+    if (!cidr) {
+      StructuredLog().Event("server_warning").Field("type", "invalid_cidr_entry").Field("cidr", cidr_str).Warn();
+      continue;
+    }
+    parsed.push_back(*cidr);
+  }
+
+  return parsed;
 }
 
 }  // namespace mygram::utils

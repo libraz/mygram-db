@@ -38,6 +38,12 @@ TEST(StripSQLCommentsTest, MultipleComments) {
   EXPECT_NE(result.find("FROM users"), std::string::npos);
 }
 
+TEST(StripSQLCommentsTest, UnterminatedBlockComment) {
+  std::string sql = "SELECT /* no end";
+  std::string result = StripSQLComments(sql);
+  EXPECT_EQ(result, "SELECT ");
+}
+
 TEST(StripSQLCommentsTest, EmptyInput) {
   EXPECT_EQ(StripSQLComments(""), "");
 }
@@ -176,4 +182,26 @@ TEST(MatchTableNameTest, FollowedBySemicolon) {
   size_t pos = 0;
   EXPECT_TRUE(MatchTableName(str, pos, "USERS"));
   EXPECT_EQ(pos, 5U);
+}
+
+// BUG-3 fix: pos restoration on failure
+TEST(MatchTableNameBugFixTest, PosRestoredOnBacktickFailure) {
+  std::string str = "`other_table` WHERE";
+  size_t pos = 0;
+  EXPECT_FALSE(MatchTableName(str, pos, "my_table"));
+  EXPECT_EQ(pos, 0U) << "pos must be restored on backtick mismatch";
+}
+
+TEST(MatchTableNameBugFixTest, PosRestoredOnPlainFailure) {
+  std::string str = "other_table WHERE";
+  size_t pos = 0;
+  EXPECT_FALSE(MatchTableName(str, pos, "my_table"));
+  EXPECT_EQ(pos, 0U) << "pos must be restored on plain mismatch";
+}
+
+TEST(MatchTableNameBugFixTest, PosRestoredOnPrefixMatch) {
+  std::string str = "users_extended WHERE";
+  size_t pos = 0;
+  EXPECT_FALSE(MatchTableName(str, pos, "users"));
+  EXPECT_EQ(pos, 0U) << "pos must be restored when name is prefix of longer identifier";
 }

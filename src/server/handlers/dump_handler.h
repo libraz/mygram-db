@@ -49,8 +49,9 @@ class DumpHandler : public CommandHandler {
   /**
    * @brief Background worker for async DUMP SAVE
    * @param filepath Path to save dump file
+   * @return true if the dump was saved successfully, false otherwise
    */
-  void DumpSaveWorker(const std::string& filepath);
+  bool DumpSaveWorker(const std::string& filepath);
 };
 
 }  // namespace mygramdb::server

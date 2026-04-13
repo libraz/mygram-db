@@ -375,9 +375,26 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       return;
     }
 
+    // Validate query text for control characters (CRLF injection prevention)
+    std::string query_text = body["q"].get<std::string>();
+    for (char c : query_text) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+        return;
+      }
+    }
+
+    // Validate table name for control characters
+    for (char c : table) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+        return;
+      }
+    }
+
     // Build query string for QueryParser
     std::ostringstream query_str;
-    query_str << "SEARCH " << table << " " << body["q"].get<std::string>();
+    query_str << "SEARCH " << table << " " << query_text;
 
     // Add limit
     if (body.contains("limit")) {
@@ -639,9 +656,26 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
       return;
     }
 
+    // Validate query text for control characters (CRLF injection prevention)
+    std::string query_text = body["q"].get<std::string>();
+    for (char c : query_text) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+        return;
+      }
+    }
+
+    // Validate table name for control characters
+    for (char c : table) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+        return;
+      }
+    }
+
     // Build query string for QueryParser (COUNT query)
     std::ostringstream query_str;
-    query_str << "COUNT " << table << " " << body["q"].get<std::string>();
+    query_str << "COUNT " << table << " " << query_text;
 
     // Parse and execute query
     query::QueryParser query_parser;
@@ -933,6 +967,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["hits"] = cache_stats.cache_hits;
       cache_obj["misses"] = cache_stats.cache_misses;
       cache_obj["misses_not_found"] = cache_stats.cache_misses_not_found;
+      cache_obj["misses_ttl_expired"] = cache_stats.cache_misses_ttl_expired;
       cache_obj["misses_invalidated"] = cache_stats.cache_misses_invalidated;
       cache_obj["total_queries"] = cache_stats.total_queries;
       cache_obj["hit_rate"] = cache_stats.HitRate();

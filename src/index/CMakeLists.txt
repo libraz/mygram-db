@@ -1,5 +1,7 @@
 add_library(mygramdb_index STATIC
   index.cpp
+  index_optimization.cpp
+  index_serialization.cpp
   posting_list.cpp
 )
 

@@ -16,7 +16,7 @@ class TestMemoryPressure:
         gen = DataGenerator(seed=888)
         # Insert batches of data to push memory usage up
         # MygramDB is configured with 200MB hard limit
-        for batch in range(5):
+        for _batch in range(5):
             rows = gen.generate_articles(count=500, mixed=True)
             mysql.insert_rows("articles", rows)
 

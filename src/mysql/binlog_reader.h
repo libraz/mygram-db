@@ -60,7 +60,7 @@ struct BinlogEvent {
   std::string primary_key;
   std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
   std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
-  std::unordered_map<std::string, storage::FilterValue> filters;
+  storage::FilterMap filters;
   std::string gtid;  // GTID for this event
 
   /**
@@ -266,9 +266,17 @@ class BinlogReader final : public IBinlogReader {
   uint64_t GetProcessedEvents() const override { return processed_events_; }
 
   /**
+   * @brief Get total CRC32 checksum errors detected
+   */
+  uint64_t GetCRCErrors() const { return crc_errors_; }
+
+  /**
    * @brief Get last error message
    */
-  const std::string& GetLastError() const override { return last_error_; }
+  std::string GetLastError() const override {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    return last_error_;
+  }
 
   /**
    * @brief Set server statistics tracker
@@ -319,6 +327,7 @@ class BinlogReader final : public IBinlogReader {
 
   // Statistics
   std::atomic<uint64_t> processed_events_{0};
+  std::atomic<uint64_t> crc_errors_{0};
   std::string current_gtid_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
@@ -330,6 +339,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<int> skip_log_count_{0};
 
   std::string last_error_;
+  mutable std::mutex last_error_mutex_;
 
   // Failover detection: track last known server UUID
   std::string last_server_uuid_;
@@ -344,6 +354,15 @@ class BinlogReader final : public IBinlogReader {
 
   // GTID encoding data (must persist during mysql_binlog_open call)
   std::vector<uint8_t> gtid_encoded_data_;
+
+  /**
+   * @brief Set last error message (thread-safe)
+   * @param error Error message
+   */
+  void SetLastError(const std::string& error) {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    last_error_ = error;
+  }
 
   /**
    * @brief Static callback for MySQL binlog API to encode GTID set

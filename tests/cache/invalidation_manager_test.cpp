@@ -1266,4 +1266,49 @@ TEST(InvalidationManagerTest, P1_2_ClearTableCleansSettings) {
   EXPECT_EQ(1, invalidated2.size());
 }
 
+// =============================================================================
+// C-8: Filter invalidation bypassed when text also changes
+// =============================================================================
+
+/**
+ * @brief Test that filter-bearing entries are invalidated even when text also changes
+ *
+ * Bug C-8: When both filter columns AND text change simultaneously, filter-bearing
+ * cache entries must still be invalidated. Previously, the condition
+ * `filter_columns_changed && changed_ngrams.empty()` meant filter-only entries
+ * were skipped when text also changed.
+ */
+TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChanges) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Entry with filters but ngrams that do NOT overlap with the text change
+  auto key_filter = CacheKeyGenerator::Generate("query_filter_only");
+  CacheMetadata meta_filter;
+  meta_filter.table = "posts";
+  meta_filter.ngrams = {"zzz", "yyy"};  // No overlap with "hello" or "world"
+  meta_filter.filters = {{"status", query::FilterOp::EQ, "active"}};
+  mgr.RegisterCacheEntry(key_filter, meta_filter);
+
+  // Entry without filters
+  auto key_no_filter = CacheKeyGenerator::Generate("query_no_filter");
+  CacheMetadata meta_no_filter;
+  meta_no_filter.table = "posts";
+  meta_no_filter.ngrams = {"zzz", "yyy"};
+  // No filters
+  mgr.RegisterCacheEntry(key_no_filter, meta_no_filter);
+
+  // Both text AND filter columns changed: "hello" -> "world" with filter_columns_changed=true
+  // changed_ngrams is NOT empty (text changed), so the old bug would skip filter invalidation
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "world", 3, 2, true, true);
+
+  // The filter-bearing entry should be invalidated even though changed_ngrams is non-empty
+  EXPECT_TRUE(invalidated.find(key_filter) != invalidated.end())
+      << "C-8: Filter-bearing entry must be invalidated when both text and filters change";
+
+  // The no-filter entry should NOT be invalidated (no ngram overlap, no filters)
+  EXPECT_FALSE(invalidated.find(key_no_filter) != invalidated.end())
+      << "C-8: Entry without filters should not be invalidated by filter change alone";
+}
+
 }  // namespace mygramdb::cache

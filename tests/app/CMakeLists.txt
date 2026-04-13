@@ -29,6 +29,19 @@ gtest_discover_tests(command_line_parser_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Application tests (dump directory validation)
+add_executable(application_test application_test.cpp)
+target_link_libraries(application_test
+    PRIVATE
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(application_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # SignalManager tests (SIGUSR1 log rotation)
 add_executable(signal_manager_test signal_manager_test.cpp)
 target_link_libraries(signal_manager_test

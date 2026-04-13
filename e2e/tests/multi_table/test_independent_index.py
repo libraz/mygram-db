@@ -1,5 +1,7 @@
 """Test multiple table independent indexing."""
 
+import contextlib
+
 import pytest
 
 from lib.wait import wait_until_gte
@@ -14,13 +16,18 @@ class TestIndependentIndex:
         """Data in one table should not appear in another table's index."""
         # Insert unique content into articles
         article_marker = "article_only_unique_marker"
-        mysql.insert_rows("articles", [{
-            "title": "Article Only",
-            "content": f"Content with {article_marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Article Only",
+                    "content": f"Content with {article_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", article_marker),
@@ -33,18 +40,14 @@ class TestIndependentIndex:
         # Search in products should NOT find article-only content
         # (if products table is indexed)
         product_count = mygramdb.count("products", article_marker)
-        assert product_count == 0, (
-            f"Article content found in products index: {product_count}"
-        )
+        assert product_count == 0, f"Article content found in products index: {product_count}"
 
     def test_independent_counts(self, mysql, mygramdb, seed_data):
         """Each table should maintain independent document counts."""
         articles_count = mygramdb.count("articles", "test")
         # Products may not be indexed, so just verify no crash
-        try:
-            products_count = mygramdb.count("products", "test")
-        except Exception:
-            products_count = -1  # Table not indexed is OK
+        with contextlib.suppress(Exception):
+            mygramdb.count("products", "test")
 
         # Verify articles has data
         assert articles_count >= 0

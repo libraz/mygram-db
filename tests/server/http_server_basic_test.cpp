@@ -31,20 +31,20 @@ class HttpServerTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     // Add test documents
-    std::unordered_map<std::string, storage::FilterValue> filters1;
+    storage::FilterMap filters1;
     filters1["status"] = static_cast<int64_t>(1);
     filters1["category"] = std::string("tech");
     filters1["score"] = 3.14159;
     filters1["series"] = std::string("Project X=Beta");
     auto doc_id1 = doc_store->AddDocument("article_1", filters1);
 
-    std::unordered_map<std::string, storage::FilterValue> filters2;
+    storage::FilterMap filters2;
     filters2["status"] = static_cast<int64_t>(1);
     filters2["category"] = std::string("news");
     filters2["score"] = 1.61803;
     auto doc_id2 = doc_store->AddDocument("article_2", filters2);
 
-    std::unordered_map<std::string, storage::FilterValue> filters3;
+    storage::FilterMap filters3;
     filters3["status"] = static_cast<int64_t>(0);
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 

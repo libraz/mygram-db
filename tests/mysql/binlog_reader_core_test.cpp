@@ -61,23 +61,24 @@ TEST_F(BinlogReaderFixture, IsRunningReturnsFalseWhenShouldStopIsTrue) {
 }
 
 /**
- * @brief Verify Start fails when reader is in stopping state
+ * @brief Verify Start cleans up stale stopping state
  *
- * When Stop() is called but threads haven't finished joining yet,
- * Start() should return an appropriate error instead of "already running".
+ * When the reader thread self-exits (should_stop_=true, running_=true),
+ * Start() should clean up stale state and proceed (failing later at
+ * connection validation since there's no real MySQL connection).
+ * After failure, running_ must be false so a subsequent Start() can retry.
  */
-TEST_F(BinlogReaderFixture, StartFailsWhenStopping) {
-  // Simulate stopping state: running is true but should_stop is also true
+TEST_F(BinlogReaderFixture, StartCleansUpStaleStoppingState) {
+  // Simulate stale stopping state: reader thread self-exited
   reader_->running_ = true;
   reader_->should_stop_ = true;
 
-  // Start should fail with "stopping" error
-  EXPECT_FALSE(reader_->Start());
-  EXPECT_NE(reader_->GetLastError().find("stopping"), std::string::npos);
+  // Start cleans up stale state, then fails at connection validation
+  auto result = reader_->Start();
+  EXPECT_FALSE(result);
 
-  // Cleanup
-  reader_->running_ = false;
-  reader_->should_stop_ = false;
+  // running_ must be false after failed Start() to allow retry
+  EXPECT_FALSE(reader_->running_.load());
 }
 
 /**
@@ -795,6 +796,33 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeTransaction1) {
   // Edge case: transaction 1 -> "uuid:1-1"
   std::string result = BinlogReader::ConvertSingleGtidToRange("00000000-0000-0000-0000-000000000001:1");
   EXPECT_EQ(result, "00000000-0000-0000-0000-000000000001:1-1");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID where entries need conversion
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidWithSingleGno) {
+  // Multi-UUID GTID where individual entries are single GNOs should be converted
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:50");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID mixed entries
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidMixed) {
+  // Mix of range and single GNO entries
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:1-100,uuid2:50");
+  EXPECT_EQ(result, "uuid1:1-100,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange with multi-UUID tagged GTID passthrough
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidWithTagged) {
+  // Tagged GTID entries (UUID:TAG:GNO) should pass through unchanged
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:tag1:50");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:tag1:50");
 }
 
 /**

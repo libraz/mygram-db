@@ -212,7 +212,7 @@ TEST_F(CacheMetricsTest, InvalidationIndexMemoryInStatistics) {
   query.search_text = "golang";
 
   std::vector<DocId> result = {1, 2, 3};
-  std::set<std::string> ngrams = {"gol", "ola", "lan", "ang"};
+  std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
 
   manager.Insert(query, result, ngrams, 10.0);
 

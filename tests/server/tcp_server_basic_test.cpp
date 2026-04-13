@@ -260,7 +260,7 @@ TEST_F(TcpServerTest, GetNonExistent) {
  */
 TEST_F(TcpServerTest, GetDocument) {
   // Add document
-  std::unordered_map<std::string, storage::FilterValue> filters;
+  storage::FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
   auto doc_id = doc_store_->AddDocument("test123", filters);
   index_->AddDocument(static_cast<index::DocId>(*doc_id), "hello world");

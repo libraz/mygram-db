@@ -2,8 +2,8 @@
 
 import pytest
 
-from lib.wait import wait_until, wait_until_gte
 from lib.data_generator import DataGenerator
+from lib.wait import wait_until, wait_until_gte
 
 pytestmark = pytest.mark.ddl
 
@@ -15,13 +15,18 @@ class TestTruncate:
         """TRUNCATE TABLE should clear the MygramDB index."""
         # Verify we have data
         marker = "truncate_test_marker"
-        mysql.insert_rows("articles", [{
-            "title": "Truncate Test",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Truncate Test",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),
@@ -36,7 +41,7 @@ class TestTruncate:
 
         # Wait for articles search to return no results
         def _articles_cleared() -> bool:
-            count = mygramdb.count("articles", "truncate_test_marker")
+            mygramdb.count("articles", "truncate_test_marker")
             # Also verify a broad search returns nothing for articles
             result = mygramdb.search("articles", "test", limit=1)
             return result["total"] == 0

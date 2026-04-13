@@ -84,8 +84,8 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
       }
 
       stats_.cache_misses++;
-      stats_.cache_misses_not_found++;  // Treat expired as not found
-      stats_.ttl_expirations++;         // Count TTL expiration at detection time
+      stats_.cache_misses_ttl_expired++;  // Count as TTL-expired miss
+      stats_.ttl_expirations++;           // Count TTL expiration at detection time
 
       // Record miss latency
       auto end_time = std::chrono::high_resolution_clock::now();
@@ -99,10 +99,9 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
     }
   }
 
-  // Cache hit - copy data while holding lock, defer stats update until after decompression
-  // Copy compressed data and metadata while holding lock
+  // Cache hit - copy shared_ptr under lock, decompress outside
   const auto& entry = iter->second.first;
-  std::vector<uint8_t> compressed_copy = entry.compressed;
+  auto compressed_ptr = entry.compressed;
   const size_t original_size = entry.original_size;
   const double query_cost_ms = entry.query_cost_ms;
 
@@ -117,7 +116,7 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   if (compression_enabled_) {
-    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_size);
+    auto decompress_result = ResultCompressor::Decompress(*compressed_ptr, original_size);
     if (!decompress_result) {
       // Decompression failed - enqueue for cleanup and treat as miss
       {
@@ -143,7 +142,7 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   } else {
     // No compression - interpret raw bytes as DocId array
     result.resize(original_size);
-    std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
   }
 
   // Decompression succeeded - now count as hit
@@ -217,8 +216,8 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
       }
 
       stats_.cache_misses++;
-      stats_.cache_misses_not_found++;  // Treat expired as not found
-      stats_.ttl_expirations++;         // Count TTL expiration at detection time
+      stats_.cache_misses_ttl_expired++;  // Count as TTL-expired miss
+      stats_.ttl_expirations++;           // Count TTL expiration at detection time
 
       // Record miss latency
       auto end_time = std::chrono::high_resolution_clock::now();
@@ -232,10 +231,9 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
     }
   }
 
-  // Cache hit - copy data while holding lock, defer stats update until after decompression
-  // Copy compressed data and metadata while holding lock
+  // Cache hit - copy shared_ptr under lock, decompress outside
   const auto& entry = iter->second.first;
-  std::vector<uint8_t> compressed_copy = entry.compressed;
+  auto compressed_ptr = entry.compressed;
   const size_t original_size = entry.original_size;
   metadata.query_cost_ms = entry.query_cost_ms;
   metadata.created_at = entry.metadata.created_at;
@@ -251,7 +249,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   if (compression_enabled_) {
-    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_size);
+    auto decompress_result = ResultCompressor::Decompress(*compressed_ptr, original_size);
     if (!decompress_result) {
       // Decompression failed - enqueue for cleanup and treat as miss
       {
@@ -277,7 +275,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
   } else {
     // No compression - interpret raw bytes as DocId array
     result.resize(original_size);
-    std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
+    std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
   }
 
   // Decompression succeeded - now count as hit
@@ -318,11 +316,11 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
   // Create cache entry to calculate accurate memory usage
   CacheEntry temp_entry;
-  temp_entry.compressed = std::move(compressed);
+  temp_entry.compressed = std::make_shared<const std::vector<uint8_t>>(std::move(compressed));
   temp_entry.metadata = metadata;
 
   const size_t original_count = result.size();  // Number of DocId elements, not bytes
-  const size_t compressed_size = temp_entry.compressed.size();
+  const size_t compressed_size = temp_entry.compressed->size();
   const size_t entry_memory = temp_entry.MemoryUsage();
 
   // Don't cache if entry is too large

@@ -181,6 +181,10 @@ uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
 }
 
 void ServerStats::Reset() {
+  // Note: Reset() is not atomic across all counters. Concurrent readers may
+  // observe a partially-reset state during the brief reset window. Callers
+  // should account for this when using post-reset values as baselines.
+
   // Reset command counters
   cmd_search_.store(0);
   cmd_count_.store(0);
@@ -194,12 +198,13 @@ void ServerStats::Reset() {
   cmd_config_.store(0);
   cmd_unknown_.store(0);
 
-  // Reset memory statistics
+  // Reset memory statistics (current only; peak is a cumulative high-water mark)
   current_memory_.store(0);
-  peak_memory_.store(0);
+  // Note: peak_memory_ is NOT reset — it is a cumulative high-water mark
 
-  // Reset connection statistics
-  active_connections_.store(0);
+  // Reset connection counters (cumulative only; active_connections_ represents
+  // live state and must not be reset while connections are open)
+  // Note: active_connections_ is NOT reset — it tracks live connection count
   total_connections_.store(0);
   total_requests_.store(0);
 

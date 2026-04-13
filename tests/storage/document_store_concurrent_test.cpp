@@ -99,7 +99,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
   DocumentStore store1;
 
   // Create and save a snapshot
-  std::unordered_map<std::string, FilterValue> filters;
+  FilterMap filters;
   filters["status"] = static_cast<int32_t>(1);
 
   for (int i = 0; i < 100; i++) {
@@ -191,7 +191,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
     threads.emplace_back([&store, &stop, &add_calls, i]() {
       int doc_id = 1000 + i * 1000;
       while (!stop) {
-        std::unordered_map<std::string, FilterValue> filters;
+        FilterMap filters;
         filters["thread_id"] = static_cast<int32_t>(i);
         (void)store.AddDocument("add_" + std::to_string(doc_id++), filters);
         add_calls++;
@@ -233,6 +233,32 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
   size_t final_size = store.Size();
   EXPECT_GE(final_size, 0);
   EXPECT_LT(final_size, 10000);
+}
+
+/**
+ * @brief Test SetStoreTexts() thread safety during concurrent writes
+ *
+ * SetStoreTexts() writes to store_texts_ which is read by AddDocument()
+ * under lock. Without atomicity, concurrent calls cause a data race on
+ * the plain bool member.
+ */
+TEST(DocumentStoreConcurrentTest, SetStoreTextsDuringConcurrentWrites) {
+  DocumentStore store;
+
+  std::thread writer([&]() {
+    for (int i = 0; i < 100; ++i) {
+      (void)store.AddDocument("pk" + std::to_string(i), {}, "text " + std::to_string(i));
+    }
+  });
+
+  std::thread toggler([&]() {
+    for (int i = 0; i < 200; ++i) {
+      store.SetStoreTexts(i % 2 == 0);
+    }
+  });
+
+  writer.join();
+  toggler.join();
 }
 
 /**

@@ -56,19 +56,23 @@ enum class ErrorCode : std::uint16_t {
   kConfigJsonError = 1007,        ///< JSON parsing error
 
   // ===== MySQL/Database Errors (2000-2999) =====
-  kMySQLConnectionFailed = 2000,  ///< Failed to connect to MySQL
-  kMySQLQueryFailed = 2001,       ///< MySQL query execution failed
-  kMySQLDisconnected = 2002,      ///< MySQL connection lost
-  kMySQLAuthFailed = 2003,        ///< MySQL authentication failed
-  kMySQLTimeout = 2004,           ///< MySQL operation timed out
-  kMySQLInvalidGTID = 2005,       ///< Invalid GTID format
-  kMySQLGTIDNotEnabled = 2006,    ///< GTID mode not enabled
-  kMySQLReplicationError = 2007,  ///< Replication error
-  kMySQLBinlogError = 2008,       ///< Binlog reading error
-  kMySQLTableNotFound = 2009,     ///< Table not found
-  kMySQLColumnNotFound = 2010,    ///< Column not found
-  kMySQLDuplicateColumn = 2011,   ///< Duplicate column in unique constraint
-  kMySQLInvalidSchema = 2012,     ///< Invalid schema/table structure
+  kMySQLConnectionFailed = 2000,        ///< Failed to connect to MySQL
+  kMySQLQueryFailed = 2001,             ///< MySQL query execution failed
+  kMySQLDisconnected = 2002,            ///< MySQL connection lost
+  kMySQLAuthFailed = 2003,              ///< MySQL authentication failed
+  kMySQLTimeout = 2004,                 ///< MySQL operation timed out
+  kMySQLInvalidGTID = 2005,             ///< Invalid GTID format
+  kMySQLGTIDNotEnabled = 2006,          ///< GTID mode not enabled
+  kMySQLReplicationError = 2007,        ///< Replication error
+  kMySQLBinlogError = 2008,             ///< Binlog reading error
+  kMySQLTableNotFound = 2009,           ///< Table not found
+  kMySQLColumnNotFound = 2010,          ///< Column not found
+  kMySQLDuplicateColumn = 2011,         ///< Duplicate column in unique constraint
+  kMySQLInvalidSchema = 2012,           ///< Invalid schema/table structure
+  kMySQLFieldTruncated = 2013,          ///< Field data truncated in binlog event
+  kMySQLInvalidMetadata = 2014,         ///< Invalid field metadata in binlog event
+  kMySQLUnsupportedType = 2015,         ///< Unsupported MySQL column type
+  kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
 
   // ===== Query Parsing Errors (3000-3999) =====
   kQuerySyntaxError = 3000,           ///< Query syntax error
@@ -92,6 +96,10 @@ enum class ErrorCode : std::uint16_t {
   kIndexDocumentNotFound = 4004,       ///< Document not found in index
   kIndexInvalidDocID = 4005,           ///< Invalid document ID
   kIndexFull = 4006,                   ///< Index capacity exceeded
+  kSyncTableNotFound = 4010,           ///< Table not found for SYNC operation
+  kSyncAlreadyInProgress = 4011,       ///< SYNC already in progress for table
+  kSyncMemoryCritical = 4012,          ///< Memory critically low, cannot start SYNC
+  kSyncThreadCreationFailed = 4013,    ///< Failed to create sync thread
 
   // ===== Storage/Snapshot Errors (5000-5999) =====
   kStorageFileNotFound = 5000,         ///< Snapshot file not found
@@ -231,6 +239,12 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Duplicate column";
     case ErrorCode::kMySQLInvalidSchema:
       return "Invalid schema";
+    case ErrorCode::kMySQLFieldTruncated:
+      return "Field data truncated";
+    case ErrorCode::kMySQLInvalidMetadata:
+      return "Invalid field metadata";
+    case ErrorCode::kMySQLUnsupportedType:
+      return "Unsupported column type";
 
     // Query
     case ErrorCode::kQuerySyntaxError:
@@ -273,6 +287,14 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Invalid document ID";
     case ErrorCode::kIndexFull:
       return "Index full";
+    case ErrorCode::kSyncTableNotFound:
+      return "Table not found for SYNC";
+    case ErrorCode::kSyncAlreadyInProgress:
+      return "SYNC already in progress";
+    case ErrorCode::kSyncMemoryCritical:
+      return "Memory critically low for SYNC";
+    case ErrorCode::kSyncThreadCreationFailed:
+      return "Failed to create sync thread";
 
     // Storage
     case ErrorCode::kStorageFileNotFound:
@@ -458,9 +480,9 @@ class Error {
   }
 
   /**
-   * @brief Implicit conversion to string (for compatibility)
+   * @brief Explicit conversion to string
    */
-  operator std::string() const { return to_string(); }
+  explicit operator std::string() const { return to_string(); }
 
   /**
    * @brief Get message as C string (for compatibility with legacy code)
@@ -506,7 +528,6 @@ inline Error MakeError(ErrorCode code, const std::string& message, const std::st
  * @param line Line number (automatically filled by compiler)
  * @return Error object with context information
  */
-template <typename... Args>
 inline Error MakeErrorWithLocation(ErrorCode code, const std::string& message, const char* file = __builtin_FILE(),
                                    int line = __builtin_LINE()) {
   return {code, message, std::string(file) + ":" + std::to_string(line)};

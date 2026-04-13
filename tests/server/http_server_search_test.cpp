@@ -32,20 +32,20 @@ class HttpServerTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     // Add test documents
-    std::unordered_map<std::string, storage::FilterValue> filters1;
+    storage::FilterMap filters1;
     filters1["status"] = static_cast<int64_t>(1);
     filters1["category"] = std::string("tech");
     filters1["score"] = 3.14159;
     filters1["series"] = std::string("Project X=Beta");
     auto doc_id1 = doc_store->AddDocument("article_1", filters1);
 
-    std::unordered_map<std::string, storage::FilterValue> filters2;
+    storage::FilterMap filters2;
     filters2["status"] = static_cast<int64_t>(1);
     filters2["category"] = std::string("news");
     filters2["score"] = 1.61803;
     auto doc_id2 = doc_store->AddDocument("article_2", filters2);
 
-    std::unordered_map<std::string, storage::FilterValue> filters3;
+    storage::FilterMap filters3;
     filters3["status"] = static_cast<int64_t>(0);
     auto doc_id3 = doc_store->AddDocument("article_3", filters3);
 
@@ -329,12 +329,12 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
   httplib::Client client("http://127.0.0.1:18080");
 
   // Add documents with bool filters
-  std::unordered_map<std::string, storage::FilterValue> filters_bool_true;
+  storage::FilterMap filters_bool_true;
   filters_bool_true["published"] = true;
   auto doc_id_bool1 = doc_store_->AddDocument("bool_article_1", filters_bool_true);
   index_->AddDocument(*doc_id_bool1, "boolean test");
 
-  std::unordered_map<std::string, storage::FilterValue> filters_bool_false;
+  storage::FilterMap filters_bool_false;
   filters_bool_false["published"] = false;
   auto doc_id_bool2 = doc_store_->AddDocument("bool_article_2", filters_bool_false);
   index_->AddDocument(*doc_id_bool2, "boolean test");

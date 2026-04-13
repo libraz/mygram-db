@@ -29,17 +29,22 @@ class TestCacheCoherency:
 
         def _inserter():
             """Insert rows one by one with unique content."""
-            gen = DataGenerator(seed=99)
+            DataGenerator(seed=99)
             for i in range(insert_count):
                 if stop_event.is_set():
                     break
-                mysql.insert_rows("articles", [{
-                    "title": f"{marker} insert {i}",
-                    "content": f"{marker} coherency content batch {i}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }])
+                mysql.insert_rows(
+                    "articles",
+                    [
+                        {
+                            "title": f"{marker} insert {i}",
+                            "content": f"{marker} coherency content batch {i}",
+                            "status": 1,
+                            "category": "tech",
+                            "enabled": 1,
+                        }
+                    ],
+                )
                 time.sleep(0.1)
 
         def _searcher(thread_id: int):
@@ -92,13 +97,16 @@ class TestCacheCoherency:
         marker = f"cacheinval_{uuid.uuid4().hex[:8]}"
 
         # Insert specific rows
-        rows = [{
-            "title": f"{marker} original title {i}",
-            "content": f"{marker} original content for cache invalidation test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(5)]
+        rows = [
+            {
+                "title": f"{marker} original title {i}",
+                "content": f"{marker} original content for cache invalidation test",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(5)
+        ]
         mysql.insert_rows("articles", rows)
         mygramdb.sync("articles", timeout=15)
 
@@ -125,21 +133,22 @@ class TestCacheCoherency:
 
         # Search with new content
         result2 = mygramdb.count("articles", new_marker)
-        assert result2 >= 3, (
-            f"Expected updated content in results, got count={result2}"
-        )
+        assert result2 >= 3, f"Expected updated content in results, got count={result2}"
 
     def test_delete_then_search_cache_stale(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache search result, DELETE rows, verify results decrease."""
         marker = f"cachestale_{uuid.uuid4().hex[:8]}"
 
-        rows = [{
-            "title": f"{marker} to delete {i}",
-            "content": f"{marker} content that will be deleted soon",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(10)]
+        rows = [
+            {
+                "title": f"{marker} to delete {i}",
+                "content": f"{marker} content that will be deleted soon",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(10)
+        ]
         mysql.insert_rows("articles", rows)
         mygramdb.sync("articles", timeout=15)
 
