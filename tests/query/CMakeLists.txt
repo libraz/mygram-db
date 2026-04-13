@@ -74,6 +74,21 @@ gtest_discover_tests(bm25_sort_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Synonym dictionary tests
+add_executable(synonym_dictionary_test
+  synonym_dictionary_test.cpp
+)
+
+target_link_libraries(synonym_dictionary_test
+  mygramdb_query
+  GTest::gtest_main
+)
+
+gtest_discover_tests(synonym_dictionary_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # Result sorter ASC/DESC bug reproduction test
 
 add_executable(result_sorter_asc_desc_test

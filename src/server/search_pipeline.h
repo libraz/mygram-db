@@ -24,6 +24,9 @@ class CacheManager;
 namespace mygramdb::config {
 struct Config;
 }  // namespace mygramdb::config
+namespace mygramdb::query {
+class SynonymDictionary;
+}  // namespace mygramdb::query
 
 namespace mygramdb::server {
 
@@ -181,6 +184,31 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
 void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query,
                    const std::vector<storage::DocId>& results, const std::vector<SearchTermInfo>& term_infos,
                    double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary);
+
+/// @brief A synonym group: original term + all its synonyms, each with their own n-grams
+struct SynonymTermGroup {
+  std::vector<SearchTermInfo> variants;       ///< N-gram info per synonym variant
+  std::vector<std::string> normalized_terms;  ///< Normalized terms for verify_text
+};
+
+/// @brief Expand search terms with synonym dictionary
+std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::string>& search_terms,
+                                                       const query::SynonymDictionary* synonym_dict,
+                                                       index::Index* current_index, int ngram_size,
+                                                       int kanji_ngram_size, bool cross_boundary_ngrams);
+
+/// @brief Execute synonym-aware search pipeline with OR-within-group, AND-across-group semantics
+SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::vector<SynonymTermGroup>& synonym_groups,
+                                         index::Index* current_index, storage::DocumentStore* current_doc_store,
+                                         const config::Config* full_config, int ngram_size, int kanji_ngram_size,
+                                         bool cross_boundary, size_t filter_threshold);
+
+/// @brief Synonym-aware post-filter: for each group, document must contain at least one synonym
+std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<storage::DocId>& candidates,
+                                                          const std::vector<SynonymTermGroup>& synonym_groups,
+                                                          index::Index* current_index,
+                                                          storage::DocumentStore* doc_store,
+                                                          const config::Config* full_config);
 
 }  // namespace search_pipeline
 }  // namespace mygramdb::server

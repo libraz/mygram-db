@@ -511,6 +511,17 @@ TableConfig ParseTableConfig(const json& json_obj) {
     }
   }
 
+  // Parse synonyms config
+  if (json_obj.contains("synonyms")) {
+    const auto& syn = json_obj["synonyms"];
+    if (syn.contains("enable")) {
+      config.synonyms.enable = syn["enable"].get<bool>();
+    }
+    if (syn.contains("file")) {
+      config.synonyms.file = syn["file"].get<std::string>();
+    }
+  }
+
   return config;
 }
 

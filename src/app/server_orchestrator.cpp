@@ -11,6 +11,7 @@
 #include "app/signal_manager.h"
 #include "config/runtime_variable_manager.h"
 #include "loader/initial_loader.h"
+#include "query/synonym_dictionary.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
 #include "utils/string_utils.h"
@@ -192,6 +193,28 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
                                                 deps_.config.memory.normalize.nfkc, deps_.config.memory.normalize.width,
                                                 deps_.config.memory.normalize.lower);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+    // Load synonym dictionary if configured
+    if (table_config.synonyms.enable && !table_config.synonyms.file.empty()) {
+      ctx->synonym_dict = std::make_unique<query::SynonymDictionary>();
+      auto normalizer = [&ctx](std::string_view text) { return ctx->index->NormalizeText(text); };
+      auto load_result = ctx->synonym_dict->LoadFromFile(table_config.synonyms.file, normalizer);
+      if (!load_result) {
+        mygram::utils::StructuredLog()
+            .Event("synonym_load_error")
+            .Field("table", table_config.name)
+            .Field("file", table_config.synonyms.file)
+            .Field("error", load_result.error().message())
+            .Error();
+      } else {
+        mygram::utils::StructuredLog()
+            .Event("synonym_dictionary_loaded")
+            .Field("table", table_config.name)
+            .Field("groups", static_cast<uint64_t>(ctx->synonym_dict->GroupCount()))
+            .Field("terms", static_cast<uint64_t>(ctx->synonym_dict->TermCount()))
+            .Info();
+      }
+    }
 
     table_contexts_[table_config.name] = std::move(ctx);
     mygram::utils::StructuredLog()

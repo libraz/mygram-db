@@ -14,6 +14,7 @@
 #include <memory>
 
 #include "cache/cache_manager.h"
+#include "query/synonym_dictionary.h"
 #include "config/config.h"
 #include "storage/filter_index.h"
 #include "utils/comparison_utils.h"
@@ -517,6 +518,188 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
     all_ngrams = std::move(merged);
   }
   cache_manager->Insert(query, results, all_ngrams, query_time_ms, ngram_size, kanji_ngram_size, cross_boundary);
+}
+
+std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::string>& search_terms,
+                                                       const query::SynonymDictionary* synonym_dict,
+                                                       index::Index* current_index, int ngram_size,
+                                                       int kanji_ngram_size, bool cross_boundary_ngrams) {
+  std::vector<SynonymTermGroup> groups;
+  groups.reserve(search_terms.size());
+
+  for (const auto& term : search_terms) {
+    SynonymTermGroup group;
+    std::string normalized = current_index->NormalizeText(term);
+
+    // Expand to include synonyms
+    auto synonyms = synonym_dict->Expand(normalized);
+
+    for (const auto& synonym : synonyms) {
+      auto ngrams = mygram::utils::GenerateQueryNgrams(synonym, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      mygram::utils::DeduplicateSorted(ngrams);
+
+      size_t min_size = std::numeric_limits<size_t>::max();
+      for (const auto& ngram : ngrams) {
+        uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+        if (posting_size > 0) {
+          min_size = std::min(min_size, static_cast<size_t>(posting_size));
+        } else {
+          min_size = 0;
+          break;
+        }
+      }
+
+      group.variants.push_back({std::move(ngrams), min_size});
+      group.normalized_terms.push_back(synonym);
+    }
+
+    groups.push_back(std::move(group));
+  }
+
+  return groups;
+}
+
+SearchPipelineResult ExecuteWithSynonyms(const query::Query& query,
+                                         const std::vector<SynonymTermGroup>& synonym_groups,
+                                         index::Index* current_index, storage::DocumentStore* current_doc_store,
+                                         const config::Config* full_config, int ngram_size, int kanji_ngram_size,
+                                         bool cross_boundary, size_t filter_threshold) {
+  (void)filter_threshold;  // Reserved for future optimization
+  SearchPipelineResult result;
+  bool first_group = true;
+
+  for (const auto& group : synonym_groups) {
+    // Union within this synonym group (OR semantics)
+    std::vector<storage::DocId> group_results;
+
+    for (const auto& variant : group.variants) {
+      if (variant.ngrams.empty() || variant.estimated_size == 0) {
+        continue;
+      }
+
+      auto var_results = current_index->SearchAnd(variant.ngrams);
+      if (group_results.empty()) {
+        group_results = std::move(var_results);
+      } else {
+        std::vector<storage::DocId> merged;
+        merged.reserve(group_results.size() + var_results.size());
+        std::set_union(group_results.begin(), group_results.end(), var_results.begin(), var_results.end(),
+                       std::back_inserter(merged));
+        group_results = std::move(merged);
+      }
+    }
+
+    // Intersect across groups (AND semantics)
+    if (first_group) {
+      result.results = std::move(group_results);
+      first_group = false;
+    } else if (!result.results.empty() && !group_results.empty()) {
+      std::vector<storage::DocId> intersection;
+      intersection.reserve(std::min(result.results.size(), group_results.size()));
+      std::set_intersection(result.results.begin(), result.results.end(), group_results.begin(), group_results.end(),
+                            std::back_inserter(intersection));
+      result.results = std::move(intersection);
+    } else {
+      result.results.clear();
+    }
+  }
+
+  if (first_group) {
+    result.empty_term_detected = true;
+    return result;
+  }
+
+  // Apply NOT filter (NOT terms are NOT synonym-expanded)
+  if (!query.not_terms.empty()) {
+    result.results =
+        ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary);
+  }
+
+  // Apply column filters
+  if (!query.filters.empty()) {
+    result.results = ApplyFiltersWithBitmap(result.results, query.filters, current_doc_store);
+  }
+
+  // Apply synonym-aware verify_text
+  result.results =
+      PostFilterByTextWithSynonyms(result.results, synonym_groups, current_index, current_doc_store, full_config);
+
+  return result;
+}
+
+std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<storage::DocId>& candidates,
+                                                          const std::vector<SynonymTermGroup>& synonym_groups,
+                                                          index::Index* current_index,
+                                                          storage::DocumentStore* doc_store,
+                                                          const config::Config* full_config) {
+  (void)current_index;  // Available for future normalization needs
+
+  if (candidates.empty() || full_config == nullptr) {
+    return candidates;
+  }
+
+  const auto& verify_mode = full_config->memory.verify_text;
+  if (verify_mode == "off") {
+    return candidates;
+  }
+
+  // Check if verification should be applied based on mode
+  bool should_verify = (verify_mode == "all");
+  if (verify_mode == "ascii") {
+    should_verify = true;
+    for (const auto& group : synonym_groups) {
+      for (const auto& term : group.normalized_terms) {
+        for (unsigned char ch : term) {
+          if (ch >= 0x80) {  // NOLINT(readability-magic-numbers)
+            should_verify = false;
+            break;
+          }
+        }
+        if (!should_verify) {
+          break;
+        }
+      }
+      if (!should_verify) {
+        break;
+      }
+    }
+  }
+
+  if (!should_verify) {
+    return candidates;
+  }
+
+  std::vector<storage::DocId> verified;
+  verified.reserve(candidates.size());
+
+  for (auto doc_id : candidates) {
+    auto text = doc_store->GetNormalizedText(doc_id);
+    if (!text.has_value()) {
+      verified.push_back(doc_id);
+      continue;
+    }
+
+    bool all_groups_match = true;
+    for (const auto& group : synonym_groups) {
+      bool any_synonym_found = false;
+      for (const auto& term : group.normalized_terms) {
+        if (text->find(term) != std::string::npos) {
+          any_synonym_found = true;
+          break;
+        }
+      }
+      if (!any_synonym_found) {
+        all_groups_match = false;
+        break;
+      }
+    }
+
+    if (all_groups_match) {
+      verified.push_back(doc_id);
+    }
+  }
+
+  return verified;
 }
 
 }  // namespace mygramdb::server::search_pipeline

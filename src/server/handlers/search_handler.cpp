@@ -11,6 +11,7 @@
 #include "cache/cache_manager.h"
 #include "index/bm25_scorer.h"
 #include "query/result_sorter.h"
+#include "query/synonym_dictionary.h"
 #include "server/search_pipeline.h"
 #include "utils/string_utils.h"
 
@@ -100,8 +101,90 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     output.debug_info.search_terms = output.all_search_terms;
   }
 
-  // Generate n-grams for each term and estimate result sizes
+  // Check for synonym dictionary
   output.current_cross_boundary = output.current_index->GetCrossBoundaryNgrams();
+  query::SynonymDictionary* synonym_dict = nullptr;
+  {
+    auto table_it2 = ctx_.table_contexts.find(query.table);
+    if (table_it2 != ctx_.table_contexts.end() && table_it2->second->synonym_dict &&
+        !table_it2->second->synonym_dict->IsEmpty()) {
+      synonym_dict = table_it2->second->synonym_dict.get();
+    }
+  }
+
+  if (synonym_dict != nullptr) {
+    // Synonym-aware search path
+    auto synonym_groups = search_pipeline::ExpandTermsWithSynonyms(
+        output.all_search_terms, synonym_dict, output.current_index, output.current_ngram_size,
+        output.current_kanji_ngram_size, output.current_cross_boundary);
+
+    if (conn_ctx.debug_mode) {
+      for (const auto& group : synonym_groups) {
+        for (const auto& variant : group.variants) {
+          for (const auto& ngram : variant.ngrams) {
+            output.debug_info.ngrams_used.push_back(ngram);
+          }
+          output.debug_info.posting_list_sizes.push_back(variant.estimated_size);
+        }
+      }
+    }
+
+    auto pipeline_result = search_pipeline::ExecuteWithSynonyms(
+        query, synonym_groups, output.current_index, output.current_doc_store, ctx_.full_config,
+        output.current_ngram_size, output.current_kanji_ngram_size, output.current_cross_boundary, filter_threshold_);
+
+    if (pipeline_result.empty_term_detected) {
+      output.results.clear();
+      auto end_time = std::chrono::high_resolution_clock::now();
+      output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      if (conn_ctx.debug_mode) {
+        output.debug_info.optimization_used = "synonym-search (empty posting list)";
+        output.debug_info.final_results = 0;
+        output.debug_info.query_time_ms = output.query_time_ms;
+        output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+      }
+      return "";
+    }
+
+    output.results = std::move(pipeline_result.results);
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.total_candidates = output.results.size();
+      output.debug_info.after_intersection = output.results.size();
+      output.debug_info.optimization_used = "synonym-expanded search";
+      output.debug_info.after_not = output.results.size();
+      output.debug_info.after_filters = output.results.size();
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+    // Collect all n-grams for cache invalidation
+    std::vector<SearchTermInfo> all_term_infos;
+    for (const auto& group : synonym_groups) {
+      for (const auto& variant : group.variants) {
+        all_term_infos.push_back(variant);
+      }
+    }
+    search_pipeline::InsertToCache(ctx_.cache_manager, query, output.results, all_term_infos, output.query_time_ms,
+                                   output.current_ngram_size, output.current_kanji_ngram_size,
+                                   output.current_cross_boundary);
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.query_time_ms = output.query_time_ms;
+      output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+      if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
+        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+        output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      } else {
+        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+      }
+    }
+
+    return "";  // Success
+  }
+
+  // Non-synonym path: generate n-grams for each term and estimate result sizes
   output.term_infos =
       search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
                                          output.current_kanji_ngram_size, output.current_cross_boundary);

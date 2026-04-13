@@ -7,6 +7,7 @@ add_library(mygramdb_query STATIC
   cache_key.cpp
   query_normalizer.cpp
   md5.cpp
+  synonym_dictionary.cpp
 )
 
 target_include_directories(mygramdb_query PUBLIC

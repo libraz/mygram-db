@@ -17,6 +17,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "query/synonym_dictionary.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
 #include "utils/network_utils.h"
@@ -149,6 +150,7 @@ struct TableContext {
   std::unique_ptr<index::Index> index;
   std::unique_ptr<storage::DocumentStore> doc_store;
   BM25Stats bm25_stats;
+  std::unique_ptr<query::SynonymDictionary> synonym_dict;  ///< Synonym dictionary (Phase 1B)
   // Note: BinlogReader is shared across all tables (single GTID stream)
 };
 

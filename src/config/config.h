@@ -181,6 +181,14 @@ struct PostingConfig {
 };
 
 /**
+ * @brief Synonym dictionary configuration
+ */
+struct SynonymConfig {
+  bool enable = false;   ///< Enable synonym expansion during search
+  std::string file;      ///< Path to TSV synonym file (one group per line, tab-separated)
+};
+
+/**
  * @brief Table configuration
  */
 struct TableConfig {
@@ -193,6 +201,7 @@ struct TableConfig {
   int kanji_ngram_size = 0;           // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
   bool cross_boundary_ngrams = true;  // Generate N-grams that span CJK/non-CJK boundaries
   PostingConfig posting;
+  SynonymConfig synonyms;
 };
 
 /**
