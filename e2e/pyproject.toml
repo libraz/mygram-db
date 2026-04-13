@@ -22,7 +22,27 @@ build-backend = "hatchling.build"
 packages = ["lib"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Order matters: non-destructive tests first, DDL/destructive tests last.
+# DDL operations (DROP, TRUNCATE, RENAME) disrupt binlog replication state
+# and can cause subsequent tests to see stale data if run too early.
+testpaths = [
+    "tests/smoke",
+    "tests/search",
+    "tests/unicode",
+    "tests/edge_cases",
+    "tests/cache",
+    "tests/statistics",
+    "tests/mysql",
+    "tests/replication",
+    "tests/memory",
+    "tests/persistence",
+    "tests/concurrency",
+    "tests/multi_table",
+    "tests/ddl",
+    "tests/resilience",
+    "tests/load",
+    "tests/benchmark",
+]
 markers = [
     "mysql: MySQL server configuration and connection tests",
     "smoke: Basic connectivity and health checks",

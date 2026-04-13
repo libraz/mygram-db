@@ -1391,9 +1391,8 @@ TEST(QueryCacheTest, MemoryUsageAccuracy) {
   EXPECT_GT(usage, sizeof(CacheEntry) + 100);
 
   // Must include table string
-  EXPECT_GE(usage,
-            sizeof(CacheEntry) + sizeof(std::vector<uint8_t>) + entry.compressed->capacity() +
-                entry.metadata.table.capacity());
+  EXPECT_GE(usage, sizeof(CacheEntry) + sizeof(std::vector<uint8_t>) + entry.compressed->capacity() +
+                       entry.metadata.table.capacity());
 }
 
 /**
@@ -1923,8 +1922,7 @@ TEST(QueryCacheTest, SharedPtrCompressedLookupCorrectness) {
 
     auto cached = cache.Lookup(key);
     ASSERT_TRUE(cached.has_value());
-    EXPECT_EQ(original_result, cached.value())
-        << "Lookup should return identical data for size=" << size;
+    EXPECT_EQ(original_result, cached.value()) << "Lookup should return identical data for size=" << size;
   }
 }
 

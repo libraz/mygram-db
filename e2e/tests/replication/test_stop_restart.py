@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from lib.metrics import MetricsSnapshot
-from lib.wait import wait_until, wait_until_gte
+from lib.wait import wait_until_gte
 
 pytestmark = pytest.mark.replication
 
@@ -35,8 +35,8 @@ class TestStopRestart:
                 time.sleep(3)
                 continue
             # Some other response (e.g. already running, or error)
-            assert False, f"Failed to start replication (attempt {attempt}): {resp}"
-        assert False, "Failed to start replication: stuck in stopping state"
+            raise AssertionError(f"Failed to start replication (attempt {attempt}): {resp}")
+        raise AssertionError("Failed to start replication: stuck in stopping state")
 
     def _ensure_replication_running(self, mygramdb):
         """Ensure replication is running (best effort)."""
@@ -60,13 +60,16 @@ class TestStopRestart:
 
             marker = f"stoprestart_{uuid.uuid4().hex[:8]}"
             n = 10
-            rows = [{
-                "title": f"Stop Restart Test {i}",
-                "content": f"Content for stop restart {marker} item {i}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            } for i in range(n)]
+            rows = [
+                {
+                    "title": f"Stop Restart Test {i}",
+                    "content": f"Content for stop restart {marker} item {i}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+                for i in range(n)
+            ]
             mysql.insert_rows("articles", rows)
 
             # Data should NOT appear while replication is stopped
@@ -95,13 +98,16 @@ class TestStopRestart:
         marker = f"stopmix_{uuid.uuid4().hex[:8]}"
 
         # Insert seed rows first (while replication is running)
-        seed_rows = [{
-            "title": f"Stop Mix Seed {i}",
-            "content": f"Content for stopmix seed {marker} item {i}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        } for i in range(5)]
+        seed_rows = [
+            {
+                "title": f"Stop Mix Seed {i}",
+                "content": f"Content for stopmix seed {marker} item {i}",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            }
+            for i in range(5)
+        ]
         mysql.insert_rows("articles", seed_rows)
 
         wait_until_gte(
@@ -117,25 +123,28 @@ class TestStopRestart:
             time.sleep(1)
 
             # INSERT 3 more
-            new_rows = [{
-                "title": f"Stop Mix New {i}",
-                "content": f"Content for stopmix new {marker} extra {i}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            } for i in range(3)]
+            new_rows = [
+                {
+                    "title": f"Stop Mix New {i}",
+                    "content": f"Content for stopmix new {marker} extra {i}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+                for i in range(3)
+            ]
             mysql.insert_rows("articles", new_rows)
 
             # UPDATE 2 rows
             mysql.update(
                 "articles",
                 f"content = 'Updated stopmix {marker} item 0'",
-                f"content LIKE '%stopmix seed {marker} item 0%'"
+                f"content LIKE '%stopmix seed {marker} item 0%'",
             )
             mysql.update(
                 "articles",
                 f"content = 'Updated stopmix {marker} item 1'",
-                f"content LIKE '%stopmix seed {marker} item 1%'"
+                f"content LIKE '%stopmix seed {marker} item 1%'",
             )
 
             # DELETE 1 row
@@ -186,7 +195,7 @@ class TestStopRestart:
     def test_rapid_stop_start_cycles(self, mysql, mygramdb, seed_data):
         """Stop/start cycles should not crash the server."""
         try:
-            for i in range(3):
+            for _i in range(3):
                 self._stop_replication(mygramdb)
                 self._start_replication(mygramdb)
 
@@ -195,13 +204,18 @@ class TestStopRestart:
 
             # Insert and verify replication still works
             marker = f"rapidcycle_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows("articles", [{
-                "title": "Rapid Cycle Test",
-                "content": f"Content for rapid cycle {marker}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            }])
+            mysql.insert_rows(
+                "articles",
+                [
+                    {
+                        "title": "Rapid Cycle Test",
+                        "content": f"Content for rapid cycle {marker}",
+                        "status": 1,
+                        "category": "tech",
+                        "enabled": 1,
+                    }
+                ],
+            )
 
             wait_until_gte(
                 lambda: mygramdb.count("articles", marker),
@@ -243,21 +257,22 @@ class TestStopRestart:
 
             marker = f"accum_{uuid.uuid4().hex[:8]}"
             n = 20
-            rows = [{
-                "title": f"Accumulated {i:03d}",
-                "content": f"Content for accumulated {marker} seq {i:03d}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            } for i in range(n)]
+            rows = [
+                {
+                    "title": f"Accumulated {i:03d}",
+                    "content": f"Content for accumulated {marker} seq {i:03d}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+                for i in range(n)
+            ]
             mysql.insert_rows("articles", rows)
 
             # Nothing should appear yet
             time.sleep(2)
             count_stopped = mygramdb.count("articles", marker)
-            assert count_stopped == 0, (
-                f"No data should appear while stopped, got {count_stopped}"
-            )
+            assert count_stopped == 0, f"No data should appear while stopped, got {count_stopped}"
 
             # Restart
             self._start_replication(mygramdb)
@@ -292,13 +307,18 @@ class TestStopRestart:
 
             # INSERT while stopped
             marker = f"stopddl_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows("articles", [{
-                "title": "Stop DDL Test",
-                "content": f"Content for stop ddl {marker}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            }])
+            mysql.insert_rows(
+                "articles",
+                [
+                    {
+                        "title": "Stop DDL Test",
+                        "content": f"Content for stop ddl {marker}",
+                        "status": 1,
+                        "category": "tech",
+                        "enabled": 1,
+                    }
+                ],
+            )
 
             # Restart
             self._start_replication(mygramdb)

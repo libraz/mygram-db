@@ -2,8 +2,8 @@
 
 import pytest
 
-from lib.wait import wait_until_gte
 from lib.data_generator import DataGenerator
+from lib.wait import wait_until_gte
 
 pytestmark = pytest.mark.edge_cases
 
@@ -18,13 +18,18 @@ class TestLargeContent:
         marker = "large_doc_unique_marker"
         large_content = f"{marker} {large_content}"
 
-        mysql.insert_rows("articles", [{
-            "title": "Large Document",
-            "content": large_content,
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Large Document",
+                    "content": large_content,
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),

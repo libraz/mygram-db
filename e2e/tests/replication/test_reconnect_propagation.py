@@ -27,13 +27,18 @@ class TestReconnectPropagation:
 
         # Insert a row after the reconnection
         marker = f"reconnect_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "Reconnect Test",
-            "content": f"Content with {marker} after idle reconnect",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Reconnect Test",
+                    "content": f"Content with {marker} after idle reconnect",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         # The row should be found within 20 seconds
         wait_until_gte(

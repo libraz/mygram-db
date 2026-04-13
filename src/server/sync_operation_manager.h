@@ -21,6 +21,10 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 
+namespace mygramdb::cache {
+class CacheManager;
+}
+
 namespace mygramdb::mysql {
 class BinlogReader;
 }
@@ -81,9 +85,11 @@ class SyncOperationManager {
    * @param table_contexts Reference to table contexts (must outlive this instance)
    * @param full_config Pointer to configuration (must outlive this instance)
    * @param binlog_reader Pointer to binlog reader (must outlive this instance, can be nullptr)
+   * @param cache_manager Pointer to cache manager (must outlive this instance, can be nullptr)
    */
   SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                       const config::Config* full_config, mysql::BinlogReader* binlog_reader);
+                       const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                       cache::CacheManager* cache_manager = nullptr);
 
   ~SyncOperationManager();
 
@@ -143,10 +149,17 @@ class SyncOperationManager {
    */
   bool GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const;
 
+  /**
+   * @brief Set the cache manager (for deferred initialization)
+   * @param cache_manager Pointer to cache manager (must outlive this instance, can be nullptr)
+   */
+  void SetCacheManager(cache::CacheManager* cache_manager);
+
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
   mysql::BinlogReader* binlog_reader_;
+  cache::CacheManager* cache_manager_ = nullptr;
 
   // State tracking
   //

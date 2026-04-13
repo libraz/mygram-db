@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import socket
 import time
 from typing import Any
-from urllib.request import urlopen, Request
 from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 class MygramdbClient:
     """MygramDB client supporting both TCP and HTTP protocols."""
 
-    def __init__(self, host: str, tcp_port: int = 11016, http_port: int = 18080, unix_socket_path: str = "") -> None:
+    def __init__(
+        self, host: str, tcp_port: int = 11016, http_port: int = 18080, unix_socket_path: str = ""
+    ) -> None:
         self.host = host
         self.tcp_port = tcp_port
         self.http_port = http_port
@@ -85,7 +88,11 @@ class MygramdbClient:
             sock.close()
 
             response = data.decode("utf-8", errors="ignore").strip()
-            success = response.startswith("OK ") or response.startswith("(integer)") or response.startswith("OK")
+            success = (
+                response.startswith("OK ")
+                or response.startswith("(integer)")
+                or response.startswith("OK")
+            )
             return success, elapsed, response
         except Exception as e:
             return False, 0.0, str(e)
@@ -273,24 +280,18 @@ class MygramdbClient:
             if line.startswith("OK RESULTS "):
                 parts = line.split()
                 if len(parts) >= 3:
-                    try:
+                    with contextlib.suppress(ValueError):
                         result["total"] = int(parts[2])
-                    except ValueError:
-                        pass
                     for p in parts[3:]:
-                        try:
+                        with contextlib.suppress(ValueError):
                             ids.append(int(p))
-                        except ValueError:
-                            pass
                 continue
             # "OK <total>" format
             if line.startswith("OK "):
                 parts = line.split()
                 if len(parts) >= 2:
-                    try:
+                    with contextlib.suppress(ValueError):
                         result["total"] = int(parts[1])
-                    except ValueError:
-                        pass
                 continue
             if line.isdigit():
                 ids.append(int(line))
@@ -298,10 +299,8 @@ class MygramdbClient:
                 # "1) 42" numbered list format
                 parts = line.split()
                 if len(parts) >= 2:
-                    try:
+                    with contextlib.suppress(ValueError):
                         ids.append(int(parts[-1]))
-                    except ValueError:
-                        pass
 
         result["ids"] = ids
         if not result["total"] and ids:

@@ -214,22 +214,24 @@ def _run_saturation_mode(
             sat_result = analyzer.run(queries=queries, concurrency_levels=concurrency_levels)
 
             print_saturation_summary(sat_result)
-            raw_data["saturation"].append({
-                "scenario": scenario.name,
-                "peak_qps": sat_result.peak_qps,
-                "peak_concurrency": sat_result.peak_concurrency,
-                "breaking_point": sat_result.breaking_point,
-                "levels": [
-                    {
-                        "concurrency": lvl.concurrency,
-                        "qps": round(lvl.qps, 1),
-                        "p50_ms": round(lvl.p50_ms, 2),
-                        "p99_ms": round(lvl.p99_ms, 2),
-                        "error_rate": round(lvl.error_rate, 4),
-                    }
-                    for lvl in sat_result.levels
-                ],
-            })
+            raw_data["saturation"].append(
+                {
+                    "scenario": scenario.name,
+                    "peak_qps": sat_result.peak_qps,
+                    "peak_concurrency": sat_result.peak_concurrency,
+                    "breaking_point": sat_result.breaking_point,
+                    "levels": [
+                        {
+                            "concurrency": lvl.concurrency,
+                            "qps": round(lvl.qps, 1),
+                            "p50_ms": round(lvl.p50_ms, 2),
+                            "p99_ms": round(lvl.p99_ms, 2),
+                            "error_rate": round(lvl.error_rate, 4),
+                        }
+                        for lvl in sat_result.levels
+                    ],
+                }
+            )
         finally:
             mygramdb.replication_start()
 
@@ -259,7 +261,9 @@ def _run_connection_cost(args: argparse.Namespace, mygramdb: MygramdbClient) -> 
     print(f"  Transport: {transport}")
     print(f"  Iterations: {iterations}")
     if times:
-        print(f"  p50: {result.p50_ms:.2f}ms, p99: {result.p99_ms:.2f}ms, avg: {result.avg_ms:.2f}ms")
+        print(
+            f"  p50: {result.p50_ms:.2f}ms, p99: {result.p99_ms:.2f}ms, avg: {result.avg_ms:.2f}ms"
+        )
     return {"connection_cost": {"transport": transport, **summary}}
 
 
@@ -420,10 +424,8 @@ def main() -> None:
         all_report_data.update(result)
 
     # Run comparison mode
-    comparison_results: list[ComparisonResult] = []
     if args.compare:
         results, raw_data = _run_comparison_mode(args, scenarios, mysql, mygramdb)
-        comparison_results = results
         all_report_data.update(raw_data)
 
         print()
@@ -471,14 +473,15 @@ def main() -> None:
                     result = runner.run(queries, concurrency=c, duration=duration)
                     summary = result.summary()
                     print(
-                        f"p50={result.p50_ms:.1f}ms p99={result.p99_ms:.1f}ms "
-                        f"qps={result.qps:.0f}"
+                        f"p50={result.p50_ms:.1f}ms p99={result.p99_ms:.1f}ms qps={result.qps:.0f}"
                     )
-                    target_results["benchmarks"].append({
-                        "scenario": scenario.name,
-                        "concurrency": c,
-                        **summary,
-                    })
+                    target_results["benchmarks"].append(
+                        {
+                            "scenario": scenario.name,
+                            "concurrency": c,
+                            **summary,
+                        }
+                    )
             finally:
                 mygramdb.replication_start()
                 pool.close_all()
@@ -491,9 +494,7 @@ def main() -> None:
 
     # Check against baseline
     if os.path.exists(BASELINE_PATH):
-        baseline_anomalies = detector.check_regression_from_files(
-            all_report_data, BASELINE_PATH
-        )
+        baseline_anomalies = detector.check_regression_from_files(all_report_data, BASELINE_PATH)
         anomalies.extend(baseline_anomalies)
 
     if anomalies:

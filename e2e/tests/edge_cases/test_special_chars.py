@@ -10,14 +10,20 @@ class TestSpecialChars:
 
     def test_sql_injection_content(self, mysql, mygramdb, seed_data):
         """SQL injection strings should not cause issues."""
-        mysql.insert_rows("articles", [{
-            "title": "Injection Test",
-            "content": "Robert'); DROP TABLE articles;-- injection test",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Injection Test",
+                    "content": "Robert'); DROP TABLE articles;-- injection test",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
         import time
+
         time.sleep(2)
         # Should not crash and tables should still exist
         assert mygramdb.ping()
@@ -26,14 +32,20 @@ class TestSpecialChars:
 
     def test_html_xss_content(self, mysql, mygramdb, seed_data):
         """XSS-like content should be stored and searchable safely."""
-        mysql.insert_rows("articles", [{
-            "title": "XSS Test",
-            "content": "<script>alert('xss')</script> xss test content",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "XSS Test",
+                    "content": "<script>alert('xss')</script> xss test content",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
         import time
+
         time.sleep(2)
         assert mygramdb.ping()
 

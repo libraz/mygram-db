@@ -2,8 +2,8 @@
 
 import pytest
 
-from lib.wait import wait_until_gte
 from lib.metrics import MetricsSnapshot
+from lib.wait import wait_until_gte
 
 pytestmark = pytest.mark.statistics
 
@@ -45,6 +45,4 @@ class TestReplicationCounters:
         if insert_metrics:
             # At least one insert metric should have increased by >= n
             max_increase = max(insert_metrics.values())
-            assert max_increase >= n, (
-                f"Insert counter increased by {max_increase}, expected >= {n}"
-            )
+            assert max_increase >= n, f"Insert counter increased by {max_increase}, expected >= {n}"

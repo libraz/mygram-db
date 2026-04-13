@@ -69,10 +69,28 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   // before creating new connections and threads.
   std::lock_guard<std::mutex> start_lock(stop_mutex_);
 
-  // Check if currently stopping (running_ is true but should_stop_ is also true)
+  // Clean up stale state if should_stop_ is set.
+  // This can happen in two scenarios:
+  // 1. Reader thread self-exited due to non-recoverable error (should_stop_=true, running_=true)
+  //    The thread sets should_stop_ but does NOT clear running_ (to prevent Stop() join race).
+  // 2. Previous Stop() completed but a race left should_stop_ set (should_stop_=true, running_=false)
+  //
+  // Since we hold stop_mutex_ here, and Stop() also requires stop_mutex_,
+  // Stop() cannot be running concurrently. It's safe to join threads and reset.
   if (should_stop_.load()) {
-    SetLastError("Binlog reader is stopping, please wait");
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    if (reader_thread_ && reader_thread_->joinable()) {
+      reader_thread_->join();
+      reader_thread_.reset();
+    }
+    if (worker_thread_ && worker_thread_->joinable()) {
+      worker_thread_->join();
+      worker_thread_.reset();
+    }
+    binlog_connection_.reset();
+    metadata_connection_.reset();
+    should_stop_ = false;
+    running_ = false;
+    mygram::utils::StructuredLog().Event("binlog_reader_stale_state_cleaned").Info();
   }
 
   // Atomically check and set running_ to prevent concurrent Start() calls

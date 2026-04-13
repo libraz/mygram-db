@@ -72,15 +72,17 @@ class BenchmarkResult:
             "error_rate": round(self.error_rate, 4),
         }
         if self.times:
-            result.update({
-                "avg_ms": round(self.avg_ms, 2),
-                "min_ms": round(self.min_ms, 2),
-                "max_ms": round(self.max_ms, 2),
-                "p50_ms": round(self.p50_ms, 2),
-                "p95_ms": round(self.p95_ms, 2),
-                "p99_ms": round(self.p99_ms, 2),
-                "qps": round(self.qps, 1),
-            })
+            result.update(
+                {
+                    "avg_ms": round(self.avg_ms, 2),
+                    "min_ms": round(self.min_ms, 2),
+                    "max_ms": round(self.max_ms, 2),
+                    "p50_ms": round(self.p50_ms, 2),
+                    "p95_ms": round(self.p95_ms, 2),
+                    "p99_ms": round(self.p99_ms, 2),
+                    "qps": round(self.qps, 1),
+                }
+            )
         return result
 
 

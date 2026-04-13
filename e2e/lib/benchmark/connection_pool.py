@@ -6,6 +6,7 @@ TCP/UDS switching, and timed query execution for both MygramDB and MySQL.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import time
 from abc import ABC, abstractmethod
@@ -58,10 +59,8 @@ class ConnectionPool(ABC):
         while True:
             try:
                 conn = self._pool.get_nowait()
-                try:
+                with contextlib.suppress(Exception):
                     self._close_connection(conn)
-                except Exception:
-                    pass
             except Empty:
                 break
 
@@ -114,10 +113,8 @@ class MygramdbConnection:
 
     def close(self) -> None:
         self._closed = True
-        try:
+        with contextlib.suppress(Exception):
             self._sock.close()
-        except Exception:
-            pass
 
 
 class MygramdbConnectionPool(ConnectionPool):
@@ -162,10 +159,8 @@ class MygramdbConnectionPool(ConnectionPool):
         success, elapsed, response = conn.command_timed(cmd)
         if conn.is_closed:
             conn.close()
-            try:
+            with contextlib.suppress(Exception):
                 conn = self._create_connection()
-            except Exception:
-                pass
         self.return_connection(conn)
         return success, elapsed, response
 
@@ -209,10 +204,8 @@ class MysqlConnection:
 
     def close(self) -> None:
         self._closed = True
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
 
 class MysqlConnectionPool(ConnectionPool):
@@ -270,10 +263,8 @@ class MysqlConnectionPool(ConnectionPool):
             self.return_connection(conn)
             return result
         except Exception as exc:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
             try:
                 replacement = self._create_connection()
                 self.return_connection(replacement)

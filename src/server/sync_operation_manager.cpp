@@ -13,6 +13,7 @@
 #include <sstream>
 #include <thread>
 
+#include "cache/cache_manager.h"
 #include "loader/initial_loader.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
@@ -28,8 +29,14 @@ constexpr int kSyncPollIntervalMs = 100;
 }  // namespace
 
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader)
-    : table_contexts_(table_contexts), full_config_(full_config), binlog_reader_(binlog_reader) {}
+                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                                           cache::CacheManager* cache_manager)
+    : table_contexts_(table_contexts),
+      full_config_(full_config),
+      binlog_reader_(binlog_reader),
+      cache_manager_(cache_manager) {}
+
+void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
 
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();
@@ -462,6 +469,29 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       return;
     }
 
+    // Stop replication BEFORE clearing data to prevent the reader/worker
+    // threads from re-adding documents into the cleared index/doc_store.
+    mysql::BinlogReader* reader = binlog_reader_;
+    bool replication_was_running = false;
+    if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {
+      mygram::utils::StructuredLog()
+          .Event("replication_restart")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("reason", "stop_before_clear")
+          .Info();
+      reader->Stop();
+      replication_was_running = true;
+    }
+
+    // Clear index and doc_store before SYNC to ensure a clean rebuild.
+    // Without this, stale data from a previous (possibly failed) SYNC can
+    // persist: the InitialLoader skips index updates for documents whose PK
+    // already exists in the doc_store, causing content mismatches where
+    // doc_store has new data but the index retains old posting lists.
+    ctx->index->Clear();
+    ctx->doc_store->Clear();
+
     // Build initial data load
     loader::InitialLoader loader(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
                                  full_config_->build);
@@ -529,13 +559,18 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.processed_rows = processed;
       });
 
-      // Start replication if configured
-      // NOTE: binlog_reader_ is owned by Application and guaranteed to outlive
-      // SyncOperationManager. We check for nullptr for defensive programming.
-      // SAFETY: Capture binlog_reader_ to local variable to prevent TOCTOU issues
-      // (Time-Of-Check-Time-Of-Use) if binlog_reader_ were to be modified by another thread.
-      mysql::BinlogReader* reader = binlog_reader_;
+      // Clear search cache for this table after SYNC replaces the index
+      if (cache_manager_ != nullptr) {
+        cache_manager_->ClearTable(table_name);
+        mygram::utils::StructuredLog()
+            .Event("sync_cache_cleared")
+            .Field("table", table_name)
+            .Field("rows", processed)
+            .Info();
+      }
 
+      // Restart replication from the SYNC GTID position.
+      // Replication was stopped before Clear() above; now set the new GTID and restart.
       // Log replication configuration for debugging
       mygram::utils::StructuredLog()
           .Event("sync_replication_check")
@@ -547,18 +582,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Info();
 
       if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
-        // reader is guaranteed non-null here due to the check above
-        // If replication is already running, stop it first to update GTID
-        // This handles cases where:
-        // 1. Replication failed with non-recoverable error but running_ flag wasn't cleared
-        // 2. GTID needs to be updated to the snapshot position
+        // If replication is still running (e.g., was not stopped earlier because
+        // it wasn't enabled at that point), stop it now before updating GTID.
         if (reader->IsRunning()) {
-          mygram::utils::StructuredLog()
-              .Event("replication_restart")
-              .Field("operation", "sync")
-              .Field("table", table_name)
-              .Field("reason", "update_gtid_after_sync")
-              .Info();
           reader->Stop();
         }
 

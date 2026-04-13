@@ -34,8 +34,7 @@ class TestColumnValidation:
         """UNIQUE KEY column must be detected."""
         mysql.execute("DROP TABLE IF EXISTS _e2e_validate_uk")
         mysql.execute(
-            "CREATE TABLE _e2e_validate_uk "
-            "(id INT, code VARCHAR(50) UNIQUE, name VARCHAR(100))"
+            "CREATE TABLE _e2e_validate_uk (id INT, code VARCHAR(50) UNIQUE, name VARCHAR(100))"
         )
         try:
             result = mysql.execute(
@@ -52,9 +51,7 @@ class TestColumnValidation:
     def test_composite_key_not_single(self, mysql: MysqlClient) -> None:
         """Composite PK columns must not be treated as single-column keys."""
         mysql.execute("DROP TABLE IF EXISTS _e2e_validate_comp")
-        mysql.execute(
-            "CREATE TABLE _e2e_validate_comp (a INT, b INT, PRIMARY KEY(a, b))"
-        )
+        mysql.execute("CREATE TABLE _e2e_validate_comp (a INT, b INT, PRIMARY KEY(a, b))")
         try:
             total = mysql.execute(
                 "SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.STATISTICS "

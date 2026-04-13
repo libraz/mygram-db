@@ -74,12 +74,9 @@ class BenchmarkRunner:
 
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [
-                executor.submit(self._worker, queries, stop_time)
-                for _ in range(concurrency)
+                executor.submit(self._worker, queries, stop_time) for _ in range(concurrency)
             ]
-            all_results: list[list[tuple[bool, float, str]]] = [
-                f.result() for f in futures
-            ]
+            all_results: list[list[tuple[bool, float, str]]] = [f.result() for f in futures]
 
         total_time_ms = (time.perf_counter() - start_wall) * 1000
 

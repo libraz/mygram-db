@@ -4,8 +4,8 @@ import uuid
 
 import pytest
 
-from lib.wait import wait_until_gte
 from lib.data_generator import DataGenerator
+from lib.wait import wait_until_gte
 
 pytestmark = pytest.mark.replication
 
@@ -19,13 +19,15 @@ class TestBatchOperations:
         marker = f"batch1k_{uuid.uuid4().hex[:8]}"
         rows = []
         for i in range(1000):
-            rows.append({
-                "title": f"Batch1000 #{i}",
-                "content": f"Content {marker} item number {i} {gen._random_sentence(5, 15)}",
-                "status": gen.rng.choice([1, 2, 3]),
-                "category": gen.rng.choice(DataGenerator.CATEGORIES),
-                "enabled": 1,
-            })
+            rows.append(
+                {
+                    "title": f"Batch1000 #{i}",
+                    "content": f"Content {marker} item number {i} {gen._random_sentence(5, 15)}",
+                    "status": gen.rng.choice([1, 2, 3]),
+                    "category": gen.rng.choice(DataGenerator.CATEGORIES),
+                    "enabled": 1,
+                }
+            )
         mysql.insert_rows("articles", rows)
 
         # Wait for binlog replication to process most events.
@@ -44,17 +46,23 @@ class TestBatchOperations:
         marker = f"churn_{uuid.uuid4().hex[:8]}"
 
         # Insert and immediately delete
-        mysql.insert_rows("articles", [{
-            "title": "Churn Test",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Churn Test",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
         mysql.delete("articles", f"content LIKE '%{marker}%'")
 
         # Wait for events to process
         import time
+
         time.sleep(5)
 
         # Should have 0 documents with this marker

@@ -1416,10 +1416,9 @@ Expected<void, Error> ReadDumpV1(
 
       // Maximum allowed size for table data sections (prevents OOM from malicious/corrupt dumps)
       // Use physical memory as the upper bound; fall back to 64 GB if unavailable
-      const uint64_t kMaxTableDataSectionLength = []{
+      const uint64_t kMaxTableDataSectionLength = [] {
         auto mem_info = mygram::utils::GetSystemMemoryInfo();
-        return mem_info ? mem_info->total_physical_bytes
-                        : 64ULL * 1024 * 1024 * 1024;
+        return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
       }();
 
       // Check if table context exists
@@ -1464,8 +1463,7 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
       if (index_len > kMaxTableDataSectionLength) {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
       }
 
       if (index_len > 0) {

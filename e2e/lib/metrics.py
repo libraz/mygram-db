@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import TYPE_CHECKING
 
@@ -30,14 +31,14 @@ class MetricsSnapshot:
             if not line or line.startswith("#"):
                 continue
             # Match: metric_name{labels} value or metric_name value
-            match = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^}]*\})?)\s+([\d.eE+-]+|NaN|Inf|-Inf)$", line)
+            match = re.match(
+                r"^([a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^}]*\})?)\s+([\d.eE+-]+|NaN|Inf|-Inf)$", line
+            )
             if match:
                 key = match.group(1)
                 val_str = match.group(2)
-                try:
+                with contextlib.suppress(ValueError):
                     result[key] = float(val_str)
-                except ValueError:
-                    pass
         return result
 
     def get(self, metric: str, default: float = 0.0) -> float:

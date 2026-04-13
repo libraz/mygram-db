@@ -801,9 +801,11 @@ TEST(QueryASTEvaluationTest, MultipleNotNodesShareAllDocs) {
 TEST(QueryASTParserBugFixTest, DeeplyNestedParensRejected) {
   // 33 levels of nesting should exceed kMaxRecursionDepth (32)
   std::string expr;
-  for (int i = 0; i < 33; ++i) expr += "(";
+  for (int i = 0; i < 33; ++i)
+    expr += "(";
   expr += "term";
-  for (int i = 0; i < 33; ++i) expr += ")";
+  for (int i = 0; i < 33; ++i)
+    expr += ")";
 
   QueryASTParser parser;
   auto result = parser.Parse(expr);
@@ -814,9 +816,11 @@ TEST(QueryASTParserBugFixTest, DeeplyNestedParensRejected) {
 TEST(QueryASTParserBugFixTest, ModerateParenNestingAccepted) {
   // 31 levels should be within limit
   std::string expr;
-  for (int i = 0; i < 31; ++i) expr += "(";
+  for (int i = 0; i < 31; ++i)
+    expr += "(";
   expr += "term";
-  for (int i = 0; i < 31; ++i) expr += ")";
+  for (int i = 0; i < 31; ++i)
+    expr += ")";
 
   QueryASTParser parser;
   auto result = parser.Parse(expr);

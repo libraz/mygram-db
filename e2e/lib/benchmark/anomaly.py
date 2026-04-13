@@ -57,17 +57,13 @@ class AnomalyDetector:
                 continue
             threshold = base_threshold * factor
             actual = getattr(result, metric, 0.0)
-            anomaly = self._classify_higher_is_worse(
-                scenario_name, metric, actual, threshold
-            )
+            anomaly = self._classify_higher_is_worse(scenario_name, metric, actual, threshold)
             if anomaly is not None:
                 anomalies.append(anomaly)
 
         min_qps = scenario_thresholds.get("min_qps")
         if min_qps is not None:
-            anomaly = self._classify_lower_is_worse(
-                scenario_name, "qps", result.qps, min_qps
-            )
+            anomaly = self._classify_lower_is_worse(scenario_name, "qps", result.qps, min_qps)
             if anomaly is not None:
                 anomalies.append(anomaly)
 
@@ -92,23 +88,29 @@ class AnomalyDetector:
             if ratio <= 0:
                 continue
             if ratio > 2.0:
-                anomalies.append(Anomaly(
-                    severity="critical",
-                    scenario=scenario_name,
-                    metric=metric,
-                    actual=ratio,
-                    threshold=max_ratio,
-                    message=f"{metric}={ratio:.2f} critically exceeds threshold {max_ratio:.2f}",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="critical",
+                        scenario=scenario_name,
+                        metric=metric,
+                        actual=ratio,
+                        threshold=max_ratio,
+                        message=(
+                            f"{metric}={ratio:.2f} critically exceeds threshold {max_ratio:.2f}"
+                        ),
+                    )
+                )
             elif ratio > max_ratio:
-                anomalies.append(Anomaly(
-                    severity="warning",
-                    scenario=scenario_name,
-                    metric=metric,
-                    actual=ratio,
-                    threshold=max_ratio,
-                    message=f"{metric}={ratio:.2f} exceeds threshold {max_ratio:.2f}",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="warning",
+                        scenario=scenario_name,
+                        metric=metric,
+                        actual=ratio,
+                        threshold=max_ratio,
+                        message=f"{metric}={ratio:.2f} exceeds threshold {max_ratio:.2f}",
+                    )
+                )
 
         return anomalies
 
@@ -129,23 +131,33 @@ class AnomalyDetector:
             p99_warning = regression.get("p99_warning_pct", 20)
 
             if p99_change > p99_critical:
-                anomalies.append(Anomaly(
-                    severity="critical",
-                    scenario=scenario_name,
-                    metric="p99_ms",
-                    actual=current.p99_ms,
-                    threshold=baseline.p99_ms,
-                    message=f"p99 degraded {p99_change:.1f}% ({baseline.p99_ms:.2f} -> {current.p99_ms:.2f}ms)",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="critical",
+                        scenario=scenario_name,
+                        metric="p99_ms",
+                        actual=current.p99_ms,
+                        threshold=baseline.p99_ms,
+                        message=(
+                            f"p99 degraded {p99_change:.1f}%"
+                            f" ({baseline.p99_ms:.2f} -> {current.p99_ms:.2f}ms)"
+                        ),
+                    )
+                )
             elif p99_change > p99_warning:
-                anomalies.append(Anomaly(
-                    severity="warning",
-                    scenario=scenario_name,
-                    metric="p99_ms",
-                    actual=current.p99_ms,
-                    threshold=baseline.p99_ms,
-                    message=f"p99 degraded {p99_change:.1f}% ({baseline.p99_ms:.2f} -> {current.p99_ms:.2f}ms)",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="warning",
+                        scenario=scenario_name,
+                        metric="p99_ms",
+                        actual=current.p99_ms,
+                        threshold=baseline.p99_ms,
+                        message=(
+                            f"p99 degraded {p99_change:.1f}%"
+                            f" ({baseline.p99_ms:.2f} -> {current.p99_ms:.2f}ms)"
+                        ),
+                    )
+                )
 
         # QPS drop
         if baseline.qps > 0:
@@ -154,23 +166,33 @@ class AnomalyDetector:
             qps_warning = regression.get("qps_warning_pct", 20)
 
             if qps_change > qps_critical:
-                anomalies.append(Anomaly(
-                    severity="critical",
-                    scenario=scenario_name,
-                    metric="qps",
-                    actual=current.qps,
-                    threshold=baseline.qps,
-                    message=f"QPS dropped {qps_change:.1f}% ({baseline.qps:.1f} -> {current.qps:.1f})",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="critical",
+                        scenario=scenario_name,
+                        metric="qps",
+                        actual=current.qps,
+                        threshold=baseline.qps,
+                        message=(
+                            f"QPS dropped {qps_change:.1f}%"
+                            f" ({baseline.qps:.1f} -> {current.qps:.1f})"
+                        ),
+                    )
+                )
             elif qps_change > qps_warning:
-                anomalies.append(Anomaly(
-                    severity="warning",
-                    scenario=scenario_name,
-                    metric="qps",
-                    actual=current.qps,
-                    threshold=baseline.qps,
-                    message=f"QPS dropped {qps_change:.1f}% ({baseline.qps:.1f} -> {current.qps:.1f})",
-                ))
+                anomalies.append(
+                    Anomaly(
+                        severity="warning",
+                        scenario=scenario_name,
+                        metric="qps",
+                        actual=current.qps,
+                        threshold=baseline.qps,
+                        message=(
+                            f"QPS dropped {qps_change:.1f}%"
+                            f" ({baseline.qps:.1f} -> {current.qps:.1f})"
+                        ),
+                    )
+                )
 
         return anomalies
 

@@ -16,7 +16,7 @@ class TestReplicationResilience:
 
     def _ensure_replication_running(self, mygramdb):
         """Ensure replication is running (with retry and sync fallback)."""
-        for attempt in range(30):
+        for _attempt in range(30):
             status = mygramdb.replication_status()
             if status and "running" in status.lower():
                 return
@@ -44,13 +44,18 @@ class TestReplicationResilience:
         def insert_worker():
             try:
                 for i in range(n):
-                    mysql.insert_rows("articles", [{
-                        "title": f"Active Write {i}",
-                        "content": f"Content active write {marker} item {i}",
-                        "status": 1,
-                        "category": "tech",
-                        "enabled": 1,
-                    }])
+                    mysql.insert_rows(
+                        "articles",
+                        [
+                            {
+                                "title": f"Active Write {i}",
+                                "content": f"Content active write {marker} item {i}",
+                                "status": 1,
+                                "category": "tech",
+                                "enabled": 1,
+                            }
+                        ],
+                    )
                     time.sleep(0.1)
             except Exception as e:
                 errors.append(e)

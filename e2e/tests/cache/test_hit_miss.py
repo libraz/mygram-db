@@ -13,13 +13,18 @@ class TestCacheHitMiss:
     def test_cache_miss_then_hit(self, mysql, mygramdb, seed_data):
         """First search should be a miss, second should be a hit."""
         marker = "cache_hitm_test_marker"
-        mysql.insert_rows("articles", [{
-            "title": "Cache Test",
-            "content": f"Content with {marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Cache Test",
+                    "content": f"Content with {marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", marker),

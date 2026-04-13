@@ -15,7 +15,7 @@ import uuid
 
 import pytest
 
-from lib.wait import wait_until, wait_until_gte
+from lib.wait import wait_until_gte
 
 pytestmark = [
     pytest.mark.replication,
@@ -53,13 +53,18 @@ class TestVectorPropagation:
 
         # Verify replication still works by checking a normal table
         check_marker = f"veccheck_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "After Vector Insert",
-            "content": f"Verifying replication after vector insert {check_marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "After Vector Insert",
+                    "content": f"Verifying replication after vector insert {check_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", check_marker),
@@ -86,19 +91,23 @@ class TestVectorPropagation:
         # Update the vector column
         new_vec_hex = _vector_to_hex([0.4, 0.5, 0.6])
         mysql.execute(
-            f"UPDATE vec_articles SET embedding = {new_vec_hex} "
-            f"WHERE content = '{marker}'"
+            f"UPDATE vec_articles SET embedding = {new_vec_hex} WHERE content = '{marker}'"
         )
 
         # Verify replication continues
         check_marker = f"vecupd_check_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "After Vector Update",
-            "content": f"Verify after vector update {check_marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "After Vector Update",
+                    "content": f"Verify after vector update {check_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", check_marker),
@@ -125,13 +134,18 @@ class TestVectorPropagation:
 
         # Verify replication continues
         check_marker = f"vecdel_check_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "After Vector Delete",
-            "content": f"Verify after vector delete {check_marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "After Vector Delete",
+                    "content": f"Verify after vector delete {check_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", check_marker),
@@ -158,13 +172,18 @@ class TestVectorPropagation:
 
         # Verify replication is healthy after batch
         check_marker = f"vecbatch_check_{uuid.uuid4().hex[:8]}"
-        mysql.insert_rows("articles", [{
-            "title": "After Vector Batch",
-            "content": f"Verify after vector batch {check_marker}",
-            "status": 1,
-            "category": "tech",
-            "enabled": 1,
-        }])
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "After Vector Batch",
+                    "content": f"Verify after vector batch {check_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until_gte(
             lambda: mygramdb.count("articles", check_marker),

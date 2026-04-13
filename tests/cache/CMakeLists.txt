@@ -176,5 +176,5 @@ target_link_libraries(cache_metrics_test PRIVATE
 gtest_discover_tests(cache_metrics_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK cache_state
+  PROPERTIES RESOURCE_LOCK cache_state TIMEOUT 60
 )

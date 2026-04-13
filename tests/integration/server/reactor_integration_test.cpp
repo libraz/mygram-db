@@ -76,6 +76,7 @@ class ReactorIntegrationTest : public ::testing::Test {
   void TearDown() override {
     table_contexts_.clear();
     table_ctx_.reset();
+    recv_leftover_.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -224,16 +225,26 @@ class ReactorIntegrationTest : public ::testing::Test {
     static constexpr const char kTerminator[] = "\r\nEND\r\n";
     static constexpr size_t kTerminatorLen = 7;
 
-    std::string out;
+    std::string out = std::move(recv_leftover_);
+    recv_leftover_.clear();
     std::array<char, 1024> buf{};
     while (out.size() < 1 * 1024 * 1024) {
+      // Check if we already have a complete response in the buffer
+      if (out.size() >= kTerminatorLen) {
+        auto pos = out.find(kTerminator);
+        if (pos != std::string::npos) {
+          size_t end = pos + kTerminatorLen;
+          std::string result = out.substr(0, end);
+          if (end < out.size()) {
+            recv_leftover_ = out.substr(end);
+          }
+          return result;
+        }
+      }
       ssize_t n = recv(sock, buf.data(), buf.size(), 0);
       if (n <= 0)
         return "";
       out.append(buf.data(), static_cast<size_t>(n));
-      if (out.size() >= kTerminatorLen && out.compare(out.size() - kTerminatorLen, kTerminatorLen, kTerminator) == 0) {
-        return out;
-      }
     }
     return "";
   }
@@ -257,6 +268,7 @@ class ReactorIntegrationTest : public ::testing::Test {
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::string recv_leftover_;  ///< Leftover data from previous RecvMultilineResponse calls
 };
 
 // ============================================================================

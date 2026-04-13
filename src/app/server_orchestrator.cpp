@@ -220,7 +220,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   mysql_config.database = deps_.config.mysql.database;
   // Use ceiling division to avoid truncating sub-second timeouts to zero
   auto ceil_div_ms = [](int ms) -> int {
-    if (ms <= 0) return 0;
+    if (ms <= 0)
+      return 0;
     return (ms + kMillisecondsPerSecond - 1) / kMillisecondsPerSecond;
   };
   mysql_config.connect_timeout = ceil_div_ms(deps_.config.mysql.connect_timeout_ms);

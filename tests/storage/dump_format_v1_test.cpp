@@ -3,11 +3,11 @@
  * @brief Unit tests for dump format V1 header serialization
  */
 
+#include "storage/dump_format_v1.h"
+
 #include <gtest/gtest.h>
 
 #include <sstream>
-
-#include "storage/dump_format_v1.h"
 
 using namespace mygramdb::storage::dump_v1;
 

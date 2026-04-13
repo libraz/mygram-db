@@ -16,7 +16,7 @@ class TestMemoryConsistency:
         detail = mygramdb.health_detail()
 
         # Look for memory metrics
-        memory_metrics = snapshot.get_matching("memory")
+        snapshot.get_matching("memory")
         assert isinstance(detail, dict)
 
         # Just verify both endpoints return memory data without crash

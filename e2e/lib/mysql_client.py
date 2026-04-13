@@ -48,10 +48,7 @@ class MysqlClient:
         try:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(sql, params)
-            if cursor.description:
-                results = cursor.fetchall()
-            else:
-                results = []
+            results = cursor.fetchall() if cursor.description else []
             cursor.close()
             return results
         finally:

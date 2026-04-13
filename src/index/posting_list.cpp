@@ -394,7 +394,8 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap && other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
+      other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap AND
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
     result->roaring_bitmap_ = roaring_bitmap_and(roaring_bitmap_, other.roaring_bitmap_);
@@ -443,7 +444,8 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap && other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
+      other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap OR
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
     result->roaring_bitmap_ = roaring_bitmap_or(roaring_bitmap_, other.roaring_bitmap_);
@@ -509,7 +511,8 @@ void PostingList::Optimize(uint64_t total_docs) {
         .Field("to", "roaring")
         .Field("density", density)
         .Debug();
-  } else if (density < roaring_threshold_ * kHysteresisFactor && strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
+  } else if (density < roaring_threshold_ * kHysteresisFactor &&
+             strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Convert back to delta for low density (with hysteresis)
     ConvertToDelta();
     mygram::utils::StructuredLog()

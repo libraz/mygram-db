@@ -6,14 +6,14 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
-from lib.mysql_client import MysqlClient
-from lib.mygramdb_client import MygramdbClient
 from lib.metrics import MetricsSnapshot
+from lib.mygramdb_client import MygramdbClient
+from lib.mysql_client import MysqlClient
 from lib.wait import wait_until
 
 # Constants
@@ -75,7 +75,7 @@ def mygramdb_process() -> Generator[subprocess.Popen, None, None]:
 
     MYGRAMDB_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    log_file = open(MYGRAMDB_LOG, "w")
+    log_file = open(MYGRAMDB_LOG, "w")  # noqa: SIM115
     proc = subprocess.Popen(
         [str(MYGRAMDB_BINARY), "-c", str(MYGRAMDB_CONFIG)],
         stdout=log_file,

@@ -1,7 +1,8 @@
 """Test memory release after data removal."""
 
-import pytest
 import time
+
+import pytest
 
 from lib.wait import wait_until
 
@@ -17,7 +18,7 @@ class TestMemoryRelease:
         mygramdb.sync("articles")
 
         # Get memory before
-        detail_before = mygramdb.health_detail()
+        mygramdb.health_detail()
 
         # Truncate
         mysql.truncate("articles")
@@ -42,6 +43,7 @@ class TestMemoryRelease:
 
         # Re-seed for subsequent tests
         from lib.data_generator import DataGenerator
+
         gen = DataGenerator(seed=42)
         rows = gen.generate_articles(count=100)
         mysql.insert_rows("articles", rows)

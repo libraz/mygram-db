@@ -44,24 +44,20 @@ TEST(ConfigValidationTest, KanjiNgramSizeNegativeRejected) {
  * @brief Test IsSensitiveField: "primary_key" should NOT be sensitive
  */
 TEST(ConfigValidationTest, PrimaryKeyNotSensitive) {
-  EXPECT_FALSE(IsSensitiveField("tables.primary_key"))
-      << "primary_key should not be marked as sensitive";
-  EXPECT_FALSE(IsSensitiveField("primary_key"))
-      << "primary_key should not be marked as sensitive";
+  EXPECT_FALSE(IsSensitiveField("tables.primary_key")) << "primary_key should not be marked as sensitive";
+  EXPECT_FALSE(IsSensitiveField("primary_key")) << "primary_key should not be marked as sensitive";
 }
 
 /**
  * @brief Test IsSensitiveField: "password" IS sensitive
  */
 TEST(ConfigValidationTest, PasswordIsSensitive) {
-  EXPECT_TRUE(IsSensitiveField("mysql.password"))
-      << "password should be marked as sensitive";
+  EXPECT_TRUE(IsSensitiveField("mysql.password")) << "password should be marked as sensitive";
 }
 
 /**
  * @brief Test IsSensitiveField: "ssl_key" IS sensitive
  */
 TEST(ConfigValidationTest, SslKeyIsSensitive) {
-  EXPECT_TRUE(IsSensitiveField("mysql.ssl_key"))
-      << "ssl_key should be marked as sensitive";
+  EXPECT_TRUE(IsSensitiveField("mysql.ssl_key")) << "ssl_key should be marked as sensitive";
 }

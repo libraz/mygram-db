@@ -57,7 +57,8 @@ class SearchHandler : public CommandHandler {
 
  private:
   /// Candidate count threshold: at or below this, use FilterByNgrams; above, use full SearchAnd intersection
-  static inline std::atomic<size_t> filter_threshold_{1000};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+  static inline std::atomic<size_t> filter_threshold_{
+      1000};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
   /**
    * @brief Result from ExecuteSearchPipeline

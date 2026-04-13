@@ -16,9 +16,9 @@
 
 namespace mygramdb::query {
 
+using mygram::utils::ErrorCode;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
-using mygram::utils::ErrorCode;
 
 using internal::IsClauseKeyword;
 using internal::kMaxLimit;

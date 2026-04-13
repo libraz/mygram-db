@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pytest
 
 from lib.raw_socket import (
-    raw_tcp_exchange,
     raw_tcp_connect_disconnect,
     raw_tcp_slow_send,
 )
@@ -58,9 +57,7 @@ class TestConnectionStress:
 
         successes = sum(1 for _, ok, _ in results if ok)
         # All connections should succeed — server supports 10000 max_connections
-        assert successes >= 180, (
-            f"Only {successes}/200 connections succeeded"
-        )
+        assert successes >= 180, f"Only {successes}/200 connections succeeded"
         # Server must remain healthy
         time.sleep(1)
         assert mygramdb.ping(), "Server unresponsive after connection storm"
@@ -86,8 +83,11 @@ class TestConnectionStress:
         command = b"INFO\r\n"
         chunks = [bytes([b]) for b in command]
         resp = raw_tcp_slow_send(
-            MYGRAMDB_HOST, MYGRAMDB_TCP_PORT,
-            chunks, delay=0.3, timeout=15.0,
+            MYGRAMDB_HOST,
+            MYGRAMDB_TCP_PORT,
+            chunks,
+            delay=0.3,
+            timeout=15.0,
         )
         decoded = resp.decode("utf-8", errors="ignore")
         assert len(decoded) > 0, "No response for slowly-sent command"
@@ -111,7 +111,7 @@ class TestConnectionStress:
                     data += byte
                     if data.endswith(b"\r\n"):
                         break
-                except socket.timeout:
+                except TimeoutError:
                     break
         finally:
             sock.close()
@@ -144,14 +144,18 @@ class TestConnectionStress:
                         if not chunk:
                             break
                         data += chunk
-                    except socket.timeout:
+                    except TimeoutError:
                         break
 
                 sock.close()
                 # Count response blocks (rough estimate)
                 decoded = data.decode("utf-8", errors="ignore")
                 # Each INFO response contains multiple lines ending with \r\n
-                response_count = decoded.count("total_documents") or decoded.count("doc_count") or decoded.count("uptime")
+                response_count = (
+                    decoded.count("total_documents")
+                    or decoded.count("doc_count")
+                    or decoded.count("uptime")
+                )
                 return idx, commands_sent, max(response_count, 1 if decoded else 0)
             except Exception:
                 return idx, 0, 0
@@ -185,7 +189,7 @@ class TestConnectionStress:
                     if not chunk:
                         break
                     data += chunk
-                except socket.timeout:
+                except TimeoutError:
                     break
         finally:
             sock.close()

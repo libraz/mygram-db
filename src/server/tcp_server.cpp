@@ -147,6 +147,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   thread_pool_ = std::move(components.thread_pool);
   table_catalog_ = std::move(components.table_catalog);
   cache_manager_ = std::move(components.cache_manager);
+#ifdef USE_MYSQL
+  // Provide cache manager to sync manager for post-SYNC cache invalidation
+  if (sync_manager_) {
+    sync_manager_->SetCacheManager(cache_manager_.get());
+  }
+#endif
   variable_manager_ = std::move(components.variable_manager);
   handler_context_ = std::move(components.handler_context);
 
