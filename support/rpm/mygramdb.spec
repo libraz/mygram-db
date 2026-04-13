@@ -130,15 +130,11 @@ fi
 %systemd_preun %{name}.service || :
 
 %postun
-# Deliberately use `%systemd_postun` (no auto-restart) rather than
-# `%systemd_postun_with_restart`.  MygramDB is an in-memory engine:
-# on restart it replays the full MySQL binlog from the last snapshot,
-# which for a populated fleet can take minutes and leaves the instance
-# unavailable for search traffic in the meantime. A surprise restart
-# triggered mid-`dnf upgrade` is therefore an operational hazard —
-# operators upgrading an HA pair must stop one instance, upgrade it,
-# start it, wait for replication to catch up, then repeat for the peer.
-# Leaving restart off here forces that explicit sequence.
+# Use systemd_postun (no auto-restart) instead of the _with_restart
+# variant.  MygramDB is an in-memory engine: on restart it replays the
+# full MySQL binlog from the last snapshot, which can take minutes and
+# leaves the instance unavailable.  Operators upgrading an HA pair must
+# sequence the upgrade explicitly (stop, upgrade, start, catch up).
 %systemd_postun %{name}.service
 
 %files
