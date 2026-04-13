@@ -6,6 +6,7 @@ add_library(mygramdb_storage STATIC
   dump_format_v1.cpp
   dump_format_v1_config.cpp
   dump_format_v1_integrity.cpp
+  dump_format_v2.cpp
   filter_index.cpp
 )
 

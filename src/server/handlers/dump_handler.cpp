@@ -16,6 +16,7 @@
 #include "cache/cache_manager.h"
 #include "server/sync_operation_manager.h"
 #include "storage/dump_format_v1.h"
+#include "storage/dump_format_v2.h"
 #include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
@@ -219,7 +220,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   std::string gtid;
 #endif
 
-  // Convert table_contexts to format expected by dump_v1::WriteDumpV1
+  // Convert table_contexts to format expected by dump API
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
   size_t table_index = 0;
   for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
@@ -232,7 +233,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     ++table_index;
   }
 
-  // Call dump_v1 API
+  // Call dump API (writes V2 format)
   mygram::utils::StructuredLog()
       .Event("dump_save_write_starting")
       .Field("filepath", filepath)
@@ -240,7 +241,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       .Field("tables", static_cast<uint64_t>(converted_contexts.size()))
       .Info();
 
-  auto result = storage::dump_v1::WriteDumpV1(filepath, gtid, *ctx_.full_config, converted_contexts);
+  auto result = storage::dump_v2::WriteDump(filepath, gtid, *ctx_.full_config, converted_contexts);
 
   mygram::utils::StructuredLog()
       .Event("dump_save_write_finished")
@@ -381,7 +382,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Set loading mode (RAII guard ensures it's cleared even on exceptions)
   mygram::utils::AtomicFlagGuard loading_guard(ctx_.dump_load_in_progress);
 
-  // Convert table_contexts to format expected by dump_v1::ReadDumpV1
+  // Convert table_contexts to format expected by dump API
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
   for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
     converted_contexts[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};
@@ -392,9 +393,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   config::Config loaded_config;
   storage::dump_format::IntegrityError integrity_error;
 
-  // Call dump_v1 API
-  auto result = storage::dump_v1::ReadDumpV1(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
-                                             &integrity_error);
+  // Call dump API (auto-detects V1 or V2 format)
+  auto result = storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
+                                           &integrity_error);
 
 #ifdef USE_MYSQL
   // Update GTID from loaded dump (if load was successful and GTID is available)
@@ -480,7 +481,7 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   mygram::utils::StructuredLog().Event("dump_verify_starting").Field("path", filepath).Info();
 
   storage::dump_format::IntegrityError integrity_error;
-  auto result = storage::dump_v1::VerifyDumpIntegrity(filepath, integrity_error);
+  auto result = storage::dump_v2::VerifyDumpIntegrity(filepath, integrity_error);
 
   if (result) {
     mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field("path", filepath).Info();
@@ -524,8 +525,8 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
 
   mygram::utils::StructuredLog().Event("dump_info_reading").Field("path", filepath).Info();
 
-  storage::dump_v1::DumpInfo info;
-  auto info_result = storage::dump_v1::GetDumpInfo(filepath, info);
+  storage::dump_v2::DumpV2Info info;
+  auto info_result = storage::dump_v2::GetDumpInfo(filepath, info);
 
   if (!info_result) {
     return ResponseFormatter::FormatError("Failed to read dump info from " + filepath + ": " +

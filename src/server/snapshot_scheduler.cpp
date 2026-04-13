@@ -16,6 +16,7 @@
 
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
+#include "storage/dump_format_v2.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
 
@@ -166,8 +167,8 @@ void SnapshotScheduler::TakeSnapshot() {
     // Get dumpable contexts from catalog
     auto dumpable = catalog_->GetDumpableContexts();
 
-    // Perform save using dump_v1 API
-    auto result = storage::dump_v1::WriteDumpV1(dump_path.string(), gtid, *full_config_, dumpable);
+    // Perform save using dump API (writes V2 format)
+    auto result = storage::dump_v2::WriteDump(dump_path.string(), gtid, *full_config_, dumpable);
 
     if (result) {
       mygram::utils::StructuredLog().Event("snapshot_completed").Field("path", dump_path.string()).Info();

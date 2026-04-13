@@ -34,11 +34,11 @@ constexpr std::array<char, 4> kMagicNumber = {'M', 'G', 'D', 'B'};
 
 // Current format version (version we write)
 // Increment when introducing breaking changes to the format
-constexpr uint32_t kCurrentVersion = 1;
+constexpr uint32_t kCurrentVersion = 2;
 
 // Maximum supported version (versions we can read)
 // Must be >= kCurrentVersion, can support newer versions for forward compatibility
-constexpr uint32_t kMaxSupportedVersion = 1;
+constexpr uint32_t kMaxSupportedVersion = 2;
 
 // Minimum supported version (oldest version we can read)
 // Must be <= kCurrentVersion, set to 1 to support all versions since initial release
@@ -53,10 +53,8 @@ constexpr size_t kFixedHeaderSize = 8;
  */
 // NOLINTNEXTLINE(performance-enum-size) - Must match file format uint32_t
 enum class FormatVersion : uint32_t {
-  V1 = 1,  // Initial version
-  // Future versions can be added here
-  // V2 = 2,
-  // V3 = 3,
+  V1 = 1,  // Initial version (flat sequential sections)
+  V2 = 2,  // Section envelope format (type + CRC + length per section)
 };
 
 /**
@@ -85,6 +83,53 @@ constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (alw
 }  // namespace flags_v1
 
 /**
+ * @brief Section types for V2 dump format
+ *
+ * Each section in a V2 dump file is wrapped in an envelope that identifies
+ * its type. Unknown section types can be safely skipped by the reader,
+ * enabling forward compatibility.
+ */
+// NOLINTNEXTLINE(performance-enum-size) - Must match file format uint32_t
+enum class SectionType : uint32_t {
+  kConfig = 1,          // Configuration section
+  kStatistics = 2,      // Global dump statistics
+  kTableData = 3,       // Table data (index + docstore)
+  kTableBM25 = 5,       // BM25 term frequency data (Phase 1A, reserved)
+  kTableSynonyms = 7,   // Synonym dictionary (Phase 1B, reserved)
+  // 8-15: Reserved for future expansion
+};
+
+/**
+ * @brief Section envelope for V2 dump format
+ *
+ * Each section starts with this fixed-size envelope (16 bytes) that
+ * describes the section type, integrity checksum, and data length.
+ * Readers that encounter an unknown SectionType skip data_length bytes.
+ */
+struct SectionEnvelope {
+  SectionType type{};         // Section type identifier
+  uint32_t crc32 = 0;        // CRC32 of the section data (after this envelope)
+  uint64_t data_length = 0;  // Byte count of the section data following this envelope
+};
+
+/// Size of the section envelope in bytes (type:4 + crc32:4 + data_length:8)
+constexpr size_t kSectionEnvelopeSize = 16;
+
+/**
+ * @brief Flags for V2 dump format extensions
+ *
+ * These flags indicate which optional data sections are present.
+ * A V2 dump always has kConfig and kTableData sections.
+ */
+namespace flags_v2 {
+constexpr uint32_t kNone = 0x00000000;            // No optional sections
+constexpr uint32_t kWithStatistics = 0x00000008;  // Contains statistics section (same bit as V1)
+constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (same bit as V1)
+constexpr uint32_t kHasBM25Data = 0x00000020;     // Contains BM25 term frequency data (Phase 1A)
+constexpr uint32_t kHasSynonymData = 0x00000080;  // Contains synonym dictionary data (Phase 1B)
+}  // namespace flags_v2
+
+/**
  * @brief CRC error types
  *
  * Classifies the type of CRC mismatch detected during dump verification.
@@ -98,6 +143,7 @@ enum class CRCErrorType : std::uint8_t {
   TableStatsCRC = 4,  // Table statistics CRC mismatch (table-specific)
   IndexCRC = 5,       // Index data CRC mismatch (table-specific)
   DocStoreCRC = 6,    // DocStore data CRC mismatch (table-specific)
+  SectionCRC = 7,     // V2 section envelope CRC mismatch
 };
 
 /**
