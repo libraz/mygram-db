@@ -227,6 +227,22 @@ gtest_discover_tests(index_empty_doc_test
   DISCOVERY_TIMEOUT 30
 )
 
+# BM25 scorer tests
+add_executable(bm25_scorer_test
+  bm25_scorer_test.cpp
+)
+
+target_link_libraries(bm25_scorer_test
+  mygramdb_index
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(bm25_scorer_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # Empty document and SearchOr correctness tests
 add_executable(index_empty_doc_and_search_test
   index_empty_doc_and_search_test.cpp

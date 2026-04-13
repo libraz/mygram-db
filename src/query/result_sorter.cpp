@@ -477,6 +477,10 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     order_by.order = SortOrder::DESC;
   }
 
+  if (order_by.IsScoreSort()) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "SORT _score requires BM25-aware search path"));
+  }
+
   // Column validation: lightweight check (only first few documents)
   // - Primary key (empty column name or explicit primary key column name): always valid
   // - Filter column: check existence in a sample of documents
@@ -589,6 +593,59 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
 
   // Apply OFFSET and LIMIT after sorting
   return ApplyOffsetLimit(results, query.offset, query.limit);
+}
+
+std::vector<DocId> ResultSorter::SortByScore(const std::vector<DocId>& results, const std::vector<double>& scores,
+                                             SortOrder order, uint32_t limit, uint32_t offset) {
+  if (results.empty()) {
+    return {};
+  }
+
+  // Build index-score pairs
+  struct ScoreEntry {
+    size_t index;
+    double score;
+  };
+
+  std::vector<ScoreEntry> entries;
+  entries.reserve(results.size());
+  for (size_t i = 0; i < results.size(); ++i) {
+    entries.push_back({i, scores[i]});
+  }
+
+  bool descending = (order == SortOrder::DESC);
+  auto comparator = [descending](const ScoreEntry& lhs, const ScoreEntry& rhs) {
+    return descending ? (lhs.score > rhs.score) : (lhs.score < rhs.score);
+  };
+
+  // Compute total needed for partial sort
+  uint64_t total_needed_64 = static_cast<uint64_t>(offset) + static_cast<uint64_t>(limit);
+  size_t total_needed =
+      (limit == 0 || total_needed_64 > entries.size()) ? entries.size() : static_cast<size_t>(total_needed_64);
+
+  auto entries_size_double = static_cast<double>(entries.size());
+  auto total_needed_double = static_cast<double>(total_needed);
+  bool use_partial =
+      (total_needed < entries.size() && total_needed_double < entries_size_double * kPartialSortThreshold);
+
+  if (use_partial) {
+    std::partial_sort(entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(total_needed), entries.end(),
+                      comparator);
+  } else {
+    std::sort(entries.begin(), entries.end(), comparator);
+  }
+
+  // Apply offset and limit
+  size_t start = std::min(static_cast<size_t>(offset), entries.size());
+  size_t end = (limit == 0) ? entries.size() : std::min(start + static_cast<size_t>(limit), entries.size());
+
+  std::vector<DocId> sorted_results;
+  sorted_results.reserve(end - start);
+  for (size_t i = start; i < end; ++i) {
+    sorted_results.push_back(results[entries[i].index]);
+  }
+
+  return sorted_results;
 }
 
 }  // namespace mygramdb::query

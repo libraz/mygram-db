@@ -22,7 +22,7 @@ namespace mygramdb::mysql {
 bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
                                         const config::MysqlConfig& mysql_config, server::ServerStats* stats,
-                                        cache::CacheManager* cache_manager) {
+                                        cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats) {
   // Evaluate required_filters to determine if data should exist in index
   bool matches_required =
       BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config, mysql_config.datetime_timezone);
@@ -64,6 +64,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         index.AddDocument(doc_id, normalized);
 
+        if (bm25_stats != nullptr && !normalized.empty()) {
+          bm25_stats->AddDocument(mygram::utils::CountCodePoints(normalized));
+        }
+
         mygram::utils::StructuredLog()
             .Event("binlog_insert")
             .Field("primary_key", event.primary_key)
@@ -102,6 +106,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (!removal_text.empty()) {
           std::string normalized = index.NormalizeText(removal_text);
           index.RemoveDocument(doc_id, normalized);
+
+          if (bm25_stats != nullptr && !normalized.empty()) {
+            bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(normalized));
+          }
         }
 
         if (!doc_store.RemoveDocument(doc_id)) {
@@ -145,6 +153,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         storage::DocId doc_id = *doc_id_result;
 
         index.AddDocument(doc_id, normalized);
+
+        if (bm25_stats != nullptr && !normalized.empty()) {
+          bm25_stats->AddDocument(mygram::utils::CountCodePoints(normalized));
+        }
 
         mygram::utils::StructuredLog()
             .Event("binlog_update_added")
@@ -192,18 +204,32 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             std::string new_normalized = index.NormalizeText(event.text);
             index.UpdateDocument(doc_id, old_normalized, new_normalized);
             doc_store.SetNormalizedText(doc_id, new_normalized);
+            if (bm25_stats != nullptr) {
+              if (!old_normalized.empty()) {
+                bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
+              }
+              if (!new_normalized.empty()) {
+                bm25_stats->AddDocument(mygram::utils::CountCodePoints(new_normalized));
+              }
+            }
             text_changed = true;
           } else if (!event.old_text.empty()) {
             // Only old text available - remove from index
             std::string old_normalized = index.NormalizeText(event.old_text);
             index.RemoveDocument(doc_id, old_normalized);
             doc_store.SetNormalizedText(doc_id, "");
+            if (bm25_stats != nullptr && !old_normalized.empty()) {
+              bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
+            }
             text_changed = true;
           } else if (!event.text.empty()) {
             // Only new text available - add to index
             std::string new_normalized = index.NormalizeText(event.text);
             index.AddDocument(doc_id, new_normalized);
             doc_store.SetNormalizedText(doc_id, new_normalized);
+            if (bm25_stats != nullptr && !new_normalized.empty()) {
+              bm25_stats->AddDocument(mygram::utils::CountCodePoints(new_normalized));
+            }
             text_changed = true;
           }
         }
@@ -246,6 +272,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (!event.text.empty()) {
           std::string normalized = index.NormalizeText(event.text);
           index.RemoveDocument(doc_id, normalized);
+
+          if (bm25_stats != nullptr && !normalized.empty()) {
+            bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(normalized));
+          }
         }
 
         // Remove from document store

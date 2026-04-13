@@ -609,4 +609,24 @@ std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ng
   return GenerateNgrams(normalized, ngram_size);
 }
 
+uint32_t CountCodePoints(std::string_view text) {
+  uint32_t count = 0;
+  for (size_t i = 0; i < text.size();) {
+    auto byte = static_cast<unsigned char>(text[i]);
+    if (byte < 0x80) {
+      i += 1;
+    } else if ((byte & 0xE0) == 0xC0) {
+      i += 2;
+    } else if ((byte & 0xF0) == 0xE0) {
+      i += 3;
+    } else if ((byte & 0xF8) == 0xF0) {
+      i += 4;
+    } else {
+      i += 1;  // Invalid byte, skip
+    }
+    ++count;
+  }
+  return count;
+}
+
 }  // namespace mygram::utils

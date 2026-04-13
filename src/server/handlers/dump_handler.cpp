@@ -19,6 +19,7 @@
 #include "storage/dump_format_v2.h"
 #include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -394,8 +395,8 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   storage::dump_format::IntegrityError integrity_error;
 
   // Call dump API (auto-detects V1 or V2 format)
-  auto result = storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr,
-                                           &integrity_error);
+  auto result =
+      storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error);
 
 #ifdef USE_MYSQL
   // Update GTID from loaded dump (if load was successful and GTID is available)
@@ -439,6 +440,25 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     if (ctx_.cache_manager != nullptr) {
       ctx_.cache_manager->Clear();
     }
+
+    // Rebuild BM25 corpus statistics from loaded documents
+    for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
+      if (table_ctx->doc_store) {
+        auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
+        uint64_t total_length = 0;
+        uint64_t doc_count = 0;
+        for (auto doc_id : all_doc_ids) {
+          auto text_opt = table_ctx->doc_store->GetNormalizedText(doc_id);
+          if (text_opt.has_value() && !text_opt->empty()) {
+            total_length += mygram::utils::CountCodePoints(*text_opt);
+            ++doc_count;
+          }
+        }
+        table_ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
+        table_ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
+      }
+    }
+
     mygram::utils::StructuredLog().Event("dump_load_completed").Field("path", filepath).Field("gtid", gtid).Info();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }

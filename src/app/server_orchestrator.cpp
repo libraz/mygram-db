@@ -13,6 +13,7 @@
 #include "loader/initial_loader.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
@@ -309,6 +310,28 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
         .Field("table", table_config.name)
         .Field("documents", initial_loader.GetProcessedRows())
         .Info();
+
+    // Rebuild BM25 corpus statistics from loaded documents
+    {
+      auto all_doc_ids = ctx->doc_store->GetAllDocIds();
+      uint64_t total_length = 0;
+      uint64_t doc_count = 0;
+      for (auto doc_id : all_doc_ids) {
+        auto text_opt = ctx->doc_store->GetNormalizedText(doc_id);
+        if (text_opt.has_value() && !text_opt->empty()) {
+          total_length += mygram::utils::CountCodePoints(*text_opt);
+          ++doc_count;
+        }
+      }
+      ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
+      ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
+      mygram::utils::StructuredLog()
+          .Event("bm25_stats_initialized")
+          .Field("table", table_config.name)
+          .Field("doc_count", static_cast<uint64_t>(doc_count))
+          .Field("avg_doc_length", ctx->bm25_stats.avg_doc_length())
+          .Info();
+    }
 
     // Capture GTID from first table's initial load
     if (snapshot_gtid_.empty() && deps_.config.replication.enable) {

@@ -17,7 +17,8 @@
 // Forward declarations
 namespace mygramdb::server {
 class ServerStats;
-}
+struct BM25Stats;
+}  // namespace mygramdb::server
 
 namespace mygramdb::cache {
 class CacheManager;
@@ -44,7 +45,8 @@ class BinlogEventProcessor {
    */
   static bool ProcessEvent(const BinlogEvent& event, index::Index& index, storage::DocumentStore& doc_store,
                            const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
-                           server::ServerStats* stats = nullptr, cache::CacheManager* cache_manager = nullptr);
+                           server::ServerStats* stats = nullptr, cache::CacheManager* cache_manager = nullptr,
+                           server::BM25Stats* bm25_stats = nullptr);
 };
 
 }  // namespace mygramdb::mysql

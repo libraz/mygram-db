@@ -160,4 +160,11 @@ inline void DeduplicateSorted(std::vector<T>& vec) {
 std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ngram_size, int kanji_ngram_size,
                                              bool cross_boundary_ngrams);
 
+/**
+ * @brief Count UTF-8 code points in a string
+ * @param text UTF-8 encoded text
+ * @return Number of Unicode code points
+ */
+uint32_t CountCodePoints(std::string_view text);
+
 }  // namespace mygram::utils

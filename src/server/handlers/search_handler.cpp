@@ -9,8 +9,10 @@
 #include <chrono>
 
 #include "cache/cache_manager.h"
+#include "index/bm25_scorer.h"
 #include "query/result_sorter.h"
 #include "server/search_pipeline.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::server {
 
@@ -231,12 +233,16 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       output.debug_info.offset_explicit = query.offset_explicit;
     }
 
+    // Check if this is a BM25 score sort request
+    bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+
     // Check optimization conditions for single-term queries
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     constexpr uint32_t kMaxOffsetForOptimization = 10000;
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     bool can_optimize = output.term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() &&
-                        query.limit > 0 && query.offset <= kMaxOffsetForOptimization && is_primary_key_order;
+                        query.limit > 0 && query.offset <= kMaxOffsetForOptimization && is_primary_key_order &&
+                        !is_score_sort;
 
     if (can_optimize) {
       // The pipeline already fetched all results; we can apply GetTopN optimization
@@ -271,6 +277,69 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         output.debug_info.optimization_used = "no results (optimization skipped)";
       }
     }
+  }
+
+  // BM25 scoring: compute scores if SORT _score is requested
+  bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+  if (is_score_sort && !output.results.empty()) {
+    // Validate BM25 is enabled
+    if (ctx_.full_config == nullptr || !ctx_.full_config->bm25.enable) {
+      return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration");
+    }
+
+    const auto& bm25_config = ctx_.full_config->bm25;
+    auto table_it2 = ctx_.table_contexts.find(query.table);
+    if (table_it2 == ctx_.table_contexts.end()) {
+      return ResponseFormatter::FormatError("table not found");
+    }
+    const auto& bm25_stats = table_it2->second->bm25_stats;
+
+    index::BM25Params params{bm25_config.k1, bm25_config.b};
+
+    // Compute document frequency for each search term
+    std::vector<std::string> normalized_terms;
+    std::vector<uint64_t> term_dfs;
+    for (const auto& term : output.all_search_terms) {
+      std::string normalized = output.current_index->NormalizeText(term);
+      normalized_terms.push_back(normalized);
+
+      auto ngrams = mygram::utils::GenerateQueryNgrams(normalized, output.current_ngram_size,
+                                                       output.current_kanji_ngram_size, output.current_cross_boundary);
+      mygram::utils::DeduplicateSorted(ngrams);
+
+      uint64_t min_size = std::numeric_limits<uint64_t>::max();
+      for (const auto& ngram : ngrams) {
+        uint64_t posting_size = output.current_index->EstimatePostingSize(ngram);
+        min_size = std::min(min_size, posting_size);
+        if (min_size == 0) {
+          break;
+        }
+      }
+      term_dfs.push_back(min_size == std::numeric_limits<uint64_t>::max() ? 0 : min_size);
+    }
+
+    auto scored = index::BM25Scorer::ScoreDocuments(
+        output.results, normalized_terms, term_dfs, *output.current_doc_store,
+        bm25_stats.doc_count.load(std::memory_order_relaxed), bm25_stats.avg_doc_length(), params);
+
+    // Extract scores parallel to results
+    std::vector<double> scores;
+    scores.reserve(scored.size());
+    for (const auto& sd : scored) {
+      scores.push_back(sd.score);
+    }
+
+    auto sort_order = query.order_by->order;
+    auto sorted_results =
+        query::ResultSorter::SortByScore(output.results, scores, sort_order, query.limit, query.offset);
+    size_t score_total = output.results.size();
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.final_results = sorted_results.size();
+      return ResponseFormatter::FormatSearchResponse(sorted_results, score_total, output.current_doc_store,
+                                                     &output.debug_info);
+    }
+    return ResponseFormatter::FormatSearchResponse(sorted_results, score_total, output.current_doc_store);
   }
 
   // Sort and paginate results

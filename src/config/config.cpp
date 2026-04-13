@@ -893,6 +893,20 @@ Config ParseConfigFromJson(const json& root) {
     }
   }
 
+  // BM25 scoring configuration
+  if (root.contains("bm25")) {
+    const auto& bm25 = root["bm25"];
+    if (bm25.contains("enable")) {
+      config.bm25.enable = bm25["enable"].get<bool>();
+    }
+    if (bm25.contains("k1")) {
+      config.bm25.k1 = bm25["k1"].get<double>();
+    }
+    if (bm25.contains("b")) {
+      config.bm25.b = bm25["b"].get<double>();
+    }
+  }
+
   return config;
 }
 

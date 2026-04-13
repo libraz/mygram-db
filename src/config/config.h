@@ -377,6 +377,15 @@ struct CacheConfig {
 };
 
 /**
+ * @brief BM25 relevance scoring configuration
+ */
+struct BM25Config {
+  bool enable = false;    ///< Enable BM25 scoring (default: off)
+  double k1 = 1.2;       ///< Term frequency saturation parameter
+  double b = 0.75;        ///< Document length normalization parameter
+};
+
+/**
  * @brief Root configuration
  */
 struct Config {
@@ -390,6 +399,7 @@ struct Config {
   NetworkConfig network;
   LoggingConfig logging;
   CacheConfig cache;
+  BM25Config bm25;
 };
 
 /**

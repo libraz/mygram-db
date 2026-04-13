@@ -3,6 +3,7 @@ add_library(mygramdb_index STATIC
   index_optimization.cpp
   index_serialization.cpp
   posting_list.cpp
+  bm25_scorer.cpp
 )
 
 target_include_directories(mygramdb_index PUBLIC

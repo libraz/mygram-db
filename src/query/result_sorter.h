@@ -52,6 +52,21 @@ class ResultSorter {
       std::vector<DocId>& results, const storage::DocumentStore& doc_store, const Query& query,
       const std::string& primary_key_column = "id");
 
+  /**
+   * @brief Sort results by precomputed BM25 scores
+   *
+   * Uses partial_sort when limit is small relative to result set.
+   *
+   * @param results Document IDs (parallel to scores)
+   * @param scores BM25 scores (parallel to results)
+   * @param order Sort order (DESC = highest scores first)
+   * @param limit Maximum results to return (0 = no limit)
+   * @param offset Number of results to skip
+   * @return Sorted and paginated document IDs
+   */
+  static std::vector<DocId> SortByScore(const std::vector<DocId>& results, const std::vector<double>& scores,
+                                        SortOrder order, uint32_t limit, uint32_t offset);
+
  private:
   /**
    * @brief Threshold for using Schwartzian Transform optimization

@@ -124,6 +124,11 @@ struct OrderByClause {
    * @brief Check if ordering by primary key
    */
   [[nodiscard]] bool IsPrimaryKey() const { return column.empty(); }
+
+  /**
+   * @brief Check if ordering by BM25 relevance score
+   */
+  [[nodiscard]] bool IsScoreSort() const { return column == "_score"; }
 };
 
 /**

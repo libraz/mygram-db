@@ -90,6 +90,57 @@ struct ConnectionContext {
 };
 
 /**
+ * @brief BM25 corpus statistics for a single table
+ *
+ * Maintains running totals for average document length computation.
+ * Uses relaxed atomics since slight inconsistency is acceptable for BM25 quality.
+ */
+struct BM25Stats {
+  std::atomic<uint64_t> total_doc_length{0};  ///< Sum of all doc lengths (code points)
+  std::atomic<uint64_t> doc_count{0};         ///< Number of documents with text
+
+  BM25Stats() = default;
+  ~BM25Stats() = default;
+
+  // Delete copy
+  BM25Stats(const BM25Stats&) = delete;
+  BM25Stats& operator=(const BM25Stats&) = delete;
+
+  // Custom move (atomics have no move ctor)
+  BM25Stats(BM25Stats&& other) noexcept {
+    total_doc_length.store(other.total_doc_length.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    doc_count.store(other.doc_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  }
+  BM25Stats& operator=(BM25Stats&& other) noexcept {
+    if (this != &other) {
+      total_doc_length.store(other.total_doc_length.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      doc_count.store(other.doc_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    return *this;
+  }
+
+  /// Get average document length (code points)
+  [[nodiscard]] double avg_doc_length() const {
+    auto count = doc_count.load(std::memory_order_relaxed);
+    return count > 0
+               ? static_cast<double>(total_doc_length.load(std::memory_order_relaxed)) / static_cast<double>(count)
+               : 0.0;
+  }
+
+  /// Add a document with given length
+  void AddDocument(uint32_t doc_length) {
+    total_doc_length.fetch_add(doc_length, std::memory_order_relaxed);
+    doc_count.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  /// Remove a document with given length
+  void RemoveDocument(uint32_t doc_length) {
+    total_doc_length.fetch_sub(doc_length, std::memory_order_relaxed);
+    doc_count.fetch_sub(1, std::memory_order_relaxed);
+  }
+};
+
+/**
  * @brief Table context managing resources for a single table
  */
 struct TableContext {
@@ -97,6 +148,7 @@ struct TableContext {
   config::TableConfig config;
   std::unique_ptr<index::Index> index;
   std::unique_ptr<storage::DocumentStore> doc_store;
+  BM25Stats bm25_stats;
   // Note: BinlogReader is shared across all tables (single GTID stream)
 };
 

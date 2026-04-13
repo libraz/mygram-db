@@ -106,9 +106,18 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
     }
   }
 
+  // Get BM25 stats for the table (if available)
+  server::BM25Stats* bm25_stats = nullptr;
+  if (multi_table_mode_) {
+    auto table_iter = table_contexts_.find(event.table_name);
+    if (table_iter != table_contexts_.end()) {
+      bm25_stats = &table_iter->second->bm25_stats;
+    }
+  }
+
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
-                                            server_stats_, cache_manager_);
+                                            server_stats_, cache_manager_, bm25_stats);
 }
 
 bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
