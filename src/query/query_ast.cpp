@@ -63,8 +63,8 @@ std::string QueryNode::ToString() const {
   return oss.str();
 }
 
-std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
-                                              const storage::DocumentStore& doc_store) const {
+std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index, const storage::DocumentStore& doc_store,
+                                              const std::vector<index::DocId>* all_docs) const {
   using index::DocId;
 
   switch (type) {
@@ -94,7 +94,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
       bool first = true;
 
       for (const auto& child : children) {
-        auto child_result = child->Evaluate(index, doc_store);
+        auto child_result = child->Evaluate(index, doc_store, all_docs);
 
         if (first) {
           current_result = std::move(child_result);
@@ -121,7 +121,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
       std::vector<DocId> result;
 
       for (const auto& child : children) {
-        auto child_result = child->Evaluate(index, doc_store);
+        auto child_result = child->Evaluate(index, doc_store, all_docs);
         std::vector<DocId> merged;
         merged.reserve(result.size() + child_result.size());
         std::set_union(result.begin(), result.end(), child_result.begin(), child_result.end(),
@@ -137,16 +137,20 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
         return {};
       }
 
-      // TODO: Accept pre-computed all_docs to avoid O(N) call per NOT evaluation
-      // Get all document IDs
-      auto all_docs = doc_store.GetAllDocIds();
+      // Use pre-computed all_docs if available, otherwise compute once
+      std::vector<DocId> all_docs_local;
+      const std::vector<DocId>* docs_ptr = all_docs;
+      if (docs_ptr == nullptr) {
+        all_docs_local = doc_store.GetAllDocIds();
+        docs_ptr = &all_docs_local;
+      }
 
-      // Get documents matching the child expression
-      auto exclude_docs = children[0]->Evaluate(index, doc_store);
+      // Get documents matching the child expression (pass all_docs through)
+      auto exclude_docs = children[0]->Evaluate(index, doc_store, docs_ptr);
 
       // Return complement (all_docs - exclude_docs)
       std::vector<DocId> result;
-      std::set_difference(all_docs.begin(), all_docs.end(), exclude_docs.begin(), exclude_docs.end(),
+      std::set_difference(docs_ptr->begin(), docs_ptr->end(), exclude_docs.begin(), exclude_docs.end(),
                           std::back_inserter(result));
 
       return result;

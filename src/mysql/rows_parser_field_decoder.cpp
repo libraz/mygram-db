@@ -13,6 +13,8 @@
 
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -22,6 +24,12 @@
 
 namespace mygramdb::mysql::internal {
 
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
+
 uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
   static constexpr uint32_t kMultipliers[] = {0, 100000, 10000, 1000, 100, 10, 1};
   if (precision == 0 || precision > 6) {
@@ -30,11 +38,11 @@ uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
   return static_cast<uint32_t>(std::abs(frac)) * kMultipliers[precision];
 }
 
-std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null,
-                             const unsigned char* end, bool is_unsigned) {
+Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata,
+                                              bool is_null, const unsigned char* end, bool is_unsigned) {
   constexpr uint32_t kMaxFieldLength = 256 * 1024 * 1024;  // 256MB max for any field
   if (is_null) {
-    return "";  // NULL values represented as empty string
+    return std::string{};  // NULL values represented as empty string
   }
 
   switch (col_type) {
@@ -85,7 +93,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
     // Floating point types
     case 4: {  // MYSQL_TYPE_FLOAT
       if (data + 4 > end) {
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       float val = 0;
       memcpy(&val, data, sizeof(float));
@@ -93,7 +101,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
     }
     case 5: {  // MYSQL_TYPE_DOUBLE
       if (data + 8 > end) {
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       double val = 0;
       memcpy(&val, data, sizeof(double));
@@ -105,7 +113,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       // 1 byte: 0 means 0000, 1-255 means year 1901-2155 (value + 1900)
       uint8_t year_byte = *data;
       if (year_byte == 0) {
-        return "0000";
+        return std::string{"0000"};
       }
       int year = static_cast<int>(year_byte) + 1900;
       return std::to_string(year);
@@ -119,7 +127,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       unsigned int extra_bits = metadata & 0xFF;
       unsigned int total_bytes = full_bytes + (extra_bits > 0 ? 1 : 0);
       if (data + total_bytes > end) {
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       // Read bytes as big-endian unsigned integer
       uint64_t val = 0;
@@ -135,13 +143,13 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       const unsigned char* str_data = nullptr;
       if (metadata > 255) {
         if (data + 2 > end) {
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
         if (data + 1 > end) {
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
         str_len = *data;
         str_data = data + 1;
@@ -152,7 +160,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
             .Field("type", "varchar_length_exceeds_bounds")
             .Field("length", static_cast<uint64_t>(str_len))
             .Error();
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
@@ -163,28 +171,28 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       switch (metadata) {
         case 1:  // TINYBLOB/TINYTEXT
           if (data + 1 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           blob_len = *data;
           blob_data = data + 1;
           break;
         case 2:  // BLOB/TEXT
           if (data + 2 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           blob_len = binlog_util::uint2korr(data);
           blob_data = data + 2;
           break;
         case 3:  // MEDIUMBLOB/MEDIUMTEXT
           if (data + 3 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           blob_len = binlog_util::uint3korr(data);
           blob_data = data + 3;
           break;
         case 4:  // LONGBLOB/LONGTEXT
           if (data + 4 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           blob_len = binlog_util::uint4korr(data);
           blob_data = data + 4;
@@ -196,7 +204,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
               .Field("type", "invalid_blob_metadata")
               .Field("metadata", static_cast<int64_t>(metadata))
               .Error();
-          return "[INVALID_BLOB_METADATA]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid BLOB metadata"));
       }
       if (blob_len > kMaxFieldLength || blob_data + blob_len > end) {
         mygram::utils::StructuredLog()
@@ -204,7 +212,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
             .Field("type", "blob_length_exceeds_bounds")
             .Field("length", static_cast<uint64_t>(blob_len))
             .Error();
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
     }
@@ -213,7 +221,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       unsigned char type = metadata >> 8;
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
         if (data + 1 > end) {
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
         return std::to_string(*data);
       }
@@ -222,13 +230,13 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       const unsigned char* str_data = nullptr;
       if (max_len > 255) {
         if (data + 2 > end) {
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
         str_len = binlog_util::uint2korr(data);
         str_data = data + 2;
       } else {
         if (data + 1 > end) {
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
         str_len = *data;
         str_data = data + 1;
@@ -239,7 +247,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
             .Field("type", "string_length_exceeds_bounds")
             .Field("length", static_cast<uint64_t>(str_len))
             .Error();
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
@@ -253,28 +261,28 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       switch (len_bytes) {
         case 1:
           if (data + 1 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           json_len = *data;
           json_data = data + 1;
           break;
         case 2:
           if (data + 2 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           json_len = binlog_util::uint2korr(data);
           json_data = data + 2;
           break;
         case 3:
           if (data + 3 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           json_len = binlog_util::uint3korr(data);
           json_data = data + 3;
           break;
         case 4:
           if (data + 4 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           json_len = binlog_util::uint4korr(data);
           json_data = data + 4;
@@ -286,7 +294,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
             .Field("type", "json_length_exceeds_bounds")
             .Field("length", static_cast<uint64_t>(json_len))
             .Error();
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
     }
@@ -499,34 +507,34 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       switch (metadata) {
         case 1:
           if (data + 1 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           vec_len = *data;
           vec_data = data + 1;
           break;
         case 2:
           if (data + 2 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           vec_len = binlog_util::uint2korr(data);
           vec_data = data + 2;
           break;
         case 3:
           if (data + 3 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           vec_len = binlog_util::uint3korr(data);
           vec_data = data + 3;
           break;
         case 4:
           if (data + 4 > end) {
-            return "[TRUNCATED]";
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
           }
           vec_len = binlog_util::uint4korr(data);
           vec_data = data + 4;
           break;
         default:
-          return "[VECTOR:INVALID_METADATA]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid VECTOR metadata"));
       }
       if (vec_len > kMaxFieldLength || vec_data + vec_len > end) {
         mygram::utils::StructuredLog()
@@ -534,7 +542,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
             .Field("type", "vector_length_exceeds_bounds")
             .Field("length", static_cast<uint64_t>(vec_len))
             .Error();
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
       // VECTOR contains binary float data; return as hex string
       std::ostringstream oss;
@@ -571,7 +579,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
           geo_data = data + 4;
           break;
         default:
-          return "[GEOMETRY:INVALID_METADATA]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid GEOMETRY metadata"));
       }
 
       // Return WKB data as hex string
@@ -592,12 +600,12 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       }
       if (enum_size == 1) {
         if (data + 1 > end)
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         uint8_t val = *data;
         return std::to_string(val);
       } else {
         if (data + 2 > end)
-          return "[TRUNCATED]";
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         uint16_t val = data[0] | (static_cast<uint16_t>(data[1]) << 8);
         return std::to_string(val);
       }
@@ -611,7 +619,7 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       if (set_size > 8)
         set_size = 8;
       if (data + set_size > end)
-        return "[TRUNCATED]";
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       uint64_t val = 0;
       for (uint8_t i = 0; i < set_size; i++) {
         val |= static_cast<uint64_t>(data[i]) << (i * 8);
@@ -620,7 +628,8 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
     }
 
     default:
-      return "[UNSUPPORTED_TYPE:" + std::to_string(col_type) + "]";
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLUnsupportedType, "Unsupported column type: " + std::to_string(col_type)));
   }
 }
 

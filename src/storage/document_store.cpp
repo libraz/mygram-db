@@ -80,7 +80,8 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   return doc_id;
 }
 
-Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
+Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::vector<DocumentItem>& documents,
+                                                                    std::unordered_set<DocId>* existing_doc_ids_out) {
   std::vector<DocId> doc_ids;
   doc_ids.reserve(documents.size());
 
@@ -101,6 +102,9 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
           .Field("primary_key", doc.primary_key)
           .Field("existing_doc_id", static_cast<uint64_t>(iterator->second))
           .Warn();
+      if (existing_doc_ids_out != nullptr) {
+        existing_doc_ids_out->insert(iterator->second);
+      }
       doc_ids.push_back(iterator->second);
       continue;
     }

@@ -30,8 +30,9 @@ TEST_F(EnumSetDecodeTest, Enum1ByteValue) {
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "42");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "42");
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
@@ -39,8 +40,9 @@ TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
   unsigned char data[] = {0};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "0");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "0");
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteMax) {
@@ -48,8 +50,9 @@ TEST_F(EnumSetDecodeTest, Enum1ByteMax) {
   unsigned char data[] = {255};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "255");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "255");
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteValue) {
@@ -59,8 +62,9 @@ TEST_F(EnumSetDecodeTest, Enum2ByteValue) {
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "769");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "769");
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteZero) {
@@ -68,8 +72,9 @@ TEST_F(EnumSetDecodeTest, Enum2ByteZero) {
   unsigned char data[] = {0x00, 0x00};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "0");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "0");
 }
 
 TEST_F(EnumSetDecodeTest, EnumDefaultTo1ByteWhenMetadataZero) {
@@ -78,8 +83,9 @@ TEST_F(EnumSetDecodeTest, EnumDefaultTo1ByteWhenMetadataZero) {
   unsigned char data[] = {5};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "5");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "5");
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
@@ -87,8 +93,8 @@ TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
   unsigned char data[] = {42};
   const unsigned char* end = data;  // No data available
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "[TRUNCATED]");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteTruncated) {
@@ -96,8 +102,8 @@ TEST_F(EnumSetDecodeTest, Enum2ByteTruncated) {
   unsigned char data[] = {0x01};
   const unsigned char* end = data + 1;  // Only 1 byte, need 2
 
-  std::string result = DecodeFieldValue(247, data, metadata, false, end, false);
-  EXPECT_EQ(result, "[TRUNCATED]");
+  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(EnumSetDecodeTest, EnumNull) {
@@ -105,8 +111,9 @@ TEST_F(EnumSetDecodeTest, EnumNull) {
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(247, data, metadata, true, end, false);
-  EXPECT_EQ(result, "");
+  auto result = DecodeFieldValue(247, data, metadata, true, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "");
 }
 
 // ============================================================================
@@ -118,8 +125,9 @@ TEST_F(EnumSetDecodeTest, Set1ByteValue) {
   unsigned char data[] = {0x05};  // bits 0 and 2 set
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "5");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "5");
 }
 
 TEST_F(EnumSetDecodeTest, Set2ByteValue) {
@@ -128,8 +136,9 @@ TEST_F(EnumSetDecodeTest, Set2ByteValue) {
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "769");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "769");
 }
 
 TEST_F(EnumSetDecodeTest, Set4ByteValue) {
@@ -138,8 +147,9 @@ TEST_F(EnumSetDecodeTest, Set4ByteValue) {
   const unsigned char* end = data + sizeof(data);
 
   // 0x0F | (0 << 8) | (0 << 16) | (1 << 24) = 16777231
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "16777231");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "16777231");
 }
 
 TEST_F(EnumSetDecodeTest, Set8ByteValue) {
@@ -149,8 +159,9 @@ TEST_F(EnumSetDecodeTest, Set8ByteValue) {
 
   // 1 | (0x80 << 56) = 9223372036854775809
   uint64_t expected = 1ULL | (static_cast<uint64_t>(0x80) << 56);
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, std::to_string(expected));
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, std::to_string(expected));
 }
 
 TEST_F(EnumSetDecodeTest, SetDefaultTo1ByteWhenMetadataZero) {
@@ -158,8 +169,9 @@ TEST_F(EnumSetDecodeTest, SetDefaultTo1ByteWhenMetadataZero) {
   unsigned char data[] = {7};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "7");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "7");
 }
 
 TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
@@ -167,8 +179,8 @@ TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
   unsigned char data[] = {0x05};
   const unsigned char* end = data;  // No data available
 
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "[TRUNCATED]");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(EnumSetDecodeTest, Set4ByteTruncated) {
@@ -176,8 +188,8 @@ TEST_F(EnumSetDecodeTest, Set4ByteTruncated) {
   unsigned char data[] = {0x01, 0x02};
   const unsigned char* end = data + 2;  // Only 2 bytes, need 4
 
-  std::string result = DecodeFieldValue(248, data, metadata, false, end, false);
-  EXPECT_EQ(result, "[TRUNCATED]");
+  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(EnumSetDecodeTest, SetNull) {
@@ -185,8 +197,9 @@ TEST_F(EnumSetDecodeTest, SetNull) {
   unsigned char data[] = {0xFF, 0xFF};
   const unsigned char* end = data + sizeof(data);
 
-  std::string result = DecodeFieldValue(248, data, metadata, true, end, false);
-  EXPECT_EQ(result, "");
+  auto result = DecodeFieldValue(248, data, metadata, true, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "");
 }
 
 #else

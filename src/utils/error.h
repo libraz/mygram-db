@@ -69,6 +69,9 @@ enum class ErrorCode : std::uint16_t {
   kMySQLColumnNotFound = 2010,    ///< Column not found
   kMySQLDuplicateColumn = 2011,   ///< Duplicate column in unique constraint
   kMySQLInvalidSchema = 2012,     ///< Invalid schema/table structure
+  kMySQLFieldTruncated = 2013,    ///< Field data truncated in binlog event
+  kMySQLInvalidMetadata = 2014,   ///< Invalid field metadata in binlog event
+  kMySQLUnsupportedType = 2015,   ///< Unsupported MySQL column type
 
   // ===== Query Parsing Errors (3000-3999) =====
   kQuerySyntaxError = 3000,           ///< Query syntax error
@@ -235,6 +238,12 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Duplicate column";
     case ErrorCode::kMySQLInvalidSchema:
       return "Invalid schema";
+    case ErrorCode::kMySQLFieldTruncated:
+      return "Field data truncated";
+    case ErrorCode::kMySQLInvalidMetadata:
+      return "Invalid field metadata";
+    case ErrorCode::kMySQLUnsupportedType:
+      return "Unsupported column type";
 
     // Query
     case ErrorCode::kQuerySyntaxError:

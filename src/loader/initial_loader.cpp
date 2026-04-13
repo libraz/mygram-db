@@ -362,18 +362,9 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Collect existing doc_ids before batch add to detect duplicates
+  // Add documents to document store (collecting duplicate info in one pass)
   std::unordered_set<storage::DocId> existing_doc_ids;
-  existing_doc_ids.reserve(doc_batch.size());
-  for (const auto& doc : doc_batch) {
-    auto existing_id = doc_store_.GetDocId(doc.primary_key);
-    if (existing_id) {
-      existing_doc_ids.insert(*existing_id);
-    }
-  }
-
-  // Add documents to document store
-  auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch);
+  auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch, &existing_doc_ids);
   if (!doc_ids_result) {
     auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
     if (!rollback_result) {

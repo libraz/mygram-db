@@ -74,10 +74,12 @@ struct QueryNode {
    *
    * @param index The inverted index to search
    * @param doc_store Document store for NOT operations (to get all docs)
+   * @param all_docs Pre-computed set of all document IDs (optimization for
+   *        queries with multiple NOT nodes). If nullptr, computed on demand.
    * @return Vector of document IDs matching the query
    */
-  [[nodiscard]] std::vector<index::DocId> Evaluate(const index::Index& index,
-                                                   const storage::DocumentStore& doc_store) const;
+  [[nodiscard]] std::vector<index::DocId> Evaluate(const index::Index& index, const storage::DocumentStore& doc_store,
+                                                   const std::vector<index::DocId>* all_docs = nullptr) const;
 };
 
 /**

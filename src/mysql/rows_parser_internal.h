@@ -17,6 +17,8 @@
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/table_metadata.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::mysql::internal {
 
@@ -82,8 +84,10 @@ uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision);
  * @param is_unsigned Whether the field is unsigned
  * @return String representation of the value
  */
-std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null,
-                             const unsigned char* end, bool is_unsigned = false);
+mygram::utils::Expected<std::string, mygram::utils::Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data,
+                                                                            uint16_t metadata, bool is_null,
+                                                                            const unsigned char* end,
+                                                                            bool is_unsigned = false);
 
 }  // namespace mygramdb::mysql::internal
 

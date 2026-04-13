@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -150,11 +151,14 @@ class DocumentStore {
    * the existing document. No error is raised for duplicates.
    *
    * @param documents Vector of documents to add
+   * @param existing_doc_ids_out If non-null, populated with DocIds of documents
+   *        that already existed (duplicates). Caller can use this to skip indexing.
    * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input,
    *         existing DocIDs for duplicates) or error (e.g., DocID exhausted mid-batch)
    * @note This method is thread-safe
    */
-  [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(const std::vector<DocumentItem>& documents);
+  [[nodiscard]] Expected<std::vector<DocId>, Error> AddDocumentBatch(
+      const std::vector<DocumentItem>& documents, std::unordered_set<DocId>* existing_doc_ids_out = nullptr);
 
   /**
    * @brief Update document

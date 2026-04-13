@@ -244,8 +244,19 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         }
 
         // Decode field value
-        std::string value = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
+        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
                                                        is_null, end, col_meta.is_unsigned);
+        if (!value_result) {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "field_decode_error")
+              .Field("event_type", "write_rows")
+              .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Field("error", value_result.error().message())
+              .Error();
+          return std::nullopt;
+        }
+        std::string value = *value_result;
 
         // Store in row data
         row.columns[col_meta.name] = value;
@@ -453,20 +464,20 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
           break;
         }
 
-        std::string value = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
+        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
                                                        is_null, end, col_meta.is_unsigned);
-
-        // Check for truncation marker
-        if (value == "[TRUNCATED]") {
+        if (!value_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
-              .Field("type", "field_truncation")
+              .Field("type", "field_decode_error")
               .Field("event_type", "update_rows")
               .Field("image", "before")
               .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Field("error", value_result.error().message())
               .Error();
           return std::nullopt;
         }
+        std::string value = *value_result;
 
         // Check again after decode, as DecodeFieldValue advances ptr
         if (ptr > end) {
@@ -617,20 +628,20 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
           break;
         }
 
-        std::string value = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
+        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
                                                        is_null, end, col_meta.is_unsigned);
-
-        // Check for truncation marker
-        if (value == "[TRUNCATED]") {
+        if (!value_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
-              .Field("type", "field_truncation")
+              .Field("type", "field_decode_error")
               .Field("event_type", "update_rows")
               .Field("image", "after")
               .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Field("error", value_result.error().message())
               .Error();
           return std::nullopt;
         }
+        std::string value = *value_result;
 
         // Check again after decode
         if (ptr > end) {
@@ -794,19 +805,19 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
           return std::nullopt;
         }
 
-        std::string value = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
+        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
                                                        is_null, end, col_meta.is_unsigned);
-
-        // Check for truncation marker
-        if (value == "[TRUNCATED]") {
+        if (!value_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
-              .Field("type", "field_truncation")
+              .Field("type", "field_decode_error")
               .Field("event_type", "delete_rows")
               .Field("column_index", static_cast<uint64_t>(col_idx))
+              .Field("error", value_result.error().message())
               .Error();
           return std::nullopt;
         }
+        std::string value = *value_result;
 
         row.columns[col_meta.name] = value;
 
