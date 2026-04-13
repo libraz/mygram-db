@@ -62,8 +62,7 @@ TEST(BinlogCRC32Test, ValidChecksumPasses) {
 
   // Simulate receiver-side verification
   size_t event_length = buf.size();
-  ASSERT_GE(event_length,
-            mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize);
+  ASSERT_GE(event_length, mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize);
 
   size_t data_length = event_length - mygram::constants::kBinlogChecksumSize;
   uint32_t computed = mygram::utils::ComputeCRC32(buf.data(), data_length);
@@ -110,8 +109,7 @@ TEST(BinlogCRC32Test, MinimalEventWithChecksum) {
   auto buf = BuildMinimalHeader(0x21);
   AppendValidCRC(buf);
 
-  EXPECT_EQ(buf.size(),
-            mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize);
+  EXPECT_EQ(buf.size(), mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize);
 
   size_t data_length = buf.size() - mygram::constants::kBinlogChecksumSize;
   uint32_t computed = mygram::utils::ComputeCRC32(buf.data(), data_length);
@@ -123,8 +121,7 @@ TEST(BinlogCRC32Test, MinimalEventWithChecksum) {
 TEST(BinlogCRC32Test, EventTooSmallForChecksum) {
   // An event smaller than header + checksum should not be verified
   std::vector<uint8_t> buf(10, 0);
-  EXPECT_LT(buf.size(),
-            mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize)
+  EXPECT_LT(buf.size(), mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize)
       << "Buffer should be too small for CRC verification";
 }
 
