@@ -256,8 +256,12 @@ class MygramClient::Impl {
       timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / kMillisecondsPerSecond);
       timeout_val.tv_usec = static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % kMillisecondsPerSecond) *
                                                                        kMicrosecondsPerMillisecond);
-      setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
-      setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
+      if (setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val)) < 0) {
+        // Non-critical: timeout setting failed, continue with default
+      }
+      if (setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val)) < 0) {
+        // Non-critical: timeout setting failed, continue with default
+      }
 
       struct sockaddr_un server_addr {};
       server_addr.sun_family = AF_UNIX;
@@ -285,8 +289,12 @@ class MygramClient::Impl {
     timeout_val.tv_sec = static_cast<decltype(timeout_val.tv_sec)>(config_.timeout_ms / kMillisecondsPerSecond);
     timeout_val.tv_usec = static_cast<decltype(timeout_val.tv_usec)>((config_.timeout_ms % kMillisecondsPerSecond) *
                                                                      kMicrosecondsPerMillisecond);
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val));
-    setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val));
+    if (setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout_val, sizeof(timeout_val)) < 0) {
+      // Non-critical: timeout setting failed, continue with default
+    }
+    if (setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout_val, sizeof(timeout_val)) < 0) {
+      // Non-critical: timeout setting failed, continue with default
+    }
 
     struct sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;

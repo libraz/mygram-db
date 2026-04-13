@@ -53,6 +53,9 @@
 
 namespace mygramdb::server {
 
+// ToSockaddr / ToSockaddrUn are provided by utils/network_utils.h
+using mygram::utils::ToSockaddr;
+
 namespace {
 // Buffer size for IP address formatting
 constexpr size_t kIpAddressBufferSize = 64;
@@ -60,27 +63,6 @@ constexpr size_t kIpAddressBufferSize = 64;
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 constexpr int kDefaultConnectionRecvTimeoutSec = 60;
-
-/**
- * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
- *
- * POSIX socket API requires sockaddr* but we use sockaddr_in for IPv4.
- * This helper centralizes the required reinterpret_cast to a single location.
- *
- * Why reinterpret_cast is necessary here:
- * - POSIX socket functions (bind, accept, getsockname) require struct sockaddr*
- * - We use struct sockaddr_in for IPv4, which is binary-compatible
- * - This is the standard pattern in all POSIX socket programming
- * - The cast is safe as both types share the same memory layout for the address family
- *
- * @param addr Pointer to sockaddr_in structure
- * @return Pointer to sockaddr (same memory location, different type)
- */
-inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
-  // Suppressing clang-tidy warning for POSIX socket API compatibility
-  // This reinterpret_cast is required and safe for socket address structures
-  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-}
 
 }  // namespace
 

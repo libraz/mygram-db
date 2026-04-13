@@ -96,7 +96,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupImpl(const CacheKey& key, Lo
   // Copy compressed data and metadata while holding lock
   const auto& entry = iter->second.first;
   std::vector<uint8_t> compressed_copy = entry.compressed;
-  const size_t original_size = entry.original_size;
+  const size_t original_element_count = entry.original_element_count;
   const double query_cost_ms = entry.query_cost_ms;
 
   // Populate metadata if requested
@@ -116,7 +116,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupImpl(const CacheKey& key, Lo
   // Decompress outside lock to reduce shared_lock hold time
   std::vector<DocId> result;
   if (compression_enabled_) {
-    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_size);
+    auto decompress_result = ResultCompressor::Decompress(compressed_copy, original_element_count);
     if (!decompress_result) {
       // Decompression failed - enqueue for cleanup and treat as miss
       {
@@ -133,7 +133,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupImpl(const CacheKey& key, Lo
     result = std::move(*decompress_result);
   } else {
     // No compression - interpret raw bytes as DocId array
-    result.resize(original_size);
+    result.resize(original_element_count);
     std::memcpy(result.data(), compressed_copy.data(), compressed_copy.size());
   }
 
@@ -204,8 +204,9 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
   // Complete cache entry (reuse temp_entry to maintain consistent memory calculation)
   temp_entry.key = key;
-  temp_entry.original_size = original_count;  // Store count, not bytes
+  temp_entry.original_element_count = original_count;  // Store element count, not bytes
   temp_entry.compressed_size = compressed_size;
+  temp_entry.stored_memory_footprint = entry_memory;  // Record footprint at insertion time
   temp_entry.query_cost_ms = query_cost_ms;
   temp_entry.metadata.created_at = std::chrono::steady_clock::now();
   temp_entry.metadata.last_accessed = temp_entry.metadata.created_at;
@@ -255,8 +256,8 @@ bool QueryCache::Erase(const CacheKey& key) {
   // Remove from LRU list
   lru_list_.erase(iter->second.second);
 
-  // Update memory tracking
-  const size_t entry_memory = iter->second.first.HeapFootprint();
+  // Update memory tracking (use stored footprint to avoid underflow from capacity changes)
+  const size_t entry_memory = iter->second.first.stored_memory_footprint;
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
   stats_.current_memory_bytes = total_memory_bytes_;
@@ -343,8 +344,8 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
   // Remove from LRU list
   lru_list_.erase(iter->second.second);
 
-  // Update memory tracking
-  const size_t entry_memory = iter->second.first.HeapFootprint();
+  // Update memory tracking (use stored footprint to avoid underflow from capacity changes)
+  const size_t entry_memory = iter->second.first.stored_memory_footprint;
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
 

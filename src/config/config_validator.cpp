@@ -24,11 +24,12 @@ void ValidatePathNoTraversal(const std::string& path, const std::string& field_n
     return;  // Empty paths are allowed (will be validated elsewhere if required)
   }
 
-  // Check for path traversal patterns
-  if (path.find("..") != std::string::npos) {
+  // Check for ".." as a path component (not just substring)
+  if (path == ".." || path.find("/../") != std::string::npos || path.find("../") == 0 ||
+      (path.size() >= 3 && path.substr(path.size() - 3) == "/..")) {
     throw std::runtime_error(
         "Path traversal detected in '" + field_name +
-        "': path contains '..' which is not allowed for security reasons. "
+        "': path contains '..' component which is not allowed for security reasons. "
         "Use absolute paths or paths relative to the working directory without parent references.");
   }
 

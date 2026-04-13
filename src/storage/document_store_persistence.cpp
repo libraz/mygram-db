@@ -54,7 +54,7 @@ constexpr uint32_t kMaxNormalizedTextLength = 16 * 1024 * 1024;  // 16MB
 
 }  // namespace
 
-void DocumentStore::SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const {
+bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const {
   // File format:
   // [4 bytes: magic "MGDS"] [4 bytes: version] [4 bytes: next_doc_id]
   // [4 bytes: gtid_length] [gtid_length bytes: GTID string]
@@ -147,6 +147,8 @@ void DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
       WriteBinary(out, text_len);
     }
   }
+
+  return out.good();
 }
 
 Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std::string* replication_gtid,
@@ -222,6 +224,12 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
       new_pk_to_doc_id;
   std::unordered_map<DocId, FilterMap> new_doc_filters;
   std::unordered_map<DocId, std::string> new_doc_texts;
+
+  // Reserve capacity to avoid rehashing during bulk insertion
+  new_doc_id_to_pk.reserve(static_cast<size_t>(doc_count));
+  new_pk_to_doc_id.reserve(static_cast<size_t>(doc_count));
+  new_doc_filters.reserve(static_cast<size_t>(doc_count));
+  new_doc_texts.reserve(static_cast<size_t>(doc_count));
 
   // Read doc_id -> pk mappings and filters
   for (uint64_t i = 0; i < doc_count; ++i) {
@@ -465,7 +473,10 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                       "Failed to open temp file for writing", temp_filepath));
     }
 
-    SerializeDocuments(ofs, replication_gtid);
+    if (!SerializeDocuments(ofs, replication_gtid)) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                      "Stream error while serializing documents", temp_filepath));
+    }
 
     ofs.close();
 
@@ -517,9 +528,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
                                                   const std::string& replication_gtid) const {
   try {
-    SerializeDocuments(output_stream, replication_gtid);
-
-    if (!output_stream.good()) {
+    if (!SerializeDocuments(output_stream, replication_gtid)) {
       return MakeUnexpected(
           MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Stream error while saving document store"));
     }

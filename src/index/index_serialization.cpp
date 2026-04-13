@@ -16,8 +16,10 @@
 #include <unistd.h>
 #endif
 
+#include "utils/binary_io.h"
 #include "utils/constants.h"
 #include "utils/crc32.h"
+#include "utils/endian_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::index {
@@ -111,13 +113,11 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
     // Write version
     uint32_t version = kCurrentFormatVersion;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    buffer.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    mygram::utils::WriteBinary(buffer, version);
 
     // Write ngram_size
     auto ngram = static_cast<uint32_t>(ngram_size_);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    buffer.write(reinterpret_cast<const char*>(&ngram), sizeof(ngram));
+    mygram::utils::WriteBinary(buffer, ngram);
 
     // RCU snapshot: Take short shared_lock to copy term->PostingList pairs, then
     // serialize lock-free. This allows searches to proceed during serialization.
@@ -132,15 +132,13 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
     // Write term count
     auto term_count = static_cast<uint64_t>(snapshot.size());
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    buffer.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+    mygram::utils::WriteBinary(buffer, term_count);
 
     // Write each term and its posting list (lock-free)
     for (const auto& [term, posting] : snapshot) {
       // Write term length and term
       auto term_len = static_cast<uint32_t>(term.size());
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      buffer.write(reinterpret_cast<const char*>(&term_len), sizeof(term_len));
+      mygram::utils::WriteBinary(buffer, term_len);
       buffer.write(term.data(), static_cast<std::streamsize>(term_len));
 
       // Serialize posting list to buffer
@@ -157,9 +155,8 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
       // Write posting list size and data
       uint64_t posting_size = posting_data.size();
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-      buffer.write(reinterpret_cast<const char*>(&posting_size), sizeof(posting_size));
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
+      mygram::utils::WriteBinary(buffer, posting_size);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O of raw bytes
       buffer.write(reinterpret_cast<const char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
     }
 
@@ -169,8 +166,7 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
 
     // Write data followed by CRC32 trailer to the actual output stream
     output_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O
-    output_stream.write(reinterpret_cast<const char*>(&crc), sizeof(crc));
+    mygram::utils::WriteBinary(output_stream, crc);
 
     if (!output_stream.good()) {
       mygram::utils::StructuredLog()
@@ -273,6 +269,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     // Read version (offset 4)
     uint32_t version = 0;
     std::memcpy(&version, all_data.data() + 4, sizeof(version));
+    version = mygram::utils::FromLittleEndian(version);
 
     if (version != kFormatVersionV1 && version != kFormatVersionV2) {
       mygram::utils::StructuredLog()
@@ -303,6 +300,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       // Read stored CRC32 from trailer
       uint32_t stored_crc = 0;
       std::memcpy(&stored_crc, all_data.data() + payload_size, sizeof(stored_crc));
+      stored_crc = mygram::utils::FromLittleEndian(stored_crc);
 
       // Compute CRC32 over the payload
       uint32_t computed_crc = mygram::utils::ComputeCRC32(all_data.data(), payload_size);
@@ -329,6 +327,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     // Read ngram_size (offset 8)
     uint32_t ngram = 0;
     std::memcpy(&ngram, all_data.data() + pos, sizeof(ngram));
+    ngram = mygram::utils::FromLittleEndian(ngram);
     pos += sizeof(ngram);
 
     if (static_cast<int>(ngram) != ngram_size_) {
@@ -343,6 +342,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
     // Read term count
     uint64_t term_count = 0;
     std::memcpy(&term_count, all_data.data() + pos, sizeof(term_count));
+    term_count = mygram::utils::FromLittleEndian(term_count);
     pos += sizeof(term_count);
 
     // Load into a new map to minimize lock time
@@ -363,6 +363,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       // Read term length and term
       uint32_t term_len = 0;
       std::memcpy(&term_len, all_data.data() + pos, sizeof(term_len));
+      term_len = mygram::utils::FromLittleEndian(term_len);
       pos += sizeof(term_len);
 
       if (pos + term_len > data_size) {
@@ -389,6 +390,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
       // Read posting list size and data
       uint64_t posting_size = 0;
       std::memcpy(&posting_size, all_data.data() + pos, sizeof(posting_size));
+      posting_size = mygram::utils::FromLittleEndian(posting_size);
       pos += sizeof(posting_size);
 
       if (pos + posting_size > data_size) {

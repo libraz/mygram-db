@@ -534,33 +534,41 @@ class MygramClient {
       return "(error) Failed to send command: " + std::string(strerror(saved_errno));
     }
 
-    // Receive response
+    // Receive response (loop until CRLF terminator is found)
+    std::string response;
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
     char buffer[kReceiveBufferSize];
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-    if (received <= 0) {
-      if (received == 0) {
-        return "(error) SERVER_DISCONNECTED: Server closed the connection. This usually means:\n"
-               "  1. Server was shut down gracefully\n"
-               "  2. Server crashed or encountered a fatal error\n"
-               "  3. Server restarted and dropped all connections\n"
-               "\nTry reconnecting to check if the server is still running.";
+    while (true) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+      ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+      if (received <= 0) {
+        if (received == 0) {
+          if (response.empty()) {
+            return "(error) SERVER_DISCONNECTED: Server closed the connection. This usually means:\n"
+                   "  1. Server was shut down gracefully\n"
+                   "  2. Server crashed or encountered a fatal error\n"
+                   "  3. Server restarted and dropped all connections\n"
+                   "\nTry reconnecting to check if the server is still running.";
+          }
+          break;  // Use partial response
+        }
+        int saved_errno = errno;
+        if (saved_errno == ECONNRESET) {
+          return "(error) SERVER_DISCONNECTED: Connection reset by server. The server may have crashed.";
+        }
+        if (saved_errno == ETIMEDOUT) {
+          return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or frozen.";
+        }
+        return "(error) Failed to receive response: " + std::string(strerror(saved_errno));
       }
-      int saved_errno = errno;
-      if (saved_errno == ECONNRESET) {
-        return "(error) SERVER_DISCONNECTED: Connection reset by server. The server may have crashed.";
-      }
-      if (saved_errno == ETIMEDOUT) {
-        return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or frozen.";
-      }
-      return "(error) Failed to receive response: " + std::string(strerror(saved_errno));
-    }
 
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    buffer[received] = '\0';
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-    std::string response(buffer);
+      response.append(buffer, static_cast<size_t>(received));
+
+      // Check if response ends with \r\n (protocol terminator)
+      if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
+        break;
+      }
+    }
 
     // Remove trailing \r\n
     if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
@@ -881,8 +889,12 @@ int main(int argc, char* argv[]) {
     } else if (arg == "-p") {
       if (i + 1 < argc) {
         try {
-          config.port =
-              static_cast<uint16_t>(std::stoi(argv[++i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+          int port_int = std::stoi(argv[++i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+          if (port_int < 1 || port_int > 65535) {
+            std::cerr << "Error: port must be between 1 and 65535" << '\n';
+            return 1;
+          }
+          config.port = static_cast<uint16_t>(port_int);
         } catch (const std::exception& e) {
           std::cerr << "Error: Invalid port number" << '\n';
           return 1;

@@ -137,6 +137,7 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index,
         return {};
       }
 
+      // TODO: Accept pre-computed all_docs to avoid O(N) call per NOT evaluation
       // Get all document IDs
       auto all_docs = doc_store.GetAllDocIds();
 

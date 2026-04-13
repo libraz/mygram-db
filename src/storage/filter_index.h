@@ -65,6 +65,9 @@ class FilterIndex {
   static std::string SerializeFilterValue(const FilterValue& value);
 
  private:
+  /// Add doc_id to bitmaps for given filters. Caller must hold unique_lock on mutex_.
+  void AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters);
+
   /// Remove doc_id from bitmaps for given filters. Caller must hold unique_lock on mutex_.
   void RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters);
 

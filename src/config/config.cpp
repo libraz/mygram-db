@@ -147,6 +147,10 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   }
   if (json_obj.contains("connect_timeout_ms")) {
     config.connect_timeout_ms = json_obj["connect_timeout_ms"].get<int>();
+    if (config.connect_timeout_ms < 0) {
+      throw std::runtime_error("mysql.connect_timeout_ms must be non-negative, got: " +
+                               std::to_string(config.connect_timeout_ms));
+    }
   }
   if (json_obj.contains("read_timeout_ms")) {
     config.read_timeout_ms = json_obj["read_timeout_ms"].get<int>();
@@ -333,6 +337,9 @@ TableConfig ParseTableConfig(const json& json_obj) {
   }
   if (json_obj.contains("ngram_size")) {
     config.ngram_size = json_obj["ngram_size"].get<int>();
+    if (config.ngram_size < 1 || config.ngram_size > 10) {
+      throw std::runtime_error("ngram_size must be between 1 and 10, got: " + std::to_string(config.ngram_size));
+    }
   }
   if (json_obj.contains("kanji_ngram_size")) {
     config.kanji_ngram_size = json_obj["kanji_ngram_size"].get<int>();
@@ -453,6 +460,9 @@ Config ParseConfigFromJson(const json& root) {
   int global_ngram_size = 1;  // default
   if (root.contains("index") && root["index"].contains("ngram_size")) {
     global_ngram_size = root["index"]["ngram_size"].get<int>();
+    if (global_ngram_size < 1 || global_ngram_size > 10) {
+      throw std::runtime_error("index.ngram_size must be between 1 and 10, got: " + std::to_string(global_ngram_size));
+    }
   }
 
   // Parse tables
@@ -475,6 +485,9 @@ Config ParseConfigFromJson(const json& root) {
     }
     if (build.contains("batch_size")) {
       config.build.batch_size = build["batch_size"].get<int>();
+      if (config.build.batch_size <= 0) {
+        throw std::runtime_error("build.batch_size must be positive, got: " + std::to_string(config.build.batch_size));
+      }
     }
     if (build.contains("parallelism")) {
       config.build.parallelism = build["parallelism"].get<int>();
@@ -501,6 +514,10 @@ Config ParseConfigFromJson(const json& root) {
     }
     if (repl.contains("queue_size")) {
       config.replication.queue_size = repl["queue_size"].get<int>();
+      if (config.replication.queue_size <= 0) {
+        throw std::runtime_error("replication.queue_size must be positive, got: " +
+                                 std::to_string(config.replication.queue_size));
+      }
     }
     if (repl.contains("reconnect_backoff_min_ms")) {
       config.replication.reconnect_backoff_min_ms = repl["reconnect_backoff_min_ms"].get<int>();

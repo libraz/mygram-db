@@ -278,7 +278,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       query::ResultSorter::SortAndPaginate(output.results, *output.current_doc_store, query, primary_key_column);
 
   if (!sorted_result.has_value()) {
-    return sorted_result.error();
+    return sorted_result.error().to_string();
   }
 
   auto sorted_results = std::move(sorted_result.value());

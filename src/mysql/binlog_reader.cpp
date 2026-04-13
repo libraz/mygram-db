@@ -125,8 +125,9 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       binlog_conn.reset();
       metadata_conn.reset();
 
-      // Clear state flags - must reset should_stop to allow future Start() calls
-      should_stop = false;
+      // Clear running flag to allow future Start() calls.
+      // Note: should_stop is NOT reset here — the next Start() call
+      // sets should_stop_ = false explicitly before launching threads.
       running_flag = false;
     }
 

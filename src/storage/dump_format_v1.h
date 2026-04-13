@@ -89,6 +89,22 @@ constexpr uint32_t kMaxTextContentLength = 16 * 1024 * 1024;  // 16MB
 /// Maximum length for general/fallback string fields
 constexpr uint32_t kMaxGeneralStringLength = 1024 * 1024;  // 1MB
 
+/// Maximum length for config section (prevents OOM from malicious dump files)
+constexpr uint32_t kMaxConfigSectionLength = 16 * 1024 * 1024;  // 16 MB
+
+/// Maximum length for statistics section (prevents OOM from malicious dump files)
+constexpr uint32_t kMaxStatsSectionLength = 16 * 1024 * 1024;  // 16 MB
+
+/// @}
+
+/// @name Header field offsets for V1 format
+/// These offsets are relative to the start of the file and used for seeking
+/// to specific header fields during write-back operations.
+/// Layout: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) = 24
+/// @{
+constexpr std::streamoff kHeaderTotalFileSizeOffset = 24;
+/// total_file_size(8) follows, so CRC32 is at offset 32
+constexpr std::streamoff kHeaderFileCRC32Offset = 32;
 /// @}
 
 /**

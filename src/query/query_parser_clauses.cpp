@@ -4,6 +4,8 @@
  */
 
 #include <array>
+#include <climits>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -159,38 +161,73 @@ bool QueryParser::ParseLimit(const std::vector<std::string>& tokens, size_t& pos
     std::string offset_str = limit_str.substr(0, comma_pos);
     std::string count_str = limit_str.substr(comma_pos + 1);
 
-    try {
-      int offset = std::stoi(offset_str);
-      int count = std::stoi(count_str);
+    // Reject negative values (stoul would wrap them)
+    if (!offset_str.empty() && offset_str[0] == '-') {
+      SetError("LIMIT offset must be non-negative");
+      return false;
+    }
+    if (!count_str.empty() && count_str[0] == '-') {
+      SetError("LIMIT count must be positive");
+      return false;
+    }
 
-      if (offset < 0) {
-        SetError("LIMIT offset must be non-negative");
-        return false;
-      }
-      if (count <= 0) {
+    try {
+      unsigned long offset_val = std::stoul(offset_str);
+      unsigned long count_val = std::stoul(count_str);
+
+      if (count_val == 0) {
         SetError("LIMIT count must be positive");
         return false;
       }
 
-      query.offset = static_cast<uint32_t>(offset);
-      query.limit = static_cast<uint32_t>(count);
+      // Check that values fit in uint32_t
+      if (offset_val > static_cast<unsigned long>(UINT32_MAX)) {
+        SetError("LIMIT offset value too large");
+        return false;
+      }
+      if (count_val > static_cast<unsigned long>(UINT32_MAX)) {
+        SetError("LIMIT count value too large");
+        return false;
+      }
+
+      query.offset = static_cast<uint32_t>(offset_val);
+      query.limit = static_cast<uint32_t>(count_val);
       query.offset_explicit = true;
       query.limit_explicit = true;
-    } catch (const std::exception& e) {
+    } catch (const std::out_of_range&) {
+      SetError("LIMIT offset,count value out of range: " + limit_str);
+      return false;
+    } catch (const std::invalid_argument&) {
       SetError("Invalid LIMIT offset,count format: " + limit_str);
       return false;
     }
   } else {
     // Parse LIMIT <n>
+    // Reject negative values (stoul would wrap them)
+    if (!limit_str.empty() && limit_str[0] == '-') {
+      SetError("LIMIT must be positive");
+      return false;
+    }
+
     try {
-      int limit = std::stoi(limit_str);
-      if (limit <= 0) {
+      unsigned long limit_val = std::stoul(limit_str);
+      if (limit_val == 0) {
         SetError("LIMIT must be positive");
         return false;
       }
-      query.limit = static_cast<uint32_t>(limit);
+
+      // Check that value fits in uint32_t
+      if (limit_val > static_cast<unsigned long>(UINT32_MAX)) {
+        SetError("LIMIT value too large");
+        return false;
+      }
+
+      query.limit = static_cast<uint32_t>(limit_val);
       query.limit_explicit = true;  // Mark as explicitly specified
-    } catch (const std::exception& e) {
+    } catch (const std::out_of_range&) {
+      SetError("LIMIT value out of range: " + limit_str);
+      return false;
+    } catch (const std::invalid_argument&) {
       SetError("Invalid LIMIT value: " + limit_str);
       return false;
     }
@@ -208,16 +245,30 @@ bool QueryParser::ParseOffset(const std::vector<std::string>& tokens, size_t& po
     return false;
   }
 
+  const std::string& offset_str = tokens[pos++];
+
+  // Reject negative values (stoul would wrap them)
+  if (!offset_str.empty() && offset_str[0] == '-') {
+    SetError("OFFSET must be non-negative");
+    return false;
+  }
+
   try {
-    int offset = std::stoi(tokens[pos++]);
-    if (offset < 0) {
-      SetError("OFFSET must be non-negative");
+    unsigned long offset_val = std::stoul(offset_str);
+
+    // Check that value fits in uint32_t
+    if (offset_val > static_cast<unsigned long>(UINT32_MAX)) {
+      SetError("OFFSET value too large");
       return false;
     }
-    query.offset = static_cast<uint32_t>(offset);
+
+    query.offset = static_cast<uint32_t>(offset_val);
     query.offset_explicit = true;  // Mark as explicitly specified
-  } catch (const std::exception& e) {
-    SetError("Invalid OFFSET value: " + tokens[pos - 1]);
+  } catch (const std::out_of_range&) {
+    SetError("OFFSET value out of range: " + offset_str);
+    return false;
+  } catch (const std::invalid_argument&) {
+    SetError("Invalid OFFSET value: " + offset_str);
     return false;
   }
 

@@ -5,12 +5,41 @@
 
 #pragma once
 
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace mygram::utils {
+
+/**
+ * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
+ *
+ * POSIX socket API requires sockaddr* but we use sockaddr_in for IPv4.
+ * This helper centralizes the required reinterpret_cast to a single location.
+ *
+ * @param addr Pointer to sockaddr_in structure
+ * @return Pointer to sockaddr (same memory location, different type)
+ */
+// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
+  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
+
+/**
+ * @brief Helper to safely cast sockaddr_un* to sockaddr* for socket API
+ *
+ * @param addr Pointer to sockaddr_un structure
+ * @return Pointer to sockaddr (same memory location, different type)
+ */
+// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+inline struct sockaddr* ToSockaddrUn(struct sockaddr_un* addr) {
+  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
 
 /**
  * @brief CIDR (Classless Inter-Domain Routing) representation

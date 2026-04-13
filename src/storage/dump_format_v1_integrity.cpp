@@ -121,9 +121,9 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
 
     // Read V1 header
     HeaderV1 header;
-    if (!ReadHeaderV1(ifs, header)) {
+    if (auto header_result = ReadHeaderV1(ifs, header); !header_result) {
       integrity_error.type = dump_format::CRCErrorType::FileCRC;
-      integrity_error.message = "Failed to read V1 header";
+      integrity_error.message = "Failed to read V1 header: " + header_result.error().message();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
@@ -148,7 +148,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       auto file_size = static_cast<uint64_t>(ifs.tellg());
 
       // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
-      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
+      const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
 
       uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
 

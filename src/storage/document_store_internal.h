@@ -33,35 +33,33 @@ inline constexpr uint8_t kTypeIndexString = 11;
 inline constexpr uint8_t kTypeIndexDouble = 12;
 
 /**
- * @brief Void-returning wrapper for WriteBinary (maintains API compatibility)
+ * @brief Bool-returning wrapper for WriteBinary
  *
  * Delegates to mygram::utils::WriteBinary from binary_io.h.
- * This wrapper maintains the original void return type for compatibility
- * with existing code that doesn't check return values.
  *
  * @tparam T Type of data to write
  * @param output_stream Output stream
  * @param data Reference to data to write
+ * @return true if write succeeded
  */
 template <typename T>
-inline void WriteBinary(std::ostream& output_stream, const T& data) {
-  (void)mygram::utils::WriteBinary(output_stream, data);
+inline bool WriteBinary(std::ostream& output_stream, const T& data) {
+  return mygram::utils::WriteBinary(output_stream, data);
 }
 
 /**
- * @brief Void-returning wrapper for ReadBinary (maintains API compatibility)
+ * @brief Bool-returning wrapper for ReadBinary
  *
  * Delegates to mygram::utils::ReadBinary from binary_io.h.
- * This wrapper maintains the original void return type for compatibility
- * with existing code that doesn't check return values.
  *
  * @tparam T Type of data to read
  * @param input_stream Input stream
  * @param data Reference to data to read into
+ * @return true if read succeeded
  */
 template <typename T>
-inline void ReadBinary(std::istream& input_stream, T& data) {
-  (void)mygram::utils::ReadBinary(input_stream, data);
+inline bool ReadBinary(std::istream& input_stream, T& data) {
+  return mygram::utils::ReadBinary(input_stream, data);
 }
 
 }  // namespace mygramdb::storage::internal

@@ -265,14 +265,25 @@ Expected<void, Error> WriteDumpV1(
     }
 
     // Create ofstream from file descriptor
-    // Note: We need to close file_descriptor manually or use __gnu_cxx::stdio_filebuf on Linux
-    // For simplicity, we'll close file_descriptor and reopen with ofstream since ownership is verified
+    // Note: We close file_descriptor and reopen with ofstream since ownership is verified.
+    // To mitigate the TOCTOU gap, we re-verify inode identity after reopening.
     close(file_descriptor);
 
     std::ofstream ofs(temp_filepath, std::ios::binary | std::ios::trunc | std::ios::out);
     if (!ofs) {
       LogStorageError("open_temp_file", temp_filepath, "Failed to open for writing");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+    }
+
+    // Re-verify the file identity after reopen to detect TOCTOU races
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by stat()
+    struct stat reopen_stat {};
+    if (stat(temp_filepath.c_str(), &reopen_stat) != 0 || reopen_stat.st_ino != file_stat.st_ino ||
+        reopen_stat.st_dev != file_stat.st_dev) {
+      ofs.close();
+      unlink(temp_filepath.c_str());
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                      "File identity changed between open and reopen (possible TOCTOU attack)"));
     }
 #else
     // Windows: Use standard file opening (symlink attacks less common on Windows)
@@ -451,13 +462,16 @@ Expected<void, Error> WriteDumpV1(
       }
 
       // Seek to total_file_size position (after magic + version + header_size + flags + timestamp)
-      const std::streamoff file_size_offset = 4 + 4 + 4 + 4 + 8;
-      update_stream1.seekp(file_size_offset);
+      update_stream1.seekp(kHeaderTotalFileSizeOffset);
       if (!WriteBinary(update_stream1, file_size)) {
         LogStorageError("write_header_field", temp_filepath, "Failed to write total_file_size");
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       update_stream1.close();
+      if (!update_stream1.good()) {
+        LogStorageError("update_header", temp_filepath, "Stream error during file size update");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+      }
     }
 
     // Calculate CRC32 of the file
@@ -468,7 +482,7 @@ Expected<void, Error> WriteDumpV1(
     }
 
     // CRC field is at offset: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) + total_file_size(8)
-    const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
+    const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
 
     uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
     ifs.close();
@@ -482,9 +496,7 @@ Expected<void, Error> WriteDumpV1(
       }
 
       // Seek to file_crc32 position (right after total_file_size)
-      const std::streamoff file_size_offset = 4 + 4 + 4 + 4 + 8;
-      const std::streamoff crc_file_offset = file_size_offset + 8;
-      update_stream2.seekp(crc_file_offset);
+      update_stream2.seekp(kHeaderFileCRC32Offset);
       if (!WriteBinary(update_stream2, calculated_crc)) {
         LogStorageError("write_header_field", temp_filepath, "Failed to write file_crc32");
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -621,7 +633,7 @@ Expected<void, Error> ReadDumpV1(
       auto file_size = static_cast<uint64_t>(ifs.tellg());
 
       // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
-      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
+      const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
 
       uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
@@ -651,6 +663,10 @@ Expected<void, Error> ReadDumpV1(
     if (!ReadBinary(ifs, config_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
     }
+    if (config_len > kMaxConfigSectionLength) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageDumpReadError, "Config section too large: " + std::to_string(config_len)));
+    }
     std::string config_data(config_len, '\0');
     ifs.read(config_data.data(), static_cast<std::streamsize>(config_len));
     std::istringstream config_stream(config_data);
@@ -663,6 +679,10 @@ Expected<void, Error> ReadDumpV1(
     uint32_t stats_len = 0;
     if (!ReadBinary(ifs, stats_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+    }
+    if (stats_len > kMaxStatsSectionLength) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageDumpReadError, "Statistics section too large: " + std::to_string(stats_len)));
     }
     if (stats_len > 0 && stats != nullptr) {
       std::string stats_data(stats_len, '\0');

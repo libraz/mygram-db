@@ -8,14 +8,15 @@
 #include <cstring>
 #include <mutex>
 
+#include "utils/endian_utils.h"
+
 namespace mygramdb::storage {
 
 FilterIndex::~FilterIndex() {
   Clear();
 }
 
-void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
-  std::unique_lock lock(mutex_);
+void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
     // Skip NULL values (monostate)
     if (std::holds_alternative<std::monostate>(value)) {
@@ -32,6 +33,11 @@ void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
       roaring_bitmap_add(it->second, doc_id);
     }
   }
+}
+
+void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
+  std::unique_lock lock(mutex_);
+  AddDocToBitmapsLocked(doc_id, filters);
 }
 
 void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters) {
@@ -57,23 +63,7 @@ void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filt
 void FilterIndex::UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters) {
   std::unique_lock lock(mutex_);
   RemoveDocFromBitmapsLocked(doc_id, old_filters);
-
-  // Add to new bitmaps (inline to avoid re-locking)
-  for (const auto& [column, value] : new_filters) {
-    if (std::holds_alternative<std::monostate>(value)) {
-      continue;
-    }
-    std::string key = SerializeFilterValue(value);
-    auto& column_map = eq_bitmaps_[column];
-    auto it = column_map.find(key);
-    if (it == column_map.end()) {
-      roaring_bitmap_t* bm = roaring_bitmap_create();
-      roaring_bitmap_add(bm, doc_id);
-      column_map[std::move(key)] = bm;
-    } else {
-      roaring_bitmap_add(it->second, doc_id);
-    }
-  }
+  AddDocToBitmapsLocked(doc_id, new_filters);
 }
 
 void FilterIndex::RemoveDocument(DocId doc_id, const FilterMap& filters) {
@@ -138,12 +128,14 @@ std::string FilterIndex::SerializeFilterValue(const FilterValue& value) {
         } else if constexpr (std::is_same_v<T, double>) {
           std::string result(1 + sizeof(double), '\0');
           result[0] = '\x0C';  // double tag
-          std::memcpy(&result[1], &val, sizeof(double));
+          double le_val = mygram::utils::ToLittleEndianDouble(val);
+          std::memcpy(&result[1], &le_val, sizeof(double));
           return result;
         } else if constexpr (std::is_same_v<T, TimeValue>) {
           std::string result(1 + sizeof(int64_t), '\0');
           result[0] = '\x0A';  // TimeValue tag
-          std::memcpy(&result[1], &val.seconds, sizeof(int64_t));
+          int64_t le_val = mygram::utils::ToLittleEndian(val.seconds);
+          std::memcpy(&result[1], &le_val, sizeof(int64_t));
           return result;
         } else if constexpr (std::is_same_v<T, int8_t>) {
           std::string result(1 + sizeof(int8_t), '\0');
@@ -158,32 +150,38 @@ std::string FilterIndex::SerializeFilterValue(const FilterValue& value) {
         } else if constexpr (std::is_same_v<T, int16_t>) {
           std::string result(1 + sizeof(int16_t), '\0');
           result[0] = '\x04';
-          std::memcpy(&result[1], &val, sizeof(int16_t));
+          int16_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(int16_t));
           return result;
         } else if constexpr (std::is_same_v<T, uint16_t>) {
           std::string result(1 + sizeof(uint16_t), '\0');
           result[0] = '\x05';
-          std::memcpy(&result[1], &val, sizeof(uint16_t));
+          uint16_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(uint16_t));
           return result;
         } else if constexpr (std::is_same_v<T, int32_t>) {
           std::string result(1 + sizeof(int32_t), '\0');
           result[0] = '\x06';
-          std::memcpy(&result[1], &val, sizeof(int32_t));
+          int32_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(int32_t));
           return result;
         } else if constexpr (std::is_same_v<T, uint32_t>) {
           std::string result(1 + sizeof(uint32_t), '\0');
           result[0] = '\x07';
-          std::memcpy(&result[1], &val, sizeof(uint32_t));
+          uint32_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(uint32_t));
           return result;
         } else if constexpr (std::is_same_v<T, int64_t>) {
           std::string result(1 + sizeof(int64_t), '\0');
           result[0] = '\x08';
-          std::memcpy(&result[1], &val, sizeof(int64_t));
+          int64_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(int64_t));
           return result;
         } else if constexpr (std::is_same_v<T, uint64_t>) {
           std::string result(1 + sizeof(uint64_t), '\0');
           result[0] = '\x09';
-          std::memcpy(&result[1], &val, sizeof(uint64_t));
+          uint64_t le_val = mygram::utils::ToLittleEndian(val);
+          std::memcpy(&result[1], &le_val, sizeof(uint64_t));
           return result;
         }
       },

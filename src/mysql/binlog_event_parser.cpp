@@ -14,8 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <iomanip>
-#include <sstream>
+#include <cstdio>
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_filter_evaluator.h"
@@ -150,6 +149,14 @@ std::optional<RowsEventContext> InitRowsEventContext(
  */
 std::string ConcatenateTextColumns(const RowData& row, const std::vector<std::string>& concat_columns) {
   std::string result;
+  size_t total_size = 0;
+  for (const auto& col_name : concat_columns) {
+    auto col_iter = row.columns.find(col_name);
+    if (col_iter != row.columns.end() && !col_iter->second.empty()) {
+      total_size += col_iter->second.size() + 1;  // +1 for separator
+    }
+  }
+  result.reserve(total_size);
   for (const auto& col_name : concat_columns) {
     auto col_iter = row.columns.find(col_name);
     if (col_iter != row.columns.end() && !col_iter->second.empty()) {
@@ -182,26 +189,11 @@ inline std::string GetRowText(const RowData& row, const RowsEventContext& ctx) {
  * @return UUID string in format "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
  */
 std::string FormatUUID(const unsigned char* bytes) {
-  std::ostringstream oss;
-  oss << std::hex << std::setfill('0');
-  // Bytes 0-3
-  oss << std::setw(2) << static_cast<int>(bytes[0]) << std::setw(2) << static_cast<int>(bytes[1]) << std::setw(2)
-      << static_cast<int>(bytes[2]) << std::setw(2) << static_cast<int>(bytes[3]);
-  oss << '-';
-  // Bytes 4-5
-  oss << std::setw(2) << static_cast<int>(bytes[4]) << std::setw(2) << static_cast<int>(bytes[5]);
-  oss << '-';
-  // Bytes 6-7
-  oss << std::setw(2) << static_cast<int>(bytes[6]) << std::setw(2) << static_cast<int>(bytes[7]);
-  oss << '-';
-  // Bytes 8-9
-  oss << std::setw(2) << static_cast<int>(bytes[8]) << std::setw(2) << static_cast<int>(bytes[9]);
-  oss << '-';
-  // Bytes 10-15
-  oss << std::setw(2) << static_cast<int>(bytes[10]) << std::setw(2) << static_cast<int>(bytes[11]) << std::setw(2)
-      << static_cast<int>(bytes[12]) << std::setw(2) << static_cast<int>(bytes[13]) << std::setw(2)
-      << static_cast<int>(bytes[14]) << std::setw(2) << static_cast<int>(bytes[15]);
-  return oss.str();
+  char buf[37];
+  snprintf(buf, sizeof(buf), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0], bytes[1],
+           bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+           bytes[12], bytes[13], bytes[14], bytes[15]);
+  return std::string(buf, 36);
 }
 
 }  // namespace
@@ -408,14 +400,18 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // Check if this affects any of our target tables
       if (multi_table_mode) {
         // Multi-table mode: check all registered tables
+        std::vector<BinlogEvent> events;
         for (const auto& [table_name, ctx] : table_contexts) {
           if (IsTableAffectingDDL(query, table_name)) {
             BinlogEvent event;
             event.type = BinlogEventType::DDL;
             event.table_name = table_name;
             event.text = query;  // Store the DDL query
-            return {event};      // Return as vector with single element
+            events.push_back(std::move(event));
           }
+        }
+        if (!events.empty()) {
+          return events;
         }
       } else {
         // Single-table mode: check only our configured table
@@ -969,16 +965,7 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   // [db_name (variable length, null-terminated)]
   // [query (variable length)]
 
-  // Detect CRC32 checksum: the event header at bytes 9-12 contains the original
-  // event_length (including 4-byte CRC32). If the server didn't strip the checksum,
-  // length == header_event_length, and we need to subtract 4 bytes.
-  uint32_t header_event_length = buffer[9] | (static_cast<uint32_t>(buffer[10]) << 8) |
-                                 (static_cast<uint32_t>(buffer[11]) << 16) | (static_cast<uint32_t>(buffer[12]) << 24);
   size_t effective_length = length;
-  if (length == header_event_length && length > 4) {
-    // Checksum was NOT stripped by server — exclude 4-byte CRC32
-    effective_length = length - 4;
-  }
 
   const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
   size_t remaining = effective_length - mygram::constants::kBinlogEventHeaderLen;
@@ -1043,7 +1030,7 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   size_t pos = 0;
 
   // Skip leading whitespace
-  if (!mygram::utils::SkipWhitespace(query_upper, pos) && query_upper.empty()) {
+  if (!mygram::utils::SkipWhitespace(query_upper, pos) || query_upper.empty()) {
     return false;
   }
 

@@ -470,9 +470,9 @@ class Error {
   }
 
   /**
-   * @brief Implicit conversion to string (for compatibility)
+   * @brief Explicit conversion to string
    */
-  operator std::string() const { return to_string(); }
+  explicit operator std::string() const { return to_string(); }
 
   /**
    * @brief Get message as C string (for compatibility with legacy code)

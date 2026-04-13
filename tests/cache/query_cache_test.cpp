@@ -1821,4 +1821,75 @@ TEST(QueryCacheTest, M5_DecompressionFailureEntryEventuallyRemoved) {
   EXPECT_EQ(stats.current_entries, 1);
 }
 
+// =============================================================================
+// M-21: Memory accounting consistency with stored_memory_footprint
+// =============================================================================
+
+/**
+ * @brief Test that memory accounting is consistent using stored_memory_footprint
+ *
+ * Bug M-21: total_memory_bytes_ could underflow if HeapFootprint() returned a
+ * different value at removal time than at insertion time (e.g., vector capacity
+ * changes). The fix stores the memory footprint at insertion time and uses that
+ * stored value during removal.
+ */
+TEST(QueryCacheTest, M21_StoredMemoryFootprintConsistency) {
+  QueryCache cache(10 * 1024 * 1024, 0.0);  // 10MB, no min cost
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"abc", "def", "ghi"};
+
+  // Insert an entry
+  auto key = CacheKeyGenerator::Generate("m21_test");
+  std::vector<DocId> result = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+
+  // Verify memory is tracked
+  auto stats_after_insert = cache.GetStatistics();
+  EXPECT_GT(stats_after_insert.current_memory_bytes, 0);
+  EXPECT_EQ(stats_after_insert.current_entries, 1);
+
+  // Erase the entry
+  ASSERT_TRUE(cache.Erase(key));
+
+  // Memory should return to exactly 0 (stored footprint ensures no underflow/drift)
+  auto stats_after_erase = cache.GetStatistics();
+  EXPECT_EQ(stats_after_erase.current_memory_bytes, 0) << "M-21: Memory should be exactly 0 after erasing all entries";
+  EXPECT_EQ(stats_after_erase.current_entries, 0);
+}
+
+/**
+ * @brief Test memory accounting across multiple insert/erase cycles
+ *
+ * Verifies that using stored_memory_footprint prevents drift over many cycles.
+ */
+TEST(QueryCacheTest, M21_MemoryAccountingNoDriftOverManyCycles) {
+  QueryCache cache(10 * 1024 * 1024, 0.0);
+
+  CacheMetadata meta;
+  meta.table = "test";
+  meta.ngrams = {"test", "memory", "drift"};
+
+  constexpr int kCycles = 200;
+  for (int i = 0; i < kCycles; ++i) {
+    auto key = CacheKeyGenerator::Generate("drift_test_" + std::to_string(i));
+
+    // Varying result sizes to exercise different compression ratios
+    std::vector<DocId> result;
+    for (int j = 0; j < (i % 100 + 5); ++j) {
+      result.push_back(static_cast<DocId>(i * 1000 + j));
+    }
+
+    ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+    ASSERT_TRUE(cache.Erase(key));
+  }
+
+  // After all cycles, memory should be exactly 0
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_memory_bytes, 0)
+      << "M-21: Memory should be exactly 0 after " << kCycles << " insert/erase cycles";
+  EXPECT_EQ(stats.current_entries, 0);
+}
+
 }  // namespace mygramdb::cache

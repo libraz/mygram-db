@@ -15,6 +15,23 @@
 
 namespace mygramdb::index {
 
+namespace {
+
+/**
+ * @brief RAII guard to ensure the optimization flag is cleared on scope exit
+ */
+struct OptimizationGuard {
+  std::atomic<bool>& flag;
+  explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
+  ~OptimizationGuard() { flag.store(false); }
+  OptimizationGuard(const OptimizationGuard&) = delete;
+  OptimizationGuard& operator=(const OptimizationGuard&) = delete;
+  OptimizationGuard(OptimizationGuard&&) = delete;
+  OptimizationGuard& operator=(OptimizationGuard&&) = delete;
+};
+
+}  // namespace
+
 void Index::Optimize(uint64_t total_docs) {
   // Check if already optimizing (prevent concurrent Optimize() calls)
   bool expected = false;
@@ -23,16 +40,6 @@ void Index::Optimize(uint64_t total_docs) {
     return;
   }
 
-  // RAII guard to ensure flag is cleared
-  struct OptimizationGuard {
-    std::atomic<bool>& flag;
-    explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
-    ~OptimizationGuard() { flag = false; }
-    OptimizationGuard(const OptimizationGuard&) = delete;
-    OptimizationGuard& operator=(const OptimizationGuard&) = delete;
-    OptimizationGuard(OptimizationGuard&&) = delete;
-    OptimizationGuard& operator=(OptimizationGuard&&) = delete;
-  };
   OptimizationGuard guard(is_optimizing_);
 
   // Phase 1a: Take snapshot of posting list VERSIONS and pointers (brief shared_lock)
@@ -131,16 +138,6 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     return false;
   }
 
-  // RAII guard to ensure flag is cleared even if exception occurs
-  struct OptimizationGuard {
-    std::atomic<bool>& flag;
-    explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
-    OptimizationGuard(const OptimizationGuard&) = delete;
-    OptimizationGuard& operator=(const OptimizationGuard&) = delete;
-    OptimizationGuard(OptimizationGuard&&) = delete;
-    OptimizationGuard& operator=(OptimizationGuard&&) = delete;
-    ~OptimizationGuard() { flag.store(false); }
-  };
   OptimizationGuard guard(is_optimizing_);
 
   size_t initial_term_count;

@@ -140,7 +140,7 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
     if (posting_iter != term_postings_.end()) {
       posting_iter->second->Remove(doc_id);
       // Remove empty posting lists to prevent memory leak
-      if (posting_iter->second->Size() == 0) {
+      if (posting_iter->second->SizeApprox() == 0) {
         term_postings_.erase(posting_iter);
         empty_lists_removed++;
       }
@@ -180,7 +180,7 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
     if (posting_iter != term_postings_.end()) {
       posting_iter->second->Remove(doc_id);
       // Remove empty posting lists to prevent memory leak
-      if (posting_iter->second->Size() == 0) {
+      if (posting_iter->second->SizeApprox() == 0) {
         term_postings_.erase(posting_iter);
         empty_lists_removed++;
       }

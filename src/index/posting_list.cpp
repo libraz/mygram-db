@@ -19,13 +19,27 @@ namespace mygramdb::index {
 // Hysteresis factor to prevent oscillation between delta and roaring formats
 constexpr double kHysteresisFactor = 0.5;
 
-// Binary serialization constants
-constexpr uint32_t kBitsPerByte = 8;
-constexpr uint32_t kShift16Bits = 16;
-constexpr uint32_t kShift24Bits = 24;
-constexpr uint32_t kByteMask = 0xFF;
-
 namespace {
+
+/**
+ * @brief Write a uint32_t in little-endian byte order to a buffer
+ */
+inline void WriteUint32LE(std::vector<uint8_t>& buf, uint32_t val) {
+  buf.push_back(static_cast<uint8_t>(val & 0xFF));
+  buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+  buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
+  buf.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
+}
+
+/**
+ * @brief Read a uint32_t in little-endian byte order from a buffer
+ */
+inline uint32_t ReadUint32LE(const std::vector<uint8_t>& buf, size_t& offset) {
+  uint32_t val = static_cast<uint32_t>(buf[offset]) | (static_cast<uint32_t>(buf[offset + 1]) << 8) |
+                 (static_cast<uint32_t>(buf[offset + 2]) << 16) | (static_cast<uint32_t>(buf[offset + 3]) << 24);
+  offset += 4;
+  return val;
+}
 
 /**
  * @brief Helper to get char* pointer for Roaring Bitmap serialization
@@ -85,17 +99,23 @@ PostingList::~PostingList() {
   }
 }
 
+// Precondition: moved-from object must not be concurrently accessed.
+// Move operations do not acquire mutex_ on either object.
 PostingList::PostingList(PostingList&& other) noexcept
     : strategy_(other.strategy_),
       roaring_threshold_(other.roaring_threshold_),
       delta_compressed_(std::move(other.delta_compressed_)),
       last_doc_id_(other.last_doc_id_),
       roaring_bitmap_(other.roaring_bitmap_),
+      doc_count_(other.doc_count_.load(std::memory_order_relaxed)),
       version_(other.version_.load(std::memory_order_relaxed)) {
   other.roaring_bitmap_ = nullptr;
   other.last_doc_id_ = 0;
+  other.doc_count_.store(0, std::memory_order_relaxed);
 }
 
+// Precondition: moved-from object must not be concurrently accessed.
+// Move operations do not acquire mutex_ on either object.
 PostingList& PostingList::operator=(PostingList&& other) noexcept {
   if (this != &other) {
     if (roaring_bitmap_ != nullptr) {
@@ -106,9 +126,11 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
     delta_compressed_ = std::move(other.delta_compressed_);
     last_doc_id_ = other.last_doc_id_;
     roaring_bitmap_ = other.roaring_bitmap_;
+    doc_count_.store(other.doc_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     version_.store(other.version_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.roaring_bitmap_ = nullptr;
     other.last_doc_id_ = 0;
+    other.doc_count_.store(0, std::memory_order_relaxed);
   }
   return *this;
 }
@@ -141,6 +163,11 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
+  } else {
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
+  }
   version_.fetch_add(1, std::memory_order_release);
 }
 
@@ -148,6 +175,8 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   if (doc_ids.empty()) {
     return;
   }
+
+  assert(std::is_sorted(doc_ids.begin(), doc_ids.end()));
 
   std::unique_lock lock(mutex_);  // Exclusive access for write
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
@@ -162,6 +191,11 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     }
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
+  }
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
+  } else {
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
   }
   version_.fetch_add(1, std::memory_order_release);
 }
@@ -180,6 +214,11 @@ void PostingList::Remove(DocId doc_id) {
     }
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
+  }
+  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
+  } else {
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
   }
   version_.fetch_add(1, std::memory_order_release);
 }
@@ -320,10 +359,7 @@ uint64_t PostingList::Size() const {
 }
 
 uint64_t PostingList::SizeApprox() const {
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    return delta_compressed_.size();
-  }
-  return roaring_bitmap_get_cardinality(roaring_bitmap_);
+  return doc_count_.load(std::memory_order_relaxed);
 }
 
 size_t PostingList::MemoryUsage() const {
@@ -332,8 +368,9 @@ size_t PostingList::MemoryUsage() const {
 }
 
 size_t PostingList::MemoryUsageApprox() const {
+  uint64_t count = doc_count_.load(std::memory_order_relaxed);
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    return delta_compressed_.size() * sizeof(uint32_t);
+    return static_cast<size_t>(count) * sizeof(uint32_t);
   }
   return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 }
@@ -466,22 +503,21 @@ void PostingList::Optimize(uint64_t total_docs) {
 }
 
 std::shared_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
-  std::shared_lock lock(mutex_);  // Protect read access to internal state
-
   auto cloned = std::make_shared<PostingList>(roaring_threshold_);
 
-  // Get all document IDs from current posting list
-  // Note: GetAll() is called with the lock already held
+  // Get all document IDs from current posting list under lock
   std::vector<DocId> docs;
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
-    docs = DecodeDelta(delta_compressed_);
-  } else {
-    uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
-    docs.resize(size);
-    roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+  {
+    std::shared_lock lock(mutex_);  // Protect read access to internal state
+    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+      docs = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      docs.resize(size);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+    }
   }
-
-  lock.unlock();  // Release lock before expensive operations
+  // Lock released here
 
   // Build the cloned posting list (no longer needs lock on original)
   if (!docs.empty()) {
@@ -520,6 +556,7 @@ void PostingList::ConvertToRoaring() {
   delta_compressed_.shrink_to_fit();
   last_doc_id_ = 0;  // Not used for Roaring strategy
   strategy_ = PostingStrategy::kRoaringBitmap;
+  doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
 }
 
 void PostingList::ConvertToDelta() {
@@ -539,6 +576,7 @@ void PostingList::ConvertToDelta() {
   roaring_bitmap_free(roaring_bitmap_);
   roaring_bitmap_ = nullptr;
   strategy_ = PostingStrategy::kDeltaCompressed;
+  doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
 }
 
 std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids) {
@@ -600,17 +638,11 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
       return false;
     }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
-    buffer.push_back((size >> kShift24Bits) & kByteMask);
-    buffer.push_back((size >> kShift16Bits) & kByteMask);
-    buffer.push_back((size >> kBitsPerByte) & kByteMask);
-    buffer.push_back(size & kByteMask);
+    WriteUint32LE(buffer, size);
 
     // Write delta-compressed data
     for (uint32_t val : delta_compressed_) {
-      buffer.push_back((val >> kShift24Bits) & kByteMask);
-      buffer.push_back((val >> kShift16Bits) & kByteMask);
-      buffer.push_back((val >> kBitsPerByte) & kByteMask);
-      buffer.push_back(val & kByteMask);
+      WriteUint32LE(buffer, val);
     }
   } else {
     // Roaring bitmap: serialize using roaring's native format
@@ -623,10 +655,7 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);
 
     // Write size
-    buffer.push_back((roaring_size_u32 >> kShift24Bits) & kByteMask);
-    buffer.push_back((roaring_size_u32 >> kShift16Bits) & kByteMask);
-    buffer.push_back((roaring_size_u32 >> kBitsPerByte) & kByteMask);
-    buffer.push_back(roaring_size_u32 & kByteMask);
+    WriteUint32LE(buffer, roaring_size_u32);
 
     // Write roaring bitmap data
     size_t old_size = buffer.size();
@@ -656,11 +685,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
   }
 
   // Read size
-  uint32_t size = (static_cast<uint32_t>(buffer[offset]) << kShift24Bits) |
-                  (static_cast<uint32_t>(buffer[offset + 1]) << kShift16Bits) |
-                  (static_cast<uint32_t>(buffer[offset + 2]) << kBitsPerByte) |
-                  static_cast<uint32_t>(buffer[offset + 3]);
-  offset += 4;
+  uint32_t size = ReadUint32LE(buffer, offset);
 
   if (strategy_ == PostingStrategy::kDeltaCompressed) {
     // Read delta-compressed data
@@ -672,15 +697,13 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     delta_compressed_.reserve(size);
 
     for (uint32_t i = 0; i < size; ++i) {
-      uint32_t val = (static_cast<uint32_t>(buffer[offset]) << kShift24Bits) |
-                     (static_cast<uint32_t>(buffer[offset + 1]) << kShift16Bits) |
-                     (static_cast<uint32_t>(buffer[offset + 2]) << kBitsPerByte) |
-                     static_cast<uint32_t>(buffer[offset + 3]);
+      uint32_t val = ReadUint32LE(buffer, offset);
       delta_compressed_.push_back(val);
-      offset += 4;
     }
 
     RecomputeLastDocId();
+
+    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
 
     if (roaring_bitmap_ != nullptr) {
       roaring_bitmap_free(roaring_bitmap_);
@@ -704,6 +727,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
 
     offset += size;
     delta_compressed_.clear();
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
   }
 
   return true;

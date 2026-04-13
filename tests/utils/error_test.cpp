@@ -84,7 +84,7 @@ TEST(ErrorTest, ToString) {
 
 TEST(ErrorTest, StringConversion) {
   Error error(ErrorCode::kInvalidArgument, "Invalid input");
-  std::string str = error;
+  std::string str = error.to_string();
   EXPECT_EQ(str, "[Invalid argument (2)] Invalid input");
 }
 
@@ -392,9 +392,9 @@ TEST(ErrorTest, WhatReturnsNullTerminated) {
   EXPECT_STREQ(w, "missing resource");
 }
 
-TEST(ErrorTest, ImplicitStringConversion) {
+TEST(ErrorTest, ExplicitStringConversion) {
   Error error(ErrorCode::kTimeout, "op timed out", "ctx");
-  std::string s = error;
+  std::string s = error.to_string();
   EXPECT_NE(s.find("Timeout"), std::string::npos);
   EXPECT_NE(s.find("op timed out"), std::string::npos);
   EXPECT_NE(s.find("ctx"), std::string::npos);

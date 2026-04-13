@@ -57,13 +57,23 @@ std::pair<int, int> detail::CountParensInToken(const std::string& token) {
     char chr = token[i];
 
     // Handle quote state
-    if ((chr == '"' || chr == '\'') && (i == 0 || token[i - 1] != '\\')) {
-      if (!in_quote) {
-        in_quote = true;
-        quote_char = chr;
-      } else if (chr == quote_char) {
-        in_quote = false;
-        quote_char = '\0';
+    if (chr == '"' || chr == '\'') {
+      // Count preceding backslashes to determine if this quote is escaped
+      size_t num_backslashes = 0;
+      size_t j = i;
+      while (j > 0 && token[j - 1] == '\\') {
+        num_backslashes++;
+        j--;
+      }
+      // Quote is escaped only if preceded by an odd number of backslashes
+      if (num_backslashes % 2 == 0) {
+        if (!in_quote) {
+          in_quote = true;
+          quote_char = chr;
+        } else if (chr == quote_char) {
+          in_quote = false;
+          quote_char = '\0';
+        }
       }
     }
 
@@ -274,7 +284,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     return query;
   }
-  if (command == "CONFIG") {
+  if (EqualsIgnoreCase(command, "CONFIG")) {
     Query query;
     query.table = "";  // CONFIG doesn't need a table
 
@@ -317,7 +327,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     return query;
   }
-  if (command == "REPLICATION") {
+  if (EqualsIgnoreCase(command, "REPLICATION")) {
     // REPLICATION STATUS | STOP | START
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: REPLICATION + subcommand
@@ -342,7 +352,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     return query;
   }
-  if (command == "SYNC") {
+  if (EqualsIgnoreCase(command, "SYNC")) {
     // SYNC [table] | SYNC STATUS | SYNC STOP [table]
     Query query;
 
@@ -374,7 +384,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     return query;
   }
-  if (command == "OPTIMIZE") {
+  if (EqualsIgnoreCase(command, "OPTIMIZE")) {
     // OPTIMIZE [table] - optimize index posting lists
     Query query;
     query.type = QueryType::OPTIMIZE;
@@ -408,7 +418,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     return query;
   }
-  if (command == "CACHE") {
+  if (EqualsIgnoreCase(command, "CACHE")) {
     // CACHE CLEAR [table] | STATS | ENABLE | DISABLE
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() < 2) {  // 2: CACHE + subcommand

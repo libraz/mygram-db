@@ -22,6 +22,27 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
                                   const std::string& datetime_timezone) {
   storage::FilterMap filters;
 
+  // Pre-create DateTimeProcessor once for all TIME-type filters (avoid per-row allocation)
+  std::optional<mygram::utils::DateTimeProcessor> cached_processor;
+  auto get_processor = [&]() -> mygram::utils::DateTimeProcessor* {
+    if (!cached_processor.has_value()) {
+      config::MysqlConfig temp_config;
+      temp_config.datetime_timezone = datetime_timezone;
+      auto result = temp_config.CreateDateTimeProcessor();
+      if (result) {
+        cached_processor.emplace(*result);
+      } else {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "datetime_processor_creation_failed")
+            .Field("error", result.error().message())
+            .Error();
+        return nullptr;
+      }
+    }
+    return &*cached_processor;
+  };
+
   for (const auto& filter_config : filter_configs) {
     // Check if column exists in row data
     auto iterator = row_data.columns.find(filter_config.name);
@@ -87,20 +108,10 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
               .Error();
         }
       } else if (filter_config.type == "time") {
-        // TIME: Convert to seconds since midnight using DateTimeProcessor
-        // Create a temporary MysqlConfig to use DateTimeProcessor
-        config::MysqlConfig temp_config;
-        temp_config.datetime_timezone = datetime_timezone;
-        auto processor_result = temp_config.CreateDateTimeProcessor();
-        if (!processor_result) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "datetime_processor_creation_failed")
-              .Field("column_name", filter_config.name)
-              .Field("error", processor_result.error().message())
-              .Error();
-        } else {
-          auto seconds_result = processor_result->TimeToSeconds(value_str);
+        // TIME: Convert to seconds since midnight using cached DateTimeProcessor
+        auto* processor = get_processor();
+        if (processor != nullptr) {
+          auto seconds_result = processor->TimeToSeconds(value_str);
           if (seconds_result) {
             filters[filter_config.name] = storage::TimeValue{*seconds_result};
           } else {

@@ -2219,6 +2219,143 @@ TEST(CountParensInTokenTest, MixedQuotedAndUnquoted) {
   EXPECT_EQ(close, 0);
 }
 
+// ============================================================================
+// LIMIT/OFFSET boundary tests
+// ============================================================================
+
+/**
+ * @brief Test LIMIT with value at INT_MAX+1 (2147483648) — should be valid
+ */
+TEST(QueryParserTest, LimitAboveIntMax) {
+  QueryParser parser;
+  // 2147483648 exceeds INT_MAX but fits in uint32_t; however it exceeds kMaxLimit (1000)
+  // so the query should be parsed but fail validation
+  auto query = parser.Parse("SEARCH articles hello LIMIT 2147483648");
+  // The LIMIT value exceeds kMaxLimit (1000), so it should fail
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT with negative value — should fail
+ */
+TEST(QueryParserTest, LimitNegativeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT -1");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT 0 — should fail
+ */
+TEST(QueryParserTest, LimitZero) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT 0");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test OFFSET with very large value — should be handled
+ */
+TEST(QueryParserTest, OffsetVeryLargeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET 4294967295");  // UINT32_MAX
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 4294967295U);
+}
+
+/**
+ * @brief Test OFFSET with value exceeding uint32_t — should fail
+ */
+TEST(QueryParserTest, OffsetExceedsUint32Max) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET 4294967296");  // UINT32_MAX + 1
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test OFFSET with negative value — should fail
+ */
+TEST(QueryParserTest, OffsetNegativeValue) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello OFFSET -10");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test LIMIT with comma format and large values
+ */
+TEST(QueryParserTest, LimitCommaFormatLargeOffset) {
+  QueryParser parser;
+  // Large offset with small count — offset exceeds kMaxLimit only applies to count/limit
+  auto query = parser.Parse("SEARCH articles hello LIMIT 100000,10");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->offset, 100000U);
+  EXPECT_EQ(query->limit, 10U);
+}
+
+/**
+ * @brief Test LIMIT comma format with negative offset — should fail
+ */
+TEST(QueryParserTest, LimitCommaFormatNegativeOffset) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello LIMIT -1,10");
+  EXPECT_FALSE(query);
+}
+
+/**
+ * @brief Test case-insensitive CONFIG command
+ */
+TEST(QueryParserTest, ConfigCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("config show");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::CONFIG_SHOW);
+}
+
+/**
+ * @brief Test case-insensitive REPLICATION command
+ */
+TEST(QueryParserTest, ReplicationCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("replication status");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::REPLICATION_STATUS);
+}
+
+/**
+ * @brief Test case-insensitive SYNC command
+ */
+TEST(QueryParserTest, SyncCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("sync mytable");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SYNC);
+}
+
+/**
+ * @brief Test case-insensitive OPTIMIZE command
+ */
+TEST(QueryParserTest, OptimizeCaseInsensitive) {
+  QueryParser parser;
+  auto query = parser.Parse("optimize mytable");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::OPTIMIZE);
+}
+
+/**
+ * @brief Test CountParensInToken with double-backslash before quote
+ */
+TEST(CountParensInTokenTest, DoubleBackslashBeforeQuote) {
+  // \\\\" means backslash is escaped, quote should toggle
+  // Input: \\"( — the \\ is an escaped backslash, " starts a quote, ( is inside
+  // Actually, token = R"(\\\"()" with double backslash before quote means
+  // the backslash is escaped and the quote IS significant
+  auto [open, close] = mygramdb::query::detail::CountParensInToken(R"(\\"()");
+  // \\ = escaped backslash, " = opens quote, ( = inside quote, no open parens counted
+  EXPECT_EQ(open, 0);
+  EXPECT_EQ(close, 0);
+}
+
 /**
  * @brief Test CountParensInToken with only open parentheses
  */

@@ -24,6 +24,7 @@
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/gtid_encoder.h"
 #include "server/tcp_server.h"  // For TableContext definition
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -35,6 +36,9 @@ static constexpr uint64_t kHeartbeatPeriodNs = 3000000000;
 
 /// Log every Nth no-data occurrence to avoid spam
 static constexpr int kLogSampleInterval = 100;
+
+/// Size of the OK byte prefix in MySQL binlog protocol buffer
+static constexpr size_t kBinlogOKByteSize = 1;
 
 void BinlogReader::ReaderThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_reader_thread_started").Info();
@@ -62,6 +66,50 @@ void BinlogReader::ReaderThreadFunc() {
   int reconnect_attempt = 0;
   bool idle_timeout_reconnect = false;  // Track if reconnecting due to idle timeout
 
+  // Helper lambda: sleep with backoff, check should_stop_, reconnect, validate.
+  // Returns: 1 = success, 0 = reconnect failed (retry), -1 = should stop
+  auto reconnect_with_backoff = [this, &reconnect_attempt](const std::string& reason, bool silent) -> int {
+    reconnect_attempt = std::min(reconnect_attempt + 1, 10);
+    int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "retry_connection")
+        .Field("reason", reason)
+        .Field("delay_ms", static_cast<int64_t>(delay_ms))
+        .Field("attempt", static_cast<int64_t>(reconnect_attempt))
+        .Debug();
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+
+    if (should_stop_) {
+      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_during_retry").Debug();
+      return -1;
+    }
+
+    auto result = binlog_connection_->Reconnect(silent);
+    if (!result) {
+      mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), result.error().message(), reconnect_attempt);
+      return 0;  // Retry in next iteration
+    }
+
+    // Validate connection after reconnection (detect failover, invalid servers)
+    if (!ValidateConnection()) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "connection_validation_failed")
+          .Field("context", "after_reconnect")
+          .Field("error", GetLastError())
+          .Error();
+      return -1;  // Stop replication
+    }
+
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "connection_validated_after_reconnect")
+        .Debug();
+    reconnect_attempt = 0;
+    return 1;  // Success
+  };
+
   while (!should_stop_) {
     // Disable binlog checksums for this connection
     // We don't verify checksums yet, so ask the server to send events without them
@@ -80,60 +128,15 @@ void BinlogReader::ReaderThreadFunc() {
         mygram::utils::LogBinlogError("checksum_disable_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt);
       }
 
-      // Retry connection after delay with exponential backoff (capped at 10x) (#4)
-      reconnect_attempt = std::min(reconnect_attempt + 1, 10);
-      int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "retry_connection")
-          .Field("delay_ms", static_cast<int64_t>(delay_ms))
-          .Field("attempt", static_cast<int64_t>(reconnect_attempt))
-          .Debug();
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-      // Check if stop was requested during sleep
-      if (should_stop_) {
-        mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_during_retry").Debug();
-        break;
-      }
-
-      // Full reconnect (close, reinitialize, connect)
+      // Retry connection after delay with exponential backoff
       // Use silent mode on first attempt since this is likely a normal idle timeout recovery
-      auto reconnect_result = binlog_connection_->Reconnect(reconnect_attempt == 1 /* silent on first attempt */);
-      if (!reconnect_result) {
-        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(),
-                                      reconnect_attempt + 1);
-        reconnect_attempt++;  // Increment to show error on subsequent failures
-        continue;
-      }
-      // Only log reconnection on non-silent (subsequent) attempts
-      if (reconnect_attempt > 0) {
-        mygram::utils::StructuredLog().Event("binlog_reconnected").Field("gtid", GetCurrentGTID()).Info();
-      }
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "reconnected_after_checksum_failure")
-          .Debug();
-
-      // Validate connection after reconnection (detect failover, invalid servers)
-      if (!ValidateConnection()) {
-        // Validation failed - server is invalid, stop replication
-        mygram::utils::StructuredLog()
-            .Event("binlog_error")
-            .Field("type", "connection_validation_failed")
-            .Field("context", "after_reconnect")
-            .Field("error", GetLastError())
-            .Error();
+      bool silent = (reconnect_attempt == 0);
+      int rc = reconnect_with_backoff("checksum_disable_failed", silent);
+      if (rc == -1) {
         should_stop_ = true;
         break;
       }
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "connection_validated_after_reconnect")
-          .Debug();
-
-      // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
-      reconnect_attempt = 0;  // Reset delay counter after successful reconnection
+      // rc == 0 (reconnect failed) or rc == 1 (success): retry from top of loop
       continue;
     }
     mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksums_disabled").Debug();
@@ -238,51 +241,13 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       // Other errors - retry with reconnection and exponential backoff
-      reconnect_attempt = std::min(reconnect_attempt + 1, 10);
-      int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
-      mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt);
-
-      mygram::utils::StructuredLog()
-          .Event("binlog_debug")
-          .Field("action", "retry_connection")
-          .Field("delay_ms", static_cast<int64_t>(delay_ms))
-          .Field("attempt", static_cast<int64_t>(reconnect_attempt))
-          .Debug();
-      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-      // Check if stop was requested during sleep
-      if (should_stop_) {
-        mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_during_retry").Debug();
+      mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt + 1);
+      int rc = reconnect_with_backoff("stream_open_failed", false /* not silent */);
+      if (rc == -1) {
+        should_stop_ = true;
         break;
       }
-
-      // Full reconnect (close + reinit + connect) to avoid reusing corrupted handle (#3)
-      auto reconnect_result = binlog_connection_->Reconnect();
-      if (!reconnect_result) {
-        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(),
-                                      reconnect_attempt + 1);
-      } else {
-        // Validate connection after reconnection (detect failover, invalid servers)
-        if (!ValidateConnection()) {
-          // Validation failed - server is invalid, stop replication
-          mygram::utils::StructuredLog()
-              .Event("binlog_error")
-              .Field("type", "connection_validation_failed")
-              .Field("context", "after_reconnect")
-              .Field("error", GetLastError())
-              .Error();
-          should_stop_ = true;
-          break;
-        }
-        mygram::utils::StructuredLog()
-            .Event("binlog_connection_validated")
-            .Field("context", "after_reconnect")
-            .Field("gtid", GetCurrentGTID())
-            .Debug();
-
-        // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used in next iteration after continue
-        reconnect_attempt = 0;  // Reset delay counter after successful reconnection
-      }
+      // rc == 0 (reconnect failed) or rc == 1 (success): retry from top of loop
       continue;
     }
 
@@ -322,18 +287,16 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       if (result != 0) {
+        // Check stop request FIRST before accessing potentially-closed handle
+        if (should_stop_) {
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "read_timeout_stop_requested").Debug();
+          break;
+        }
+
         unsigned int err_no = mysql_errno(binlog_connection_->GetHandle());
         const char* err_str = mysql_error(binlog_connection_->GetHandle());
         SetLastError("Failed to fetch binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) +
                      ")");
-
-        // Check if this is a read timeout (expected with 5-second timeout when heartbeat fails)
-        // errno 2013 (CR_SERVER_LOST) can indicate either timeout or actual connection loss
-        if (should_stop_) {
-          // Timeout while stopping - exit gracefully
-          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "read_timeout_stop_requested").Debug();
-          break;
-        }
 
         // Check if this is likely a read timeout (errno 2013 during idle)
         // With heartbeat configured, timeouts indicate actual connection issues.
@@ -367,51 +330,14 @@ void BinlogReader::ReaderThreadFunc() {
           // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
           connection_lost = true;
 
-          // Close current binlog stream
+          // Close current binlog stream before reconnecting
           mysql_binlog_close(binlog_connection_->GetHandle(), &rpl);
 
-          // Wait before reconnecting with exponential backoff (capped at 10x)
-          reconnect_attempt = std::min(reconnect_attempt + 1, 10);
-          int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "reconnect_attempt")
-              .Field("attempt", static_cast<int64_t>(reconnect_attempt))
-              .Field("delay_ms", static_cast<int64_t>(delay_ms))
-              .Debug();
-          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-          // Check again before reconnecting
-          if (should_stop_) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "stop_requested_during_reconnect")
-                .Debug();
-            break;
-          }
-
-          // Full reconnect (close + reinit + connect) to avoid reusing corrupted handle (#3)
-          auto reconnect_result = binlog_connection_->Reconnect();
-          if (!reconnect_result) {
-            mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(),
-                                          reconnect_attempt);
-          } else {
-            // Validate connection after reconnection (detect failover, invalid servers)
-            if (!ValidateConnection()) {
-              // Validation failed - server is invalid, stop replication
-              mygram::utils::StructuredLog()
-                  .Event("binlog_error")
-                  .Field("type", "connection_validation_failed")
-                  .Field("context", "after_reconnect")
-                  .Field("error", GetLastError())
-                  .Error();
-              should_stop_ = true;
-              break;
-            }
+          int rc = reconnect_with_backoff("server_gone_away", false /* not silent */);
+          if (rc == -1) {
+            should_stop_ = true;
+          } else if (rc == 1) {
             mygram::utils::StructuredLog().Event("binlog_connection_restored").Info();
-
-            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Used after break exits inner loop
-            reconnect_attempt = 0;  // Reset delay counter after successful reconnection
           }
           break;  // Exit inner loop to retry from outer loop
         }
@@ -481,11 +407,11 @@ void BinlogReader::ReaderThreadFunc() {
       //
       // We skip the OK byte here and pass rpl.buffer+1 to parsers, so parsers can use
       // standard LOG_EVENT_HEADER_LEN (19 bytes) offsets directly.
-      const unsigned char* event_buffer = rpl.buffer + 1;
-      const unsigned long event_length = rpl.size - 1;
+      const unsigned char* event_buffer = rpl.buffer + kBinlogOKByteSize;
+      const unsigned long event_length = rpl.size - kBinlogOKByteSize;
 
       // Check for GTID events first (need to update current_gtid)
-      if (event_length >= 19) {
+      if (event_length >= mygram::constants::kBinlogEventHeaderLen) {
         auto event_type = static_cast<MySQLBinlogEventType>(event_buffer[4]);
 
         if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
@@ -654,23 +580,25 @@ void BinlogReader::ReaderThreadFunc() {
         // Process ALL events in the batch (multi-row support)
         for (auto& event : events) {
           // Log data events at debug level (can be high volume in production)
-          if (event.type == BinlogEventType::INSERT || event.type == BinlogEventType::UPDATE ||
-              event.type == BinlogEventType::DELETE) {
-            const char* event_type_str = "UNKNOWN";
-            if (event.type == BinlogEventType::INSERT) {
-              event_type_str = "INSERT";
-            } else if (event.type == BinlogEventType::UPDATE) {
-              event_type_str = "UPDATE";
-            } else if (event.type == BinlogEventType::DELETE) {
-              event_type_str = "DELETE";
+          if (spdlog::should_log(spdlog::level::debug)) {
+            if (event.type == BinlogEventType::INSERT || event.type == BinlogEventType::UPDATE ||
+                event.type == BinlogEventType::DELETE) {
+              const char* event_type_str = "UNKNOWN";
+              if (event.type == BinlogEventType::INSERT) {
+                event_type_str = "INSERT";
+              } else if (event.type == BinlogEventType::UPDATE) {
+                event_type_str = "UPDATE";
+              } else if (event.type == BinlogEventType::DELETE) {
+                event_type_str = "DELETE";
+              }
+              mygram::utils::StructuredLog()
+                  .Event("binlog_debug")
+                  .Field("action", "binlog_data_event")
+                  .Field("event_type", event_type_str)
+                  .Field("table", event.table_name)
+                  .Field("pk", event.primary_key)
+                  .Debug();
             }
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "binlog_data_event")
-                .Field("event_type", event_type_str)
-                .Field("table", event.table_name)
-                .Field("pk", event.primary_key)
-                .Debug();
           }
 
           PushEvent(std::make_unique<BinlogEvent>(std::move(event)));

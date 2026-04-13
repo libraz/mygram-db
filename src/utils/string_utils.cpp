@@ -410,9 +410,7 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
 
   ngrams.reserve(codepoints.size() - n + 1);
   for (size_t i = 0; i <= codepoints.size() - n; ++i) {
-    std::vector<uint32_t> ngram_cp(codepoints.begin() + static_cast<std::ptrdiff_t>(i),
-                                   codepoints.begin() + static_cast<std::ptrdiff_t>(i + n));
-    ngrams.push_back(CodepointsToUtf8(ngram_cp));
+    ngrams.push_back(CodepointsToUtf8(codepoints.data() + i, codepoints.data() + i + n));
   }
 
   return ngrams;

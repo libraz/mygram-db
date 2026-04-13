@@ -270,6 +270,17 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
             .Info();
         iter->second->Cancel();
       } else {
+        // Clean up sync state before returning error to avoid stuck state
+        auto state_it = sync_states_.find(table_name);
+        if (state_it != sync_states_.end()) {
+          state_it->second.is_running = false;
+          state_it->second.status = "FAILED";
+          state_it->second.error_message = "Loader not found during stop";
+        }
+        {
+          std::lock_guard<std::mutex> tables_lock(syncing_tables_mutex_);
+          syncing_tables_.erase(table_name);
+        }
         return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
       }
     }
@@ -457,12 +468,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     RegisterLoader(table_name, &loader);
 
-    auto result = loader.Load([&](const auto& progress) {
-      // Update progress atomically (these fields are atomic in SyncState)
-      std::lock_guard<std::mutex> lock(sync_mutex_);
-      sync_states_[table_name].total_rows = progress.total_rows;
-      sync_states_[table_name].processed_rows = progress.processed_rows;
-      // Note: No need to call loader.Cancel() here as RequestShutdown() already handles it
+    // Capture reference to SyncState to avoid map lookup in hot path
+    auto& state = sync_states_[table_name];  // Safe: key was created under sync_mutex_ in StartSync
+    auto result = loader.Load([&state](const auto& progress) {
+      // Update progress atomically without mutex (these fields are std::atomic)
+      state.total_rows.store(progress.total_rows, std::memory_order_relaxed);
+      state.processed_rows.store(progress.processed_rows, std::memory_order_relaxed);
     });
 
     UnregisterLoader(table_name);

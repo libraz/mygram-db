@@ -583,6 +583,42 @@ std::string DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16
       return oss.str();
     }
 
+    case 247: {  // MYSQL_TYPE_ENUM
+      // ENUM values are stored as 1 or 2 byte integers
+      // The metadata byte tells us the size
+      uint8_t enum_size = (metadata >> 8) & 0xFF;  // high byte of metadata
+      if (enum_size == 0) {
+        enum_size = 1;  // default to 1 byte if metadata not available
+      }
+      if (enum_size == 1) {
+        if (data + 1 > end)
+          return "[TRUNCATED]";
+        uint8_t val = *data;
+        return std::to_string(val);
+      } else {
+        if (data + 2 > end)
+          return "[TRUNCATED]";
+        uint16_t val = data[0] | (static_cast<uint16_t>(data[1]) << 8);
+        return std::to_string(val);
+      }
+    }
+    case 248: {  // MYSQL_TYPE_SET
+      // SET values are stored as 1-8 byte bitmask
+      uint8_t set_size = (metadata >> 8) & 0xFF;
+      if (set_size == 0) {
+        set_size = 1;
+      }
+      if (set_size > 8)
+        set_size = 8;
+      if (data + set_size > end)
+        return "[TRUNCATED]";
+      uint64_t val = 0;
+      for (uint8_t i = 0; i < set_size; i++) {
+        val |= static_cast<uint64_t>(data[i]) << (i * 8);
+      }
+      return std::to_string(val);
+    }
+
     default:
       return "[UNSUPPORTED_TYPE:" + std::to_string(col_type) + "]";
   }

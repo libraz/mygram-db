@@ -116,8 +116,9 @@ struct CacheMetadata {
 struct CacheEntry {
   CacheKey key;                          ///< Cache key (16 bytes)
   std::vector<uint8_t> compressed;       ///< LZ4-compressed result
-  size_t original_size = 0;              ///< Uncompressed size (bytes)
+  size_t original_element_count = 0;     ///< Number of DocId elements in the original result
   size_t compressed_size = 0;            ///< Compressed size (bytes)
+  size_t stored_memory_footprint = 0;    ///< Memory footprint recorded at insertion time
   double query_cost_ms = 0.0;            ///< Query execution time (ms)
   CacheMetadata metadata;                ///< Metadata for invalidation
   std::atomic<bool> invalidated{false};  ///< Invalidation flag (for two-phase invalidation)
@@ -129,8 +130,9 @@ struct CacheEntry {
   CacheEntry(const CacheEntry& other)
       : key(other.key),
         compressed(other.compressed),
-        original_size(other.original_size),
+        original_element_count(other.original_element_count),
         compressed_size(other.compressed_size),
+        stored_memory_footprint(other.stored_memory_footprint),
         query_cost_ms(other.query_cost_ms),
         metadata(other.metadata),
         invalidated(other.invalidated.load()) {}
@@ -139,8 +141,9 @@ struct CacheEntry {
   CacheEntry(CacheEntry&& other) noexcept
       : key(other.key),  // CacheKey is trivially copyable
         compressed(std::move(other.compressed)),
-        original_size(other.original_size),
+        original_element_count(other.original_element_count),
         compressed_size(other.compressed_size),
+        stored_memory_footprint(other.stored_memory_footprint),
         query_cost_ms(other.query_cost_ms),
         metadata(std::move(other.metadata)),
         invalidated(other.invalidated.load()) {}
@@ -153,8 +156,9 @@ struct CacheEntry {
     if (this != &other) {
       key = other.key;
       compressed = other.compressed;
-      original_size = other.original_size;
+      original_element_count = other.original_element_count;
       compressed_size = other.compressed_size;
+      stored_memory_footprint = other.stored_memory_footprint;
       query_cost_ms = other.query_cost_ms;
       metadata = other.metadata;
       invalidated.store(other.invalidated.load());
@@ -167,8 +171,9 @@ struct CacheEntry {
     if (this != &other) {
       key = other.key;  // CacheKey is trivially copyable
       compressed = std::move(other.compressed);
-      original_size = other.original_size;
+      original_element_count = other.original_element_count;
       compressed_size = other.compressed_size;
+      stored_memory_footprint = other.stored_memory_footprint;
       query_cost_ms = other.query_cost_ms;
       metadata = std::move(other.metadata);
       invalidated.store(other.invalidated.load());

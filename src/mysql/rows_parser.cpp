@@ -234,7 +234,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
 
-        if (ptr > end) {
+        if (ptr >= end) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
               .Field("type", "write_rows_truncated")
@@ -785,7 +785,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
         const auto& col_meta = table_metadata->columns[col_idx];
         bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
 
-        if (ptr > end) {
+        if (ptr >= end) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
               .Field("type", "delete_rows_truncated")

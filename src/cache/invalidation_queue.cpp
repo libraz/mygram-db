@@ -5,13 +5,17 @@
 
 #include "cache/invalidation_queue.h"
 
-#include <spdlog/spdlog.h>
-
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "server/server_types.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
+
+/// Default ngram size when table context is not found
+constexpr int kDefaultNgramSize = 3;
+/// Default kanji ngram size when table context is not found
+constexpr int kDefaultKanjiNgramSize = 2;
 
 InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
                                      const std::unordered_map<std::string, server::TableContext*>& table_contexts)
@@ -24,8 +28,8 @@ InvalidationQueue::~InvalidationQueue() {
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
                                 bool filter_columns_changed) {
   // Get ngram settings for this specific table
-  int ngram_size = 3;                 // Default
-  int kanji_ngram_size = 2;           // Default
+  int ngram_size = kDefaultNgramSize;
+  int kanji_ngram_size = kDefaultKanjiNgramSize;
   bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
@@ -44,10 +48,11 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   // Phase 2: Queue for deferred deletion or process immediately
   // Reject enqueues after Stop() to prevent use-after-free
   if (stopped_.load()) {
-    spdlog::warn(
-        "InvalidationQueue: Enqueue called after Stop(), "
-        "skipping deferred deletion for {} entries",
-        affected_keys.size());
+    mygram::utils::StructuredLog()
+        .Event("invalidation_queue_warning")
+        .Field("reason", "enqueue_after_stop")
+        .Field("entries", static_cast<uint64_t>(affected_keys.size()))
+        .Warn();
     return;
   }
 
@@ -65,8 +70,13 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       if (pending_cache_keys_.size() >= max_queue_size_) {
         // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
         // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
-        spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
-                     pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+        mygram::utils::StructuredLog()
+            .Event("invalidation_queue_warning")
+            .Field("reason", "queue_full")
+            .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
+            .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
+            .Field("dropped_entries", static_cast<uint64_t>(affected_keys.size()))
+            .Warn();
       } else {
         // Always update timestamp even if key exists to ensure proper batch processing
         auto now = std::chrono::steady_clock::now();

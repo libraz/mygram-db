@@ -438,21 +438,26 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // Validate GTID format using existing parser
-  if (gtid != "AUTOMATIC") {
-    auto gtid_result = GTID::Parse(gtid);
-    if (!gtid_result) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_error")
-          .Field("operation", "set_gtid_next")
-          .Field("gtid", gtid)
-          .Field("error", "Invalid GTID format")
-          .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid));
-    }
+  if (gtid == "AUTOMATIC") {
+    std::string query = "SET GTID_NEXT = 'AUTOMATIC'";
+    return ExecuteUpdate(query);
   }
 
-  std::string query = "SET GTID_NEXT = '" + gtid + "'";
+  // Validate and normalize GTID format to prevent injection
+  auto parsed = GTID::Parse(gtid);
+  if (!parsed) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_error")
+        .Field("operation", "set_gtid_next")
+        .Field("gtid", gtid)
+        .Field("error", "Invalid GTID format")
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid));
+  }
+
+  // Use normalized GTID string to prevent injection
+  std::string normalized = parsed->ToString();
+  std::string query = "SET GTID_NEXT = '" + normalized + "'";
   return ExecuteUpdate(query);
 }
 
@@ -584,21 +589,24 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
   mysql_real_escape_string(mysql_, escaped_table.data(), table.c_str(), table.length());
   mysql_real_escape_string(mysql_, escaped_column.data(), column.c_str(), column.length());
 
+  // Cache escaped strings to avoid redundant std::string constructions
+  std::string esc_db_str(escaped_db.data());
+  std::string esc_table_str(escaped_table.data());
+  std::string esc_column_str(escaped_column.data());
+
   // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
   std::string query =
       "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = '" +
-      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
-      "' AND COLUMN_NAME = '" + std::string(escaped_column.data()) +
+      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' AND COLUMN_NAME = '" + esc_column_str +
       "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
       "WHERE TABLE_SCHEMA = '" +
-      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
+      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str +
       "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = '" +
-      std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
-      "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
   auto result_exp = Execute(query);
   if (!result_exp) {
@@ -630,8 +638,7 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
     std::string column_check_query =
         "SELECT COUNT(*) FROM information_schema.COLUMNS "
         "WHERE TABLE_SCHEMA = '" +
-        std::string(escaped_db.data()) + "' AND TABLE_NAME = '" + std::string(escaped_table.data()) +
-        "' AND COLUMN_NAME = '" + std::string(escaped_column.data()) + "'";
+        esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' AND COLUMN_NAME = '" + esc_column_str + "'";
 
     auto col_result_exp = Execute(column_check_query);
     if (col_result_exp) {

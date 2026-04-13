@@ -44,6 +44,15 @@ Expected<void, Error> IoReactor::Start() {
     return {};
   }
 
+  if (config_.event_loop_threads != 1) {
+    mygram::utils::StructuredLog()
+        .Event("reactor_config_warning")
+        .Field("event_loop_threads", static_cast<int64_t>(config_.event_loop_threads))
+        .Field("effective_threads", static_cast<int64_t>(1))
+        .Field("note", "ReactorConfig::event_loop_threads is currently ignored (hardcoded to 1)")
+        .Warn();
+  }
+
   // In tests, mux_factory_ is set via SetMultiplexerFactoryForTest() to
   // inject a MockEventMultiplexer. In production this branch is never taken.
   auto mux = mux_factory_ ? mux_factory_() : reactor::CreateEventMultiplexer();

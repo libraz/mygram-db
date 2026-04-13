@@ -21,8 +21,10 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cstring>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -287,6 +289,20 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
   // result automatically freed by MySQLResult destructor
 
+  // Check cancellation before committing to avoid unnecessary COMMIT
+  if (cancelled_) {
+    auto rollback_result_cancel = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result_cancel) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", rollback_result_cancel.error().message())
+          .Warn();
+    }
+    std::string error_msg = "Load cancelled";
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
+
   // Commit the transaction (releases the snapshot)
   auto commit_result = connection_.ExecuteUpdate("COMMIT");
   if (!commit_result) {
@@ -297,11 +313,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
         .Field("type", "commit_failed")
         .Field("error", error_msg)
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-  }
-
-  if (cancelled_) {
-    std::string error_msg = "Load cancelled";
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -420,6 +431,36 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   return {};
 }
 
+/**
+ * @brief Validate that a string represents a valid numeric value
+ *
+ * Accepts optional sign, digits, and at most one decimal point.
+ */
+static bool IsValidNumericValue(const std::string& value) {
+  if (value.empty()) {
+    return false;
+  }
+  size_t start = 0;
+  if (value[0] == '-' || value[0] == '+') {
+    start = 1;
+  }
+  if (start >= value.size()) {
+    return false;
+  }
+  bool has_dot = false;
+  for (size_t i = start; i < value.size(); i++) {
+    if (value[i] == '.') {
+      if (has_dot) {
+        return false;
+      }
+      has_dot = true;
+    } else if (std::isdigit(static_cast<unsigned char>(value[i])) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string InitialLoader::BuildSelectQuery() const {
   std::ostringstream query;
   query << "SELECT ";
@@ -533,6 +574,19 @@ std::string InitialLoader::BuildSelectQuery() const {
         if (requires_quoting()) {
           query << "'" << escape_sql_value(filter.value) << "'";
         } else {
+          // Validate numeric values to prevent SQL injection
+          if (!IsValidNumericValue(filter.value)) {
+            mygram::utils::StructuredLog()
+                .Event("loader_error")
+                .Field("operation", "build_select_query")
+                .Field("type", "invalid_numeric_filter_value")
+                .Field("filter_name", filter.name)
+                .Field("value", filter.value)
+                .Error();
+            query.str("");
+            query << "SELECT 1 WHERE FALSE /* invalid numeric filter value */";
+            return query.str();
+          }
           query << filter.value;
         }
       }
@@ -584,7 +638,17 @@ std::string InitialLoader::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsig
     }
   } else {
     // Concatenate columns
-    std::ostringstream text;
+    // Estimate total size for reservation
+    size_t total_estimate = 0;
+    for (const auto& col : table_config_.text_source.concat) {
+      int idx = FindFieldIndex(col, fields, num_fields);
+      if (idx >= 0 && row[idx] != nullptr) {
+        total_estimate += std::strlen(row[idx]) + table_config_.text_source.delimiter.size();
+      }
+    }
+    std::string text;
+    text.reserve(total_estimate);
+
     for (const auto& col : table_config_.text_source.concat) {
       int idx = FindFieldIndex(col, fields, num_fields);
       if (idx >= 0) {
@@ -601,14 +665,14 @@ std::string InitialLoader::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsig
           continue;  // Skip this column
         }
         if (row[idx] != nullptr) {
-          if (text.tellp() > 0) {
-            text << table_config_.text_source.delimiter;
+          if (!text.empty()) {
+            text += table_config_.text_source.delimiter;
           }
-          text << row[idx];
+          text += row[idx];
         }
       }
     }
-    return text.str();
+    return text;
   }
 
   return "";
