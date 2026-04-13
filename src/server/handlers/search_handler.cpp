@@ -411,6 +411,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     return snippets;
   };
 
+  // Validate HIGHLIGHT is possible (requires stored normalized text)
+  if (query.highlight.has_value() && output.current_doc_store != nullptr &&
+      !output.current_doc_store->IsStoreTextsEnabled()) {
+    return ResponseFormatter::FormatError(
+        "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in configuration.");
+  }
+
   // BM25 scoring: compute scores if SORT _score is requested
   bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
   if (is_score_sort && !output.results.empty()) {

@@ -277,6 +277,12 @@ class DocumentStore {
   void SetStoreTexts(bool enabled) { store_texts_.store(enabled, std::memory_order_relaxed); }
 
   /**
+   * @brief Check if normalized text storage is enabled
+   * @return true if AddDocument stores normalized text
+   */
+  [[nodiscard]] bool IsStoreTextsEnabled() const { return store_texts_.load(std::memory_order_relaxed); }
+
+  /**
    * @brief Set normalized text for a document (for n-gram verification)
    *
    * @param doc_id Document ID
