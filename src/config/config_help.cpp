@@ -11,7 +11,6 @@
 #include <stdexcept>
 
 #include "config/config_schema_embedded.h"
-#include "utils/constants.h"
 
 namespace mygramdb::config {
 
@@ -221,10 +220,10 @@ nlohmann::json ConfigToJson(const Config& config) {
   };
 
   // Cache configuration
+  constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
   json["cache"] = {
       {"enabled", config.cache.enabled},
-      {"max_memory_mb",
-       config.cache.max_memory_bytes / mygram::constants::kBytesPerMegabyte},  // Convert bytes to MB for display
+      {"max_memory_mb", config.cache.max_memory_bytes / kBytesPerMB},  // Convert bytes to MB for display
       {"min_query_cost_ms", config.cache.min_query_cost_ms},
       {"ttl_seconds", config.cache.ttl_seconds},
       {"invalidation_strategy", config.cache.invalidation_strategy},
@@ -631,7 +630,20 @@ ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path, co
 }
 
 std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path) {
-  return SplitPathHelper(path);
+  std::vector<std::string> result;
+  if (path.empty()) {
+    return result;
+  }
+
+  std::istringstream stream(path);
+  std::string part;
+  while (std::getline(stream, part, '.')) {
+    if (!part.empty()) {
+      result.push_back(part);
+    }
+  }
+
+  return result;
 }
 
 // Standalone functions
@@ -639,7 +651,9 @@ std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path
 bool IsSensitiveField(const std::string& path) {
   std::string lower_path = ToLower(path);
   return lower_path.find("password") != std::string::npos || lower_path.find("secret") != std::string::npos ||
-         lower_path.find("key") != std::string::npos || lower_path.find("token") != std::string::npos;
+         lower_path.find("ssl_key") != std::string::npos || lower_path.find("api_key") != std::string::npos ||
+         lower_path.find("auth_key") != std::string::npos || lower_path.find("private_key") != std::string::npos ||
+         lower_path.find("access_key") != std::string::npos || lower_path.find("token") != std::string::npos;
 }
 
 std::string MaskSensitiveValue(const std::string& path, const std::string& value) {

@@ -65,7 +65,7 @@ bool Index::SaveToFile(const std::string& filepath) const {
     // Ensure data is flushed to disk to prevent data loss on OS crash
 #ifndef _WIN32
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int file_desc = open(filepath.c_str(), O_RDONLY);
+    int file_desc = open(filepath.c_str(), O_RDWR);
     if (file_desc >= 0) {
       if (fsync(file_desc) != 0) {
         mygram::utils::StructuredLog()

@@ -172,18 +172,18 @@ gtest_discover_tests(dump_string_limits_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
-# Dump format V1 bounds tests (config_len/stats_len OOM prevention)
-add_executable(dump_format_v1_bounds_test
-  dump_format_v1_bounds_test.cpp
+# Dump format V1 tests (header serialization)
+add_executable(dump_format_v1_test
+  dump_format_v1_test.cpp
 )
 
-target_link_libraries(dump_format_v1_bounds_test
+target_link_libraries(dump_format_v1_test
   mygramdb_storage
   GTest::gtest_main
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
-gtest_discover_tests(dump_format_v1_bounds_test
+gtest_discover_tests(dump_format_v1_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io

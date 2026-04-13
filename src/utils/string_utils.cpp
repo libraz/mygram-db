@@ -331,10 +331,10 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   // NFKC normalization
   if (nfkc) {
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
-    if (U_SUCCESS(status) != 0) {
+    if (U_SUCCESS(status)) {
       icu::UnicodeString normalized;
       normalizer->normalize(ustr, normalized, status);
-      if (U_SUCCESS(status) != 0) {
+      if (U_SUCCESS(status)) {
         ustr = normalized;
       }
     }
@@ -345,14 +345,14 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
     // Full-width to half-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status) != 0) && trans != nullptr) {
+    if ((U_SUCCESS(status)) && trans != nullptr) {
       trans->transliterate(ustr);
     }
   }
@@ -446,6 +446,10 @@ bool IsCJKIdeograph(uint32_t codepoint) {
 std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size, int kanji_ngram_size,
                                               bool cross_boundary_ngrams) {
   std::vector<std::string> ngrams;
+
+  if (ascii_ngram_size <= 0 || kanji_ngram_size <= 0) {
+    return ngrams;
+  }
 
   // Convert to codepoints for proper character-level processing
   std::vector<uint32_t> codepoints = Utf8ToCodepoints(text);

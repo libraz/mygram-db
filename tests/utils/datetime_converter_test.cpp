@@ -300,4 +300,17 @@ TEST(DateTimeProcessorTest, CompareTimeValues) {
   EXPECT_LT(*time3, 0);       // Negative time
 }
 
+// BUG-4 fix: ConvertToEpoch consistency
+TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
+  // 2000-01-01 00:00:00 UTC = 946684800
+  auto epoch = ConvertToEpoch("2000-01-01 00:00:00", 0);
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, 946684800);
+
+  // Unix epoch
+  auto epoch0 = ConvertToEpoch("1970-01-01 00:00:00", 0);
+  ASSERT_TRUE(epoch0.has_value());
+  EXPECT_EQ(*epoch0, 0);
+}
+
 }  // namespace mygram::utils

@@ -35,6 +35,7 @@ struct CacheStatisticsSnapshot {
   uint64_t cache_misses = 0;
   uint64_t cache_misses_invalidated = 0;
   uint64_t cache_misses_not_found = 0;
+  uint64_t cache_misses_ttl_expired = 0;
 
   // Invalidation statistics
   uint64_t invalidations_immediate = 0;
@@ -93,6 +94,7 @@ struct CacheStatistics {
   std::atomic<uint64_t> cache_misses{0};
   std::atomic<uint64_t> cache_misses_invalidated{0};
   std::atomic<uint64_t> cache_misses_not_found{0};
+  std::atomic<uint64_t> cache_misses_ttl_expired{0};
 
   // Invalidation statistics
   std::atomic<uint64_t> invalidations_immediate{0};
@@ -227,6 +229,7 @@ class QueryCache {
     snapshot.cache_misses = stats_.cache_misses.load();
     snapshot.cache_misses_invalidated = stats_.cache_misses_invalidated.load();
     snapshot.cache_misses_not_found = stats_.cache_misses_not_found.load();
+    snapshot.cache_misses_ttl_expired = stats_.cache_misses_ttl_expired.load();
     snapshot.invalidations_immediate = stats_.invalidations_immediate.load();
     snapshot.invalidations_deferred = stats_.invalidations_deferred.load();
     snapshot.invalidations_batches = stats_.invalidations_batches.load();
@@ -262,10 +265,7 @@ class QueryCache {
    * @brief Set callback to be notified when entries are evicted
    * @param callback Function to call when an entry is evicted via LRU
    */
-  void SetEvictionCallback(EvictionCallback callback) {
-    std::unique_lock lock(mutex_);
-    eviction_callback_ = std::move(callback);
-  }
+  void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
 
   /**
    * @brief Set minimum query cost threshold for caching
@@ -274,12 +274,12 @@ class QueryCache {
    * Queries with cost less than this threshold will not be cached.
    * Changes apply to future Insert() calls.
    */
-  void SetMinQueryCost(double min_query_cost_ms) { min_query_cost_ms_.store(min_query_cost_ms); }
+  void SetMinQueryCost(double min_query_cost_ms) { min_query_cost_ms_ = min_query_cost_ms; }
 
   /**
    * @brief Get current minimum query cost threshold
    */
-  [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_.load(); }
+  [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_; }
 
   /**
    * @brief Set TTL for cache entries
@@ -287,12 +287,12 @@ class QueryCache {
    *
    * Changes apply immediately to TTL expiration checks.
    */
-  void SetTtl(int ttl_seconds) { ttl_seconds_.store(ttl_seconds); }
+  void SetTtl(int ttl_seconds) { ttl_seconds_ = ttl_seconds; }
 
   /**
    * @brief Get current TTL setting
    */
-  [[nodiscard]] int GetTtl() const { return ttl_seconds_.load(); }
+  [[nodiscard]] int GetTtl() const { return ttl_seconds_; }
 
   /**
    * @brief Check if compression is enabled for cached results
@@ -308,9 +308,9 @@ class QueryCache {
 
   // Configuration
   size_t max_memory_bytes_;
-  std::atomic<double> min_query_cost_ms_;
-  std::atomic<int> ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
-  bool compression_enabled_;      ///< Enable LZ4 compression for cached results
+  double min_query_cost_ms_;
+  int ttl_seconds_;           ///< Time-to-live in seconds (0 = no expiration)
+  bool compression_enabled_;  ///< Enable LZ4 compression for cached results
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;
@@ -372,14 +372,6 @@ class QueryCache {
    * Called by RefreshLRUWorker() while holding exclusive lock.
    */
   void RefreshLRU();
-
-  /**
-   * @brief Shared lookup implementation
-   * @param key Cache key
-   * @param metadata If non-null, populated with query cost and creation time on cache hit
-   * @return Decompressed result if found and not invalidated, nullopt otherwise
-   */
-  [[nodiscard]] std::optional<std::vector<DocId>> LookupImpl(const CacheKey& key, LookupMetadata* metadata);
 };
 
 }  // namespace mygramdb::cache

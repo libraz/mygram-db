@@ -467,7 +467,15 @@ std::unique_ptr<QueryNode> QueryASTParser::ParsePrimary() {
   if (Match(TokenType::LPAREN)) {
     Advance();
 
+    ++recursion_depth_;
+    if (recursion_depth_ >= kMaxRecursionDepth) {
+      SetError("Maximum expression nesting depth exceeded");
+      --recursion_depth_;
+      return nullptr;
+    }
+
     auto expr = ParseOrExpr();
+    --recursion_depth_;
     if (!expr || !error_.empty()) {
       return nullptr;
     }

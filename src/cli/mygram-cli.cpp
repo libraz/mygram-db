@@ -17,8 +17,6 @@
 #include <utility>
 #include <vector>
 
-#include "server/protocol_constants.h"
-
 // Try to use readline if available
 #ifdef HAVE_READLINE
 #include <readline/history.h>
@@ -29,39 +27,14 @@
 
 namespace {
 
-/**
- * @brief Split response into main and debug sections at \r\n\r\n separator
- * @return {main_response, debug_section} where debug_section is empty if no separator found
- */
-std::pair<std::string, std::string> SplitDebugSection(const std::string& response) {
-  size_t debug_separator = response.find("\r\n\r\n");
-  if (debug_separator != std::string::npos) {
-    return {response.substr(0, debug_separator), response.substr(debug_separator + 4)};
-  }
-  return {response, ""};
-}
-
-/**
- * @brief Replace \r\n line endings with \n
- */
-std::string ReplaceLineEndings(const std::string& str) {
-  std::string result = str;
-  size_t pos = 0;
-  while ((pos = result.find("\r\n", pos)) != std::string::npos) {
-    result.replace(pos, 2, "\n");
-    pos += 1;
-  }
-  return result;
-}
-
-// Protocol constants from shared header
-constexpr size_t kReceiveBufferSize = mygramdb::server::protocol::kDefaultRecvBufferSize;
-constexpr size_t kOkInfoPrefixLength = mygramdb::server::protocol::kOkInfoPrefixLen;
-constexpr size_t kOkSavedPrefixLength = mygramdb::server::protocol::kOkSavedPrefixLen;
-constexpr size_t kOkLoadedPrefixLength = mygramdb::server::protocol::kOkLoadedPrefixLen;
-constexpr size_t kOkReplicationPrefixLength = mygramdb::server::protocol::kOkReplicationPrefixLen;
-constexpr size_t kErrorPrefixLength = mygramdb::server::protocol::kErrorPrefixLen;
-constexpr int kMaxWaitReadyRetries = 100;  // Maximum retries for --wait-ready (~5 minutes)
+// Buffer and string prefix size constants
+constexpr size_t kReceiveBufferSize = 65536;       // Receive buffer size (64KB)
+constexpr size_t kOkInfoPrefixLength = 8;          // "OK INFO\r\n" length (7 chars + newline)
+constexpr size_t kOkSavedPrefixLength = 9;         // "OK SAVED " length
+constexpr size_t kOkLoadedPrefixLength = 10;       // "OK LOADED " length
+constexpr size_t kOkReplicationPrefixLength = 15;  // "OK REPLICATION\r\n" length (14 chars + newline)
+constexpr size_t kErrorPrefixLength = 6;           // "ERROR " length
+constexpr int kMaxWaitReadyRetries = 100;          // Maximum retries for --wait-ready (~5 minutes)
 
 #ifdef USE_READLINE
 constexpr size_t kTablesKeyLength = 8;  // "tables: " length (used in tab completion)
@@ -454,6 +427,12 @@ class MygramClient {
         continue;
       }
 
+      // Set receive timeout (30 seconds) to prevent indefinite blocking
+      struct timeval recv_timeout {};
+      recv_timeout.tv_sec = 30;
+      recv_timeout.tv_usec = 0;
+      setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+
       // Connected successfully
       if (attempts > 0) {
         std::cerr << "\nConnected successfully after " << attempts << " retry(ies)!\n\n";
@@ -522,53 +501,52 @@ class MygramClient {
       return "(error) Not connected";
     }
 
-    // Send command with \r\n
+    // Send command with \r\n (handle partial sends)
     std::string msg = command + "\r\n";
-    ssize_t sent = send(sock_, msg.c_str(), msg.length(), 0);
-    if (sent < 0) {
-      int saved_errno = errno;
-      if (saved_errno == EPIPE || saved_errno == ECONNRESET) {
-        return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may have "
-               "crashed or been shut down.";
+    size_t total_sent = 0;
+    while (total_sent < msg.length()) {
+      ssize_t sent = send(sock_, msg.c_str() + total_sent, msg.length() - total_sent, 0);
+      if (sent < 0) {
+        int saved_errno = errno;
+        if (saved_errno == EPIPE || saved_errno == ECONNRESET) {
+          return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may have "
+                 "crashed or been shut down.";
+        }
+        if (saved_errno == EINTR) {
+          continue;  // Retry on interrupt
+        }
+        return "(error) Failed to send command: " + std::string(strerror(saved_errno));
       }
-      return "(error) Failed to send command: " + std::string(strerror(saved_errno));
+      total_sent += static_cast<size_t>(sent);
     }
 
-    // Receive response (loop until CRLF terminator is found)
-    std::string response;
+    // Receive response
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
     char buffer[kReceiveBufferSize];
-    while (true) {
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-      ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-      if (received <= 0) {
-        if (received == 0) {
-          if (response.empty()) {
-            return "(error) SERVER_DISCONNECTED: Server closed the connection. This usually means:\n"
-                   "  1. Server was shut down gracefully\n"
-                   "  2. Server crashed or encountered a fatal error\n"
-                   "  3. Server restarted and dropped all connections\n"
-                   "\nTry reconnecting to check if the server is still running.";
-          }
-          break;  // Use partial response
-        }
-        int saved_errno = errno;
-        if (saved_errno == ECONNRESET) {
-          return "(error) SERVER_DISCONNECTED: Connection reset by server. The server may have crashed.";
-        }
-        if (saved_errno == ETIMEDOUT) {
-          return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or frozen.";
-        }
-        return "(error) Failed to receive response: " + std::string(strerror(saved_errno));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+    if (received <= 0) {
+      if (received == 0) {
+        return "(error) SERVER_DISCONNECTED: Server closed the connection. This usually means:\n"
+               "  1. Server was shut down gracefully\n"
+               "  2. Server crashed or encountered a fatal error\n"
+               "  3. Server restarted and dropped all connections\n"
+               "\nTry reconnecting to check if the server is still running.";
       }
-
-      response.append(buffer, static_cast<size_t>(received));
-
-      // Check if response ends with \r\n (protocol terminator)
-      if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
-        break;
+      int saved_errno = errno;
+      if (saved_errno == ECONNRESET) {
+        return "(error) SERVER_DISCONNECTED: Connection reset by server. The server may have crashed.";
       }
+      if (saved_errno == ETIMEDOUT) {
+        return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or frozen.";
+      }
+      return "(error) Failed to receive response: " + std::string(strerror(saved_errno));
     }
+
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+    buffer[received] = '\0';
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    std::string response(buffer);
 
     // Remove trailing \r\n
     if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
@@ -720,7 +698,13 @@ class MygramClient {
     // Parse response type
     if (response.find("OK RESULTS") == 0) {
       // SEARCH response: OK RESULTS <count> [<id1> <id2> ...]\r\n\r\n# DEBUG\r\n...
-      auto [main_response, debug_section] = SplitDebugSection(response);
+      // Split by \r\n\r\n to separate main response from debug info
+      size_t debug_separator = response.find("\r\n\r\n");
+      std::string main_response =
+          (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
+      std::string debug_section = (debug_separator != std::string::npos)
+                                      ? response.substr(debug_separator + 4)  // Skip "\r\n\r\n"
+                                      : "";
 
       std::istringstream iss(main_response);
       std::string status;
@@ -750,15 +734,26 @@ class MygramClient {
       // Print debug info if present
       if (!debug_section.empty()) {
         std::cout << '\n';
-        std::string debug_output = ReplaceLineEndings(debug_section);
-        std::cout << debug_output;
-        if (!debug_output.empty() && debug_output.back() != '\n') {
+        // Replace \r\n with actual newlines for display
+        size_t pos = 0;
+        while ((pos = debug_section.find("\r\n", pos)) != std::string::npos) {
+          debug_section.replace(pos, 2, "\n");
+          pos += 1;
+        }
+        std::cout << debug_section;
+        if (!debug_section.empty() && debug_section.back() != '\n') {
           std::cout << '\n';
         }
       }
     } else if (response.find("OK COUNT") == 0) {
       // COUNT response: OK COUNT <n>\r\n\r\n# DEBUG\r\n...
-      auto [main_response, debug_section] = SplitDebugSection(response);
+      // Split by \r\n\r\n to separate main response from debug info
+      size_t debug_separator = response.find("\r\n\r\n");
+      std::string main_response =
+          (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
+      std::string debug_section = (debug_separator != std::string::npos)
+                                      ? response.substr(debug_separator + 4)  // Skip "\r\n\r\n"
+                                      : "";
 
       std::istringstream iss(main_response);
       std::string status;
@@ -771,9 +766,14 @@ class MygramClient {
       // Print debug info if present
       if (!debug_section.empty()) {
         std::cout << '\n';
-        std::string debug_output = ReplaceLineEndings(debug_section);
-        std::cout << debug_output;
-        if (!debug_output.empty() && debug_output.back() != '\n') {
+        // Replace \r\n with actual newlines for display
+        size_t pos = 0;
+        while ((pos = debug_section.find("\r\n", pos)) != std::string::npos) {
+          debug_section.replace(pos, 2, "\n");
+          pos += 1;
+        }
+        std::cout << debug_section;
+        if (!debug_section.empty() && debug_section.back() != '\n') {
           std::cout << '\n';
         }
       }
@@ -789,7 +789,7 @@ class MygramClient {
       // Simply print the formatted response (already has nice formatting from server)
       std::string info = response.substr(kOkInfoPrefixLength);  // Remove "OK INFO\r\n"
 
-      // Replace escaped \r\n literals with newlines
+      // Replace \r\n with actual newlines for display
       size_t pos = 0;
       while ((pos = info.find("\\r\\n", pos)) != std::string::npos) {
         info.replace(pos, 4, "\n");
@@ -797,7 +797,11 @@ class MygramClient {
       }
 
       // Handle actual \r\n sequences
-      info = ReplaceLineEndings(info);
+      pos = 0;
+      while ((pos = info.find("\r\n", pos)) != std::string::npos) {
+        info.replace(pos, 2, "\n");
+        pos += 1;
+      }
 
       std::cout << info << '\n';
     } else if (response.find("OK SAVED") == 0) {
@@ -889,12 +893,8 @@ int main(int argc, char* argv[]) {
     } else if (arg == "-p") {
       if (i + 1 < argc) {
         try {
-          int port_int = std::stoi(argv[++i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-          if (port_int < 1 || port_int > 65535) {
-            std::cerr << "Error: port must be between 1 and 65535" << '\n';
-            return 1;
-          }
-          config.port = static_cast<uint16_t>(port_int);
+          config.port =
+              static_cast<uint16_t>(std::stoi(argv[++i]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
         } catch (const std::exception& e) {
           std::cerr << "Error: Invalid port number" << '\n';
           return 1;

@@ -102,7 +102,7 @@ PostingList::~PostingList() {
 // Precondition: moved-from object must not be concurrently accessed.
 // Move operations do not acquire mutex_ on either object.
 PostingList::PostingList(PostingList&& other) noexcept
-    : strategy_(other.strategy_),
+    : strategy_(other.strategy_.load(std::memory_order_relaxed)),
       roaring_threshold_(other.roaring_threshold_),
       delta_compressed_(std::move(other.delta_compressed_)),
       last_doc_id_(other.last_doc_id_),
@@ -121,7 +121,7 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
     if (roaring_bitmap_ != nullptr) {
       roaring_bitmap_free(roaring_bitmap_);
     }
-    strategy_ = other.strategy_;
+    strategy_.store(other.strategy_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     roaring_threshold_ = other.roaring_threshold_;
     delta_compressed_ = std::move(other.delta_compressed_);
     last_doc_id_ = other.last_doc_id_;
@@ -137,7 +137,7 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
 
 void PostingList::Add(DocId doc_id) {
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     if (delta_compressed_.empty()) {
       // First entry: store doc_id as-is (delta encoding stores first value raw)
       delta_compressed_.push_back(doc_id);
@@ -163,7 +163,7 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
@@ -179,7 +179,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   assert(std::is_sorted(doc_ids.begin(), doc_ids.end()));
 
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Merge sorted arrays
     auto existing = DecodeDelta(delta_compressed_);
     std::vector<DocId> merged;
@@ -192,7 +192,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
@@ -202,7 +202,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 
 void PostingList::Remove(DocId doc_id) {
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
@@ -215,7 +215,7 @@ void PostingList::Remove(DocId doc_id) {
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
   }
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
@@ -225,7 +225,7 @@ void PostingList::Remove(DocId doc_id) {
 
 bool PostingList::Contains(DocId doc_id) const {
   std::shared_lock lock(mutex_);  // Protect read access
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     if (delta_compressed_.empty()) {
       return false;
     }
@@ -261,7 +261,7 @@ bool PostingList::Contains(DocId doc_id) const {
 
 std::vector<DocId> PostingList::GetAll() const {
   std::shared_lock lock(mutex_);  // Protect read access
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     return DecodeDelta(delta_compressed_);
   }
   uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -276,7 +276,7 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   // If limit is 0, return all documents
   if (limit == 0) {
     std::vector<DocId> result;
-    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       result = DecodeDelta(delta_compressed_);
     } else {
       uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -289,7 +289,7 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
     return result;
   }
 
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Delta-compressed: decode and extract top N
     auto all_docs = DecodeDelta(delta_compressed_);
     size_t actual_limit = std::min(limit, all_docs.size());
@@ -369,7 +369,7 @@ size_t PostingList::MemoryUsage() const {
 
 size_t PostingList::MemoryUsageApprox() const {
   uint64_t count = doc_count_.load(std::memory_order_relaxed);
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     return static_cast<size_t>(count) * sizeof(uint32_t);
   }
   return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
@@ -394,15 +394,20 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap && other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap AND
-    result->strategy_ = PostingStrategy::kRoaringBitmap;
+    result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
     result->roaring_bitmap_ = roaring_bitmap_and(roaring_bitmap_, other.roaring_bitmap_);
+    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_);
+    result->doc_count_.store(card, std::memory_order_relaxed);
+    if (card > 0) {
+      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_);
+    }
   } else {
     // At least one is delta: fall back to sorted array intersection
     // Note: GetAll() would try to acquire the lock again, so we inline the logic
     std::vector<DocId> docs1;
-    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       docs1 = DecodeDelta(delta_compressed_);
     } else {
       uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -411,7 +416,7 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     }
 
     std::vector<DocId> docs2;
-    if (other.strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       docs2 = DecodeDelta(other.delta_compressed_);
     } else {
       uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
@@ -422,6 +427,10 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     std::vector<DocId> intersection;
     std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
     result->delta_compressed_ = EncodeDelta(intersection);
+    result->doc_count_.store(intersection.size(), std::memory_order_relaxed);
+    if (!intersection.empty()) {
+      result->last_doc_id_ = intersection.back();
+    }
   }
 
   return result;
@@ -434,15 +443,20 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
 
-  if (strategy_ == PostingStrategy::kRoaringBitmap && other.strategy_ == PostingStrategy::kRoaringBitmap) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap && other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap OR
-    result->strategy_ = PostingStrategy::kRoaringBitmap;
+    result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
     result->roaring_bitmap_ = roaring_bitmap_or(roaring_bitmap_, other.roaring_bitmap_);
+    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_);
+    result->doc_count_.store(card, std::memory_order_relaxed);
+    if (card > 0) {
+      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_);
+    }
   } else {
     // At least one is delta: fall back to sorted array union
     // Note: GetAll() would try to acquire the lock again, so we inline the logic
     std::vector<DocId> docs1;
-    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       docs1 = DecodeDelta(delta_compressed_);
     } else {
       uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -451,7 +465,7 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     }
 
     std::vector<DocId> docs2;
-    if (other.strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       docs2 = DecodeDelta(other.delta_compressed_);
     } else {
       uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
@@ -462,6 +476,10 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     std::vector<DocId> union_result;
     std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(union_result));
     result->delta_compressed_ = EncodeDelta(union_result);
+    result->doc_count_.store(union_result.size(), std::memory_order_relaxed);
+    if (!union_result.empty()) {
+      result->last_doc_id_ = union_result.back();
+    }
   }
 
   return result;
@@ -475,7 +493,7 @@ void PostingList::Optimize(uint64_t total_docs) {
 
   // Calculate size without calling Size() to avoid recursive locking
   uint64_t size = 0;
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     size = delta_compressed_.size();
   } else {
     size = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -483,7 +501,7 @@ void PostingList::Optimize(uint64_t total_docs) {
 
   double density = static_cast<double>(size) / static_cast<double>(total_docs);
 
-  if (density >= roaring_threshold_ && strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (density >= roaring_threshold_ && strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Convert to Roaring for high density
     ConvertToRoaring();
     mygram::utils::StructuredLog()
@@ -491,7 +509,7 @@ void PostingList::Optimize(uint64_t total_docs) {
         .Field("to", "roaring")
         .Field("density", density)
         .Debug();
-  } else if (density < roaring_threshold_ * kHysteresisFactor && strategy_ == PostingStrategy::kRoaringBitmap) {
+  } else if (density < roaring_threshold_ * kHysteresisFactor && strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Convert back to delta for low density (with hysteresis)
     ConvertToDelta();
     mygram::utils::StructuredLog()
@@ -509,7 +527,7 @@ std::shared_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
   std::vector<DocId> docs;
   {
     std::shared_lock lock(mutex_);  // Protect read access to internal state
-    if (strategy_ == PostingStrategy::kDeltaCompressed) {
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
       docs = DecodeDelta(delta_compressed_);
     } else {
       uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
@@ -533,7 +551,7 @@ std::shared_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
 }
 
 void PostingList::ConvertToRoaring() {
-  if (strategy_ == PostingStrategy::kRoaringBitmap) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     return;
   }
 
@@ -555,12 +573,12 @@ void PostingList::ConvertToRoaring() {
   delta_compressed_.clear();
   delta_compressed_.shrink_to_fit();
   last_doc_id_ = 0;  // Not used for Roaring strategy
-  strategy_ = PostingStrategy::kRoaringBitmap;
+  strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_release);
   doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
 }
 
 void PostingList::ConvertToDelta() {
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     return;
   }
 
@@ -575,7 +593,7 @@ void PostingList::ConvertToDelta() {
 
   roaring_bitmap_free(roaring_bitmap_);
   roaring_bitmap_ = nullptr;
-  strategy_ = PostingStrategy::kDeltaCompressed;
+  strategy_.store(PostingStrategy::kDeltaCompressed, std::memory_order_release);
   doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
 }
 
@@ -629,9 +647,9 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
   // [1 byte: strategy] [4 bytes: size] [data...]
 
   // Write strategy
-  buffer.push_back(static_cast<uint8_t>(strategy_));
+  buffer.push_back(static_cast<uint8_t>(strategy_.load(std::memory_order_relaxed)));
 
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Write size
     if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
       spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})", delta_compressed_.size());
@@ -687,7 +705,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
   // Read size
   uint32_t size = ReadUint32LE(buffer, offset);
 
-  if (strategy_ == PostingStrategy::kDeltaCompressed) {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Read delta-compressed data
     if (offset + (static_cast<size_t>(size) * 4) > buffer.size()) {
       return false;

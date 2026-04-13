@@ -5,17 +5,13 @@
 
 #include "cache/invalidation_queue.h"
 
+#include <spdlog/spdlog.h>
+
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "server/server_types.h"
-#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
-
-/// Default ngram size when table context is not found
-constexpr int kDefaultNgramSize = 3;
-/// Default kanji ngram size when table context is not found
-constexpr int kDefaultKanjiNgramSize = 2;
 
 InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
                                      const std::unordered_map<std::string, server::TableContext*>& table_contexts)
@@ -28,8 +24,8 @@ InvalidationQueue::~InvalidationQueue() {
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
                                 bool filter_columns_changed) {
   // Get ngram settings for this specific table
-  int ngram_size = kDefaultNgramSize;
-  int kanji_ngram_size = kDefaultKanjiNgramSize;
+  int ngram_size = 2;                 // Default (match index::kDefaultNgramSize)
+  int kanji_ngram_size = 1;           // Default (match index::kDefaultKanjiNgramSize)
   bool cross_boundary_ngrams = true;  // Default
   auto table_iter = table_contexts_.find(table_name);
   if (table_iter != table_contexts_.end()) {
@@ -48,11 +44,10 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   // Phase 2: Queue for deferred deletion or process immediately
   // Reject enqueues after Stop() to prevent use-after-free
   if (stopped_.load()) {
-    mygram::utils::StructuredLog()
-        .Event("invalidation_queue_warning")
-        .Field("reason", "enqueue_after_stop")
-        .Field("entries", static_cast<uint64_t>(affected_keys.size()))
-        .Warn();
+    spdlog::warn(
+        "InvalidationQueue: Enqueue called after Stop(), "
+        "skipping deferred deletion for {} entries",
+        affected_keys.size());
     return;
   }
 
@@ -70,13 +65,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       if (pending_cache_keys_.size() >= max_queue_size_) {
         // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
         // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
-        mygram::utils::StructuredLog()
-            .Event("invalidation_queue_warning")
-            .Field("reason", "queue_full")
-            .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
-            .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
-            .Field("dropped_entries", static_cast<uint64_t>(affected_keys.size()))
-            .Warn();
+        spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
+                     pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
       } else {
         // Always update timestamp even if key exists to ensure proper batch processing
         auto now = std::chrono::steady_clock::now();
@@ -159,14 +149,9 @@ void InvalidationQueue::WorkerLoop() {
           break;
         }
 
-        // Swap pending items into local map while holding lock (eliminates TOCTOU)
-        std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch;
-        batch.swap(pending_cache_keys_);
-        oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
+        // Process batch
         lock.unlock();
-
-        // Process the swapped batch outside the lock
-        ProcessBatchFromMap(std::move(batch));
+        ProcessBatch();
       } else {
         // Wait for signal or timeout
         const auto remaining_delay = max_delay_ - time_since_oldest;
@@ -206,17 +191,12 @@ void InvalidationQueue::ProcessBatch() {
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
-  ProcessBatchFromMap(std::move(batch));
-}
-
-void InvalidationQueue::ProcessBatchFromMap(
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch) {
   // Process batch: erase invalidated entries from cache
   std::unordered_set<CacheKey> keys_to_erase;
 
   for (const auto& [composite_key, timestamp] : batch) {
     // Parse composite key (format: "table:cache_key_hex")
-    const size_t colon_pos = composite_key.find(':');
+    const size_t colon_pos = composite_key.rfind(':');
     if (colon_pos == std::string::npos) {
       continue;
     }

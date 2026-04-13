@@ -798,5 +798,30 @@ TEST(QueryASTEvaluationTest, MultipleNotNodesShareAllDocs) {
   EXPECT_EQ(results[0], id4);
 }
 
+TEST(QueryASTParserBugFixTest, DeeplyNestedParensRejected) {
+  // 33 levels of nesting should exceed kMaxRecursionDepth (32)
+  std::string expr;
+  for (int i = 0; i < 33; ++i) expr += "(";
+  expr += "term";
+  for (int i = 0; i < 33; ++i) expr += ")";
+
+  QueryASTParser parser;
+  auto result = parser.Parse(expr);
+  EXPECT_EQ(result, nullptr) << "33 levels of paren nesting should be rejected";
+  EXPECT_FALSE(parser.GetError().empty());
+}
+
+TEST(QueryASTParserBugFixTest, ModerateParenNestingAccepted) {
+  // 31 levels should be within limit
+  std::string expr;
+  for (int i = 0; i < 31; ++i) expr += "(";
+  expr += "term";
+  for (int i = 0; i < 31; ++i) expr += ")";
+
+  QueryASTParser parser;
+  auto result = parser.Parse(expr);
+  EXPECT_NE(result, nullptr) << "31 levels of paren nesting should be accepted";
+}
+
 }  // namespace query
 }  // namespace mygramdb

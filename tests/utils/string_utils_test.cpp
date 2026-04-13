@@ -998,3 +998,15 @@ TEST(StringUtilsTest, GenerateQueryNgramsCrossBoundaryIgnoredInDefaultPath) {
     EXPECT_EQ(ngrams_true[i], ngrams_false[i]);
   }
 }
+
+// BUG-14 fix: GenerateHybridNgrams zero/negative guard
+TEST(StringUtilsBugFixTest, GenerateHybridNgramsZeroSizeReturnsEmpty) {
+  EXPECT_TRUE(GenerateHybridNgrams("hello", 0, 1).empty());
+  EXPECT_TRUE(GenerateHybridNgrams("hello", 2, 0).empty());
+  EXPECT_TRUE(GenerateHybridNgrams("hello", 0, 0).empty());
+}
+
+TEST(StringUtilsBugFixTest, GenerateHybridNgramsNegativeSizeReturnsEmpty) {
+  EXPECT_TRUE(GenerateHybridNgrams("hello", -1, 1).empty());
+  EXPECT_TRUE(GenerateHybridNgrams("hello", 2, -1).empty());
+}

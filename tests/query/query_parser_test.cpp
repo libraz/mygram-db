@@ -316,9 +316,8 @@ TEST(QueryParserTest, SearchMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles");
 
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->type, QueryType::SEARCH);
-  EXPECT_FALSE(query->IsValid());
+  // After BUG-2 fix: error paths now return MakeUnexpected instead of partial Query
+  EXPECT_FALSE(query.has_value());
 }
 
 /**
@@ -328,9 +327,7 @@ TEST(QueryParserTest, CountMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("COUNT articles");
 
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->type, QueryType::COUNT);
-  EXPECT_FALSE(query->IsValid());
+  EXPECT_FALSE(query.has_value());
 }
 
 /**
@@ -340,12 +337,10 @@ TEST(QueryParserTest, GetMissingArgs) {
   QueryParser parser;
 
   auto query1 = parser.Parse("GET articles");
-  ASSERT_TRUE(query1);
-  EXPECT_FALSE(query1->IsValid());
+  EXPECT_FALSE(query1.has_value());
 
   auto query2 = parser.Parse("GET");
-  ASSERT_TRUE(query2);
-  EXPECT_FALSE(query2->IsValid());
+  EXPECT_FALSE(query2.has_value());
 }
 
 /**
@@ -2382,4 +2377,65 @@ TEST(CountParensInTokenTest, EscapedQuoteDoesNotEndQuoteState) {
   auto [open, close] = mygramdb::query::detail::CountParensInToken("\"\\\"(\"");
   EXPECT_EQ(open, 0);
   EXPECT_EQ(close, 0);
+}
+
+// ============================================================================
+// Error return validation tests (BUG-2 fixes)
+// ============================================================================
+
+TEST(QueryParserBugFixTest, SearchMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("SEARCH articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, CountMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("COUNT");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("COUNT articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, GetMissingArgsReturnsError) {
+  QueryParser parser;
+  auto result = parser.Parse("GET");
+  EXPECT_FALSE(result.has_value());
+  auto result2 = parser.Parse("GET articles");
+  EXPECT_FALSE(result2.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchTooManyAndTermsRejected) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 65; ++i) {
+    query += " AND t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchTooManyNotTermsRejected) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 65; ++i) {
+    query += " NOT t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserBugFixTest, SearchAtLimitAndTermsAccepted) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(4096);  // Allow long queries for this test
+  std::string query = "SEARCH articles hello";
+  for (int i = 0; i < 64; ++i) {
+    query += " AND t" + std::to_string(i);
+  }
+  auto result = parser.Parse(query);
+  EXPECT_TRUE(result.has_value());
 }

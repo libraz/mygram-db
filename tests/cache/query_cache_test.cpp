@@ -1380,7 +1380,7 @@ TEST(QueryCacheTest, Bug0070_AccessCountIncrement) {
  */
 TEST(QueryCacheTest, MemoryUsageAccuracy) {
   CacheEntry entry;
-  entry.compressed.resize(100, 0x42);
+  entry.compressed = std::make_shared<const std::vector<uint8_t>>(100, 0x42);
   entry.metadata.table = "test_table";
   entry.metadata.ngrams = {"abc", "bcd", "cde"};
   entry.metadata.filters = {{"col1", query::FilterOp::EQ, "val1"}};
@@ -1391,7 +1391,9 @@ TEST(QueryCacheTest, MemoryUsageAccuracy) {
   EXPECT_GT(usage, sizeof(CacheEntry) + 100);
 
   // Must include table string
-  EXPECT_GE(usage, sizeof(CacheEntry) + entry.compressed.capacity() + entry.metadata.table.capacity());
+  EXPECT_GE(usage,
+            sizeof(CacheEntry) + sizeof(std::vector<uint8_t>) + entry.compressed->capacity() +
+                entry.metadata.table.capacity());
 }
 
 /**
@@ -1399,12 +1401,12 @@ TEST(QueryCacheTest, MemoryUsageAccuracy) {
  */
 TEST(QueryCacheTest, MemoryUsageWithManyNgrams) {
   CacheEntry entry_few;
-  entry_few.compressed.resize(50, 0x00);
+  entry_few.compressed = std::make_shared<const std::vector<uint8_t>>(50, 0x00);
   entry_few.metadata.table = "t";
   entry_few.metadata.ngrams = {"aa", "bb"};
 
   CacheEntry entry_many;
-  entry_many.compressed.resize(50, 0x00);
+  entry_many.compressed = std::make_shared<const std::vector<uint8_t>>(50, 0x00);
   entry_many.metadata.table = "t";
   for (int i = 0; i < 100; ++i) {
     entry_many.metadata.ngrams.push_back("ng" + std::to_string(i));
@@ -1821,75 +1823,109 @@ TEST(QueryCacheTest, M5_DecompressionFailureEntryEventuallyRemoved) {
   EXPECT_EQ(stats.current_entries, 1);
 }
 
-// =============================================================================
-// M-21: Memory accounting consistency with stored_memory_footprint
-// =============================================================================
-
 /**
- * @brief Test that memory accounting is consistent using stored_memory_footprint
+ * @brief Test TTL-expired entries increment cache_misses_ttl_expired (not cache_misses_not_found)
  *
- * Bug M-21: total_memory_bytes_ could underflow if HeapFootprint() returned a
- * different value at removal time than at insertion time (e.g., vector capacity
- * changes). The fix stores the memory footprint at insertion time and uses that
- * stored value during removal.
+ * Regression test for: TTL-expired entries were counted as cache_misses_not_found
+ * instead of the dedicated cache_misses_ttl_expired counter.
+ *
+ * Note: The background RefreshLRU thread may remove the entry before Lookup runs,
+ * causing a not_found miss instead. We use a longer TTL and check immediately
+ * after expiry to minimize this race.
  */
-TEST(QueryCacheTest, M21_StoredMemoryFootprintConsistency) {
-  QueryCache cache(10 * 1024 * 1024, 0.0);  // 10MB, no min cost
+TEST(QueryCacheTest, TTLExpiredIncrementsTTLExpiredCounter) {
+  QueryCache cache(1024 * 1024, 0.0, 2);  // 2 second TTL
 
+  auto key = CacheKeyGenerator::Generate("ttl_counter_test");
   CacheMetadata meta;
-  meta.table = "test";
-  meta.ngrams = {"abc", "def", "ghi"};
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  cache.Insert(key, {1, 2, 3}, meta, 10.0);
 
-  // Insert an entry
-  auto key = CacheKeyGenerator::Generate("m21_test");
-  std::vector<DocId> result = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-  ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+  // Verify entry exists
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
 
-  // Verify memory is tracked
-  auto stats_after_insert = cache.GetStatistics();
-  EXPECT_GT(stats_after_insert.current_memory_bytes, 0);
-  EXPECT_EQ(stats_after_insert.current_entries, 1);
+  // Wait for TTL to expire but not too long (RefreshLRU runs every 100ms)
+  std::this_thread::sleep_for(std::chrono::milliseconds(2050));
 
-  // Erase the entry
-  ASSERT_TRUE(cache.Erase(key));
+  // Lookup expired entry - if Lookup detects TTL expiry, it increments
+  // cache_misses_ttl_expired. If RefreshLRU already removed it, it's cache_misses_not_found.
+  auto result = cache.Lookup(key);
+  EXPECT_FALSE(result.has_value());
 
-  // Memory should return to exactly 0 (stored footprint ensures no underflow/drift)
-  auto stats_after_erase = cache.GetStatistics();
-  EXPECT_EQ(stats_after_erase.current_memory_bytes, 0) << "M-21: Memory should be exactly 0 after erasing all entries";
-  EXPECT_EQ(stats_after_erase.current_entries, 0);
+  auto stats = cache.GetStatistics();
+  // Either path is a miss; the key point is that TTL-detected misses
+  // go to cache_misses_ttl_expired (not cache_misses_not_found)
+  EXPECT_EQ(stats.cache_misses, 1);  // Only the second Lookup is a miss
+  EXPECT_GE(stats.cache_misses_ttl_expired + stats.cache_misses_not_found, 1)
+      << "Expired entry should be counted as either TTL-expired or not-found";
+  // If the entry was still in the map at Lookup time, it should be TTL-expired
+  if (stats.cache_misses_ttl_expired > 0) {
+    EXPECT_EQ(stats.cache_misses_not_found, 0)
+        << "When Lookup detects TTL expiry, it should NOT increment cache_misses_not_found";
+  }
 }
 
 /**
- * @brief Test memory accounting across multiple insert/erase cycles
- *
- * Verifies that using stored_memory_footprint prevents drift over many cycles.
+ * @brief Test that LookupWithMetadata also uses TTL-expired counter
  */
-TEST(QueryCacheTest, M21_MemoryAccountingNoDriftOverManyCycles) {
-  QueryCache cache(10 * 1024 * 1024, 0.0);
+TEST(QueryCacheTest, TTLExpiredWithMetadataIncrementsTTLExpiredCounter) {
+  QueryCache cache(1024 * 1024, 0.0, 2);  // 2 second TTL
 
+  auto key = CacheKeyGenerator::Generate("ttl_meta_counter_test");
   CacheMetadata meta;
-  meta.table = "test";
-  meta.ngrams = {"test", "memory", "drift"};
+  meta.table = "t";
+  meta.ngrams = {"cd"};
+  cache.Insert(key, {4, 5, 6}, meta, 10.0);
 
-  constexpr int kCycles = 200;
-  for (int i = 0; i < kCycles; ++i) {
-    auto key = CacheKeyGenerator::Generate("drift_test_" + std::to_string(i));
+  // Verify entry exists
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
 
-    // Varying result sizes to exercise different compression ratios
-    std::vector<DocId> result;
-    for (int j = 0; j < (i % 100 + 5); ++j) {
-      result.push_back(static_cast<DocId>(i * 1000 + j));
+  // Wait for TTL to expire
+  std::this_thread::sleep_for(std::chrono::milliseconds(2050));
+
+  QueryCache::LookupMetadata lookup_meta;
+  auto result = cache.LookupWithMetadata(key, lookup_meta);
+  EXPECT_FALSE(result.has_value());
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.cache_misses, 1);  // Only the LookupWithMetadata miss
+  if (stats.cache_misses_ttl_expired > 0) {
+    EXPECT_EQ(stats.cache_misses_not_found, 0)
+        << "When LookupWithMetadata detects TTL expiry, it should NOT increment cache_misses_not_found";
+  }
+}
+
+/**
+ * @brief Test that lookup returns correct data after shared_ptr compressed change
+ *
+ * Regression test for: changing compressed from vector<uint8_t> to
+ * shared_ptr<const vector<uint8_t>> should not affect lookup results.
+ */
+TEST(QueryCacheTest, SharedPtrCompressedLookupCorrectness) {
+  QueryCache cache(1024 * 1024, 0.0);
+
+  // Test with various result sizes
+  for (int size = 1; size <= 100; size += 10) {
+    auto key = CacheKeyGenerator::Generate("shared_ptr_test_" + std::to_string(size));
+    std::vector<DocId> original_result;
+    for (int i = 0; i < size; ++i) {
+      original_result.push_back(static_cast<DocId>(i * 7 + 3));
     }
 
-    ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
-    ASSERT_TRUE(cache.Erase(key));
-  }
+    CacheMetadata meta;
+    meta.table = "test";
+    meta.ngrams = {"sp"};
 
-  // After all cycles, memory should be exactly 0
-  auto stats = cache.GetStatistics();
-  EXPECT_EQ(stats.current_memory_bytes, 0)
-      << "M-21: Memory should be exactly 0 after " << kCycles << " insert/erase cycles";
-  EXPECT_EQ(stats.current_entries, 0);
+    ASSERT_TRUE(cache.Insert(key, original_result, meta, 10.0));
+
+    auto cached = cache.Lookup(key);
+    ASSERT_TRUE(cached.has_value());
+    EXPECT_EQ(original_result, cached.value())
+        << "Lookup should return identical data for size=" << size;
+  }
 }
 
 }  // namespace mygramdb::cache

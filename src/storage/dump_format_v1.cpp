@@ -1,6 +1,6 @@
 /**
  * @file dump_format_v1.cpp
- * @brief Dump file format Version 1 implementation - header, statistics, and read/write
+ * @brief Dump file format Version 1 implementation
  */
 
 #include "storage/dump_format_v1.h"
@@ -16,9 +16,9 @@
 #include <thread>
 #include <vector>
 
-#include "storage/dump_format_v1_internal.h"
 #include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
+#include "utils/memory_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef _WIN32
@@ -41,11 +41,64 @@
 namespace mygramdb::storage::dump_v1 {
 
 using namespace mygram::utils;
-using internal::ReadString;
-using internal::WriteString;
 
-// Forward declaration for streaming CRC calculation (defined in dump_format_v1_integrity.cpp)
+// Forward declaration for streaming CRC calculation
 uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset);
+
+namespace {
+
+// Use shared WriteBinary/ReadBinary from utils/binary_io.h
+using mygram::utils::ReadBinary;
+using mygram::utils::WriteBinary;
+
+/**
+ * @brief Write string to stream (length-prefixed)
+ *
+ * Note: Uses local implementation instead of shared WriteString for consistency
+ * with ReadString which has security validation.
+ */
+bool WriteString(std::ostream& output_stream, const std::string& str) {
+  auto len = static_cast<uint32_t>(str.size());
+  if (!WriteBinary(output_stream, len)) {
+    return false;
+  }
+  if (len > 0) {
+    output_stream.write(str.data(), len);
+  }
+  return output_stream.good();
+}
+
+/**
+ * @brief Read string from stream (length-prefixed) with field-specific size limit
+ * @param input_stream Input stream to read from
+ * @param str Output string
+ * @param max_length Maximum allowed string length for this field type
+ * @return true if read succeeded and length is within limit, false otherwise
+ */
+bool ReadString(std::istream& input_stream, std::string& str, uint32_t max_length = kMaxGeneralStringLength) {
+  uint32_t len = 0;
+  if (!ReadBinary(input_stream, len)) {
+    return false;
+  }
+  if (len > max_length) {
+    StructuredLog()
+        .Event("storage_validation_error")
+        .Field("type", "string_length_exceeded")
+        .Field("length", static_cast<uint64_t>(len))
+        .Field("max_length", static_cast<uint64_t>(max_length))
+        .Error();
+    return false;
+  }
+  if (len > 0) {
+    str.resize(len);
+    input_stream.read(str.data(), len);
+  } else {
+    str.clear();
+  }
+  return input_stream.good();
+}
+
+}  // namespace
 
 // ============================================================================
 // Header V1 Serialization
@@ -182,6 +235,650 @@ Expected<void, Error> DeserializeTableStatistics(std::istream& input_stream, Tab
 }
 
 // ============================================================================
+// Config Serialization
+// ============================================================================
+
+namespace {
+
+/**
+ * @brief Serialize FilterConfig to stream
+ */
+bool SerializeFilterConfig(std::ostream& output_stream, const config::FilterConfig& filter) {
+  if (!WriteString(output_stream, filter.name)) {
+    return false;
+  }
+  if (!WriteString(output_stream, filter.type)) {
+    return false;
+  }
+  if (!WriteBinary(output_stream, filter.dict_compress)) {
+    return false;
+  }
+  if (!WriteBinary(output_stream, filter.bitmap_index)) {
+    return false;
+  }
+  if (!WriteString(output_stream, filter.bucket)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Deserialize FilterConfig from stream
+ */
+bool DeserializeFilterConfig(std::istream& input_stream, config::FilterConfig& filter) {
+  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadBinary(input_stream, filter.dict_compress)) {
+    return false;
+  }
+  if (!ReadBinary(input_stream, filter.bitmap_index)) {
+    return false;
+  }
+  if (!ReadString(input_stream, filter.bucket, kMaxIdentifierLength)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Serialize RequiredFilterConfig to stream
+ */
+bool SerializeRequiredFilterConfig(std::ostream& output_stream, const config::RequiredFilterConfig& filter) {
+  if (!WriteString(output_stream, filter.name)) {
+    return false;
+  }
+  if (!WriteString(output_stream, filter.type)) {
+    return false;
+  }
+  if (!WriteString(output_stream, filter.op)) {
+    return false;
+  }
+  if (!WriteString(output_stream, filter.value)) {
+    return false;
+  }
+  if (!WriteBinary(output_stream, filter.bitmap_index)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Deserialize RequiredFilterConfig from stream
+ */
+bool DeserializeRequiredFilterConfig(std::istream& input_stream, config::RequiredFilterConfig& filter) {
+  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadString(input_stream, filter.op, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadString(input_stream, filter.value, kMaxConfigValueLength)) {
+    return false;
+  }
+  if (!ReadBinary(input_stream, filter.bitmap_index)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Serialize TableConfig to stream
+ */
+bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig& table) {
+  if (!WriteString(output_stream, table.name)) {
+    return false;
+  }
+  if (!WriteString(output_stream, table.primary_key)) {
+    return false;
+  }
+
+  // text_source
+  if (!WriteString(output_stream, table.text_source.column)) {
+    return false;
+  }
+  auto concat_size = static_cast<uint32_t>(table.text_source.concat.size());
+  if (!WriteBinary(output_stream, concat_size)) {
+    return false;
+  }
+  for (const auto& col : table.text_source.concat) {
+    if (!WriteString(output_stream, col)) {
+      return false;
+    }
+  }
+  if (!WriteString(output_stream, table.text_source.delimiter)) {
+    return false;
+  }
+
+  // required_filters
+  auto req_filter_count = static_cast<uint32_t>(table.required_filters.size());
+  if (!WriteBinary(output_stream, req_filter_count)) {
+    return false;
+  }
+  for (const auto& filter : table.required_filters) {
+    if (!SerializeRequiredFilterConfig(output_stream, filter)) {
+      return false;
+    }
+  }
+
+  // filters
+  auto filter_count = static_cast<uint32_t>(table.filters.size());
+  if (!WriteBinary(output_stream, filter_count)) {
+    return false;
+  }
+  for (const auto& filter : table.filters) {
+    if (!SerializeFilterConfig(output_stream, filter)) {
+      return false;
+    }
+  }
+
+  // ngram sizes
+  if (!WriteBinary(output_stream, table.ngram_size)) {
+    return false;
+  }
+  if (!WriteBinary(output_stream, table.kanji_ngram_size)) {
+    return false;
+  }
+
+  // cross_boundary_ngrams
+  uint8_t cross_boundary = table.cross_boundary_ngrams ? 1 : 0;
+  if (!WriteBinary(output_stream, cross_boundary)) {
+    return false;
+  }
+
+  // posting config
+  if (!WriteBinary(output_stream, table.posting.block_size)) {
+    return false;
+  }
+  if (!WriteBinary(output_stream, table.posting.freq_bits)) {
+    return false;
+  }
+  if (!WriteString(output_stream, table.posting.use_roaring)) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * @brief Deserialize TableConfig from stream
+ */
+bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table) {
+  if (!ReadString(input_stream, table.name, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (!ReadString(input_stream, table.primary_key, kMaxIdentifierLength)) {
+    return false;
+  }
+
+  // text_source
+  constexpr uint32_t kMaxConcatColumns = 1000;
+  constexpr uint32_t kMaxFilterCount = 1000;
+  if (!ReadString(input_stream, table.text_source.column, kMaxIdentifierLength)) {
+    return false;
+  }
+  uint32_t concat_size = 0;
+  if (!ReadBinary(input_stream, concat_size)) {
+    return false;
+  }
+  if (concat_size > kMaxConcatColumns) {
+    StructuredLog()
+        .Event("storage_validation_error")
+        .Field("type", "concat_columns_exceeded")
+        .Field("count", static_cast<uint64_t>(concat_size))
+        .Field("max_count", static_cast<uint64_t>(kMaxConcatColumns))
+        .Error();
+    return false;
+  }
+  table.text_source.concat.resize(concat_size);
+  for (uint32_t i = 0; i < concat_size; ++i) {
+    if (!ReadString(input_stream, table.text_source.concat[i], kMaxIdentifierLength)) {
+      return false;
+    }
+  }
+  if (!ReadString(input_stream, table.text_source.delimiter, kMaxIdentifierLength)) {
+    return false;
+  }
+
+  // required_filters
+  uint32_t req_filter_count = 0;
+  if (!ReadBinary(input_stream, req_filter_count)) {
+    return false;
+  }
+  if (req_filter_count > kMaxFilterCount) {
+    StructuredLog()
+        .Event("storage_validation_error")
+        .Field("type", "required_filters_exceeded")
+        .Field("count", static_cast<uint64_t>(req_filter_count))
+        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
+        .Error();
+    return false;
+  }
+  table.required_filters.resize(req_filter_count);
+  for (uint32_t i = 0; i < req_filter_count; ++i) {
+    if (!DeserializeRequiredFilterConfig(input_stream, table.required_filters[i])) {
+      return false;
+    }
+  }
+
+  // filters
+  uint32_t filter_count = 0;
+  if (!ReadBinary(input_stream, filter_count)) {
+    return false;
+  }
+  if (filter_count > kMaxFilterCount) {
+    StructuredLog()
+        .Event("storage_validation_error")
+        .Field("type", "filters_exceeded")
+        .Field("count", static_cast<uint64_t>(filter_count))
+        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
+        .Error();
+    return false;
+  }
+  table.filters.resize(filter_count);
+  for (uint32_t i = 0; i < filter_count; ++i) {
+    if (!DeserializeFilterConfig(input_stream, table.filters[i])) {
+      return false;
+    }
+  }
+
+  // ngram sizes
+  if (!ReadBinary(input_stream, table.ngram_size)) {
+    return false;
+  }
+  if (!ReadBinary(input_stream, table.kanji_ngram_size)) {
+    return false;
+  }
+
+  // cross_boundary_ngrams
+  uint8_t cross_boundary = 1;
+  if (!ReadBinary(input_stream, cross_boundary)) {
+    return false;
+  }
+  table.cross_boundary_ngrams = (cross_boundary != 0);
+
+  // posting config
+  if (!ReadBinary(input_stream, table.posting.block_size)) {
+    return false;
+  }
+  if (!ReadBinary(input_stream, table.posting.freq_bits)) {
+    return false;
+  }
+  if (!ReadString(input_stream, table.posting.use_roaring, kMaxIdentifierLength)) {
+    return false;
+  }
+
+  return true;
+}
+
+}  // namespace
+
+Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config::Config& config) {
+  // MySQL config (excluding sensitive credentials)
+  if (!WriteString(output_stream, config.mysql.host)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.host"));
+  }
+  if (!WriteBinary(output_stream, config.mysql.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.port"));
+  }
+  // Write empty strings for user and password (security: do not persist credentials)
+  std::string empty_user;
+  std::string empty_password;
+  if (!WriteString(output_stream, empty_user)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.user"));
+  }
+  if (!WriteString(output_stream, empty_password)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.password"));
+  }
+  if (!WriteString(output_stream, config.mysql.database)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.database"));
+  }
+  if (!WriteBinary(output_stream, config.mysql.use_gtid)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.use_gtid"));
+  }
+  if (!WriteString(output_stream, config.mysql.binlog_format)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.binlog_format"));
+  }
+  if (!WriteString(output_stream, config.mysql.binlog_row_image)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.binlog_row_image"));
+  }
+  if (!WriteBinary(output_stream, config.mysql.connect_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.connect_timeout_ms"));
+  }
+  if (!WriteBinary(output_stream, config.mysql.read_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.read_timeout_ms"));
+  }
+  if (!WriteBinary(output_stream, config.mysql.write_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.write_timeout_ms"));
+  }
+
+  // Tables
+  auto table_count = static_cast<uint32_t>(config.tables.size());
+  if (!WriteBinary(output_stream, table_count)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write table_count"));
+  }
+  for (const auto& table : config.tables) {
+    if (!SerializeTableConfig(output_stream, table)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write table config"));
+    }
+  }
+
+  // Build config
+  if (!WriteString(output_stream, config.build.mode)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write build.mode"));
+  }
+  if (!WriteBinary(output_stream, config.build.batch_size)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write build.batch_size"));
+  }
+  if (!WriteBinary(output_stream, config.build.parallelism)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write build.parallelism"));
+  }
+  if (!WriteBinary(output_stream, config.build.throttle_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write build.throttle_ms"));
+  }
+
+  // Replication config
+  if (!WriteBinary(output_stream, config.replication.enable)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.enable"));
+  }
+  if (!WriteBinary(output_stream, config.replication.server_id)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.server_id"));
+  }
+  if (!WriteString(output_stream, config.replication.start_from)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.start_from"));
+  }
+  if (!WriteBinary(output_stream, config.replication.queue_size)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.queue_size"));
+  }
+  if (!WriteBinary(output_stream, config.replication.reconnect_backoff_min_ms)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.reconnect_backoff_min_ms"));
+  }
+  if (!WriteBinary(output_stream, config.replication.reconnect_backoff_max_ms)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write replication.reconnect_backoff_max_ms"));
+  }
+
+  // Memory config
+  if (!WriteBinary(output_stream, config.memory.hard_limit_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.hard_limit_mb"));
+  }
+  if (!WriteBinary(output_stream, config.memory.soft_target_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.soft_target_mb"));
+  }
+  if (!WriteBinary(output_stream, config.memory.arena_chunk_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.arena_chunk_mb"));
+  }
+  if (!WriteBinary(output_stream, config.memory.roaring_threshold)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.roaring_threshold"));
+  }
+  if (!WriteBinary(output_stream, config.memory.minute_epoch)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.minute_epoch"));
+  }
+  if (!WriteBinary(output_stream, config.memory.normalize.nfkc)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.normalize.nfkc"));
+  }
+  if (!WriteString(output_stream, config.memory.normalize.width)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.normalize.width"));
+  }
+  if (!WriteBinary(output_stream, config.memory.normalize.lower)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.normalize.lower"));
+  }
+
+  // Snapshot config
+  if (!WriteString(output_stream, config.dump.dir)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write dump.dir"));
+  }
+  if (!WriteBinary(output_stream, config.dump.interval_sec)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write dump.interval_sec"));
+  }
+  if (!WriteBinary(output_stream, config.dump.retain)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write dump.retain"));
+  }
+
+  // API config
+  if (!WriteString(output_stream, config.api.tcp.bind)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.tcp.bind"));
+  }
+  if (!WriteBinary(output_stream, config.api.tcp.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.tcp.port"));
+  }
+  if (!WriteBinary(output_stream, config.api.http.enable)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.http.enable"));
+  }
+  if (!WriteString(output_stream, config.api.http.bind)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.http.bind"));
+  }
+  if (!WriteBinary(output_stream, config.api.http.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.http.port"));
+  }
+  if (!WriteBinary(output_stream, config.api.default_limit)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.default_limit"));
+  }
+
+  // Network config
+  auto cidr_count = static_cast<uint32_t>(config.network.allow_cidrs.size());
+  if (!WriteBinary(output_stream, cidr_count)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write cidr_count"));
+  }
+  for (const auto& cidr : config.network.allow_cidrs) {
+    if (!WriteString(output_stream, cidr)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write network CIDR"));
+    }
+  }
+
+  // Logging config
+  if (!WriteString(output_stream, config.logging.level)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write logging.level"));
+  }
+  if (!WriteString(output_stream, config.logging.format)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write logging.format"));
+  }
+
+  // Query limits
+  if (!WriteBinary(output_stream, config.api.max_query_length)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write api.max_query_length"));
+  }
+
+  return {};
+}
+
+Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config) {
+  constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
+  // MySQL config
+  if (!ReadString(input_stream, config.mysql.host, kMaxConfigValueLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.host"));
+  }
+  if (!ReadBinary(input_stream, config.mysql.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.port"));
+  }
+  // Read user/password fields (will be empty in new dumps, ignored from old dumps)
+  std::string unused_user;
+  std::string unused_password;
+  if (!ReadString(input_stream, unused_user, kMaxConfigValueLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.user"));
+  }
+  if (!ReadString(input_stream, unused_password, kMaxConfigValueLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.password"));
+  }
+  // Note: user/password from dump are intentionally ignored for security.
+  // Credentials must be provided via config file at startup.
+  if (!ReadString(input_stream, config.mysql.database, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.database"));
+  }
+  if (!ReadBinary(input_stream, config.mysql.use_gtid)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.use_gtid"));
+  }
+  if (!ReadString(input_stream, config.mysql.binlog_format, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.binlog_format"));
+  }
+  if (!ReadString(input_stream, config.mysql.binlog_row_image, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.binlog_row_image"));
+  }
+  if (!ReadBinary(input_stream, config.mysql.connect_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.connect_timeout_ms"));
+  }
+  if (!ReadBinary(input_stream, config.mysql.read_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.read_timeout_ms"));
+  }
+  if (!ReadBinary(input_stream, config.mysql.write_timeout_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.write_timeout_ms"));
+  }
+
+  // Tables
+  uint32_t table_count = 0;
+  if (!ReadBinary(input_stream, table_count)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table_count"));
+  }
+  if (table_count > kMaxTableCount) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                    "Table count exceeds maximum allowed: " + std::to_string(table_count)));
+  }
+  config.tables.resize(table_count);
+  for (uint32_t i = 0; i < table_count; ++i) {
+    if (!DeserializeTableConfig(input_stream, config.tables[i])) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table config"));
+    }
+  }
+
+  // Build config
+  if (!ReadString(input_stream, config.build.mode, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read build.mode"));
+  }
+  if (!ReadBinary(input_stream, config.build.batch_size)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read build.batch_size"));
+  }
+  if (!ReadBinary(input_stream, config.build.parallelism)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read build.parallelism"));
+  }
+  if (!ReadBinary(input_stream, config.build.throttle_ms)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read build.throttle_ms"));
+  }
+
+  // Replication config
+  if (!ReadBinary(input_stream, config.replication.enable)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.enable"));
+  }
+  if (!ReadBinary(input_stream, config.replication.server_id)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.server_id"));
+  }
+  if (!ReadString(input_stream, config.replication.start_from, kMaxPathLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.start_from"));
+  }
+  if (!ReadBinary(input_stream, config.replication.queue_size)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.queue_size"));
+  }
+  if (!ReadBinary(input_stream, config.replication.reconnect_backoff_min_ms)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.reconnect_backoff_min_ms"));
+  }
+  if (!ReadBinary(input_stream, config.replication.reconnect_backoff_max_ms)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Failed to read replication.reconnect_backoff_max_ms"));
+  }
+
+  // Memory config
+  if (!ReadBinary(input_stream, config.memory.hard_limit_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.hard_limit_mb"));
+  }
+  if (!ReadBinary(input_stream, config.memory.soft_target_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.soft_target_mb"));
+  }
+  if (!ReadBinary(input_stream, config.memory.arena_chunk_mb)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.arena_chunk_mb"));
+  }
+  if (!ReadBinary(input_stream, config.memory.roaring_threshold)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.roaring_threshold"));
+  }
+  if (!ReadBinary(input_stream, config.memory.minute_epoch)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.minute_epoch"));
+  }
+  if (!ReadBinary(input_stream, config.memory.normalize.nfkc)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.normalize.nfkc"));
+  }
+  if (!ReadString(input_stream, config.memory.normalize.width, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.normalize.width"));
+  }
+  if (!ReadBinary(input_stream, config.memory.normalize.lower)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.normalize.lower"));
+  }
+
+  // Snapshot config
+  if (!ReadString(input_stream, config.dump.dir, kMaxPathLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read dump.dir"));
+  }
+  if (!ReadBinary(input_stream, config.dump.interval_sec)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read dump.interval_sec"));
+  }
+  if (!ReadBinary(input_stream, config.dump.retain)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read dump.retain"));
+  }
+
+  // API config
+  if (!ReadString(input_stream, config.api.tcp.bind, kMaxConfigValueLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.tcp.bind"));
+  }
+  if (!ReadBinary(input_stream, config.api.tcp.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.tcp.port"));
+  }
+  if (!ReadBinary(input_stream, config.api.http.enable)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.http.enable"));
+  }
+  if (!ReadString(input_stream, config.api.http.bind, kMaxConfigValueLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.http.bind"));
+  }
+  if (!ReadBinary(input_stream, config.api.http.port)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.http.port"));
+  }
+  if (!ReadBinary(input_stream, config.api.default_limit)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.default_limit"));
+  }
+
+  // Network config
+  constexpr uint32_t kMaxCIDRCount = 10000;
+  uint32_t cidr_count = 0;
+  if (!ReadBinary(input_stream, cidr_count)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read cidr_count"));
+  }
+  if (cidr_count > kMaxCIDRCount) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                    "CIDR count exceeds maximum allowed: " + std::to_string(cidr_count)));
+  }
+  config.network.allow_cidrs.resize(cidr_count);
+  for (uint32_t i = 0; i < cidr_count; ++i) {
+    if (!ReadString(input_stream, config.network.allow_cidrs[i], kMaxConfigValueLength)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read network CIDR"));
+    }
+  }
+
+  // Logging config
+  if (!ReadString(input_stream, config.logging.level, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.level"));
+  }
+  if (!ReadString(input_stream, config.logging.format, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read logging.format"));
+  }
+
+  // Query limits (added in newer dumps; optional for backward compatibility)
+  if (!ReadBinary(input_stream, config.api.max_query_length)) {
+    if (input_stream.eof()) {
+      input_stream.clear();
+      config.api.max_query_length = config::defaults::kDefaultQueryLengthLimit;
+      return {};
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.max_query_length"));
+  }
+
+  return {};
+}
+
+// ============================================================================
 // Complete Snapshot Read/Write (Version 1)
 // ============================================================================
 
@@ -265,25 +962,14 @@ Expected<void, Error> WriteDumpV1(
     }
 
     // Create ofstream from file descriptor
-    // Note: We close file_descriptor and reopen with ofstream since ownership is verified.
-    // To mitigate the TOCTOU gap, we re-verify inode identity after reopening.
+    // Note: We need to close file_descriptor manually or use __gnu_cxx::stdio_filebuf on Linux
+    // For simplicity, we'll close file_descriptor and reopen with ofstream since ownership is verified
     close(file_descriptor);
 
     std::ofstream ofs(temp_filepath, std::ios::binary | std::ios::trunc | std::ios::out);
     if (!ofs) {
       LogStorageError("open_temp_file", temp_filepath, "Failed to open for writing");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-    }
-
-    // Re-verify the file identity after reopen to detect TOCTOU races
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by stat()
-    struct stat reopen_stat {};
-    if (stat(temp_filepath.c_str(), &reopen_stat) != 0 || reopen_stat.st_ino != file_stat.st_ino ||
-        reopen_stat.st_dev != file_stat.st_dev) {
-      ofs.close();
-      unlink(temp_filepath.c_str());
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
-                                      "File identity changed between open and reopen (possible TOCTOU attack)"));
     }
 #else
     // Windows: Use standard file opening (symlink attacks less common on Windows)
@@ -307,7 +993,9 @@ Expected<void, Error> WriteDumpV1(
 
     // Prepare Version 1 header
     HeaderV1 header;
-    header.header_size = 0;  // Will be calculated
+    // Calculate actual header size: header_size(4) + flags(4) + dump_timestamp(8) +
+    // total_file_size(8) + file_crc32(4) + gtid_length(4) + gtid_data(N)
+    header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + gtid.size());
     header.flags = dump_format::flags_v1::kNone;
     if (stats != nullptr) {
       header.flags |= dump_format::flags_v1::kWithStatistics;
@@ -462,16 +1150,13 @@ Expected<void, Error> WriteDumpV1(
       }
 
       // Seek to total_file_size position (after magic + version + header_size + flags + timestamp)
-      update_stream1.seekp(kHeaderTotalFileSizeOffset);
+      const std::streamoff file_size_offset = 4 + 4 + 4 + 4 + 8;
+      update_stream1.seekp(file_size_offset);
       if (!WriteBinary(update_stream1, file_size)) {
         LogStorageError("write_header_field", temp_filepath, "Failed to write total_file_size");
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       update_stream1.close();
-      if (!update_stream1.good()) {
-        LogStorageError("update_header", temp_filepath, "Stream error during file size update");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
     }
 
     // Calculate CRC32 of the file
@@ -482,7 +1167,7 @@ Expected<void, Error> WriteDumpV1(
     }
 
     // CRC field is at offset: magic(4) + version(4) + header_size(4) + flags(4) + timestamp(8) + total_file_size(8)
-    const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
+    const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
 
     uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
     ifs.close();
@@ -496,7 +1181,9 @@ Expected<void, Error> WriteDumpV1(
       }
 
       // Seek to file_crc32 position (right after total_file_size)
-      update_stream2.seekp(kHeaderFileCRC32Offset);
+      const std::streamoff file_size_offset = 4 + 4 + 4 + 4 + 8;
+      const std::streamoff crc_file_offset = file_size_offset + 8;
+      update_stream2.seekp(crc_file_offset);
       if (!WriteBinary(update_stream2, calculated_crc)) {
         LogStorageError("write_header_field", temp_filepath, "Failed to write file_crc32");
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -633,7 +1320,7 @@ Expected<void, Error> ReadDumpV1(
       auto file_size = static_cast<uint64_t>(ifs.tellg());
 
       // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
-      const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
+      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
 
       uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
@@ -663,10 +1350,6 @@ Expected<void, Error> ReadDumpV1(
     if (!ReadBinary(ifs, config_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
     }
-    if (config_len > kMaxConfigSectionLength) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kStorageDumpReadError, "Config section too large: " + std::to_string(config_len)));
-    }
     std::string config_data(config_len, '\0');
     ifs.read(config_data.data(), static_cast<std::streamsize>(config_len));
     std::istringstream config_stream(config_data);
@@ -679,10 +1362,6 @@ Expected<void, Error> ReadDumpV1(
     uint32_t stats_len = 0;
     if (!ReadBinary(ifs, stats_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
-    }
-    if (stats_len > kMaxStatsSectionLength) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kStorageDumpReadError, "Statistics section too large: " + std::to_string(stats_len)));
     }
     if (stats_len > 0 && stats != nullptr) {
       std::string stats_data(stats_len, '\0');
@@ -735,6 +1414,14 @@ Expected<void, Error> ReadDumpV1(
         ifs.seekg(table_stats_len, std::ios::cur);
       }
 
+      // Maximum allowed size for table data sections (prevents OOM from malicious/corrupt dumps)
+      // Use physical memory as the upper bound; fall back to 64 GB if unavailable
+      const uint64_t kMaxTableDataSectionLength = []{
+        auto mem_info = mygram::utils::GetSystemMemoryInfo();
+        return mem_info ? mem_info->total_physical_bytes
+                        : 64ULL * 1024 * 1024 * 1024;
+      }();
+
       // Check if table context exists
       if (table_contexts.count(table_name) == 0) {
         StructuredLog()
@@ -749,11 +1436,19 @@ Expected<void, Error> ReadDumpV1(
         if (!ReadBinary(ifs, index_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
         }
+        if (index_len > kMaxTableDataSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
+        }
         ifs.seekg(static_cast<std::streamoff>(index_len), std::ios::cur);
 
         uint64_t doc_len = 0;
         if (!ReadBinary(ifs, doc_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
+        if (doc_len > kMaxTableDataSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
         }
         ifs.seekg(static_cast<std::streamoff>(doc_len), std::ios::cur);
         continue;
@@ -767,6 +1462,10 @@ Expected<void, Error> ReadDumpV1(
       uint64_t index_len = 0;
       if (!ReadBinary(ifs, index_len)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
+      if (index_len > kMaxTableDataSectionLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
       }
 
       if (index_len > 0) {
@@ -801,6 +1500,10 @@ Expected<void, Error> ReadDumpV1(
       if (!ReadBinary(ifs, doc_len)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
+      if (doc_len > kMaxTableDataSectionLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
+      }
       std::string doc_data(doc_len, '\0');
       ifs.read(doc_data.data(), static_cast<std::streamsize>(doc_len));
 
@@ -825,6 +1528,268 @@ Expected<void, Error> ReadDumpV1(
   } catch (const std::exception& e) {
     LogStorageError("read_dump_exception", filepath, e.what());
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+  }
+}
+
+// ============================================================================
+// CRC32 Calculation
+// ============================================================================
+
+/**
+ * @brief Calculate CRC32 of a file using streaming (chunked) reads
+ *
+ * This avoids loading the entire file into memory, preventing OOM for large files.
+ *
+ * @param ifs Input file stream (must be seekable)
+ * @param file_size Total file size to read
+ * @param crc_offset Position of the CRC field to zero out during calculation
+ * @return CRC32 checksum of the file
+ */
+uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset) {
+  constexpr size_t kChunkSize = 1024 * 1024;  // 1MB chunks
+  constexpr size_t kCrcFieldSize = 4;
+
+  ifs.seekg(0, std::ios::beg);
+
+  uint32_t crc = 0;
+  std::vector<char> buffer(kChunkSize);
+  uint64_t bytes_read = 0;
+
+  while (bytes_read < file_size) {
+    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
+    ifs.read(buffer.data(), static_cast<std::streamsize>(to_read));
+    auto actually_read = static_cast<size_t>(ifs.gcount());
+
+    if (actually_read == 0) {
+      break;  // EOF or error
+    }
+
+    // Zero out the CRC field if it falls within this chunk
+    if (crc_offset >= bytes_read && crc_offset < bytes_read + actually_read) {
+      size_t offset_in_chunk = crc_offset - bytes_read;
+      size_t zero_bytes = std::min(kCrcFieldSize, actually_read - offset_in_chunk);
+      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
+    }
+    // Handle case where CRC field spans chunk boundary
+    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
+      size_t zero_start = 0;
+      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
+      std::memset(&buffer[zero_start], 0, zero_end);
+    }
+
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
+    crc = static_cast<uint32_t>(
+        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));  // NOLINT
+
+    bytes_read += actually_read;
+  }
+
+  return crc;
+}
+
+// ============================================================================
+// Snapshot Integrity Verification
+// ============================================================================
+
+Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {
+  try {
+    std::ifstream ifs(filepath, std::ios::binary);
+    if (!ifs) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Failed to open file: " + filepath;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+
+    // Read and verify fixed file header
+    std::array<char, 4> magic{};
+    ifs.read(magic.data(), 4);
+    if (!ifs.good() || std::memcmp(magic.data(), dump_format::kMagicNumber.data(), 4) != 0) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Invalid magic number";
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+
+    uint32_t version = 0;
+    if (!ReadBinary(ifs, version)) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Failed to read version";
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+
+    // Version compatibility check
+    if (version > dump_format::kMaxSupportedVersion) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Version " + std::to_string(version) + " is newer than supported version " +
+                                std::to_string(dump_format::kMaxSupportedVersion);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+    if (version < dump_format::kMinSupportedVersion) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Version " + std::to_string(version) + " is older than minimum supported version " +
+                                std::to_string(dump_format::kMinSupportedVersion);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+
+    // Read V1 header
+    HeaderV1 header;
+    if (!ReadHeaderV1(ifs, header)) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "Failed to read V1 header";
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
+
+    // Verify file size if specified
+    if (header.total_file_size > 0) {
+      ifs.seekg(0, std::ios::end);
+      auto actual_size = static_cast<uint64_t>(ifs.tellg());
+
+      if (actual_size != header.total_file_size) {
+        integrity_error.type = dump_format::CRCErrorType::FileCRC;
+        integrity_error.message = "File size mismatch: expected " + std::to_string(header.total_file_size) +
+                                  " bytes, got " + std::to_string(actual_size) + " bytes (file may be truncated)";
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+    }
+
+    // Verify CRC32 if specified
+    // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
+    if (header.file_crc32 != 0) {
+      // Get file size
+      ifs.seekg(0, std::ios::end);
+      auto file_size = static_cast<uint64_t>(ifs.tellg());
+
+      // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
+      const size_t crc_offset = 4 + 4 + 4 + 4 + 8 + 8;
+
+      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+
+      if (calculated_crc != header.file_crc32) {
+        integrity_error.type = dump_format::CRCErrorType::FileCRC;
+        integrity_error.message = "CRC32 checksum mismatch";
+        StructuredLog()
+            .Event("storage_validation_error")
+            .Field("type", "crc32_verification_failed")
+            .Field("filepath", filepath)
+            .Field("expected_crc", static_cast<uint64_t>(header.file_crc32))
+            .Field("actual_crc", static_cast<uint64_t>(calculated_crc))
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+
+      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", true).Info();
+    } else {
+      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", false).Info();
+    }
+
+    integrity_error.type = dump_format::CRCErrorType::None;
+    integrity_error.message = "";
+    return {};
+
+  } catch (const std::exception& e) {
+    integrity_error.type = dump_format::CRCErrorType::FileCRC;
+    integrity_error.message = std::string("Exception during verification: ") + e.what();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+  }
+}
+
+// ============================================================================
+// Snapshot File Information
+// ============================================================================
+
+Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info) {
+  try {
+    std::ifstream ifs(filepath, std::ios::binary | std::ios::ate);
+    if (!ifs) {
+      LogStorageError("open_file", filepath, "Failed to open snapshot file");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+
+    // Get file size
+    info.file_size = static_cast<uint64_t>(ifs.tellg());
+    ifs.seekg(0, std::ios::beg);
+
+    // Read and verify magic number
+    std::array<char, 4> magic{};
+    ifs.read(magic.data(), 4);
+    if (!ifs.good() || std::memcmp(magic.data(), dump_format::kMagicNumber.data(), 4) != 0) {
+      StructuredLog()
+          .Event("storage_validation_error")
+          .Field("type", "invalid_magic_number")
+          .Field("filepath", filepath)
+          .Field("operation", "get_dump_info")
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+
+    // Read version
+    if (!ReadBinary(ifs, info.version)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+
+    // Version compatibility check
+    if (info.version > dump_format::kMaxSupportedVersion) {
+      StructuredLog()
+          .Event("storage_validation_error")
+          .Field("type", "version_too_new")
+          .Field("filepath", filepath)
+          .Field("operation", "get_dump_info")
+          .Field("version", static_cast<uint64_t>(info.version))
+          .Field("max_supported", static_cast<uint64_t>(dump_format::kMaxSupportedVersion))
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+    if (info.version < dump_format::kMinSupportedVersion) {
+      StructuredLog()
+          .Event("storage_validation_error")
+          .Field("type", "version_too_old")
+          .Field("filepath", filepath)
+          .Field("operation", "get_dump_info")
+          .Field("version", static_cast<uint64_t>(info.version))
+          .Field("min_supported", static_cast<uint64_t>(dump_format::kMinSupportedVersion))
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+
+    // Read V1 header
+    HeaderV1 header;
+    if (auto result = ReadHeaderV1(ifs, header); !result) {
+      LogStorageError("read_header", filepath, result.error().message());
+      return result;
+    }
+
+    info.gtid = header.gtid;
+    info.flags = header.flags;
+    info.timestamp = header.dump_timestamp;
+    info.has_statistics = (header.flags & dump_format::flags_v1::kWithStatistics) != 0;
+
+    // Read config section to get table count
+    uint32_t config_len = 0;
+    if (!ReadBinary(ifs, config_len)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+    if (config_len > 0) {
+      ifs.seekg(config_len, std::ios::cur);  // Skip config data
+    }
+
+    // Skip statistics section if present
+    uint32_t stats_len = 0;
+    if (!ReadBinary(ifs, stats_len)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+    if (stats_len > 0) {
+      ifs.seekg(stats_len, std::ios::cur);
+    }
+
+    // Read table count
+    if (!ReadBinary(ifs, info.table_count)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+
+    return {};
+
+  } catch (const std::exception& e) {
+    LogStorageError("get_dump_info_exception", filepath, e.what());
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
   }
 }
 

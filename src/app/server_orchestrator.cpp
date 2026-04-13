@@ -13,14 +13,14 @@
 #include "loader/initial_loader.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
-#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
 
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
-constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
+constexpr size_t kGtidPrefixLength = 5;           // "gtid="
+constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ServerOrchestrator>, mygram::utils::Error> ServerOrchestrator::Create(
@@ -146,15 +146,6 @@ void ServerOrchestrator::Stop() {
   }
 
 #ifdef USE_MYSQL
-  // Clear the reconnection callback BEFORE destroying mysql_connection_ and
-  // binlog_reader_ to prevent the callback from firing with dangling pointers.
-  if (tcp_server_) {
-    auto* variable_manager = tcp_server_->GetVariableManager();
-    if (variable_manager != nullptr) {
-      variable_manager->SetMysqlReconnectCallback(nullptr);
-    }
-  }
-
   // Stop BinlogReader
   if (binlog_reader_ && binlog_reader_->IsRunning()) {
     mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_binlog_reader").Debug();
@@ -227,9 +218,14 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   mysql_config.user = deps_.config.mysql.user;
   mysql_config.password = deps_.config.mysql.password;
   mysql_config.database = deps_.config.mysql.database;
-  mysql_config.connect_timeout = deps_.config.mysql.connect_timeout_ms / kMillisecondsPerSecond;
-  mysql_config.read_timeout = deps_.config.mysql.read_timeout_ms / kMillisecondsPerSecond;
-  mysql_config.write_timeout = deps_.config.mysql.write_timeout_ms / kMillisecondsPerSecond;
+  // Use ceiling division to avoid truncating sub-second timeouts to zero
+  auto ceil_div_ms = [](int ms) -> int {
+    if (ms <= 0) return 0;
+    return (ms + kMillisecondsPerSecond - 1) / kMillisecondsPerSecond;
+  };
+  mysql_config.connect_timeout = ceil_div_ms(deps_.config.mysql.connect_timeout_ms);
+  mysql_config.read_timeout = ceil_div_ms(deps_.config.mysql.read_timeout_ms);
+  mysql_config.write_timeout = ceil_div_ms(deps_.config.mysql.write_timeout_ms);
   mysql_config.session_timeout_sec = deps_.config.mysql.session_timeout_sec;
   mysql_config.ssl_enable = deps_.config.mysql.ssl_enable;
   mysql_config.ssl_ca = deps_.config.mysql.ssl_ca;
@@ -292,12 +288,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
       }
     });
 
-    // Check load_result FIRST so the actual error is not hidden by kCancelled
-    // when both the load fails and a shutdown is requested simultaneously.
-    if (!load_result) {
-      return mygram::utils::MakeUnexpected(load_result.error());
-    }
-
     // Check if shutdown was requested
     if (SignalManager::IsShutdownRequested()) {
       mygram::utils::StructuredLog()
@@ -307,6 +297,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           .Warn();
       return mygram::utils::MakeUnexpected(
           mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Initial load cancelled"));
+    }
+
+    if (!load_result) {
+      return mygram::utils::MakeUnexpected(load_result.error());
     }
 
     mygram::utils::StructuredLog()
@@ -373,7 +367,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     }
   } else if (start_from.find("gtid=") == 0) {
     // Extract GTID from "gtid=<UUID:txn>" format
-    start_gtid = start_from.substr(mygram::constants::kGtidPrefixLength);
+    start_gtid = start_from.substr(kGtidPrefixLength);
     mygram::utils::StructuredLog()
         .Event("server_debug")
         .Field("action", "replication_from_specified_gtid")

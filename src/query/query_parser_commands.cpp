@@ -16,8 +16,14 @@
 
 namespace mygramdb::query {
 
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
+using mygram::utils::ErrorCode;
+
 using internal::IsClauseKeyword;
 using internal::kMaxLimit;
+
+constexpr size_t kMaxTermCount = 64;
 using mygram::utils::ToUpper;
 
 mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(const std::vector<std::string>& tokens) {
@@ -32,7 +38,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   if (tokens.size() < 3) {  // 3: SEARCH + table + text (minimum)
     SetError("SEARCH requires at least table and search text");
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   query.table = tokens[1];
@@ -101,7 +107,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
 
   if (search_tokens.empty()) {
     SetError("SEARCH requires search text");
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Join search tokens with spaces to form complete search expression
@@ -183,6 +189,20 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     }
   }
 
+  // Validate term counts
+  if (query.and_terms.size() > kMaxTermCount) {
+    SetError("Too many AND terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.not_terms.size() > kMaxTermCount) {
+    SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.filters.size() > kMaxTermCount) {
+    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
   // Validate limit
   if (query.limit > kMaxLimit) {
     SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
@@ -218,7 +238,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   if (tokens.size() < 3) {  // 3: COUNT + table + text (minimum)
     SetError("COUNT requires at least table and search text");
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   query.table = tokens[1];
@@ -288,7 +308,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
 
   if (search_tokens.empty()) {
     SetError("COUNT requires search text");
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   // Join search tokens with spaces
@@ -358,6 +378,20 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
     }
   }
 
+  // Validate term counts
+  if (query.and_terms.size() > kMaxTermCount) {
+    SetError("Too many AND terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.not_terms.size() > kMaxTermCount) {
+    SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.filters.size() > kMaxTermCount) {
+    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
   if (!ValidateQueryLength(query)) {
     query.type = QueryType::UNKNOWN;
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
@@ -386,7 +420,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseGet(const
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   if (tokens.size() != 3) {  // 3: GET + table + primary_key (exact)
     SetError("GET requires table and primary_key");
-    return query;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
   query.table = tokens[1];

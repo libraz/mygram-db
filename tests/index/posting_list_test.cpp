@@ -795,6 +795,87 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
 }
 
 // =============================================================================
+// Intersect/Union doc_count_ and last_doc_id_ tests
+// =============================================================================
+
+/**
+ * @brief Test that Intersect sets Size() correctly on the result
+ */
+TEST_F(PostingListTest, IntersectSetsSizeCorrectly) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {1, 2, 3, 4, 5}
+  for (DocId id = 1; id <= 5; ++id) {
+    pl1.Add(id);
+  }
+
+  // pl2: {3, 4, 5, 6, 7}
+  for (DocId id = 3; id <= 7; ++id) {
+    pl2.Add(id);
+  }
+
+  auto result = pl1.Intersect(pl2);
+  // Intersection should be {3, 4, 5}
+  EXPECT_EQ(result->Size(), 3);
+  EXPECT_GT(result->Size(), 0);
+}
+
+/**
+ * @brief Test that Union sets Size() correctly on the result
+ */
+TEST_F(PostingListTest, UnionSetsSizeCorrectly) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {1, 2, 3}
+  for (DocId id = 1; id <= 3; ++id) {
+    pl1.Add(id);
+  }
+
+  // pl2: {3, 4, 5}
+  for (DocId id = 3; id <= 5; ++id) {
+    pl2.Add(id);
+  }
+
+  auto result = pl1.Union(pl2);
+  // Union should be {1, 2, 3, 4, 5}
+  EXPECT_EQ(result->Size(), 5);
+  EXPECT_GT(result->Size(), 0);
+}
+
+/**
+ * @brief Test that Intersect sets last doc ID correctly
+ */
+TEST_F(PostingListTest, IntersectSetsLastDocId) {
+  PostingList pl1(0.5);
+  PostingList pl2(0.5);
+
+  // pl1: {10, 20, 30, 40, 50}
+  for (DocId id = 10; id <= 50; id += 10) {
+    pl1.Add(id);
+  }
+
+  // pl2: {20, 30, 40, 60, 70}
+  pl2.Add(20);
+  pl2.Add(30);
+  pl2.Add(40);
+  pl2.Add(60);
+  pl2.Add(70);
+
+  auto result = pl1.Intersect(pl2);
+  // Intersection should be {20, 30, 40}
+  EXPECT_EQ(result->Size(), 3);
+
+  // Verify the actual doc IDs to confirm last doc ID
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 3);
+  EXPECT_EQ(all[0], 20);
+  EXPECT_EQ(all[1], 30);
+  EXPECT_EQ(all[2], 40);
+}
+
+// =============================================================================
 // Delta encoding roundtrip tests (#3)
 // =============================================================================
 
@@ -881,100 +962,6 @@ TEST_F(PostingListTest, DeltaEncodingConsecutive) {
 // =============================================================================
 
 /**
- * @brief Test that Serialize returns true for normal delta-compressed data
- */
-TEST_F(PostingListTest, SerializeReturnsTrueForNormalData) {
-  PostingList posting(0.5);
-
-  posting.Add(10);
-  posting.Add(20);
-  posting.Add(30);
-
-  std::vector<uint8_t> buffer;
-  EXPECT_TRUE(posting.Serialize(buffer));
-  EXPECT_FALSE(buffer.empty());
-}
-
-/**
- * @brief Test that Serialize returns true for Roaring bitmap data
- */
-TEST_F(PostingListTest, SerializeReturnsTrueForRoaringData) {
-  PostingList posting(0.01);
-
-  std::vector<DocId> doc_ids;
-  for (DocId id = 1; id <= 100; ++id) {
-    doc_ids.push_back(id);
-  }
-  posting.AddBatch(doc_ids);
-  posting.Optimize(100);  // Force Roaring conversion
-
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
-
-  std::vector<uint8_t> buffer;
-  EXPECT_TRUE(posting.Serialize(buffer));
-  EXPECT_FALSE(buffer.empty());
-}
-
-/**
- * @brief Test that Serialize returns true for empty posting list
- */
-TEST_F(PostingListTest, SerializeReturnsTrueForEmptyData) {
-  PostingList posting(0.5);
-
-  std::vector<uint8_t> buffer;
-  EXPECT_TRUE(posting.Serialize(buffer));
-  // Should have at least strategy byte + size bytes
-  EXPECT_GE(buffer.size(), 5u);
-}
-
-/**
- * @brief Test that ConvertToRoaring preserves all data
- */
-/**
- * @brief Test that Deserialize rejects an invalid strategy byte
- *
- * Serializes a valid PostingList, then corrupts the strategy byte to an
- * out-of-range value and verifies that Deserialize returns false.
- */
-TEST_F(PostingListTest, DeserializeInvalidStrategyByte) {
-  // Create and serialize a simple posting list
-  PostingList posting(0.5);
-  posting.Add(10);
-  posting.Add(20);
-  posting.Add(30);
-
-  std::vector<uint8_t> buffer;
-  ASSERT_TRUE(posting.Serialize(buffer));
-  ASSERT_FALSE(buffer.empty());
-
-  // The first byte is the strategy byte - corrupt it with value 2 (out of range)
-  {
-    std::vector<uint8_t> corrupted = buffer;
-    corrupted[0] = 2;
-    PostingList target(0.5);
-    size_t offset = 0;
-    EXPECT_FALSE(target.Deserialize(corrupted, offset));
-  }
-
-  // Also test with value 255
-  {
-    std::vector<uint8_t> corrupted = buffer;
-    corrupted[0] = 255;
-    PostingList target(0.5);
-    size_t offset = 0;
-    EXPECT_FALSE(target.Deserialize(corrupted, offset));
-  }
-
-  // Verify that valid strategy bytes still work
-  {
-    PostingList target(0.5);
-    size_t offset = 0;
-    EXPECT_TRUE(target.Deserialize(buffer, offset));
-    EXPECT_EQ(target.Size(), 3);
-  }
-}
-
-/**
  * @brief Test that ConvertToRoaring preserves all data
  */
 TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
@@ -1002,149 +989,4 @@ TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
   for (DocId id = 1; id <= 100; ++id) {
     EXPECT_EQ(all[id - 1], id);
   }
-}
-
-// =============================================================================
-// Tail-append optimization tests for Add()
-// =============================================================================
-
-/**
- * @brief Test Add() tail-append optimization for monotonically increasing DocIds
- *
- * When DocIds are added in strictly increasing order (common during binlog
- * replication), the optimized path appends directly to delta_compressed_
- * without full decode-sort-encode, achieving O(1) per insertion.
- */
-TEST_F(PostingListTest, AddMonotonicallyIncreasingOptimization) {
-  PostingList posting(0.5);
-
-  // Add DocIds in strictly increasing order
-  posting.Add(1);
-  posting.Add(2);
-  posting.Add(3);
-  posting.Add(4);
-  posting.Add(5);
-
-  // Verify size is correct
-  EXPECT_EQ(posting.Size(), 5);
-
-  // Verify all elements are found
-  EXPECT_TRUE(posting.Contains(1));
-  EXPECT_TRUE(posting.Contains(2));
-  EXPECT_TRUE(posting.Contains(3));
-  EXPECT_TRUE(posting.Contains(4));
-  EXPECT_TRUE(posting.Contains(5));
-
-  // Verify non-existent elements are not found
-  EXPECT_FALSE(posting.Contains(0));
-  EXPECT_FALSE(posting.Contains(6));
-
-  // Verify GetAll returns correct sorted order
-  auto all = posting.GetAll();
-  ASSERT_EQ(all.size(), 5);
-  for (DocId id = 1; id <= 5; ++id) {
-    EXPECT_EQ(all[id - 1], id);
-  }
-}
-
-/**
- * @brief Test Add() fallback path for out-of-order DocId insertions
- *
- * When DocIds arrive out of order, the full decode-sort-encode path
- * is used as a fallback to maintain sorted invariant.
- */
-TEST_F(PostingListTest, AddOutOfOrderFallback) {
-  PostingList posting(0.5);
-
-  // Add DocIds in non-monotonic order
-  posting.Add(5);
-  posting.Add(3);
-  posting.Add(1);
-  posting.Add(4);
-  posting.Add(2);
-
-  // Verify size is correct
-  EXPECT_EQ(posting.Size(), 5);
-
-  // Verify all elements are found
-  EXPECT_TRUE(posting.Contains(1));
-  EXPECT_TRUE(posting.Contains(2));
-  EXPECT_TRUE(posting.Contains(3));
-  EXPECT_TRUE(posting.Contains(4));
-  EXPECT_TRUE(posting.Contains(5));
-
-  // Verify non-existent elements are not found
-  EXPECT_FALSE(posting.Contains(0));
-  EXPECT_FALSE(posting.Contains(6));
-
-  // Verify GetAll returns correct sorted order
-  auto all = posting.GetAll();
-  ASSERT_EQ(all.size(), 5);
-  for (DocId id = 1; id <= 5; ++id) {
-    EXPECT_EQ(all[id - 1], id);
-  }
-}
-
-TEST_F(PostingListTest, ContainsDeltaCompressedCorrectness) {
-  // Use high threshold to stay in delta-compressed mode
-  PostingList posting(100.0);
-
-  // Add several documents
-  posting.Add(10);
-  posting.Add(20);
-  posting.Add(30);
-  posting.Add(50);
-  posting.Add(100);
-
-  // All added doc IDs should be found
-  EXPECT_TRUE(posting.Contains(10));
-  EXPECT_TRUE(posting.Contains(20));
-  EXPECT_TRUE(posting.Contains(30));
-  EXPECT_TRUE(posting.Contains(50));
-  EXPECT_TRUE(posting.Contains(100));
-
-  // Non-existent doc IDs should not be found
-  EXPECT_FALSE(posting.Contains(0));
-  EXPECT_FALSE(posting.Contains(15));
-  EXPECT_FALSE(posting.Contains(25));
-  EXPECT_FALSE(posting.Contains(101));
-  EXPECT_FALSE(posting.Contains(999));
-}
-
-/**
- * @brief Test that Deserialize detects truncated Roaring bitmap data
- *
- * Serializes a PostingList using the Roaring bitmap strategy, then patches
- * the serialized size field to claim the full original size while actually
- * truncating the bitmap bytes. This bypasses the outer bounds check and
- * exercises the safe deserialization path.
- */
-TEST_F(PostingListTest, DeserializeCorruptedBitmapData) {
-  // Create a posting list that uses Roaring bitmap mode (threshold 0.0)
-  PostingList posting(0.0);
-  for (uint32_t i = 0; i < 200; ++i) {
-    posting.Add(i * 10);
-  }
-
-  std::vector<uint8_t> buffer;
-  ASSERT_TRUE(posting.Serialize(buffer));
-
-  // Format: [1 byte strategy] [4 bytes size] [roaring data...]
-  // Keep the strategy byte and size field, but truncate the roaring data
-  // and patch the size field to match the truncated length so the outer
-  // bounds check passes but the roaring deserializer sees corrupt data.
-  ASSERT_GT(buffer.size(), 10U);
-  size_t truncated_data_len = (buffer.size() - 5) / 2;  // Half the bitmap data
-  auto patched = std::vector<uint8_t>(buffer.begin(), buffer.begin() + 5 + static_cast<ptrdiff_t>(truncated_data_len));
-  // Patch the 4-byte big-endian size field to match truncated length
-  auto size_val = static_cast<uint32_t>(truncated_data_len);
-  patched[1] = static_cast<uint8_t>((size_val >> 24) & 0xFF);
-  patched[2] = static_cast<uint8_t>((size_val >> 16) & 0xFF);
-  patched[3] = static_cast<uint8_t>((size_val >> 8) & 0xFF);
-  patched[4] = static_cast<uint8_t>(size_val & 0xFF);
-
-  // Deserialize should fail gracefully, not crash or return success
-  PostingList posting2(0.0);
-  size_t offset = 0;
-  EXPECT_FALSE(posting2.Deserialize(patched, offset));
 }

@@ -134,18 +134,18 @@ gtest_discover_tests(bind_address_validation_test
   PROPERTIES RESOURCE_LOCK config_file_io
 )
 
-# Config security and edge-case test
-add_executable(config_security_test
-  config_security_test.cpp
+# Config validation test
+add_executable(config_validation_test
+  config_validation_test.cpp
 )
 
-target_link_libraries(config_security_test PRIVATE
+target_link_libraries(config_validation_test PRIVATE
   mygramdb_config
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O and env var conflicts
-gtest_discover_tests(config_security_test
+# RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
+gtest_discover_tests(config_validation_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK config_file_io

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -114,11 +115,10 @@ struct CacheMetadata {
  * eviction, and invalidation decisions.
  */
 struct CacheEntry {
-  CacheKey key;                          ///< Cache key (16 bytes)
-  std::vector<uint8_t> compressed;       ///< LZ4-compressed result
-  size_t original_element_count = 0;     ///< Number of DocId elements in the original result
+  CacheKey key;                                                    ///< Cache key (16 bytes)
+  std::shared_ptr<const std::vector<uint8_t>> compressed;          ///< LZ4-compressed result (shared for lock-free copy)
+  size_t original_size = 0;              ///< Uncompressed size (bytes)
   size_t compressed_size = 0;            ///< Compressed size (bytes)
-  size_t stored_memory_footprint = 0;    ///< Memory footprint recorded at insertion time
   double query_cost_ms = 0.0;            ///< Query execution time (ms)
   CacheMetadata metadata;                ///< Metadata for invalidation
   std::atomic<bool> invalidated{false};  ///< Invalidation flag (for two-phase invalidation)
@@ -130,9 +130,8 @@ struct CacheEntry {
   CacheEntry(const CacheEntry& other)
       : key(other.key),
         compressed(other.compressed),
-        original_element_count(other.original_element_count),
+        original_size(other.original_size),
         compressed_size(other.compressed_size),
-        stored_memory_footprint(other.stored_memory_footprint),
         query_cost_ms(other.query_cost_ms),
         metadata(other.metadata),
         invalidated(other.invalidated.load()) {}
@@ -141,9 +140,8 @@ struct CacheEntry {
   CacheEntry(CacheEntry&& other) noexcept
       : key(other.key),  // CacheKey is trivially copyable
         compressed(std::move(other.compressed)),
-        original_element_count(other.original_element_count),
+        original_size(other.original_size),
         compressed_size(other.compressed_size),
-        stored_memory_footprint(other.stored_memory_footprint),
         query_cost_ms(other.query_cost_ms),
         metadata(std::move(other.metadata)),
         invalidated(other.invalidated.load()) {}
@@ -156,9 +154,8 @@ struct CacheEntry {
     if (this != &other) {
       key = other.key;
       compressed = other.compressed;
-      original_element_count = other.original_element_count;
+      original_size = other.original_size;
       compressed_size = other.compressed_size;
-      stored_memory_footprint = other.stored_memory_footprint;
       query_cost_ms = other.query_cost_ms;
       metadata = other.metadata;
       invalidated.store(other.invalidated.load());
@@ -171,9 +168,8 @@ struct CacheEntry {
     if (this != &other) {
       key = other.key;  // CacheKey is trivially copyable
       compressed = std::move(other.compressed);
-      original_element_count = other.original_element_count;
+      original_size = other.original_size;
       compressed_size = other.compressed_size;
-      stored_memory_footprint = other.stored_memory_footprint;
       query_cost_ms = other.query_cost_ms;
       metadata = std::move(other.metadata);
       invalidated.store(other.invalidated.load());
@@ -182,18 +178,15 @@ struct CacheEntry {
   }
 
   /**
-   * @brief Calculate heap-only memory footprint of this entry
-   *
-   * Returns only the heap allocations owned by this entry, without
-   * counting sizeof(*this). Use this for cache memory tracking where
-   * the entry struct is already stored in a container that accounts
-   * for its inline size.
-   *
-   * @return Heap memory usage in bytes
+   * @brief Calculate memory footprint of this entry
+   * @return Memory usage in bytes
    */
-  [[nodiscard]] size_t HeapFootprint() const {
-    // Compressed data heap allocation
-    size_t size = compressed.capacity();
+  [[nodiscard]] size_t MemoryUsage() const {
+    // Compressed data (shared_ptr + vector heap allocation)
+    size_t size = sizeof(CacheEntry);
+    if (compressed) {
+      size += sizeof(std::vector<uint8_t>) + compressed->capacity();
+    }
 
     // Ngrams: vector buffer + each string's heap allocation
     size += metadata.ngrams.capacity() * sizeof(std::string);
@@ -212,17 +205,6 @@ struct CacheEntry {
 
     return size;
   }
-
-  /**
-   * @brief Calculate total memory footprint including sizeof(*this)
-   *
-   * Includes both the inline struct size and all heap allocations.
-   * Use MemoryUsage() when the entry is standalone (not stored in a container).
-   * Use HeapFootprint() when the entry is inside a map or other container.
-   *
-   * @return Total memory usage in bytes
-   */
-  [[nodiscard]] size_t MemoryUsage() const { return sizeof(CacheEntry) + HeapFootprint(); }
 };
 
 }  // namespace mygramdb::cache

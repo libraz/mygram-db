@@ -28,7 +28,7 @@ std::string StripSQLComments(const std::string& query) {
         }
         pos++;
       }
-      // If unterminated block comment, skip all remaining characters
+      // If unterminated, skip remaining characters
       if (!found_end) {
         pos = query.length();
       }
@@ -113,6 +113,8 @@ bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keywor
 }
 
 bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name) {
+  size_t saved_pos = pos;
+
   // Skip optional backtick
   bool has_backtick = false;
   if (pos < str.length() && str[pos] == '`') {
@@ -122,10 +124,12 @@ bool MatchTableName(const std::string& str, size_t& pos, const std::string& tabl
 
   // Match table name
   if (pos + table_name.length() > str.length()) {
+    pos = saved_pos;
     return false;
   }
 
   if (str.compare(pos, table_name.length(), table_name) != 0) {
+    pos = saved_pos;
     return false;
   }
 
@@ -145,6 +149,7 @@ bool MatchTableName(const std::string& str, size_t& pos, const std::string& tabl
   if (pos < str.length()) {
     char next_char = str[pos];
     if (std::isalnum(static_cast<unsigned char>(next_char)) != 0 || next_char == '_') {
+      pos = saved_pos;
       return false;  // Table name is a prefix of a longer identifier
     }
   }

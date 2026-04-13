@@ -11,8 +11,6 @@
 #include <regex>
 #include <sstream>
 
-#include "utils/constants.h"
-
 namespace mygram::utils {
 
 using mygram::utils::ErrorCode;
@@ -26,14 +24,14 @@ constexpr size_t kTimezoneOffsetLength = 6;  // Format: "+HH:MM" or "-HH:MM"
 constexpr size_t kMinuteFirstDigitPos = 4;   // Position of minute's first digit in "+HH:MM"
 constexpr size_t kMinuteSecondDigitPos = 5;  // Position of minute's second digit in "+HH:MM"
 constexpr int kDecimalBase = 10;             // Decimal base for numeric conversions
-constexpr int kMaxHour = 23;                 // Maximum hour value for datetime (0-23)
-constexpr int kMaxTimezoneHour = 14;         // Maximum timezone offset hour (UTC+14)
+constexpr int kMaxHour = 23;                 // Maximum hour value (0-23) for datetime
+constexpr int kMaxTimezoneHour = 14;         // Maximum timezone offset hour (UTC+14, Line Islands)
 constexpr int kMaxMinute = 59;               // Maximum minute value (0-59)
 constexpr int kMinutesFirstDigitMax = 5;     // First digit of minutes (0-5)
 
-// Time conversion constants (from utils/constants.h)
-using mygram::constants::kSecondsPerHour;
-using mygram::constants::kSecondsPerMinute;
+// Time conversion constants
+constexpr int kSecondsPerHour = 3600;  // 3600 seconds per hour
+constexpr int kSecondsPerMinute = 60;  // 60 seconds per minute
 
 // MySQL TIME type constants
 constexpr int kMaxMySQLTimeHours = 838;  // MySQL TIME allows -838:59:59 to 838:59:59
@@ -132,7 +130,7 @@ Expected<TimezoneOffset, Error> TimezoneOffset::Parse(std::string_view offset_st
   }
   int hours = (offset_str[1] - '0') * kDecimalBase + (offset_str[2] - '0');
   if (hours > kMaxTimezoneHour) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Hours must be 0-14"));
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Timezone offset hours must be 0-14"));
   }
 
   // Check colon separator
@@ -425,41 +423,16 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
   tm_struct.tm_hour = hour;
   tm_struct.tm_min = minute;
   tm_struct.tm_sec = second;
-  tm_struct.tm_isdst = -1;  // Let mktime determine DST (though we're using UTC)
-
-  // timegm() is not portable, so we use a workaround:
-  // 1. Save current TZ
-  // 2. Set TZ=UTC
-  // 3. Call mktime()
-  // 4. Restore TZ
-  //
-  // However, for thread-safety, we use a different approach:
-  // mktime assumes local time, so we apply timezone offset manually
-
-  // Use mktime to get local time interpretation
-  std::time_t local_time = std::mktime(&tm_struct);
-  if (local_time == -1) {
-    return std::nullopt;
-  }
-
-  // mktime treats tm_struct as local time, but we want to treat it as the specified timezone
-  // We need to reverse the local timezone offset and apply the specified offset
-  //
-  // Actually, we want to treat the datetime as being in the specified timezone,
-  // then convert to UTC. So:
-  // 1. datetime_str is in timezone with offset timezone_offset_sec
-  // 2. To get UTC, subtract the offset
-  //
-  // But mktime interprets tm_struct as local time. We need a different approach.
-
   // Thread-safe approach: Use timegm if available, otherwise calculate manually
 #if defined(__GLIBC__) || defined(__APPLE__)
   // timegm is available on Linux and macOS
+  tm_struct.tm_isdst = 0;  // UTC has no DST
   std::time_t utc_time = timegm(&tm_struct);
   if (utc_time == -1) {
     return std::nullopt;
   }
 #else
+  tm_struct.tm_isdst = -1;  // Let mktime determine DST
   // Fallback: Calculate epoch manually (simplified, assumes Gregorian calendar)
   // This is less accurate but portable
   // Days since epoch calculation

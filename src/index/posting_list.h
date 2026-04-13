@@ -135,7 +135,7 @@ class PostingList {
   /**
    * @brief Get current strategy
    */
-  [[nodiscard]] PostingStrategy GetStrategy() const { return strategy_; }
+  [[nodiscard]] PostingStrategy GetStrategy() const { return strategy_.load(std::memory_order_acquire); }
 
   /**
    * @brief Intersect with another posting list
@@ -180,7 +180,7 @@ class PostingList {
   bool Deserialize(const std::vector<uint8_t>& buffer, size_t& offset);
 
  private:
-  PostingStrategy strategy_ = PostingStrategy::kDeltaCompressed;
+  std::atomic<PostingStrategy> strategy_{PostingStrategy::kDeltaCompressed};
   double roaring_threshold_;
 
   // Delta-compressed storage
