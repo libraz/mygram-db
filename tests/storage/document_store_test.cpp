@@ -1530,3 +1530,55 @@ TEST(DocumentStoreTest, AddDocumentBatch_DuplicateAtUint32Max) {
   // Sentinel should be set after using UINT32_MAX
   EXPECT_EQ(store.GetNextDocId(), 0);
 }
+
+// ============================================================
+// SetStoreTexts / IsStoreTextsEnabled tests
+// ============================================================
+
+TEST(DocumentStoreTest, IsStoreTextsEnabledDefault) {
+  DocumentStore store;
+  EXPECT_TRUE(store.IsStoreTextsEnabled());
+}
+
+TEST(DocumentStoreTest, SetStoreTextsFalseDisablesTextStorage) {
+  DocumentStore store;
+  store.SetStoreTexts(false);
+  EXPECT_FALSE(store.IsStoreTextsEnabled());
+
+  // Add document with normalized text
+  auto doc_id = store.AddDocument("pk1", {}, "hello world");
+  ASSERT_TRUE(doc_id.has_value());
+
+  // Text should NOT be stored
+  auto text = store.GetNormalizedText(*doc_id);
+  EXPECT_FALSE(text.has_value());
+}
+
+TEST(DocumentStoreTest, SetStoreTextsTrueEnablesTextStorage) {
+  DocumentStore store;
+  store.SetStoreTexts(true);
+
+  auto doc_id = store.AddDocument("pk1", {}, "hello world");
+  ASSERT_TRUE(doc_id.has_value());
+
+  // Text should be stored
+  auto text = store.GetNormalizedText(*doc_id);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ(text.value(), "hello world");
+}
+
+TEST(DocumentStoreTest, SetStoreTextsFalseBatchSkipsText) {
+  DocumentStore store;
+  store.SetStoreTexts(false);
+
+  std::vector<DocumentStore::DocumentItem> batch;
+  batch.push_back({"pk1", {}, "text1"});
+  batch.push_back({"pk2", {}, "text2"});
+
+  auto result = store.AddDocumentBatch(batch);
+  ASSERT_TRUE(result.has_value());
+
+  // No text should be stored
+  EXPECT_FALSE(store.GetNormalizedText((*result)[0]).has_value());
+  EXPECT_FALSE(store.GetNormalizedText((*result)[1]).has_value());
+}
