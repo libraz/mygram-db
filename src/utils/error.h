@@ -71,7 +71,8 @@ enum class ErrorCode : std::uint16_t {
   kMySQLInvalidSchema = 2012,     ///< Invalid schema/table structure
   kMySQLFieldTruncated = 2013,    ///< Field data truncated in binlog event
   kMySQLInvalidMetadata = 2014,   ///< Invalid field metadata in binlog event
-  kMySQLUnsupportedType = 2015,   ///< Unsupported MySQL column type
+  kMySQLUnsupportedType = 2015,          ///< Unsupported MySQL column type
+  kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
 
   // ===== Query Parsing Errors (3000-3999) =====
   kQuerySyntaxError = 3000,           ///< Query syntax error

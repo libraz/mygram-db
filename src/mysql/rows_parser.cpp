@@ -75,11 +75,10 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
   }
 
   const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip standard header
-  // IMPORTANT: Event size includes header + data + 4-byte CRC32 checksum at the end.
-  // Even when checksums are disabled via SET @source_binlog_checksum='NONE', MySQL still
-  // includes 4 bytes at the end of each event for checksum space.
-  // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: BINLOG_CHECKSUM_LEN = 4)
-  const unsigned char* end = buffer + event_size - 4;  // Exclude 4-byte checksum
+  // Event size (from header) includes header + data + 4-byte CRC32 checksum.
+  // CRC32 is verified by the binlog reader before dispatch.
+  // Subtract checksum size to get the actual data boundary.
+  const unsigned char* end = buffer + event_size - mygram::constants::kBinlogChecksumSize;
 
   // Parse post-header: table_id (6 bytes) + flags (2 bytes)
   if (ptr + 8 > end) {

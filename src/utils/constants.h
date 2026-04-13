@@ -67,6 +67,9 @@ constexpr int kSecondsPerDay = 86400;
 /// Standard MySQL binlog event header length (LOG_EVENT_HEADER_LEN)
 constexpr size_t kBinlogEventHeaderLen = 19;
 
+/// CRC32 checksum length appended to each binlog event (BINLOG_CHECKSUM_LEN)
+constexpr size_t kBinlogChecksumSize = 4;
+
 /// Maximum number of columns in a MySQL table
 constexpr uint64_t kMySQLMaxColumns = 4096;
 

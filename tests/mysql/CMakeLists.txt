@@ -30,6 +30,21 @@ gtest_discover_tests(runtime_variable_manager_mysql_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Binlog CRC32 verification tests (no MySQL dependency)
+add_executable(binlog_crc32_test
+  binlog_crc32_test.cpp
+)
+
+target_link_libraries(binlog_crc32_test
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(binlog_crc32_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 if(USE_MYSQL AND MYSQL_FOUND)
   # ENUM/SET field decoder tests
   add_executable(rows_parser_enum_set_test

@@ -10,10 +10,12 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "mysql/binlog_event_types.h"
+#include "utils/crc32.h"
 
 // NOLINTBEGIN(readability-magic-numbers)
 
@@ -128,6 +130,21 @@ class BinlogEventBuilder {
    *        (which should already contain a 4-byte checksum placeholder).
    */
   static inline void FixEventSizeWithChecksum(std::vector<uint8_t>& buf) { FixEventSize(buf); }
+
+  /**
+   * @brief Compute CRC32 over all bytes except the trailing 4-byte checksum
+   *        and write the result into the last 4 bytes (little-endian).
+   *
+   * Call this after FixEventSizeWithChecksum() to produce a valid event.
+   */
+  static inline void FixChecksum(std::vector<uint8_t>& buf) {
+    if (buf.size() < 4) {
+      return;
+    }
+    size_t data_len = buf.size() - 4;
+    uint32_t crc = mygram::utils::ComputeCRC32(buf.data(), data_len);
+    std::memcpy(buf.data() + data_len, &crc, sizeof(crc));
+  }
 
   /**
    * @brief Build the 19-byte common event header.

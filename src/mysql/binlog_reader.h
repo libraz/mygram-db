@@ -266,6 +266,11 @@ class BinlogReader final : public IBinlogReader {
   uint64_t GetProcessedEvents() const override { return processed_events_; }
 
   /**
+   * @brief Get total CRC32 checksum errors detected
+   */
+  uint64_t GetCRCErrors() const { return crc_errors_; }
+
+  /**
    * @brief Get last error message
    */
   std::string GetLastError() const override {
@@ -322,6 +327,7 @@ class BinlogReader final : public IBinlogReader {
 
   // Statistics
   std::atomic<uint64_t> processed_events_{0};
+  std::atomic<uint64_t> crc_errors_{0};
   std::string current_gtid_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;

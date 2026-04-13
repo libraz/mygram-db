@@ -25,6 +25,7 @@
 #include "mysql/gtid_encoder.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "utils/constants.h"
+#include "utils/crc32.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -111,10 +112,9 @@ void BinlogReader::ReaderThreadFunc() {
   };
 
   while (!should_stop_) {
-    // Disable binlog checksums for this connection
-    // We don't verify checksums yet, so ask the server to send events without them
-    if (mysql_query(binlog_connection_->GetHandle(), "SET @source_binlog_checksum='NONE'") != 0) {
-      SetLastError("Failed to disable binlog checksum: " + binlog_connection_->GetLastError());
+    // Request CRC32 checksums so we can verify data integrity on each event
+    if (mysql_query(binlog_connection_->GetHandle(), "SET @source_binlog_checksum='CRC32'") != 0) {
+      SetLastError("Failed to set binlog checksum to CRC32: " + binlog_connection_->GetLastError());
 
       // On first attempt (reconnect_attempt == 0), this is likely a read timeout recovery
       // Use debug logging to avoid noisy error logs during normal idle reconnects
@@ -139,7 +139,7 @@ void BinlogReader::ReaderThreadFunc() {
       // rc == 0 (reconnect failed) or rc == 1 (success): retry from top of loop
       continue;
     }
-    mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksums_disabled").Debug();
+    mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksum_crc32_enabled").Debug();
 
     // Configure heartbeat to keep connection alive during idle periods.
     // The heartbeat period must be shorter than read_timeout (5s) to avoid
@@ -409,6 +409,28 @@ void BinlogReader::ReaderThreadFunc() {
       // standard LOG_EVENT_HEADER_LEN (19 bytes) offsets directly.
       const unsigned char* event_buffer = rpl.buffer + kBinlogOKByteSize;
       const unsigned long event_length = rpl.size - kBinlogOKByteSize;
+
+      // Verify CRC32 checksum for data integrity.
+      // MySQL appends a 4-byte CRC32 to every event when @source_binlog_checksum='CRC32'.
+      // The checksum covers all bytes except the trailing 4-byte CRC itself.
+      if (event_length >= mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize) {
+        const size_t data_length = event_length - mygram::constants::kBinlogChecksumSize;
+        uint32_t computed_crc = mygram::utils::ComputeCRC32(event_buffer, data_length);
+        uint32_t stored_crc = 0;
+        std::memcpy(&stored_crc, event_buffer + data_length, sizeof(stored_crc));
+        if (computed_crc != stored_crc) {
+          crc_errors_++;
+          mygram::utils::StructuredLog()
+              .Event("binlog_error")
+              .Field("type", "crc32_checksum_mismatch")
+              .Field("computed_crc", static_cast<uint64_t>(computed_crc))
+              .Field("stored_crc", static_cast<uint64_t>(stored_crc))
+              .Field("event_length", static_cast<uint64_t>(event_length))
+              .Field("gtid", reader_last_gtid)
+              .Error();
+          continue;
+        }
+      }
 
       // Check for GTID events first (need to update current_gtid)
       if (event_length >= mygram::constants::kBinlogEventHeaderLen) {

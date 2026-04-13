@@ -965,13 +965,13 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   // [db_name (variable length, null-terminated)]
   // [query (variable length)]
 
-  // Event size includes 4-byte CRC32 checksum at the end.
-  // Even when checksums are disabled via SET @source_binlog_checksum='NONE',
-  // MySQL still includes 4 bytes at the end of each event for checksum space.
-  constexpr size_t kChecksumSize = 4;
-  size_t effective_length = (length > kChecksumSize + mygram::constants::kBinlogEventHeaderLen)
-                                ? length - kChecksumSize
-                                : length;
+  // Event length includes a 4-byte CRC32 checksum at the end.
+  // CRC32 is verified by the binlog reader before dispatch.
+  // Subtract checksum size to get the actual data boundary.
+  size_t effective_length =
+      (length > mygram::constants::kBinlogChecksumSize + mygram::constants::kBinlogEventHeaderLen)
+          ? length - mygram::constants::kBinlogChecksumSize
+          : length;
 
   const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
   size_t remaining = effective_length - mygram::constants::kBinlogEventHeaderLen;
