@@ -10,6 +10,7 @@
 
 #include "cache/cache_manager.h"
 #include "index/bm25_scorer.h"
+#include "query/highlighter.h"
 #include "query/result_sorter.h"
 #include "query/synonym_dictionary.h"
 #include "server/search_pipeline.h"
@@ -362,6 +363,54 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     }
   }
 
+  // Helper: generate highlight snippets for paginated results
+  auto generate_snippets = [&](const std::vector<storage::DocId>& paginated_results) -> std::vector<std::string> {
+    if (!query.highlight.has_value()) {
+      return {};
+    }
+
+    const auto& hl_opts = query.highlight.value();
+
+    // Normalize search terms for matching
+    std::vector<std::string> normalized_terms;
+    for (const auto& term : output.all_search_terms) {
+      if (output.current_index != nullptr) {
+        normalized_terms.push_back(output.current_index->NormalizeText(term));
+      } else {
+        normalized_terms.push_back(term);
+      }
+    }
+
+    // Check for synonym expansion: include synonym variants as highlight targets
+    auto table_it3 = ctx_.table_contexts.find(query.table);
+    if (table_it3 != ctx_.table_contexts.end() && table_it3->second->synonym_dict &&
+        !table_it3->second->synonym_dict->IsEmpty()) {
+      auto* syn_dict = table_it3->second->synonym_dict.get();
+      std::vector<std::string> expanded;
+      for (const auto& nt : normalized_terms) {
+        auto synonyms = syn_dict->Expand(nt);
+        for (auto& s : synonyms) {
+          expanded.push_back(std::move(s));
+        }
+      }
+      mygram::utils::DeduplicateSorted(expanded);
+      normalized_terms = std::move(expanded);
+    }
+
+    std::vector<std::string> snippets;
+    snippets.reserve(paginated_results.size());
+    for (const auto& doc_id : paginated_results) {
+      auto text_opt = output.current_doc_store->GetNormalizedText(static_cast<storage::DocId>(doc_id));
+      if (text_opt.has_value()) {
+        auto hl_result = query::Highlighter::Generate(text_opt.value(), normalized_terms, hl_opts);
+        snippets.push_back(std::move(hl_result.snippet));
+      } else {
+        snippets.emplace_back();
+      }
+    }
+    return snippets;
+  };
+
   // BM25 scoring: compute scores if SORT _score is requested
   bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
   if (is_score_sort && !output.results.empty()) {
@@ -417,6 +466,18 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         query::ResultSorter::SortByScore(output.results, scores, sort_order, query.limit, query.offset);
     size_t score_total = output.results.size();
 
+    if (query.highlight.has_value()) {
+      auto snippets = generate_snippets(sorted_results);
+      if (conn_ctx.debug_mode) {
+        output.debug_info.final_results = sorted_results.size();
+        return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, score_total,
+                                                                     output.current_doc_store, snippets,
+                                                                     &output.debug_info);
+      }
+      return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, score_total,
+                                                                   output.current_doc_store, snippets);
+    }
+
     if (conn_ctx.debug_mode) {
       output.debug_info.final_results = sorted_results.size();
       return ResponseFormatter::FormatSearchResponse(sorted_results, score_total, output.current_doc_store,
@@ -434,6 +495,18 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   auto sorted_results = std::move(sorted_result.value());
+
+  if (query.highlight.has_value()) {
+    auto snippets = generate_snippets(sorted_results);
+    if (conn_ctx.debug_mode) {
+      output.debug_info.final_results = sorted_results.size();
+      return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, total_results,
+                                                                   output.current_doc_store, snippets,
+                                                                   &output.debug_info);
+    }
+    return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, total_results,
+                                                                 output.current_doc_store, snippets);
+  }
 
   if (conn_ctx.debug_mode) {
     output.debug_info.final_results = sorted_results.size();

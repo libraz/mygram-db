@@ -182,6 +182,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
+    } else if (keyword == "HIGHLIGHT") {
+      if (!ParseHighlight(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
     } else {
       SetError("Unknown keyword: " + keyword);
       query.type = QueryType::UNKNOWN;

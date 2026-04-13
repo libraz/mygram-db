@@ -53,6 +53,24 @@ class ResponseFormatter {
                                           const query::DebugInfo* debug_info = nullptr);
 
   /**
+   * @brief Format SEARCH response with highlighted snippets
+   *
+   * Format:
+   *   OK RESULTS <total>\r\n<pk>\t<snippet>\r\n<pk>\t<snippet>\r\n...
+   *
+   * @param results Search results (already sorted and paginated)
+   * @param total_results Total number of results before pagination
+   * @param doc_store Document store for retrieving primary keys
+   * @param snippets Parallel vector of highlight snippets (same order as results)
+   * @param debug_info Optional debug information
+   * @return Formatted response
+   */
+  static std::string FormatSearchResponseWithHighlights(const std::vector<index::DocId>& results, size_t total_results,
+                                                        storage::DocumentStore* doc_store,
+                                                        const std::vector<std::string>& snippets,
+                                                        const query::DebugInfo* debug_info = nullptr);
+
+  /**
    * @brief Format COUNT response
    * @param count Result count
    * @param debug_info Optional debug information

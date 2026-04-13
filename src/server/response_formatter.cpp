@@ -153,6 +153,94 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   return response;
 }
 
+std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vector<index::DocId>& results,
+                                                                   size_t total_results,
+                                                                   storage::DocumentStore* doc_store,
+                                                                   const std::vector<std::string>& snippets,
+                                                                   const query::DebugInfo* debug_info) {
+  // Batch lookup for primary keys
+  std::vector<storage::DocId> doc_ids;
+  doc_ids.reserve(results.size());
+  for (const auto& doc_id : results) {
+    doc_ids.push_back(static_cast<storage::DocId>(doc_id));
+  }
+  auto primary_keys = doc_store->GetPrimaryKeysBatch(doc_ids);
+
+  // Pre-allocate response buffer
+  // Estimate: base + per-result (pk + tab + snippet + newline)
+  constexpr size_t kHighlightBaseBuffer = 32;
+  constexpr size_t kEstimatedLineSize = 150;
+  std::string response;
+  response.reserve(kHighlightBaseBuffer + results.size() * kEstimatedLineSize);
+
+  response += "OK RESULTS ";
+  response += std::to_string(total_results);
+
+  // Each result on its own line: pk\tsnippet
+  for (size_t i = 0; i < primary_keys.size(); ++i) {
+    if (primary_keys[i].empty()) {
+      continue;  // Skip missing documents
+    }
+    response += "\r\n";
+    response += primary_keys[i];
+    response += '\t';
+    if (i < snippets.size()) {
+      response += snippets[i];
+    }
+  }
+
+  // Add debug information if provided (reuse same format as FormatSearchResponse)
+  if (debug_info != nullptr) {
+    std::ostringstream oss;
+    oss << "\r\n\r\n# DEBUG\r\n";
+    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
+    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
+    if (debug_info->filter_time_ms > 0.0) {
+      oss << "filter_time: " << debug_info->filter_time_ms << "ms\r\n";
+    }
+    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
+    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
+    oss << "final: " << debug_info->final_results << "\r\n";
+    if (!debug_info->optimization_used.empty()) {
+      oss << "optimization: " << debug_info->optimization_used << "\r\n";
+    }
+    if (!debug_info->order_by_applied.empty()) {
+      oss << "sort: " << debug_info->order_by_applied << "\r\n";
+    }
+    oss << "limit: " << debug_info->limit_applied;
+    if (!debug_info->limit_explicit) {
+      oss << " (default)";
+    }
+    oss << "\r\n";
+    if (debug_info->offset_applied > 0) {
+      oss << "offset: " << debug_info->offset_applied;
+      if (!debug_info->offset_explicit) {
+        oss << " (default)";
+      }
+      oss << "\r\n";
+    }
+    oss << "highlight: on\r\n";
+
+    switch (debug_info->cache_info.status) {
+      case query::CacheDebugInfo::Status::HIT:
+        oss << "cache: hit\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+        oss << "cache: miss\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+        oss << "cache: miss\r\n";
+        break;
+      case query::CacheDebugInfo::Status::MISS_DISABLED:
+        oss << "cache: disabled\r\n";
+        break;
+    }
+    response += oss.str();
+  }
+
+  return response;
+}
+
 std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {
   // Fast path for non-debug responses
   if (debug_info == nullptr) {

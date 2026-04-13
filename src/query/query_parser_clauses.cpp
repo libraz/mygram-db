@@ -330,7 +330,7 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
     // Lambda to check if token is a known keyword
     auto is_known_keyword = [&peek_token]() -> bool {
       return peek_token == "LIMIT" || peek_token == "OFFSET" || peek_token == "FILTER" || peek_token == "AND" ||
-             peek_token == "NOT";
+             peek_token == "NOT" || peek_token == "HIGHLIGHT";
     };
 
     // If next token is not a known keyword, it might be a second column name
@@ -343,6 +343,71 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   }
 
   query.order_by = order_by;
+  return true;
+}
+
+bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
+  // HIGHLIGHT [TAG <open> <close>] [SNIPPET_LEN <n>] [MAX_FRAGMENTS <n>]
+  pos++;  // Skip "HIGHLIGHT"
+
+  query::HighlightOptions opts;
+
+  while (pos < tokens.size()) {
+    std::string keyword = ToUpper(tokens[pos]);
+
+    if (keyword == "TAG") {
+      // TAG <open> <close>
+      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+      if (pos + 2 >= tokens.size()) {
+        SetError("HIGHLIGHT TAG requires open and close tag arguments");
+        return false;
+      }
+      pos++;
+      opts.open_tag = tokens[pos++];
+      opts.close_tag = tokens[pos++];
+    } else if (keyword == "SNIPPET_LEN") {
+      // SNIPPET_LEN <n>
+      if (pos + 1 >= tokens.size()) {
+        SetError("HIGHLIGHT SNIPPET_LEN requires a number");
+        return false;
+      }
+      pos++;
+      try {
+        unsigned long val = std::stoul(tokens[pos++]);
+        if (val == 0 || val > 10000) {
+          SetError("HIGHLIGHT SNIPPET_LEN must be between 1 and 10000");
+          return false;
+        }
+        opts.snippet_length = static_cast<uint32_t>(val);
+      } catch (...) {
+        SetError("Invalid HIGHLIGHT SNIPPET_LEN value");
+        return false;
+      }
+    } else if (keyword == "MAX_FRAGMENTS") {
+      // MAX_FRAGMENTS <n>
+      if (pos + 1 >= tokens.size()) {
+        SetError("HIGHLIGHT MAX_FRAGMENTS requires a number");
+        return false;
+      }
+      pos++;
+      try {
+        unsigned long val = std::stoul(tokens[pos++]);
+        if (val == 0 || val > 100) {
+          SetError("HIGHLIGHT MAX_FRAGMENTS must be between 1 and 100");
+          return false;
+        }
+        opts.max_fragments = static_cast<uint32_t>(val);
+      } catch (...) {
+        SetError("Invalid HIGHLIGHT MAX_FRAGMENTS value");
+        return false;
+      }
+    } else {
+      // Not a HIGHLIGHT sub-option, stop consuming
+      break;
+    }
+  }
+
+  query.highlight = opts;
   return true;
 }
 

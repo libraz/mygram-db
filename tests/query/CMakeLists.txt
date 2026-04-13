@@ -89,6 +89,21 @@ gtest_discover_tests(synonym_dictionary_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Highlighter tests
+add_executable(highlighter_test
+  highlighter_test.cpp
+)
+
+target_link_libraries(highlighter_test
+  mygramdb_query
+  GTest::gtest_main
+)
+
+gtest_discover_tests(highlighter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # Result sorter ASC/DESC bug reproduction test
 
 add_executable(result_sorter_asc_desc_test

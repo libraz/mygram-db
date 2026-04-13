@@ -2439,3 +2439,98 @@ TEST(QueryParserBugFixTest, SearchAtLimitAndTermsAccepted) {
   auto result = parser.Parse(query);
   EXPECT_TRUE(result.has_value());
 }
+
+// ============================================================
+// HIGHLIGHT clause tests
+// ============================================================
+
+TEST(QueryParserHighlightTest, HighlightBasic) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->open_tag, "<em>");
+  EXPECT_EQ(result->highlight->close_tag, "</em>");
+  EXPECT_EQ(result->highlight->snippet_length, 100);
+  EXPECT_EQ(result->highlight->max_fragments, 3);
+}
+
+TEST(QueryParserHighlightTest, HighlightWithCustomTags) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <b> </b>");
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->open_tag, "<b>");
+  EXPECT_EQ(result->highlight->close_tag, "</b>");
+}
+
+TEST(QueryParserHighlightTest, HighlightWithSnippetLen) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT SNIPPET_LEN 200");
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->snippet_length, 200);
+}
+
+TEST(QueryParserHighlightTest, HighlightWithMaxFragments) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT MAX_FRAGMENTS 5");
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->max_fragments, 5);
+}
+
+TEST(QueryParserHighlightTest, HighlightWithAllOptions) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <mark> </mark> SNIPPET_LEN 50 MAX_FRAGMENTS 2");
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->open_tag, "<mark>");
+  EXPECT_EQ(result->highlight->close_tag, "</mark>");
+  EXPECT_EQ(result->highlight->snippet_length, 50);
+  EXPECT_EQ(result->highlight->max_fragments, 2);
+}
+
+TEST(QueryParserHighlightTest, HighlightWithOtherClauses) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello AND world HIGHLIGHT LIMIT 10");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->and_terms.size(), 1);
+  EXPECT_EQ(result->and_terms[0], "world");
+  EXPECT_EQ(result->limit, 10);
+}
+
+TEST(QueryParserHighlightTest, HighlightAfterSort) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello SORT _score DESC HIGHLIGHT");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->highlight.has_value());
+  EXPECT_TRUE(result->order_by.has_value());
+  EXPECT_TRUE(result->order_by->IsScoreSort());
+}
+
+TEST(QueryParserHighlightTest, NoHighlightByDefault) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->highlight.has_value());
+}
+
+TEST(QueryParserHighlightTest, HighlightInvalidSnippetLen) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT SNIPPET_LEN 0");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserHighlightTest, HighlightInvalidMaxFragments) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT MAX_FRAGMENTS 0");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserHighlightTest, HighlightTagMissingArgs) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <b>");
+  EXPECT_FALSE(result.has_value());
+}

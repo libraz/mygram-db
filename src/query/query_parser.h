@@ -132,6 +132,16 @@ struct OrderByClause {
 };
 
 /**
+ * @brief Highlight options for SEARCH results
+ */
+struct HighlightOptions {
+  std::string open_tag = "<em>";     ///< Tag inserted before highlighted term
+  std::string close_tag = "</em>";   ///< Tag inserted after highlighted term
+  uint32_t snippet_length = 100;     ///< Max code points per snippet fragment
+  uint32_t max_fragments = 3;        ///< Max snippet fragments joined by ellipsis
+};
+
+/**
  * @brief Cache debug information
  */
 struct CacheDebugInfo {
@@ -194,6 +204,9 @@ struct Query {
   // Variable commands (SET, SHOW VARIABLES)
   std::vector<std::pair<std::string, std::string>> variable_assignments;  // For SET: [(name, value), ...]
   std::string variable_like_pattern;                                      // For SHOW VARIABLES LIKE 'pattern'
+
+  // Highlight options (set when HIGHLIGHT keyword is present)
+  std::optional<HighlightOptions> highlight;
 
   // Cache optimization: precomputed cache key (set by QueryParser)
   // This avoids recomputing normalization and MD5 hash on every cache lookup
@@ -325,6 +338,11 @@ class QueryParser {
    * @brief Parse SORT clause
    */
   bool ParseSort(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+
+  /**
+   * @brief Parse HIGHLIGHT clause
+   */
+  bool ParseHighlight(const std::vector<std::string>& tokens, size_t& pos, Query& query);
 
   /**
    * @brief Tokenize query string
