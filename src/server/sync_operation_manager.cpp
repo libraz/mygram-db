@@ -36,7 +36,9 @@ SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string,
       binlog_reader_(binlog_reader),
       cache_manager_(cache_manager) {}
 
-void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
+void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) {
+  cache_manager_ = cache_manager;
+}
 
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();

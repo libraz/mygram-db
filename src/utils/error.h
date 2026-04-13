@@ -56,22 +56,22 @@ enum class ErrorCode : std::uint16_t {
   kConfigJsonError = 1007,        ///< JSON parsing error
 
   // ===== MySQL/Database Errors (2000-2999) =====
-  kMySQLConnectionFailed = 2000,  ///< Failed to connect to MySQL
-  kMySQLQueryFailed = 2001,       ///< MySQL query execution failed
-  kMySQLDisconnected = 2002,      ///< MySQL connection lost
-  kMySQLAuthFailed = 2003,        ///< MySQL authentication failed
-  kMySQLTimeout = 2004,           ///< MySQL operation timed out
-  kMySQLInvalidGTID = 2005,       ///< Invalid GTID format
-  kMySQLGTIDNotEnabled = 2006,    ///< GTID mode not enabled
-  kMySQLReplicationError = 2007,  ///< Replication error
-  kMySQLBinlogError = 2008,       ///< Binlog reading error
-  kMySQLTableNotFound = 2009,     ///< Table not found
-  kMySQLColumnNotFound = 2010,    ///< Column not found
-  kMySQLDuplicateColumn = 2011,   ///< Duplicate column in unique constraint
-  kMySQLInvalidSchema = 2012,     ///< Invalid schema/table structure
-  kMySQLFieldTruncated = 2013,    ///< Field data truncated in binlog event
-  kMySQLInvalidMetadata = 2014,   ///< Invalid field metadata in binlog event
-  kMySQLUnsupportedType = 2015,          ///< Unsupported MySQL column type
+  kMySQLConnectionFailed = 2000,        ///< Failed to connect to MySQL
+  kMySQLQueryFailed = 2001,             ///< MySQL query execution failed
+  kMySQLDisconnected = 2002,            ///< MySQL connection lost
+  kMySQLAuthFailed = 2003,              ///< MySQL authentication failed
+  kMySQLTimeout = 2004,                 ///< MySQL operation timed out
+  kMySQLInvalidGTID = 2005,             ///< Invalid GTID format
+  kMySQLGTIDNotEnabled = 2006,          ///< GTID mode not enabled
+  kMySQLReplicationError = 2007,        ///< Replication error
+  kMySQLBinlogError = 2008,             ///< Binlog reading error
+  kMySQLTableNotFound = 2009,           ///< Table not found
+  kMySQLColumnNotFound = 2010,          ///< Column not found
+  kMySQLDuplicateColumn = 2011,         ///< Duplicate column in unique constraint
+  kMySQLInvalidSchema = 2012,           ///< Invalid schema/table structure
+  kMySQLFieldTruncated = 2013,          ///< Field data truncated in binlog event
+  kMySQLInvalidMetadata = 2014,         ///< Invalid field metadata in binlog event
+  kMySQLUnsupportedType = 2015,         ///< Unsupported MySQL column type
   kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
 
   // ===== Query Parsing Errors (3000-3999) =====
