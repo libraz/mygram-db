@@ -194,6 +194,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
                                                 deps_.config.memory.normalize.lower);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
+    // Disable normalized text storage when verify_text is off (saves memory)
+    if (deps_.config.memory.verify_text == "off") {
+      ctx->doc_store->SetStoreTexts(false);
+    }
+
     // Load synonym dictionary if configured
     if (table_config.synonyms.enable && !table_config.synonyms.file.empty()) {
       ctx->synonym_dict = std::make_unique<query::SynonymDictionary>();
