@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-04-13
+
+### Added
+
+- **CRC32 binlog checksum verification** — Each received binlog event is verified against its trailing CRC32 checksum; corrupted events are logged and skipped with an observable `crc_errors_` counter
+- **New error codes** — `kMySQLFieldTruncated` (2013), `kMySQLInvalidMetadata` (2014), `kMySQLUnsupportedType` (2015), `kMySQLBinlogChecksumMismatch` (2016), `kSyncThreadCreationFailed` (4013)
+- **comparison_utils.h** — Generic `CompareValues<T>`, `CompareDoubleValues`, `CompareDoubleValuesRelative` helpers
+- **protocol_constants.h** — Shared TCP protocol constants replacing parallel local definitions
+- **FilterMap type alias** — `absl::flat_hash_map` with transparent hash for heterogeneous lookup throughout document store, filter index, and binlog modules
+
+### Fixed
+
+- **Use-after-free in FilterIndex::GetEqBitmap** — Returns a copy instead of a raw pointer into internal storage, closing a race where concurrent writers could free the bitmap
+- **Deadlock in SyncOperationManager::StopSync** — Joins background threads after releasing `sync_mutex_` instead of while holding it
+- **SYNC data race** — Stop replication before clearing index/doc_store during SYNC; invalidate search cache after rebuild
+- **CRC32 stripping in QUERY_EVENT** — Strip 4-byte checksum from effective length to avoid parsing garbage bytes
+- **NULL column parsing** — Skip buffer bounds check for NULL columns that consume no bytes
+- **Memory tracking underflow** — Cache entries record heap footprint at insertion time to prevent `total_memory_bytes_` going negative
+- **Filter-column invalidation bypass** — Always invalidate filter-bearing entries when filter columns change, even when text also changed
+- **Partial network I/O** — Handle partial send/recv in CLI and client with proper loops
+- **PostingList serialization endianness** — Use little-endian helpers; use safe deserialization for Roaring bitmaps
+- **Exponential backtracking in LIKE** — Replace with O(n*m) dynamic programming
+- **Security hardening** — Password masking in SHOW VARIABLES, SQL injection prevention, path traversal fix, port range validation, null byte injection rejection
+- **Thread safety** — Atomic conversions for cache fields, mutex protection for `last_error_`, TOCTOU fixes in SnapshotScheduler, atomic ResetStats in RateLimiter, atomic `store_texts_` in DocumentStore
+- **RPM packaging** — Remove Oracle MySQL-specific dependency for AlmaLinux compatibility; stop auto-restart on upgrade
+
+### Changed
+
+- **8 large files split into focused modules** — All `.cpp` files over 1000 lines decomposed into logically grouped translation units (dump_format_v1, document_store, rows_parser, binlog_reader, query_parser, config, http_server, index)
+- **Sentinel strings replaced with Expected errors** — `DecodeFieldValue` returns `Expected<std::string, Error>` instead of sentinel strings
+- **Sync error codes relocated** — `kSyncTableNotFound`/`kSyncAlreadyInProgress`/`kSyncMemoryCritical` moved from network range (6030–6032) to business-logic range (4010–4012)
+- **CacheManager::Insert()** — ngrams parameter changed from `std::set` to `std::vector`
+- **SyncOperationManager::StartSync()** — Return type changed from `std::string` to `Expected<std::string, Error>`
+- **PostingList performance** — O(1) monotonic add fast-path, cached `last_doc_id_`, `lower_bound` in Remove, lock-free `SizeApprox`/`MemoryUsageApprox`
+- **Index performance** — Heterogeneous lookup, reused temp vectors in SearchOr/SearchNot, `absl::flat_hash_map` in batch/snapshot paths
+- **Search pipeline** — Batch filter/PK lookups, sorted set_union for ngrams
+- **RateLimiter cleanup** — Time-based instead of request-count-based to eliminate latency spikes
+- **Dead code removal** — `ProcessRow`, `CleanupOldClients`, `Index::SearchOrInternal`; `DumpManager` marked `[[deprecated]]`
+
+### Testing
+
+- New test files: `binlog_crc32_test`, `comparison_utils_test`, `config_security_test`, `connection_acceptor_tcp_test`, `search_pipeline_test`, `atomic_file_writer_test`, `dump_format_v1_bounds_test`, `posting_list_serialization_test`, `invalidation_manager_test`, `cache_thread_safety_test`, `flag_guard_test`, `network_utils_test`
+- Expanded coverage for filter_index, rate_limiter, query_parser, document_store, index, posting_list, rows_parser, cache_manager, config, error codes
+
+**Detailed Release Notes**: [docs/releases/v1.5.4.md](docs/releases/v1.5.4.md)
+
 ## [1.5.3] - 2026-04-12
 
 ### Added
