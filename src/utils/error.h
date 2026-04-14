@@ -75,9 +75,9 @@ enum class ErrorCode : std::uint16_t {
   kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
 
   // MariaDB-specific errors (2020-2029)
-  kMariaDBInvalidGTID = 2020,        ///< Invalid MariaDB GTID format (expected domain-server-seq)
-  kMariaDBProtocolError = 2021,      ///< MariaDB binlog protocol error
-  kMariaDBUnsupportedVersion = 2022, ///< MariaDB version not supported
+  kMariaDBInvalidGTID = 2020,         ///< Invalid MariaDB GTID format (expected domain-server-seq)
+  kMariaDBProtocolError = 2021,       ///< MariaDB binlog protocol error
+  kMariaDBUnsupportedVersion = 2022,  ///< MariaDB version not supported
 
   // ===== Query Parsing Errors (3000-3999) =====
   kQuerySyntaxError = 3000,           ///< Query syntax error

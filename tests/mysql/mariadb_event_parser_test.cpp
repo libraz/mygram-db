@@ -3,12 +3,13 @@
  * @brief Tests for MariaDB-specific binlog event parsing
  */
 
+#include "mysql/mariadb_event_parser.h"
+
 #include <gtest/gtest.h>
 
 #include <cstring>
 #include <vector>
 
-#include "mysql/mariadb_event_parser.h"
 #include "mysql/mariadb_gtid.h"
 #include "utils/constants.h"
 
@@ -147,8 +148,8 @@ class MariaDBEventParserGTIDListTest : public ::testing::Test {
   std::vector<unsigned char> BuildGTIDListEvent(const std::vector<MariaDBGTID>& gtids, uint32_t flags = 0) {
     uint32_t count = static_cast<uint32_t>(gtids.size());
     uint32_t count_and_flags = (flags << 28) | (count & 0x0FFFFFFFu);
-    uint32_t total_len = mygram::constants::kBinlogEventHeaderLen + 4 + (count * 16) +
-                         mygram::constants::kBinlogChecksumSize;
+    uint32_t total_len =
+        mygram::constants::kBinlogEventHeaderLen + 4 + (count * 16) + mygram::constants::kBinlogChecksumSize;
 
     auto buf = MakeEventHeader(163, 1, total_len);
     AppendU32(buf, count_and_flags);
@@ -243,8 +244,7 @@ class MariaDBEventParserAnnotateTest : public ::testing::Test {
   /// Build an ANNOTATE_ROWS event (type 160)
   /// Layout: header(19) + sql_text + CRC32(4)
   std::vector<unsigned char> BuildAnnotateRowsEvent(const std::string& sql) {
-    uint32_t total_len = mygram::constants::kBinlogEventHeaderLen + sql.size() +
-                         mygram::constants::kBinlogChecksumSize;
+    uint32_t total_len = mygram::constants::kBinlogEventHeaderLen + sql.size() + mygram::constants::kBinlogChecksumSize;
     auto buf = MakeEventHeader(160, 1, total_len);
     buf.insert(buf.end(), sql.begin(), sql.end());
     AppendCRC32Placeholder(buf);
@@ -333,8 +333,8 @@ TEST(MariaDBEventParserIntegrationTest, GTIDListToSet) {
 
   // Build GTID_LIST event
   uint32_t count = 2;
-  uint32_t total_len = mygram::constants::kBinlogEventHeaderLen + 4 + (count * 16) +
-                       mygram::constants::kBinlogChecksumSize;
+  uint32_t total_len =
+      mygram::constants::kBinlogEventHeaderLen + 4 + (count * 16) + mygram::constants::kBinlogChecksumSize;
   auto buf = MakeEventHeader(163, 1, total_len);
   AppendU32(buf, count);
   for (const auto& gtid : gtids) {

@@ -72,11 +72,11 @@ enum class MySQLBinlogEventType : uint8_t {
 
   // MariaDB-specific event types (160+)
   // These IDs are assigned by MariaDB and do not overlap with MySQL event types.
-  MARIADB_ANNOTATE_ROWS_EVENT = 160,     ///< Original SQL query for row events (debug)
+  MARIADB_ANNOTATE_ROWS_EVENT = 160,      ///< Original SQL query for row events (debug)
   MARIADB_BINLOG_CHECKPOINT_EVENT = 161,  ///< XA crash recovery checkpoint
-  MARIADB_GTID_EVENT = 162,              ///< MariaDB GTID (domain-server-seq)
-  MARIADB_GTID_LIST_EVENT = 163,         ///< List of GTIDs at binlog start
-  MARIADB_START_ENCRYPTION_EVENT = 164,  ///< Binlog encryption marker
+  MARIADB_GTID_EVENT = 162,               ///< MariaDB GTID (domain-server-seq)
+  MARIADB_GTID_LIST_EVENT = 163,          ///< List of GTIDs at binlog start
+  MARIADB_START_ENCRYPTION_EVENT = 164,   ///< Binlog encryption marker
 
   ENUM_END_EVENT = 255  // End marker
 };

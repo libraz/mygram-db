@@ -1413,8 +1413,8 @@ TEST(BinlogParsingTest, MariaDBGtidEventReturnsEmpty) {
   TableMetadataCache cache;
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
-  auto events =
-      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts,
+                                                    nullptr, false);
   EXPECT_TRUE(events.empty()) << "MARIADB_GTID_EVENT should return empty (handled by reader thread)";
 }
 
@@ -1423,8 +1423,8 @@ TEST(BinlogParsingTest, MariaDBGtidListEventReturnsEmpty) {
   TableMetadataCache cache;
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
-  auto events =
-      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts,
+                                                    nullptr, false);
   EXPECT_TRUE(events.empty()) << "MARIADB_GTID_LIST_EVENT should return empty";
 }
 
@@ -1433,8 +1433,8 @@ TEST(BinlogParsingTest, MariaDBAnnotateRowsEventReturnsEmpty) {
   TableMetadataCache cache;
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
-  auto events =
-      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts,
+                                                    nullptr, false);
   EXPECT_TRUE(events.empty()) << "MARIADB_ANNOTATE_ROWS_EVENT should return empty";
 }
 
@@ -1449,8 +1449,8 @@ TEST(BinlogParsingTest, MariaDBBinlogCheckpointEventReturnsEmpty) {
   TableMetadataCache cache;
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
-  auto events =
-      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts,
+                                                    nullptr, false);
   EXPECT_TRUE(events.empty()) << "MARIADB_BINLOG_CHECKPOINT_EVENT should return empty";
 }
 
@@ -1463,8 +1463,8 @@ TEST(BinlogParsingTest, MariaDBStartEncryptionEventReturnsEmpty) {
   TableMetadataCache cache;
   std::unordered_map<std::string, server::TableContext*> table_contexts;
 
-  auto events =
-      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts,
+                                                    nullptr, false);
   EXPECT_TRUE(events.empty()) << "MARIADB_START_ENCRYPTION_EVENT should return empty";
 }
 

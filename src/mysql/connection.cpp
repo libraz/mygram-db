@@ -485,8 +485,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
 }
 
 std::optional<std::string> Connection::GetServerUUID() {
-  const char* query =
-      (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.server_id" : "SELECT @@GLOBAL.server_uuid";
+  const char* query = (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.server_id" : "SELECT @@GLOBAL.server_uuid";
   auto result = Execute(query);
   if (!result) {
     return std::nullopt;

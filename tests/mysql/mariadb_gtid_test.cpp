@@ -27,7 +27,7 @@ TEST(MariaDBGTIDTest, ParseLargeValues) {
   auto result = MariaDBGTID::Parse("100-4294967295-18446744073709551615");
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->domain_id, 100u);
-  EXPECT_EQ(result->server_id, 4294967295u);  // uint32_t max
+  EXPECT_EQ(result->server_id, 4294967295u);                // uint32_t max
   EXPECT_EQ(result->sequence_no, 18446744073709551615ULL);  // uint64_t max
 }
 

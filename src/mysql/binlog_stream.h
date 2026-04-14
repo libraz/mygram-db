@@ -92,7 +92,7 @@ class IBinlogStream {
    * @return Success or error (includes binlog purged as specific error)
    */
   virtual mygram::utils::Expected<void, mygram::utils::Error> Open(Connection& conn, const std::string& gtid,
-                                                                    uint32_t server_id) = 0;
+                                                                   uint32_t server_id) = 0;
 
   /**
    * @brief Fetch next binlog event

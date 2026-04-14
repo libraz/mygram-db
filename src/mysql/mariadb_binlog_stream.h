@@ -41,7 +41,7 @@ class MariaDBBinlogStream final : public IBinlogStream {
 
   mygram::utils::Expected<void, mygram::utils::Error> SetupSession(Connection& conn) override;
   mygram::utils::Expected<void, mygram::utils::Error> Open(Connection& conn, const std::string& gtid,
-                                                            uint32_t server_id) override;
+                                                           uint32_t server_id) override;
   BinlogFetchResult Fetch(Connection& conn) override;
   void Close(Connection& conn) override;
 

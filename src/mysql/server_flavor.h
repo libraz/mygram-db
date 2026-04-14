@@ -43,8 +43,7 @@ inline const char* GetServerFlavorName(ServerFlavor flavor) {
 inline ServerFlavor DetectServerFlavor(const std::string& version_string) {
   // MariaDB always includes "MariaDB" (case-insensitive check for robustness)
   // but in practice it's always capitalized as "MariaDB"
-  if (version_string.find("MariaDB") != std::string::npos ||
-      version_string.find("mariadb") != std::string::npos) {
+  if (version_string.find("MariaDB") != std::string::npos || version_string.find("mariadb") != std::string::npos) {
     return ServerFlavor::kMariaDB;
   }
   return ServerFlavor::kMySQL;

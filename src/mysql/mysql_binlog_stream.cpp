@@ -32,9 +32,8 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::SetupSess
 
   // Request CRC32 checksums so we can verify data integrity on each event
   if (mysql_query(conn.GetHandle(), "SET @source_binlog_checksum='CRC32'") != 0) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kMySQLBinlogError,
-                  std::string("Failed to set binlog checksum to CRC32: ") + conn.GetLastError()));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
+                                    std::string("Failed to set binlog checksum to CRC32: ") + conn.GetLastError()));
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksum_crc32_enabled").Debug();
 
@@ -53,7 +52,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::SetupSess
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::Open(Connection& conn, const std::string& gtid,
-                                                                             uint32_t server_id) {
+                                                                            uint32_t server_id) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;

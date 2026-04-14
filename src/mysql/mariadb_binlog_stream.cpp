@@ -34,9 +34,8 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
   // Query the server's checksum setting and mirror it
   if (mysql_query(conn.GetHandle(), "SET @master_binlog_checksum = @@global.binlog_checksum") != 0) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kMariaDBProtocolError,
-                  std::string("Failed to set binlog checksum: ") + conn.GetLastError()));
+    return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,
+                                    std::string("Failed to set binlog checksum: ") + conn.GetLastError()));
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_checksum_configured").Debug();
 
@@ -72,9 +71,8 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   return {};
 }
 
-mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Connection& conn,
-                                                                               const std::string& gtid,
-                                                                               uint32_t server_id) {
+mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Connection& conn, const std::string& gtid,
+                                                                              uint32_t server_id) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -100,9 +98,9 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
   std::memset(&rpl_, 0, sizeof(rpl_));
   rpl_.file_name_length = 0;  // Empty filename = use current binlog
   rpl_.file_name = nullptr;
-  rpl_.start_position = 4;     // Skip magic number at start of binlog
+  rpl_.start_position = 4;  // Skip magic number at start of binlog
   rpl_.server_id = server_id;
-  rpl_.flags = 0;              // No MYSQL_RPL_GTID — triggers COM_BINLOG_DUMP path
+  rpl_.flags = 0;  // No MYSQL_RPL_GTID — triggers COM_BINLOG_DUMP path
 
   // No GTID callback needed (MariaDB uses session variable, not binary-encoded GTID)
   rpl_.gtid_set_encoded_size = 0;
@@ -112,8 +110,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
   // Open binlog stream via COM_BINLOG_DUMP
   if (mysql_binlog_open(conn.GetHandle(), &rpl_) != 0) {
     unsigned int err_no = mysql_errno(conn.GetHandle());
-    std::string error_msg =
-        "Failed to open MariaDB binlog stream: " + std::string(mysql_error(conn.GetHandle()));
+    std::string error_msg = "Failed to open MariaDB binlog stream: " + std::string(mysql_error(conn.GetHandle()));
 
     if (err_no == kMySQLErrBinlogPurged) {
       return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,

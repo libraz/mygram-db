@@ -392,7 +392,7 @@ class BinlogEventBuilder {
    * The server_id is stored in the standard event header.
    */
   static inline std::vector<uint8_t> BuildMariaDBGtidEvent(uint32_t domain_id, uint32_t server_id, uint64_t seq_no,
-                                                            uint8_t flags = 0) {
+                                                           uint8_t flags = 0) {
     auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_EVENT, server_id);
 
     // Post-header
@@ -422,7 +422,7 @@ class BinlogEventBuilder {
   };
 
   static inline std::vector<uint8_t> BuildMariaDBGtidListEvent(const std::vector<MariaDBGtidEntry>& entries,
-                                                                uint32_t flags = 0) {
+                                                               uint32_t flags = 0) {
     auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT);
 
     uint32_t count_and_flags = (flags << 28) | (static_cast<uint32_t>(entries.size()) & 0x0FFFFFFFu);
