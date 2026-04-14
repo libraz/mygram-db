@@ -6,11 +6,11 @@
  * and all methods return expected safe defaults.
  */
 
-#include "utils/error.h"  // Must be included before null_binlog_reader.h (provides mygram::utils::Error)
-
 #include "mysql/null_binlog_reader.h"
 
 #include <gtest/gtest.h>
+
+#include "utils/error.h"  // Must be included before null_binlog_reader.h (provides mygram::utils::Error)
 
 namespace mygramdb::mysql {
 

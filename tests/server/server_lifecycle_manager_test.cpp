@@ -376,8 +376,8 @@ TEST_F(ServerLifecycleManagerTest, Initialize_StopsAtFirstError) {
  */
 TEST_F(ServerLifecycleManagerTest, Create_ValidArgs_ReturnsValidObject) {
   auto result = ServerLifecycleManager::Create(
-      server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
-      dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
+      server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
       nullptr  // binlog_reader
 #ifdef USE_MYSQL
       ,
@@ -395,12 +395,11 @@ TEST_F(ServerLifecycleManagerTest, Create_ValidArgs_ReturnsValidObject) {
  * @brief Test that Create() with null sync_manager returns an error (not throws)
  */
 TEST_F(ServerLifecycleManagerTest, Create_NullSyncManager_ReturnsError) {
-  auto result = ServerLifecycleManager::Create(server_config_, table_contexts_, dump_dir_, &full_config_, stats_,
-                                               dump_load_in_progress_, dump_save_in_progress_,
-                                               optimization_in_progress_, replication_paused_for_dump_,
-                                               mysql_reconnecting_,
-                                               nullptr,  // binlog_reader
-                                               nullptr   // sync_manager = null
+  auto result = ServerLifecycleManager::Create(
+      server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
+      nullptr,  // binlog_reader
+      nullptr   // sync_manager = null
   );
 
   ASSERT_FALSE(result);

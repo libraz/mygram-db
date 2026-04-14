@@ -232,8 +232,7 @@ TEST(IndexConcurrentTest, LoadFromFile) {
           break;
         auto results = index2.SearchAnd({"a"});
         EXPECT_TRUE(results.size() == 0 || results.size() == 100)
-            << "Got partial result: " << results.size()
-            << " (expected 0 before load or 100 after load)";
+            << "Got partial result: " << results.size() << " (expected 0 before load or 100 after load)";
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
     });
