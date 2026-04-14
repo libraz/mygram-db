@@ -1,9 +1,11 @@
+// Manual integration test - requires live MySQL. Not run by ctest.
 /**
  * Test snapshot save and load with id < 10000 filter
  */
 
 #include <spdlog/spdlog.h>
 
+#include <cstdlib>
 #include <iostream>
 
 #include "config/config.h"
@@ -21,7 +23,7 @@ int main() {
   mysql_config.host = "127.0.0.1";
   mysql_config.port = 3306;
   mysql_config.user = "root";
-  mysql_config.password = "solaris10";
+  mysql_config.password = std::getenv("MYSQL_PASSWORD") ? std::getenv("MYSQL_PASSWORD") : "change_me";
   mysql_config.database = "test";
 
   // Table config

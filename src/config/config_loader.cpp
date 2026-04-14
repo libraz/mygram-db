@@ -142,8 +142,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
       return MakeUnexpected(validation_result.error());
     }
 
-    // Parse config (this may throw std::runtime_error from helper functions)
-    Config config = internal::ParseConfigFromJson(config_json);
+    // Parse config from JSON object
+    auto config_result = internal::ParseConfigFromJson(config_json);
+    if (!config_result) {
+      return MakeUnexpected(config_result.error());
+    }
+    auto& config = *config_result;
 
     // Apply log format immediately so subsequent logs use the configured format
     mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
@@ -173,8 +177,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
     YAML::Node yaml_root = YAML::LoadFile(path);
     json json_root = internal::YamlToJson(yaml_root);
 
-    // Parse config (this may throw std::runtime_error from helper functions)
-    Config config = internal::ParseConfigFromJson(json_root);
+    // Parse config from JSON object
+    auto config_result = internal::ParseConfigFromJson(json_root);
+    if (!config_result) {
+      return MakeUnexpected(config_result.error());
+    }
+    auto& config = *config_result;
 
     // Apply log format immediately so subsequent logs use the configured format
     mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
@@ -253,7 +261,11 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
         }
 
         // Reuse the already-parsed JSON instead of re-reading and re-parsing the file
-        Config config = internal::ParseConfigFromJson(json_root);
+        auto config_result = internal::ParseConfigFromJson(json_root);
+        if (!config_result) {
+          return MakeUnexpected(config_result.error());
+        }
+        auto& config = *config_result;
 
         // Apply log format immediately so subsequent logs use the configured format
         mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));

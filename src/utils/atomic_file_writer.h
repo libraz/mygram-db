@@ -61,6 +61,7 @@ class AtomicFileWriter {
   std::string filepath_;
   std::string temp_filepath_;
   bool committed_ = false;
+  bool rolled_back_ = false;
 };
 
 }  // namespace mygram::utils

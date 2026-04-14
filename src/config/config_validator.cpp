@@ -7,7 +7,6 @@
 #include <nlohmann/json-schema.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 
 #include "config/config.h"
@@ -19,58 +18,78 @@ namespace mygramdb::config {
 
 namespace internal {
 
-void ValidatePathNoTraversal(const std::string& path, const std::string& field_name) {
+mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
+                                                                            const std::string& field_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (path.empty()) {
-    return;  // Empty paths are allowed (will be validated elsewhere if required)
+    return {};  // Empty paths are allowed (will be validated elsewhere if required)
   }
 
   // Check for ".." as a path component (not just substring)
   if (path == ".." || path.find("/../") != std::string::npos || path.find("../") == 0 ||
       (path.size() >= 3 && path.substr(path.size() - 3) == "/..")) {
-    throw std::runtime_error(
-        "Path traversal detected in '" + field_name +
-        "': path contains '..' component which is not allowed for security reasons. "
-        "Use absolute paths or paths relative to the working directory without parent references.");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue,
+                  "Path traversal detected in '" + field_name +
+                      "': path contains '..' component which is not allowed for security reasons. "
+                      "Use absolute paths or paths relative to the working directory without parent references."));
   }
 
   // Check for null bytes (could be used to truncate paths)
   if (path.find('\0') != std::string::npos) {
-    throw std::runtime_error("Invalid path in '" + field_name + "': path contains null bytes.");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid path in '" + field_name + "': path contains null bytes."));
   }
+
+  return {};
 }
 
-void ValidateBindAddress(const std::string& address, const std::string& field_name) {
+mygram::utils::Expected<void, mygram::utils::Error> ValidateBindAddress(const std::string& address,
+                                                                        const std::string& field_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (address.empty()) {
-    return;  // Empty addresses use defaults
+    return {};  // Empty addresses use defaults
   }
 
   // Check for null bytes
   if (address.find('\0') != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name + "': address contains null bytes.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name + "': address contains null bytes."));
   }
 
   // Check for path traversal patterns
   if (address.find("..") != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name +
-                             "': address contains '..' which is not allowed. "
-                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name +
+                                        "': address contains '..' which is not allowed. "
+                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
   }
 
   // Check for path separators (bind addresses should not contain slashes)
   if (address.find('/') != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name +
-                             "': address contains '/' which is not allowed. "
-                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name +
+                                        "': address contains '/' which is not allowed. "
+                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
   }
 
   // Check for whitespace
   for (char character : address) {
     if (std::isspace(static_cast<unsigned char>(character)) != 0) {
-      throw std::runtime_error("Invalid bind address in '" + field_name +
-                               "': address contains whitespace. "
-                               "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+      return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                      "Invalid bind address in '" + field_name +
+                                          "': address contains whitespace. "
+                                          "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
     }
   }
+
+  return {};
 }
 
 }  // namespace internal

@@ -604,7 +604,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "search")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 
@@ -767,7 +772,12 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "count")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 
@@ -829,7 +839,8 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog().Event("http_handler_error").Field("handler", "get").Field("error", e.what()).Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 
@@ -983,7 +994,12 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "info")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 
@@ -1155,7 +1171,12 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "config")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 
@@ -1176,7 +1197,12 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
     SendJson(res, kHttpOk, response);
 
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "replication_status")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 #else
   SendError(res, kHttpServiceUnavailable, "MySQL replication not compiled");
@@ -1202,7 +1228,12 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {
-    SendError(res, kHttpInternalServerError, "Internal error: " + std::string(e.what()));
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "metrics")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
   }
 }
 

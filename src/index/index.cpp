@@ -330,9 +330,17 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     }
   }
 
-  // Note: limit and reverse are applied by ResultSorter layer, not here
-  // This is because we don't know the offset, and for multi-term queries
-  // the intersection result size is unpredictable
+  // Apply limit if specified (optimization: avoid returning more results than needed)
+  // Note: offset is applied by ResultSorter, but limit can be applied here to reduce
+  // the amount of data passed to the sorting layer.
+  if (limit > 0 && result.size() > limit) {
+    if (reverse) {
+      // Take the last `limit` elements (highest DocIDs)
+      result.erase(result.begin(), result.begin() + static_cast<std::ptrdiff_t>(result.size() - limit));
+    } else {
+      result.resize(limit);
+    }
+  }
   return result;
 }
 

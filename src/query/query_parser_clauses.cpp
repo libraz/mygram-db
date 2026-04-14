@@ -380,7 +380,10 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
           return false;
         }
         opts.snippet_length = static_cast<uint32_t>(val);
-      } catch (...) {
+      } catch (const std::out_of_range&) {
+        SetError("HIGHLIGHT SNIPPET_LEN value out of range");
+        return false;
+      } catch (const std::invalid_argument&) {
         SetError("Invalid HIGHLIGHT SNIPPET_LEN value");
         return false;
       }
@@ -398,7 +401,10 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
           return false;
         }
         opts.max_fragments = static_cast<uint32_t>(val);
-      } catch (...) {
+      } catch (const std::out_of_range&) {
+        SetError("HIGHLIGHT MAX_FRAGMENTS value out of range");
+        return false;
+      } catch (const std::invalid_argument&) {
         SetError("Invalid HIGHLIGHT MAX_FRAGMENTS value");
         return false;
       }

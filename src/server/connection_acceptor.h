@@ -110,7 +110,7 @@ class ConnectionAcceptor {
    * @brief Check if acceptor is running
    * @return true if accepting connections
    */
-  bool IsRunning() const { return running_; }
+  bool IsRunning() const { return running_.load(std::memory_order_acquire); }
 
   /**
    * @brief Check if this acceptor uses Unix domain socket

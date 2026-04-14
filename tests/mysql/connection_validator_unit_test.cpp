@@ -191,6 +191,51 @@ TEST(ConnectionValidatorErrorTest, ValidateServerNotConnected) {
   EXPECT_THAT(result.error_message, ::testing::HasSubstr("Connection is not active"));
 }
 
+/**
+ * @brief Test that ValidateServer returns meaningful error for bad configurations
+ * Verifies the Expected-based internal helpers propagate error messages correctly
+ */
+TEST(ConnectionValidatorErrorTest, ErrorMessagePropagation) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  // ValidateServer with no tables should fail because connection is not active
+  std::vector<std::string> tables = {"articles"};
+  auto result = ConnectionValidator::ValidateServer(conn, tables);
+
+  EXPECT_FALSE(result.valid);
+  // Error message should be populated from the first failed check
+  EXPECT_FALSE(result.error_message.empty());
+  // Should not have failover detected on a non-connected server
+  EXPECT_FALSE(result.failover_detected);
+}
+
+/**
+ * @brief Test that validation result carries error for GTID disabled scenario
+ * The CheckGTIDEnabled helper now returns Expected<void, Error> with kMySQLGTIDNotEnabled
+ */
+TEST(ConnectionValidatorErrorTest, ErrorCodeRangeForMySQLErrors) {
+  // Verify that error codes used by ConnectionValidator are in the MySQL range
+  using mygram::utils::ErrorCode;
+
+  // All error codes used internally should be in 2000-2999
+  auto check_range = [](ErrorCode code) {
+    auto val = static_cast<uint16_t>(code);
+    return val >= 2000 && val <= 2999;
+  };
+
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLGTIDNotEnabled));
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLTableNotFound));
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLBinlogError));
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLQueryFailed));
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLReplicationError));
+  EXPECT_TRUE(check_range(ErrorCode::kMySQLInvalidGTID));
+}
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

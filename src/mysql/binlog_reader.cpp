@@ -102,8 +102,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
-    SetLastError("Binlog reader is already running");
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    SetLastError(MakeError(ErrorCode::kMySQLBinlogError, "Binlog reader is already running"));
+    return MakeUnexpected(GetLastErrorObject());
   }
 
   // RAII guard to manage all resources on failure
@@ -170,18 +170,19 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
-    SetLastError("server_id must be set to a non-zero value for binlog replication");
+    SetLastError(
+        MakeError(ErrorCode::kMySQLBinlogError, "server_id must be set to a non-zero value for binlog replication"));
     mygram::utils::LogBinlogError("invalid_server_id", current_gtid_, GetLastError());
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    return MakeUnexpected(GetLastErrorObject());
   }
 
   // Check MySQL connection (reconnect if stale)
   if (!connection_.IsConnected()) {
     auto reconnect_result = connection_.Reconnect();
     if (!reconnect_result) {
-      SetLastError("MySQL connection not established and reconnect failed");
+      SetLastError(MakeError(ErrorCode::kMySQLDisconnected, "MySQL connection not established and reconnect failed"));
       mygram::utils::LogBinlogError("startup_failed", current_gtid_, GetLastError());
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, GetLastError()));
+      return MakeUnexpected(GetLastErrorObject());
     }
   } else {
     // Connection appears alive but may be stale; verify with ping
@@ -189,53 +190,56 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     if (!ping_result) {
       auto reconnect_result = connection_.Reconnect();
       if (!reconnect_result) {
-        SetLastError("MySQL connection lost and reconnect failed");
+        SetLastError(MakeError(ErrorCode::kMySQLDisconnected, "MySQL connection lost and reconnect failed"));
         mygram::utils::LogBinlogError("startup_failed", current_gtid_, GetLastError());
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, GetLastError()));
+        return MakeUnexpected(GetLastErrorObject());
       }
     }
   }
 
   // Check if GTID mode is enabled (using main connection)
   if (!connection_.IsGTIDModeEnabled()) {
-    SetLastError(
-        "GTID mode is not enabled on MySQL server. "
-        "Please enable GTID mode (gtid_mode=ON) for binlog replication.");
+    SetLastError(MakeError(ErrorCode::kMySQLGTIDNotEnabled,
+                           "GTID mode is not enabled on MySQL server. "
+                           "Please enable GTID mode (gtid_mode=ON) for binlog replication."));
     mygram::utils::LogBinlogError("gtid_mode_disabled", current_gtid_, GetLastError());
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    return MakeUnexpected(GetLastErrorObject());
   }
 
   // Validate primary keys for all tables
   if (multi_table_mode_) {
     for (const auto& [table_name, ctx] : table_contexts_) {
-      std::string validation_error;
-      if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key,
-                                            validation_error)) {
-        SetLastError("Primary key validation failed for table '" + table_name + "': " + validation_error);
+      auto validate_result =
+          connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key);
+      if (!validate_result) {
+        std::string error_msg =
+            "Primary key validation failed for table '" + table_name + "': " + validate_result.error().message();
+        SetLastError(MakeError(validate_result.error().code(), error_msg, table_name));
         mygram::utils::StructuredLog()
             .Event("binlog_error")
             .Field("type", "primary_key_validation_failed")
             .Field("table", table_name)
             .Field("gtid", current_gtid_)
-            .Field("error", GetLastError())
+            .Field("error", error_msg)
             .Error();
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+        return MakeUnexpected(GetLastErrorObject());
       }
     }
   } else {
     // Single-table mode
-    std::string validation_error;
-    if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
-                                          table_config_.primary_key, validation_error)) {
-      SetLastError("Primary key validation failed: " + validation_error);
+    auto validate_result = connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
+                                                            table_config_.primary_key);
+    if (!validate_result) {
+      std::string error_msg = "Primary key validation failed: " + validate_result.error().message();
+      SetLastError(MakeError(validate_result.error().code(), error_msg, table_config_.name));
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "primary_key_validation_failed")
           .Field("table", table_config_.name)
           .Field("gtid", current_gtid_)
-          .Field("error", GetLastError())
+          .Field("error", error_msg)
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+      return MakeUnexpected(GetLastErrorObject());
     }
   }
 
@@ -253,7 +257,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   binlog_connection_ = std::make_unique<Connection>(internal::MakeSubConfig(connection_.GetConfig(), 5));
   auto connect_result = binlog_connection_->Connect("binlog worker");
   if (!connect_result) {
-    SetLastError("Failed to create binlog connection: " + connect_result.error().message());
+    SetLastError(MakeError(ErrorCode::kMySQLConnectionFailed,
+                           "Failed to create binlog connection: " + connect_result.error().message()));
     mygram::utils::LogBinlogError("connection_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up binlog_connection_
     return MakeUnexpected(connect_result.error());
@@ -264,7 +269,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   metadata_connection_ = std::make_unique<Connection>(internal::MakeSubConfig(connection_.GetConfig()));
   auto metadata_connect_result = metadata_connection_->Connect("metadata");
   if (!metadata_connect_result) {
-    SetLastError("Failed to create metadata connection: " + metadata_connect_result.error().message());
+    SetLastError(MakeError(ErrorCode::kMySQLConnectionFailed,
+                           "Failed to create metadata connection: " + metadata_connect_result.error().message()));
     mygram::utils::LogBinlogError("metadata_connection_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up
     return MakeUnexpected(metadata_connect_result.error());
@@ -274,7 +280,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   if (!ValidateConnection()) {
     mygram::utils::LogBinlogError("validation_failed", current_gtid_, GetLastError());
     // StartupGuard will clean up binlog_connection_
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    return MakeUnexpected(GetLastErrorObject());
   }
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
 
@@ -311,10 +317,10 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     guard.success = true;  // Mark start as successful - StartupGuard won't clean up
     return {};
   } catch (const std::exception& e) {
-    SetLastError(std::string("Failed to start threads: ") + e.what());
+    SetLastError(MakeError(ErrorCode::kMySQLBinlogError, std::string("Failed to start threads: ") + e.what()));
     mygram::utils::LogBinlogError("thread_start_failed", current_gtid_, GetLastError());
     // StartupGuard destructor will clean up all resources automatically
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, GetLastError()));
+    return MakeUnexpected(GetLastErrorObject());
   }
 }
 

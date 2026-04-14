@@ -23,8 +23,10 @@ nlohmann::json YamlToJson(const YAML::Node& node);
 
 /**
  * @brief Parse configuration from JSON object
+ * @param root JSON object containing configuration
+ * @return Config on success, or Error on parse failure
  */
-Config ParseConfigFromJson(const nlohmann::json& root);
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root);
 
 /**
  * @brief Read file contents as string
@@ -35,16 +37,18 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ReadFileToString(cons
  * @brief Validate path for directory traversal attacks
  * @param path Path to validate
  * @param field_name Name of the field for error messages
- * @throws std::runtime_error if path contains traversal sequences
+ * @return Success or error if path contains traversal sequences
  */
-void ValidatePathNoTraversal(const std::string& path, const std::string& field_name);
+mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
+                                                                            const std::string& field_name);
 
 /**
  * @brief Validate bind address format
  * @param address Bind address to validate
  * @param field_name Name of the field for error messages
- * @throws std::runtime_error if address is invalid
+ * @return Success or error if address is invalid
  */
-void ValidateBindAddress(const std::string& address, const std::string& field_name);
+mygram::utils::Expected<void, mygram::utils::Error> ValidateBindAddress(const std::string& address,
+                                                                        const std::string& field_name);
 
 }  // namespace mygramdb::config::internal

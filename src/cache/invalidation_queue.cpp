@@ -9,6 +9,7 @@
 
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
 
@@ -218,6 +219,11 @@ void InvalidationQueue::ProcessBatch() {
       keys_to_erase.insert(key);
     } catch (const std::exception& e) {
       // Invalid hex string, skip
+      mygram::utils::StructuredLog()
+          .Event("invalidation_hex_parse_error")
+          .Field("key_hex", std::string(key_hex))
+          .Field("error", e.what())
+          .Debug();
       continue;
     }
   }

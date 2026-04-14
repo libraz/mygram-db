@@ -16,6 +16,8 @@
 #include "mysql/binlog_event_types.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::mysql {
 
@@ -36,13 +38,11 @@ struct RowData {
  * @param table_metadata Table metadata from TABLE_MAP
  * @param pk_column_name Primary key column name
  * @param text_column_name Text column name for search
- * @return Vector of rows if parsed successfully
+ * @return Expected<vector<RowData>, Error> - parsed rows or error with code from 2000-2999
  */
-std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer, unsigned long length,
-                                                        const TableMetadata* table_metadata,
-                                                        const std::string& pk_column_name,
-                                                        const std::string& text_column_name,
-                                                        MySQLBinlogEventType event_type);
+mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
 
 /**
  * @brief Parse UPDATE_ROWS event
@@ -52,9 +52,9 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
  * @param table_metadata Table metadata from TABLE_MAP
  * @param pk_column_name Primary key column name
  * @param text_column_name Text column name for search
- * @return Vector of (old_row, new_row) pairs if parsed successfully
+ * @return Expected<vector<pair<RowData, RowData>>, Error> - parsed row pairs or error
  */
-std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
+mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils::Error> ParseUpdateRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
     const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
 
@@ -66,13 +66,11 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
  * @param table_metadata Table metadata from TABLE_MAP
  * @param pk_column_name Primary key column name
  * @param text_column_name Text column name for search
- * @return Vector of rows if parsed successfully
+ * @return Expected<vector<RowData>, Error> - parsed rows or error with code from 2000-2999
  */
-std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer, unsigned long length,
-                                                         const TableMetadata* table_metadata,
-                                                         const std::string& pk_column_name,
-                                                         const std::string& text_column_name,
-                                                         MySQLBinlogEventType event_type);
+mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
 
 /**
  * @brief Extract filter values from row data

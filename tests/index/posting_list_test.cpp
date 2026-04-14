@@ -795,6 +795,122 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
 }
 
 // =============================================================================
+// MemoryUsageApprox nullptr guard tests
+// =============================================================================
+
+/**
+ * @brief Test MemoryUsageApprox returns 0 when bitmap is null (default state)
+ *
+ * A freshly constructed PostingList has roaring_bitmap_ == nullptr and uses
+ * delta-compressed strategy. MemoryUsage should return the delta vector size.
+ */
+TEST_F(PostingListTest, MemoryUsageApproxDeltaReturnsValue) {
+  PostingList posting(0.5);
+  // Empty delta list: memory usage should be 0
+  EXPECT_EQ(posting.MemoryUsage(), 0);
+
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+  // Delta compressed: 3 elements * sizeof(uint32_t) = 12
+  EXPECT_EQ(posting.MemoryUsage(), 3 * sizeof(uint32_t));
+}
+
+/**
+ * @brief Test MemoryUsageApprox handles nullptr roaring_bitmap_ safely
+ *
+ * When a PostingList has been moved from, roaring_bitmap_ is nullptr.
+ * MemoryUsageApprox must not crash in this state.
+ */
+TEST_F(PostingListTest, MemoryUsageApproxNullBitmapReturnsZero) {
+  // Create a Roaring posting list
+  PostingList posting(0.01);
+  std::vector<DocId> ids;
+  for (DocId id = 1; id <= 50; ++id) {
+    ids.push_back(id);
+  }
+  posting.AddBatch(ids);
+  posting.Optimize(50);  // Force Roaring
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  // Move it away, leaving the source with nullptr bitmap
+  PostingList moved_to = std::move(posting);
+
+  // The moved-from object should report 0 memory usage without crashing
+  EXPECT_EQ(posting.MemoryUsage(), 0);  // NOLINT(bugprone-use-after-move)
+}
+
+// =============================================================================
+// Self-intersection and self-union tests
+// =============================================================================
+
+/**
+ * @brief Test self-intersection returns a copy of the list
+ */
+TEST_F(PostingListTest, SelfIntersectReturnsCopy) {
+  PostingList posting(0.5);
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+
+  // A & A == A
+  auto result = posting.Intersect(posting);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 3);
+
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 3);
+  EXPECT_EQ(all[0], 10);
+  EXPECT_EQ(all[1], 20);
+  EXPECT_EQ(all[2], 30);
+}
+
+/**
+ * @brief Test self-union returns a copy of the list
+ */
+TEST_F(PostingListTest, SelfUnionReturnsCopy) {
+  PostingList posting(0.5);
+  posting.Add(10);
+  posting.Add(20);
+  posting.Add(30);
+
+  // A | A == A
+  auto result = posting.Union(posting);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 3);
+
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 3);
+  EXPECT_EQ(all[0], 10);
+  EXPECT_EQ(all[1], 20);
+  EXPECT_EQ(all[2], 30);
+}
+
+/**
+ * @brief Test self-intersection on empty list
+ */
+TEST_F(PostingListTest, SelfIntersectEmpty) {
+  PostingList posting(0.5);
+
+  auto result = posting.Intersect(posting);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 0);
+}
+
+/**
+ * @brief Test self-union on empty list
+ */
+TEST_F(PostingListTest, SelfUnionEmpty) {
+  PostingList posting(0.5);
+
+  auto result = posting.Union(posting);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 0);
+}
+
+// =============================================================================
 // Intersect/Union doc_count_ and last_doc_id_ tests
 // =============================================================================
 

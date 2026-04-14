@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "mysql/connection.h"
+#include "utils/error.h"
 
 namespace mygramdb::mysql {
 
@@ -22,13 +23,13 @@ TEST(ConnectionValidateUnitTest, MethodExists) {
 
   Connection conn(config);
 
-  std::string error_message;
   // Method should exist and be callable (even if it fails due to no connection)
-  bool result = conn.ValidateUniqueColumn("test_db", "test_table", "id", error_message);
+  auto result = conn.ValidateUniqueColumn("test_db", "test_table", "id");
 
   // We expect failure since we're not actually connected
-  EXPECT_FALSE(result);
-  EXPECT_FALSE(error_message.empty());
+  EXPECT_FALSE(result.has_value());
+  EXPECT_TRUE(result.error().is_error());
+  EXPECT_FALSE(result.error().message().empty());
 }
 
 /**
@@ -45,14 +46,16 @@ TEST(ConnectionValidateUnitTest, NullHandleDoesNotCrash) {
 
   Connection conn(config);
 
-  std::string error_message;
   // Call ValidateUniqueColumn without connecting (mysql_ handle may be nullptr or unconnected)
-  bool result = conn.ValidateUniqueColumn("test_db", "test_table", "id", error_message);
+  auto result = conn.ValidateUniqueColumn("test_db", "test_table", "id");
 
-  // Should not crash and should return false with an error message
-  EXPECT_FALSE(result);
-  // Error message could be either "Not connected" (if handle is null) or a connection error
-  EXPECT_FALSE(error_message.empty());
+  // Should not crash and should return error
+  EXPECT_FALSE(result.has_value());
+  // Error could be kMySQLDisconnected (if handle is null) or kMySQLQueryFailed (if handle exists
+  // but connection was never established). mysql_init() usually returns a non-null handle.
+  EXPECT_TRUE(result.error().code() == mygram::utils::ErrorCode::kMySQLDisconnected ||
+              result.error().code() == mygram::utils::ErrorCode::kMySQLQueryFailed);
+  EXPECT_FALSE(result.error().message().empty());
 }
 
 // Unit test: Query construction logic verification
@@ -166,29 +169,73 @@ TEST(ConnectionValidateSecurityTest, SQLInjectionProtection) {
   config.database = "test";
   Connection conn(config);
 
-  std::string error_message;
-
   // Test SQL injection attempts in database parameter
-  bool result = conn.ValidateUniqueColumn("test' OR '1'='1", "users", "id", error_message);
+  auto result = conn.ValidateUniqueColumn("test' OR '1'='1", "users", "id");
   // Should fail (either due to validation or no connection)
   // The important part is it doesn't cause SQL injection
-  EXPECT_FALSE(result);
+  EXPECT_FALSE(result.has_value());
 
   // Test SQL injection attempts in table parameter
-  result = conn.ValidateUniqueColumn("test", "users'; DROP TABLE users--", "id", error_message);
-  EXPECT_FALSE(result);
+  result = conn.ValidateUniqueColumn("test", "users'; DROP TABLE users--", "id");
+  EXPECT_FALSE(result.has_value());
 
   // Test SQL injection attempts in column parameter
-  result = conn.ValidateUniqueColumn("test", "users", "id' UNION SELECT * FROM passwords--", error_message);
-  EXPECT_FALSE(result);
+  result = conn.ValidateUniqueColumn("test", "users", "id' UNION SELECT * FROM passwords--");
+  EXPECT_FALSE(result.has_value());
 
   // Test with backtick escape attempts
-  result = conn.ValidateUniqueColumn("test`; DROP TABLE users--", "users", "id", error_message);
-  EXPECT_FALSE(result);
+  result = conn.ValidateUniqueColumn("test`; DROP TABLE users--", "users", "id");
+  EXPECT_FALSE(result.has_value());
 
   // Test with single quote escape attempts
-  result = conn.ValidateUniqueColumn("test", "users", "id\\'", error_message);
-  EXPECT_FALSE(result);
+  result = conn.ValidateUniqueColumn("test", "users", "id\\'");
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @brief Test that ValidateUniqueColumn returns Expected<void, Error> with proper error codes
+ * Verifies the new Expected-based API preserves error information
+ */
+TEST(ConnectionValidateUnitTest, ReturnsExpectedWithErrorCode) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  auto result = conn.ValidateUniqueColumn("test_db", "test_table", "id");
+
+  // Should return an error (not connected)
+  EXPECT_FALSE(result.has_value());
+
+  // Error should have a MySQL-range error code (2000-2999)
+  auto code = static_cast<uint16_t>(result.error().code());
+  EXPECT_GE(code, 2000) << "Error code should be in MySQL range";
+  EXPECT_LE(code, 2999) << "Error code should be in MySQL range";
+
+  // Error should have meaningful context
+  EXPECT_TRUE(result.error().is_error());
+  EXPECT_FALSE(result.error().message().empty());
+}
+
+/**
+ * @brief Test that ValidateUniqueColumn error includes table/column context
+ */
+TEST(ConnectionValidateUnitTest, ErrorIncludesContext) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "test";
+  Connection conn(config);
+
+  auto result = conn.ValidateUniqueColumn("mydb", "users", "email");
+
+  EXPECT_FALSE(result.has_value());
+  // The error to_string() should contain structured information
+  std::string error_str = result.error().to_string();
+  EXPECT_FALSE(error_str.empty());
 }
 
 }  // namespace mygramdb::mysql

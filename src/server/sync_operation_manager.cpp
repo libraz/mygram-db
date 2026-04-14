@@ -31,13 +31,12 @@ constexpr int kSyncPollIntervalMs = 100;
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
                                            const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                                            cache::CacheManager* cache_manager)
-    : table_contexts_(table_contexts),
-      full_config_(full_config),
-      binlog_reader_(binlog_reader),
-      cache_manager_(cache_manager) {}
+    : table_contexts_(table_contexts), full_config_(full_config), binlog_reader_(binlog_reader) {
+  cache_manager_.store(cache_manager, std::memory_order_release);
+}
 
 void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) {
-  cache_manager_ = cache_manager;
+  cache_manager_.store(cache_manager, std::memory_order_release);
 }
 
 SyncOperationManager::~SyncOperationManager() {
@@ -128,6 +127,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
       std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
       syncing_tables_.erase(table_name);
     }
+    syncing_tables_cv_.notify_all();
     sync_states_[table_name].is_running = false;
     sync_states_[table_name].status = "FAILED";
     sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
@@ -198,11 +198,22 @@ std::string SyncOperationManager::GetSyncStatus() {
 }
 
 std::string SyncOperationManager::StopSync(const std::string& table_name) {
-  // Empty table_name means stop all
+  // Empty table_name means stop all.
+  //
+  // TOCTOU note: The stop-all path intentionally acquires syncing_tables_mutex_,
+  // loaders_mutex_, and sync_mutex_ independently (not nested) to avoid deadlock
+  // with BuildSnapshotAsync and other paths that hold these locks in different
+  // combinations. This creates TOCTOU windows where a sync could complete or
+  // start between the separate lock acquisitions. This is acceptable because:
+  //   1. InitialLoader::Cancel() is idempotent -- calling it on an already-
+  //      finished loader is a harmless no-op.
+  //   2. A sync that starts after the snapshot of syncing_tables_ will simply
+  //      not be cancelled by this particular StopSync call; the caller can
+  //      retry or rely on RequestShutdown() for full cleanup.
   if (table_name.empty()) {
     std::vector<std::string> tables_to_stop;
 
-    // Collect active sync tables
+    // Collect active sync tables (lock released before acquiring loaders_mutex_)
     {
       std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
       tables_to_stop.assign(syncing_tables_.begin(), syncing_tables_.end());
@@ -212,7 +223,10 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       return ResponseFormatter::FormatError("No active SYNC operations to stop");
     }
 
-    // Cancel all active loaders
+    // Cancel all active loaders (lock acquired independently, not nested with
+    // syncing_tables_mutex_, to avoid deadlock). Cancel() is idempotent so
+    // calling it on a loader that finished between the two lock acquisitions
+    // is safe.
     {
       std::lock_guard<std::mutex> lock(loaders_mutex_);
       for (const auto& tbl : tables_to_stop) {
@@ -290,6 +304,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
           std::lock_guard<std::mutex> tables_lock(syncing_tables_mutex_);
           syncing_tables_.erase(table_name);
         }
+        syncing_tables_cv_.notify_all();
         return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
       }
     }
@@ -327,20 +342,15 @@ void SyncOperationManager::RequestShutdown() {
 }
 
 bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
-  auto start = std::chrono::steady_clock::now();
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
 
-  while (true) {
-    // Check if syncing_tables_ is empty with proper locking
-    {
-      std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+  std::unique_lock<std::mutex> lock(syncing_tables_mutex_);
+  while (!syncing_tables_.empty()) {
+    if (syncing_tables_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      // Check one more time after timeout (spurious wakeup protection)
       if (syncing_tables_.empty()) {
         return true;
       }
-    }
-
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-
-    if (elapsed > timeout_sec) {
       mygram::utils::StructuredLog()
           .Event("server_warning")
           .Field("operation", "wait_all_sync_complete")
@@ -348,9 +358,8 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
           .Warn();
       return false;
     }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(kSyncPollIntervalMs));
   }
+  return true;
 }
 
 bool SyncOperationManager::IsAnySyncing() const {
@@ -386,6 +395,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     updater(sync_states_[table_name]);
   };
 
+  // Variables for replication restart on cancellation/failure/exception.
+  // Declared before the try block so they are accessible in catch.
+  mysql::IBinlogReader* reader = binlog_reader_;
+  bool replication_was_running = false;
+  std::string saved_gtid;
+
   // RAII cleanup guard
   struct SyncGuard {
     SyncOperationManager* mgr;
@@ -393,8 +408,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     explicit SyncGuard(SyncOperationManager* manager, std::string table_name)
         : mgr(manager), table(std::move(table_name)) {}
     ~SyncGuard() {
-      std::lock_guard<std::mutex> lock(mgr->syncing_tables_mutex_);
-      mgr->syncing_tables_.erase(table);
+      {
+        std::lock_guard<std::mutex> lock(mgr->syncing_tables_mutex_);
+        mgr->syncing_tables_.erase(table);
+      }
+      mgr->syncing_tables_cv_.notify_all();
     }
     SyncGuard(const SyncGuard&) = delete;
     SyncGuard& operator=(const SyncGuard&) = delete;
@@ -473,14 +491,16 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Stop replication BEFORE clearing data to prevent the reader/worker
     // threads from re-adding documents into the cleared index/doc_store.
-    mysql::IBinlogReader* reader = binlog_reader_;
-    bool replication_was_running = false;
+    // Save the current GTID so we can restore replication if SYNC is
+    // cancelled or fails.
     if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {
+      saved_gtid = reader->GetCurrentGTID();
       mygram::utils::StructuredLog()
-          .Event("replication_restart")
+          .Event("replication_stopping")
           .Field("operation", "sync")
           .Field("table", table_name)
           .Field("reason", "stop_before_clear")
+          .Field("saved_gtid", saved_gtid)
           .Info();
       reader->Stop();
       replication_was_running = true;
@@ -549,6 +569,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("reason", cancel_reason)
           .Field("partial_rows", partial_rows)
           .Info();
+
+      // Restart replication from the saved GTID position (before SYNC started).
+      // The cancelled SYNC did not complete, so we restore to the pre-SYNC state.
+      if (replication_was_running && !shutdown_requested_) {
+        RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_cancelled");
+      }
       return;
     }
 
@@ -566,8 +592,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
 
       // Clear search cache for this table after SYNC replaces the index
-      if (cache_manager_ != nullptr) {
-        cache_manager_->ClearTable(table_name);
+      auto* cache_mgr = cache_manager_.load(std::memory_order_acquire);
+      if (cache_mgr != nullptr) {
+        cache_mgr->ClearTable(table_name);
         mygram::utils::StructuredLog()
             .Event("sync_cache_cleared")
             .Field("table", table_name)
@@ -684,6 +711,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("table", table_name)
           .Field("error", error_msg)
           .Error();
+
+      // Restart replication from the saved GTID position (before SYNC started).
+      // The failed SYNC did not complete, so we restore to the pre-SYNC state.
+      if (replication_was_running) {
+        RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_failed");
+      }
     }
 
   } catch (const std::exception& e) {
@@ -721,6 +754,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         .Field("table", table_name)
         .Field("error", error_msg)
         .Error();
+
+    // Restart replication from the saved GTID position (before SYNC started).
+    // The exception prevented SYNC completion, so we restore to the pre-SYNC state.
+    if (replication_was_running) {
+      RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_exception");
+    }
   }
 
   // Safety net: should already be false from terminal branch above
@@ -735,6 +774,47 @@ void SyncOperationManager::RegisterLoader(const std::string& table_name, loader:
 void SyncOperationManager::UnregisterLoader(const std::string& table_name) {
   std::lock_guard<std::mutex> lock(loaders_mutex_);
   active_loaders_.erase(table_name);
+}
+
+void SyncOperationManager::RestartReplicationFromGtid(mysql::IBinlogReader* reader, const std::string& gtid,
+                                                      const std::string& table_name, const std::string& reason) {
+  if (reader == nullptr || gtid.empty()) {
+    mygram::utils::StructuredLog()
+        .Event("replication_restart_skipped")
+        .Field("table", table_name)
+        .Field("reason", reason)
+        .Field("reader_null", reader == nullptr)
+        .Field("gtid_empty", gtid.empty())
+        .Warn();
+    return;
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("replication_restart")
+      .Field("table", table_name)
+      .Field("reason", reason)
+      .Field("gtid", gtid)
+      .Info();
+
+  reader->SetCurrentGTID(gtid);
+
+  auto start_result = reader->Start();
+  if (start_result) {
+    mygram::utils::StructuredLog()
+        .Event("replication_restarted")
+        .Field("table", table_name)
+        .Field("reason", reason)
+        .Field("gtid", gtid)
+        .Info();
+  } else {
+    mygram::utils::StructuredLog()
+        .Event("replication_restart_failed")
+        .Field("table", table_name)
+        .Field("reason", reason)
+        .Field("gtid", gtid)
+        .Field("error", start_result.error().message())
+        .Error();
+  }
 }
 
 }  // namespace mygramdb::server

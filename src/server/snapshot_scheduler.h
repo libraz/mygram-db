@@ -6,7 +6,9 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -104,6 +106,8 @@ class SnapshotScheduler {
   std::string dump_dir_;
 
   std::atomic<bool> running_{false};
+  std::mutex stop_mutex_;
+  std::condition_variable stop_cv_;
   std::unique_ptr<std::thread> scheduler_thread_;
 
   mysql::IBinlogReader* binlog_reader_;

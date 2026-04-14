@@ -25,6 +25,7 @@
 #include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/numeric_parse.h"
 
 using namespace mygram::utils;
 
@@ -77,13 +78,10 @@ std::optional<DebugInfo> ParseDebugInfo(const std::vector<std::string>& tokens, 
     return std::nullopt;
   }
 
-  // Safe double parser (from_chars for double is not reliably available in C++17)
+  // Safe double parser using ParseNumeric (wraps std::stod internally)
   auto safe_stod = [](const std::string& str, double default_val = 0.0) -> double {
-    try {
-      return std::stod(str);
-    } catch (const std::exception&) {
-      return default_val;
-    }
+    auto result = mygram::utils::ParseNumeric<double>(str);
+    return result.value_or(default_val);
   };
 
   // Safe integer parser using std::from_chars (no exceptions)

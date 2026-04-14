@@ -127,8 +127,7 @@ replication:
                                     # When false: Use SYNC command to manually trigger snapshot synchronization
                                     # When true: Automatically build snapshot on startup (legacy behavior)
                                     # Setting to false prevents unexpected MySQL load on startup
-  server_id: 12345                  # MySQL server ID (REQUIRED, must be non-zero and unique in replication topology)
-                                    # Generate a random number or use a unique value for your environment
+  server_id: 83917                  # MUST be unique across all instances. Generate: shuf -i 2-4294967295 -n 1
 
   # Replication start position
   # - "snapshot": Start from snapshot GTID (recommended, ensures consistency)

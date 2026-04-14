@@ -5,10 +5,10 @@ services:
     ports:
       - "13306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: test_root_password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_PASSWORD:-test_root_password}
       MYSQL_DATABASE: testdb
       MYSQL_USER: repl_user
-      MYSQL_PASSWORD: test_password
+      MYSQL_PASSWORD: ${MYSQL_TEST_PASSWORD:-test_root_password}
     command:
       - --server-id=1
       - --log-bin=mysql-bin
@@ -21,7 +21,7 @@ services:
       - inttest_mysql_data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ptest_root_password"]
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 5s
       timeout: 3s
       retries: 10

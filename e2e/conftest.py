@@ -67,7 +67,7 @@ def mysql() -> MysqlClient:
         host=MYSQL_HOST,
         port=MYSQL_PORT,
         user="root",
-        password="test_root_password",
+        password=os.environ.get("MYSQL_TEST_PASSWORD", "test_root_password"),
         database="testdb",
     )
     wait_until(

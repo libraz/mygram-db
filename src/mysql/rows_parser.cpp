@@ -181,20 +181,23 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
 // ParseWriteRowsEvent
 // ---------------------------------------------------------------------------
 
-std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buffer, unsigned long length,
-                                                        const TableMetadata* table_metadata,
-                                                        const std::string& pk_column_name,
-                                                        const std::string& text_column_name,
-                                                        MySQLBinlogEventType event_type) {
+mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, "Null buffer or table_metadata in ParseWriteRowsEvent"));
   }
 
   try {
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "write_rows");
     if (!header) {
-      return std::nullopt;
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse WRITE_ROWS event header"));
     }
 
     const unsigned char* ptr = header->row_data_ptr;
@@ -239,7 +242,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
               .Field("type", "write_rows_truncated")
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                          "WRITE_ROWS event truncated at column " + std::to_string(col_idx)));
         }
 
         // Decode field value
@@ -253,7 +257,7 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Field("error", value_result.error().message())
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(value_result.error());
         }
         std::string value = *value_result;
 
@@ -280,7 +284,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
                 .Field("column_type", static_cast<int64_t>(col_meta.type))
                 .Field("column_name", col_meta.name)
                 .Warn();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
+                                            "Unsupported column type in WRITE_ROWS event", col_meta.name));
           }
           if (ptr + field_size > end) {
             mygram::utils::StructuredLog()
@@ -290,7 +295,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
                 .Field("field_size", static_cast<uint64_t>(field_size))
                 .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
                 .Error();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                            "Field size exceeds buffer in WRITE_ROWS event", col_meta.name));
           }
           ptr += field_size;
         }
@@ -316,7 +322,8 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
         .Field("event_type", "write_rows")
         .Field("error", e.what())
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string("Exception parsing WRITE_ROWS event: ") + e.what()));
   }
 }
 
@@ -324,18 +331,23 @@ std::optional<std::vector<RowData>> ParseWriteRowsEvent(const unsigned char* buf
 // ParseUpdateRowsEvent
 // ---------------------------------------------------------------------------
 
-std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
+mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils::Error> ParseUpdateRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
     const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, "Null buffer or table_metadata in ParseUpdateRowsEvent"));
   }
 
   try {
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "update_rows");
     if (!header) {
-      return std::nullopt;
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse UPDATE_ROWS event header"));
     }
 
     const unsigned char* ptr = header->row_data_ptr;
@@ -354,7 +366,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
           .Field("type", "update_rows_too_short")
           .Field("section", "columns_after_image bitmap")
           .Error();
-      return std::nullopt;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLBinlogError, "UPDATE_ROWS event too short for columns_after_image bitmap"));
     }
     const unsigned char* columns_after = ptr;
     ptr += bitmap_size;
@@ -474,7 +487,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Field("error", value_result.error().message())
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(value_result.error());
         }
         std::string value = *value_result;
 
@@ -520,7 +533,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Field("column_type", static_cast<int64_t>(col_meta.type))
                 .Field("column_name", col_meta.name)
                 .Warn();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
+                                            "Unsupported column type in UPDATE_ROWS before image", col_meta.name));
           }
           if (ptr + field_size > end) {
             mygram::utils::StructuredLog()
@@ -531,7 +545,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Field("field_size", static_cast<uint64_t>(field_size))
                 .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
                 .Error();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                            "Field size exceeds buffer in UPDATE_ROWS before image", col_meta.name));
           }
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
@@ -638,7 +653,7 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Field("error", value_result.error().message())
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(value_result.error());
         }
         std::string value = *value_result;
 
@@ -684,7 +699,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Field("column_type", static_cast<int64_t>(col_meta.type))
                 .Field("column_name", col_meta.name)
                 .Warn();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
+                                            "Unsupported column type in UPDATE_ROWS after image", col_meta.name));
           }
           if (ptr + field_size > end) {
             mygram::utils::StructuredLog()
@@ -695,7 +711,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
                 .Field("field_size", static_cast<uint64_t>(field_size))
                 .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
                 .Error();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                            "Field size exceeds buffer in UPDATE_ROWS after image", col_meta.name));
           }
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
@@ -736,7 +753,8 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
         .Field("event_type", "update_rows")
         .Field("error", e.what())
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string("Exception parsing UPDATE_ROWS event: ") + e.what()));
   }
 }
 
@@ -744,20 +762,23 @@ std::optional<std::vector<std::pair<RowData, RowData>>> ParseUpdateRowsEvent(
 // ParseDeleteRowsEvent
 // ---------------------------------------------------------------------------
 
-std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* buffer, unsigned long length,
-                                                         const TableMetadata* table_metadata,
-                                                         const std::string& pk_column_name,
-                                                         const std::string& text_column_name,
-                                                         MySQLBinlogEventType event_type) {
+mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteRowsEvent(
+    const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if ((buffer == nullptr) || (table_metadata == nullptr)) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, "Null buffer or table_metadata in ParseDeleteRowsEvent"));
   }
 
   try {
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "delete_rows");
     if (!header) {
-      return std::nullopt;
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse DELETE_ROWS event header"));
     }
 
     const unsigned char* ptr = header->row_data_ptr;
@@ -801,7 +822,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
               .Field("type", "delete_rows_truncated")
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                          "DELETE_ROWS event truncated at column " + std::to_string(col_idx)));
         }
 
         auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
@@ -814,7 +836,7 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
               .Field("column_index", static_cast<uint64_t>(col_idx))
               .Field("error", value_result.error().message())
               .Error();
-          return std::nullopt;
+          return MakeUnexpected(value_result.error());
         }
         std::string value = *value_result;
 
@@ -839,7 +861,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
                 .Field("column_type", static_cast<int64_t>(col_meta.type))
                 .Field("column_name", col_meta.name)
                 .Warn();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
+                                            "Unsupported column type in DELETE_ROWS event", col_meta.name));
           }
           if (ptr + field_size > end) {
             mygram::utils::StructuredLog()
@@ -849,7 +872,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
                 .Field("field_size", static_cast<uint64_t>(field_size))
                 .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
                 .Error();
-            return std::nullopt;
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
+                                            "Field size exceeds buffer in DELETE_ROWS event", col_meta.name));
           }
           ptr += field_size;
         }
@@ -875,7 +899,8 @@ std::optional<std::vector<RowData>> ParseDeleteRowsEvent(const unsigned char* bu
         .Field("event_type", "delete_rows")
         .Field("error", e.what())
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string("Exception parsing DELETE_ROWS event: ") + e.what()));
   }
 }
 

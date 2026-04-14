@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import mysql.connector
@@ -15,7 +16,7 @@ class MysqlClient:
         host: str,
         port: int = 3306,
         user: str = "root",
-        password: str = "test_root_password",
+        password: str = os.environ.get("MYSQL_TEST_PASSWORD", "test_root_password"),
         database: str = "testdb",
     ) -> None:
         self.config = {

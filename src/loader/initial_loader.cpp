@@ -91,10 +91,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Validate that the primary_key column is unique (PRIMARY KEY or single-column UNIQUE KEY)
-  std::string validation_error;
-  if (!connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name, table_config_.primary_key,
-                                        validation_error)) {
-    std::string error_msg = "Primary key validation failed: " + validation_error;
+  auto validate_result =
+      connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name, table_config_.primary_key);
+  if (!validate_result) {
+    std::string error_msg = "Primary key validation failed: " + validate_result.error().message();
     mygram::utils::StructuredLog()
         .Event("loader_error")
         .Field("operation", "initial_load")

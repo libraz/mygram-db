@@ -1085,13 +1085,13 @@ Expected<void, Error> WriteDumpV1(
 
       // Save index directly to stringstream
       std::ostringstream index_stream;
-      if (!index->SaveToStream(index_stream)) {
+      if (auto index_result = index->SaveToStream(index_stream); !index_result) {
         StructuredLog()
             .Event("storage_error")
             .Field("operation", "save_index")
             .Field("filepath", temp_filepath)
             .Field("table", table_name)
-            .Field("error", "SaveToStream failed")
+            .Field("error", index_result.error().message())
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
@@ -1473,13 +1473,13 @@ Expected<void, Error> ReadDumpV1(
 
         // Load index directly from stringstream
         std::istringstream index_stream(index_data);
-        if (!index->LoadFromStream(index_stream)) {
+        if (auto index_result = index->LoadFromStream(index_stream); !index_result) {
           StructuredLog()
               .Event("storage_error")
               .Field("operation", "load_index")
               .Field("filepath", filepath)
               .Field("table", table_name)
-              .Field("error", "LoadFromStream failed")
+              .Field("error", index_result.error().message())
               .Error();
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
         }

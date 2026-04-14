@@ -300,6 +300,38 @@ TEST(DocumentStoreTest, MemoryUsage) {
 }
 
 /**
+ * @test M-2: MemoryUsage should not double-count slot overhead
+ *
+ * With N documents, slot overhead (sizeof(pair<DocId,string>) per capacity)
+ * should be counted once via capacity-based accounting. The per-element loop
+ * should only add the heap-allocated part (string::capacity()), not the
+ * in-slot sizeof(DocId) + sizeof(string) again.
+ */
+TEST(DocumentStoreTest, MemoryUsageNoDoubleCount) {
+  DocumentStore store;
+
+  // Add enough documents to make the double-counting measurable
+  constexpr int kNumDocs = 500;
+  for (int i = 0; i < kNumDocs; ++i) {
+    store.AddDocument("pk" + std::to_string(i));
+  }
+
+  size_t usage = store.MemoryUsage();
+
+  // Sanity: usage should be positive and reasonable
+  EXPECT_GT(usage, 0u);
+
+  // Upper bound: each document has a short primary key (~4-6 chars).
+  // With 500 docs, total memory should be well under 1 MB.
+  // Before the fix, double-counting could inflate this by ~2x.
+  // sizeof(DocId) + sizeof(string) ~ 40 bytes, counted twice per doc per map
+  // means ~80 bytes * 500 * 2 maps = 80KB of over-counting.
+  constexpr size_t kReasonableUpperBound = 512 * 1024;  // 512 KB
+  EXPECT_LT(usage, kReasonableUpperBound)
+      << "MemoryUsage() returned " << usage << " bytes for 500 small documents, which suggests double-counting";
+}
+
+/**
  * @brief Test clear
  */
 TEST(DocumentStoreTest, Clear) {

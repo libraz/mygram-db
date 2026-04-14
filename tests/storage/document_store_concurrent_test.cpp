@@ -178,8 +178,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
       while (!stop) {
         size_t size = store.Size();
         size_calls++;
-        // Size should always be non-negative and reasonable
-        EXPECT_GE(size, 0);
+        // Size should be reasonable
         EXPECT_LT(size, 10000);  // Sanity check
         std::this_thread::yield();
       }
@@ -229,9 +228,8 @@ TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
   EXPECT_GT(add_calls.load(), 0);
   EXPECT_GT(remove_calls.load(), 0);
 
-  // Final size should be consistent
+  // Final size should be consistent and reasonable
   size_t final_size = store.Size();
-  EXPECT_GE(final_size, 0);
   EXPECT_LT(final_size, 10000);
 }
 

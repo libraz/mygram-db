@@ -401,12 +401,13 @@ Expected<void, Error> WriteDumpV2(
       // Index data
       {
         std::ostringstream index_stream;
-        if (!index->SaveToStream(index_stream)) {
+        if (auto index_result = index->SaveToStream(index_stream); !index_result) {
           StructuredLog()
               .Event("storage_error")
               .Field("operation", "save_index")
               .Field("filepath", temp_filepath)
               .Field("table", table_name)
+              .Field("error", index_result.error().message())
               .Error();
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
@@ -763,8 +764,9 @@ Expected<void, Error> ReadDumpV2(
             std::string index_data(index_len, '\0');
             table_stream.read(index_data.data(), static_cast<std::streamsize>(index_len));
             std::istringstream index_stream(index_data);
-            if (!index->LoadFromStream(index_stream)) {
-              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index"));
+            if (auto index_result = index->LoadFromStream(index_stream); !index_result) {
+              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index",
+                                              index_result.error().message()));
             }
           } else {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid index length"));

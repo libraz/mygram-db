@@ -83,7 +83,12 @@ MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
     return nullptr;
   }
 
-  auto* client_c = new MygramClient_C();
+  MygramClient_C* client_c = nullptr;
+  try {
+    client_c = new MygramClient_C();
+  } catch (...) {
+    return nullptr;
+  }
 
   ClientConfig cpp_config;
   cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";

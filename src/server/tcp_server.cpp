@@ -238,15 +238,26 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
             socklen_t addr_len = sizeof(addr_storage);
             std::string client_ip;
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-            if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0 &&
-                addr_storage.ss_family == AF_INET) {
-              // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-              auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
-              char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-              inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
-              // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-              client_ip = ip_str;
+            if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) == 0) {
+              if (addr_storage.ss_family == AF_INET) {
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+                auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+                char ip_str[INET_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+                inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+                client_ip = ip_str;
+              } else if (addr_storage.ss_family == AF_INET6) {
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+                auto* addr_in6 = reinterpret_cast<struct sockaddr_in6*>(&addr_storage);
+                char ip_str[INET6_ADDRSTRLEN];  // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+                inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+                client_ip = ip_str;
+              } else {
+                client_ip = "unknown";
+              }
             } else {
               client_ip = "unknown";
             }

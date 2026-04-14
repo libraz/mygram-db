@@ -82,6 +82,10 @@ void SnapshotScheduler::Stop() {
     return;
   }
 
+  // Wake the scheduler loop so it exits promptly instead of sleeping
+  // for up to kShutdownCheckIntervalMs.
+  stop_cv_.notify_all();
+
   mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();
 
   if (scheduler_thread_ && scheduler_thread_->joinable()) {
@@ -112,8 +116,14 @@ void SnapshotScheduler::SchedulerLoop() {
       next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(interval_sec);
     }
 
-    // Sleep for check interval
-    std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
+    // Wait for check interval or until Stop() signals the condition variable.
+    // This replaces sleep_for so that Stop() can wake the thread immediately
+    // instead of blocking for up to kShutdownCheckIntervalMs.
+    {
+      std::unique_lock<std::mutex> lock(stop_mutex_);
+      stop_cv_.wait_for(lock, std::chrono::milliseconds(check_interval_ms),
+                        [this] { return !running_.load(std::memory_order_acquire); });
+    }
   }
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_exiting").Info();
@@ -212,7 +222,16 @@ void SnapshotScheduler::CleanupOldSnapshots() {
     const auto retain_count = static_cast<size_t>(config_.retain);
     for (size_t i = retain_count; i < dump_files.size(); ++i) {
       mygram::utils::StructuredLog().Event("snapshot_removing_old").Field("path", dump_files[i].first.string()).Info();
-      std::filesystem::remove(dump_files[i].first);
+      std::error_code ec;
+      std::filesystem::remove(dump_files[i].first, ec);
+      if (ec) {
+        mygram::utils::StructuredLog()
+            .Event("snapshot_cleanup_error")
+            .Field("path", dump_files[i].first.string())
+            .Field("error", ec.message())
+            .Warn();
+        // Continue with remaining files
+      }
     }
 
   } catch (const std::exception& e) {

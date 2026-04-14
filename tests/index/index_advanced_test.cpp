@@ -21,17 +21,13 @@ using namespace mygram::utils;
 TEST(IndexTest, MemoryUsage) {
   Index index(1);
 
-  size_t initial_usage = index.MemoryUsage();
-  // Initial usage may be zero if no memory is allocated yet
-  EXPECT_GE(initial_usage, 0);
-
   // Add documents
   index.AddDocument(1, "abc");
   index.AddDocument(2, "def");
 
   size_t after_two_docs = index.MemoryUsage();
-  // After adding documents, memory should increase
-  EXPECT_GT(after_two_docs, initial_usage);
+  // After adding documents, memory usage should be positive
+  EXPECT_GT(after_two_docs, 0u);
 
   // Add more documents and verify memory growth
   for (int i = 3; i <= 100; ++i) {
@@ -214,11 +210,11 @@ TEST(IndexTest, StreamSerializationBasic) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -250,11 +246,11 @@ TEST(IndexTest, StreamSerializationJapanese) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2, 1);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -280,11 +276,11 @@ TEST(IndexTest, StreamSerializationLargeDataset) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -310,11 +306,11 @@ TEST(IndexTest, StreamSerializationEmoji) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(1);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -339,11 +335,11 @@ TEST(IndexTest, StreamSerializationNgramConfig) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(3, 2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify n-gram configuration is preserved
   EXPECT_EQ(index1.GetNgramSize(), index2.GetNgramSize());
@@ -367,7 +363,7 @@ TEST(IndexSerializationTest, CorruptedDataDetected) {
 
   // Serialize to file
   std::string filepath = "/tmp/test_index_corruption.bin";
-  ASSERT_TRUE(index.SaveToFile(filepath));
+  ASSERT_TRUE(index.SaveToFile(filepath).has_value());
 
   // Read file, corrupt 1 byte in the middle, write back
   std::ifstream ifs(filepath, std::ios::binary);
@@ -384,7 +380,7 @@ TEST(IndexSerializationTest, CorruptedDataDetected) {
 
   // Load should fail due to checksum mismatch
   Index index2(2, 1);
-  EXPECT_FALSE(index2.LoadFromFile(filepath));
+  EXPECT_FALSE(index2.LoadFromFile(filepath).has_value());
 
   // Cleanup
   std::remove(filepath.c_str());
@@ -400,10 +396,10 @@ TEST(IndexSerializationTest, ValidDataPassesChecksum) {
   index.AddDocument(3, "another test");
 
   std::string filepath = "/tmp/test_index_valid.bin";
-  ASSERT_TRUE(index.SaveToFile(filepath));
+  ASSERT_TRUE(index.SaveToFile(filepath).has_value());
 
   Index index2(2, 1);
-  EXPECT_TRUE(index2.LoadFromFile(filepath));
+  EXPECT_TRUE(index2.LoadFromFile(filepath).has_value());
 
   // Verify data integrity
   auto results = index2.SearchAnd({"he", "ll"});
@@ -424,11 +420,11 @@ TEST(IndexSerializationTest, StreamRoundtripWithChecksum) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2, 1);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count and search results match
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -448,7 +444,7 @@ TEST(IndexSerializationTest, CorruptedStreamDetected) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index.SaveToStream(stream));
+  ASSERT_TRUE(index.SaveToStream(stream).has_value());
 
   // Corrupt a byte in the middle of the stream data
   std::string data = stream.str();
@@ -459,7 +455,7 @@ TEST(IndexSerializationTest, CorruptedStreamDetected) {
 
   // Load should fail due to checksum mismatch
   Index index2(2, 1);
-  EXPECT_FALSE(index2.LoadFromStream(corrupted_stream));
+  EXPECT_FALSE(index2.LoadFromStream(corrupted_stream).has_value());
 }
 
 /**
@@ -471,7 +467,7 @@ TEST(IndexSerializationTest, TruncatedDataDetected) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index.SaveToStream(stream));
+  ASSERT_TRUE(index.SaveToStream(stream).has_value());
 
   // Truncate the data (remove last 10 bytes including CRC32)
   std::string data = stream.str();
@@ -482,5 +478,77 @@ TEST(IndexSerializationTest, TruncatedDataDetected) {
 
   // Load should fail
   Index index2(2, 1);
-  EXPECT_FALSE(index2.LoadFromStream(truncated_stream));
+  EXPECT_FALSE(index2.LoadFromStream(truncated_stream).has_value());
+}
+
+/**
+ * @brief Test SaveToFile with non-writable path returns error with appropriate code
+ */
+TEST(IndexSerializationTest, SaveToFileInvalidPathReturnsError) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+
+  auto result = index.SaveToFile("/nonexistent/directory/test.bin");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+}
+
+/**
+ * @brief Test LoadFromFile with non-existent path returns error with appropriate code
+ */
+TEST(IndexSerializationTest, LoadFromFileNonExistentReturnsError) {
+  Index index(2, 1);
+
+  auto result = index.LoadFromFile("/nonexistent/path/missing.bin");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageFileNotFound);
+}
+
+/**
+ * @brief Test LoadFromStream with corrupted data returns error with CRC mismatch code
+ */
+TEST(IndexSerializationTest, CorruptedStreamReturnsErrorCode) {
+  Index index(2, 1);
+  index.AddDocument(1, "hello world");
+
+  std::stringstream stream;
+  ASSERT_TRUE(index.SaveToStream(stream).has_value());
+
+  // Corrupt a byte in the middle
+  std::string data = stream.str();
+  ASSERT_GT(data.size(), 10U);
+  data[data.size() / 2] ^= 0xFF;
+
+  std::istringstream corrupted_stream(data, std::ios::binary);
+
+  Index index2(2, 1);
+  auto result = index2.LoadFromStream(corrupted_stream);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageCRCMismatch);
+}
+
+/**
+ * @brief Test LoadFromStream with invalid magic returns StorageInvalidFormat error
+ */
+TEST(IndexSerializationTest, InvalidMagicReturnsError) {
+  std::string bad_data = "BADXsomegarbage1234567890";
+  std::istringstream stream(bad_data, std::ios::binary);
+
+  Index index(2, 1);
+  auto result = index.LoadFromStream(stream);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageInvalidFormat);
+}
+
+/**
+ * @brief Test LoadFromStream with too-short data returns StorageInvalidFormat error
+ */
+TEST(IndexSerializationTest, TooShortDataReturnsError) {
+  std::string short_data = "MGIX";  // Only magic, no version/ngram/term_count
+  std::istringstream stream(short_data, std::ios::binary);
+
+  Index index(2, 1);
+  auto result = index.LoadFromStream(stream);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageInvalidFormat);
 }

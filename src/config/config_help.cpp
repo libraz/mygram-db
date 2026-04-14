@@ -8,9 +8,10 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
-#include <stdexcept>
 
 #include "config/config_schema_embedded.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::config {
 
@@ -388,11 +389,14 @@ std::string JsonToYaml(const nlohmann::json& json, int indent = 0) {
 
 // ConfigSchemaExplorer implementation
 
-ConfigSchemaExplorer::ConfigSchemaExplorer() {
+mygram::utils::Expected<ConfigSchemaExplorer, mygram::utils::Error> ConfigSchemaExplorer::Create() {
   try {
-    schema_ = nlohmann::json::parse(kConfigSchemaJson);
+    nlohmann::json schema = nlohmann::json::parse(kConfigSchemaJson);
+    return ConfigSchemaExplorer(std::move(schema));
   } catch (const nlohmann::json::exception& e) {
-    throw std::runtime_error("Failed to parse embedded JSON Schema: " + std::string(e.what()));
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigSchemaError,
+                                 "Failed to parse embedded JSON Schema: " + std::string(e.what())));
   }
 }
 
@@ -663,7 +667,8 @@ std::string MaskSensitiveValue(const std::string& path, const std::string& value
   return value;
 }
 
-std::string FormatConfigForDisplay(const Config& config, const std::string& path) {
+mygram::utils::Expected<std::string, mygram::utils::Error> FormatConfigForDisplay(const Config& config,
+                                                                                  const std::string& path) {
   // Convert config struct to JSON
   nlohmann::json config_json = ConfigToJson(config);
 
@@ -671,7 +676,8 @@ std::string FormatConfigForDisplay(const Config& config, const std::string& path
   if (!path.empty()) {
     auto node = NavigateJsonPath(config_json, path);
     if (!node.has_value()) {
-      throw std::runtime_error("Path not found: " + path);
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigInvalidValue, "Path not found: " + path));
     }
     config_json = node.value();
   }

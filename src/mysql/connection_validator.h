@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 
+#include "utils/error.h"
+#include "utils/expected.h"
+
 namespace mygramdb::mysql {
 
 // Forward declaration
@@ -56,36 +59,44 @@ class ConnectionValidator {
  private:
   /**
    * @brief Check if GTID mode is enabled
+   * @return Expected<void, Error> - success or error with kMySQLGTIDNotEnabled
    */
-  static bool CheckGTIDEnabled(Connection& conn, std::string& error);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckGTIDEnabled(Connection& conn);
 
   /**
    * @brief Check if required tables exist
+   * @return Expected<void, Error> - success or error with kMySQLTableNotFound listing missing tables
    */
-  static bool CheckTablesExist(Connection& conn, const std::vector<std::string>& tables,
-                               std::vector<std::string>& missing_tables);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckTablesExist(Connection& conn,
+                                                                              const std::vector<std::string>& tables);
 
   /**
    * @brief Check server UUID and detect failover
+   * @return Expected<std::string, Error> - actual UUID or error
    */
-  static bool CheckServerUUID(Connection& conn, const std::optional<std::string>& expected_uuid,
-                              std::string& actual_uuid, std::vector<std::string>& warnings);
+  static mygram::utils::Expected<std::string, mygram::utils::Error> CheckServerUUID(
+      Connection& conn, const std::optional<std::string>& expected_uuid, std::vector<std::string>& warnings);
 
   /**
    * @brief Check GTID consistency
    *
    * Validates that the server's GTID state is consistent with expected state.
    * This helps detect scenarios where a server has diverged or been reset.
+   *
+   * @return Expected<void, Error> - success or error describing inconsistency
    */
-  static bool CheckGTIDConsistency(Connection& conn, const std::optional<std::string>& last_gtid, std::string& error);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckGTIDConsistency(
+      Connection& conn, const std::optional<std::string>& last_gtid);
 
   /**
    * @brief Check if binlog transaction compression is enabled
    *
    * TRANSACTION_PAYLOAD_EVENT (type 40) from binlog_transaction_compression=ON
    * is not supported. Reject connections with compression enabled.
+   *
+   * @return Expected<void, Error> - success or error with kMySQLBinlogError
    */
-  static bool CheckBinlogCompression(Connection& conn, std::string& error);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogCompression(Connection& conn);
 
   /**
    * @brief Check if binlog_row_image is set to FULL
@@ -93,16 +104,20 @@ class ConnectionValidator {
    * MygramDB requires binlog_row_image=FULL because the NULL bitmap and column
    * data parsing assumes all columns are present. With MINIMAL or NOBLOB, the
    * bitmap size and indexing are different, causing silent data corruption.
+   *
+   * @return Expected<void, Error> - success or error with kMySQLBinlogError
    */
-  static bool CheckBinlogRowImage(Connection& conn, std::string& error);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogRowImage(Connection& conn);
 
   /**
    * @brief Check if binlog_format is set to ROW
    *
    * MygramDB requires binlog_format=ROW because it relies on row-level events
    * for data replication. STATEMENT or MIXED formats are not supported.
+   *
+   * @return Expected<void, Error> - success or error with kMySQLBinlogError
    */
-  static bool CheckBinlogFormat(Connection& conn, std::string& error);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogFormat(Connection& conn);
 
   /**
    * @brief Check if partial JSON update mode is enabled

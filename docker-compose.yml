@@ -92,7 +92,7 @@ services:
       # Network Configuration
       # IMPORTANT: For production, restrict to specific IP ranges (e.g., "10.0.0.0/8,172.16.0.0/12")
       # For development/testing, use "0.0.0.0/0" to allow all connections
-      NETWORK_ALLOW_CIDRS: ${NETWORK_ALLOW_CIDRS:-0.0.0.0/0}
+      NETWORK_ALLOW_CIDRS: ${NETWORK_ALLOW_CIDRS:?NETWORK_ALLOW_CIDRS must be set in .env}
 
       # Logging Configuration
       LOG_LEVEL: ${LOG_LEVEL:-info}

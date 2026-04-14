@@ -293,15 +293,16 @@ size_t DocumentStore::MemoryUsage() const {
   total += pk_to_doc_id_.capacity() * (sizeof(std::pair<std::string, DocId>) + kControlByteSize);
   total += doc_filters_.capacity() * (sizeof(std::pair<DocId, FilterMap>) + kControlByteSize);
 
-  // doc_id_to_pk_ - data size
-  // sizeof(std::string) for the object itself, capacity() for heap allocation
+  // doc_id_to_pk_ - heap allocation for strings only
+  // (slot overhead including sizeof(DocId) + sizeof(std::string) is already counted above)
   for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
-    total += sizeof(DocId) + sizeof(std::string) + primary_key_str.capacity();
+    total += primary_key_str.capacity();
   }
 
-  // pk_to_doc_id_ - data size
+  // pk_to_doc_id_ - heap allocation for strings only
+  // (slot overhead including sizeof(std::string) + sizeof(DocId) is already counted above)
   for (const auto& [primary_key_str, doc_id] : pk_to_doc_id_) {
-    total += sizeof(std::string) + primary_key_str.capacity() + sizeof(DocId);
+    total += primary_key_str.capacity();
   }
 
   // doc_filters_ (approximate)
@@ -327,7 +328,9 @@ size_t DocumentStore::MemoryUsage() const {
   // doc_texts_ (normalized text for n-gram verification)
   total += doc_texts_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
   for (const auto& [doc_id, text] : doc_texts_) {
-    total += sizeof(DocId) + text.size() + text.capacity();
+    // Only count heap allocation; slot overhead (sizeof(DocId) + sizeof(std::string))
+    // is already counted above via capacity()
+    total += text.capacity();
   }
 
   // Filter index memory

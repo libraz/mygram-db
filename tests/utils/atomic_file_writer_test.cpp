@@ -183,4 +183,55 @@ TEST_F(AtomicFileWriterTest, LargeContentWrite) {
   EXPECT_EQ(ReadFile(final_path), large_content);
 }
 
+TEST_F(AtomicFileWriterTest, RollbackCleansUpTempAndLeavesCommittedFalse) {
+  std::string final_path = TestPath("output.dat");
+
+  AtomicFileWriter writer(final_path);
+  WriteToFile(writer.GetTempPath(), "temporary data");
+  EXPECT_TRUE(std::filesystem::exists(writer.GetTempPath()));
+
+  writer.Rollback();
+
+  // Temp file should be removed
+  EXPECT_FALSE(std::filesystem::exists(writer.GetTempPath()));
+  // Final file should not exist
+  EXPECT_FALSE(std::filesystem::exists(final_path));
+
+  // Commit after rollback should fail (temp file no longer exists)
+  auto result = writer.Commit();
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kIOError);
+}
+
+TEST_F(AtomicFileWriterTest, DoubleRollbackIsSafe) {
+  std::string final_path = TestPath("output.dat");
+
+  AtomicFileWriter writer(final_path);
+  WriteToFile(writer.GetTempPath(), "temporary data");
+
+  writer.Rollback();
+  // Second rollback should be a no-op (no crash)
+  writer.Rollback();
+
+  EXPECT_FALSE(std::filesystem::exists(writer.GetTempPath()));
+  EXPECT_FALSE(std::filesystem::exists(final_path));
+}
+
+TEST_F(AtomicFileWriterTest, DestructorAfterRollbackDoesNotDoubleRemove) {
+  std::string final_path = TestPath("output.dat");
+  std::string temp_path;
+
+  {
+    AtomicFileWriter writer(final_path);
+    temp_path = writer.GetTempPath();
+    WriteToFile(temp_path, "temporary data");
+    writer.Rollback();
+    EXPECT_FALSE(std::filesystem::exists(temp_path));
+    // Destructor should not attempt cleanup again
+  }
+
+  EXPECT_FALSE(std::filesystem::exists(temp_path));
+  EXPECT_FALSE(std::filesystem::exists(final_path));
+}
+
 }  // namespace mygram::utils

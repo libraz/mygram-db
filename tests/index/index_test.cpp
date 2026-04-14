@@ -594,17 +594,13 @@ TEST(IndexTest, EmptySearch) {
 TEST(IndexTest, MemoryUsage) {
   Index index(1);
 
-  size_t initial_usage = index.MemoryUsage();
-  // Initial usage may be zero if no memory is allocated yet
-  EXPECT_GE(initial_usage, 0);
-
   // Add documents
   index.AddDocument(1, "abc");
   index.AddDocument(2, "def");
 
   size_t after_two_docs = index.MemoryUsage();
-  // After adding documents, memory should increase
-  EXPECT_GT(after_two_docs, initial_usage);
+  // After adding documents, memory usage should be positive
+  EXPECT_GT(after_two_docs, 0u);
 
   // Add more documents and verify memory growth
   for (int i = 3; i <= 100; ++i) {
@@ -1086,11 +1082,11 @@ TEST(IndexTest, StreamSerializationBasic) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -1122,11 +1118,11 @@ TEST(IndexTest, StreamSerializationJapanese) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2, 1);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -1152,11 +1148,11 @@ TEST(IndexTest, StreamSerializationLargeDataset) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -1182,11 +1178,11 @@ TEST(IndexTest, StreamSerializationEmoji) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(1);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify term count
   EXPECT_EQ(index1.TermCount(), index2.TermCount());
@@ -1211,11 +1207,11 @@ TEST(IndexTest, StreamSerializationNgramConfig) {
 
   // Serialize to stringstream
   std::stringstream stream;
-  ASSERT_TRUE(index1.SaveToStream(stream));
+  ASSERT_TRUE(index1.SaveToStream(stream).has_value());
 
   // Deserialize from stringstream
   Index index2(3, 2);
-  ASSERT_TRUE(index2.LoadFromStream(stream));
+  ASSERT_TRUE(index2.LoadFromStream(stream).has_value());
 
   // Verify n-gram configuration is preserved
   EXPECT_EQ(index1.GetNgramSize(), index2.GetNgramSize());

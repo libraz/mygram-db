@@ -48,7 +48,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  if (running_) {
+  if (running_.load(std::memory_order_acquire)) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "ConnectionAcceptor already running");
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -171,8 +171,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     }
 
     actual_port_ = 0;
-    should_stop_ = false;
-    running_ = true;
+    should_stop_.store(false, std::memory_order_relaxed);
+    running_.store(true, std::memory_order_release);
 
     accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
 
@@ -274,8 +274,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     return MakeUnexpected(error);
   }
 
-  should_stop_ = false;
-  running_ = true;
+  should_stop_.store(false, std::memory_order_relaxed);
+  running_.store(true, std::memory_order_release);
 
   // Start accept thread
   accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
@@ -289,13 +289,16 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
 }
 
 void ConnectionAcceptor::Stop() {
-  if (!running_) {
+  // Use compare_exchange to ensure only one thread performs the stop sequence.
+  // Without this, two concurrent Stop() calls could both pass a plain load()
+  // check and double-join the thread, causing std::terminate.
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
     return;
   }
 
   mygram::utils::StructuredLog().Event("connection_acceptor_stopping").Debug();
-  should_stop_ = true;
-  running_ = false;
+  should_stop_.store(true, std::memory_order_release);
 
   // Close server socket to unblock accept()
   if (server_fd_ >= 0) {
@@ -401,18 +404,34 @@ void ConnectionAcceptor::AcceptLoop() {
     if (!IsUnixSocket()) {
       // Convert client IP to string for ACL checks
       std::string client_ip;
-      struct sockaddr_in peer_addr {};
-      socklen_t peer_len = sizeof(peer_addr);
-      if (getpeername(client_fd, ToSockaddr(&peer_addr), &peer_len) == 0) {
-        // C-style array required by POSIX inet_ntop API
-        // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-        char ip_buffer[INET_ADDRSTRLEN] = {};
-        // Array-to-pointer decay required by POSIX inet_ntop API
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-        if (inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-          // Array-to-pointer decay required by std::string::assign
+      struct sockaddr_storage addr_storage {};
+      socklen_t peer_len = sizeof(addr_storage);
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+      if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &peer_len) == 0) {
+        if (addr_storage.ss_family == AF_INET) {
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+          auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+          // C-style array required by POSIX inet_ntop API
+          // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          char ip_buffer[INET_ADDRSTRLEN] = {};
+          // Array-to-pointer decay required by POSIX inet_ntop API
           // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          client_ip.assign(ip_buffer);
+          if (inet_ntop(AF_INET, &addr_in->sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            client_ip.assign(ip_buffer);
+          }
+        } else if (addr_storage.ss_family == AF_INET6) {
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+          auto* addr_in6 = reinterpret_cast<struct sockaddr_in6*>(&addr_storage);
+          // C-style array required by POSIX inet_ntop API
+          // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+          char ip_buffer[INET6_ADDRSTRLEN] = {};
+          // Array-to-pointer decay required by POSIX inet_ntop API
+          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+          if (inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+            client_ip.assign(ip_buffer);
+          }
         }
       }
       if (client_ip.empty()) {

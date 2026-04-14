@@ -591,3 +591,42 @@ TEST(IndexTest, SearchAndLargePostingListsTopN) {
     EXPECT_EQ(results[i], kNumDocs - static_cast<DocId>(i)) << "Result[" << i << "] should be " << (kNumDocs - i);
   }
 }
+
+/**
+ * @test M-1: SearchAnd standard path truncates results to limit
+ *
+ * Verifies that the standard (non-streaming) intersection path applies the
+ * limit parameter, returning at most `limit` elements.
+ */
+TEST(IndexTest, SearchAndStandardPathLimitTruncation) {
+  Index index(1);  // Unigram index
+
+  // Add 50 documents that all share terms "a" and "b"
+  for (DocId i = 1; i <= 50; ++i) {
+    index.AddDocument(i, "ab");
+  }
+
+  // Without limit: should return all 50
+  auto all_results = index.SearchAnd({"a", "b"}, 0, false);
+  ASSERT_EQ(all_results.size(), 50);
+
+  // With limit=10, reverse=false: should return first 10 (ascending DocIDs)
+  auto limited = index.SearchAnd({"a", "b"}, 10, false);
+  ASSERT_LE(limited.size(), 10u);
+  EXPECT_EQ(limited.size(), 10u);
+  for (size_t i = 0; i < limited.size(); ++i) {
+    EXPECT_EQ(limited[i], static_cast<DocId>(i + 1));
+  }
+
+  // With limit=10, reverse=true: should return last 10 (highest DocIDs)
+  auto limited_rev = index.SearchAnd({"a", "b"}, 10, true);
+  ASSERT_LE(limited_rev.size(), 10u);
+  EXPECT_EQ(limited_rev.size(), 10u);
+  for (size_t i = 0; i < limited_rev.size(); ++i) {
+    EXPECT_EQ(limited_rev[i], static_cast<DocId>(41 + i));
+  }
+
+  // With limit larger than result set: should return all
+  auto large_limit = index.SearchAnd({"a", "b"}, 100, false);
+  EXPECT_EQ(large_limit.size(), 50u);
+}

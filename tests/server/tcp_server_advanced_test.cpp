@@ -24,6 +24,7 @@
 
 #include "config/config.h"
 #include "server/tcp_server.h"
+#include "tcp_server_test_helpers.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb;
@@ -34,7 +35,7 @@ using namespace mygramdb;
 class TcpServerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    SkipIfSocketCreationBlocked();
+    mygramdb::test::SkipIfSocketCreationBlocked();
 
     // Create index and doc_store as unique_ptrs
     auto index = std::make_unique<index::Index>(1);
@@ -99,33 +100,8 @@ class TcpServerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<TcpServer> server_;
 
-  static void SkipIfSocketCreationBlocked();
   void StartServerOrSkip();
 };
-
-void TcpServerTest::SkipIfSocketCreationBlocked() {
-  static bool checked = false;
-  static bool skip_due_to_permissions = false;
-  static std::string permission_error;
-
-  if (!checked) {
-    checked = true;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd >= 0) {
-      close(fd);
-    } else {
-      if (errno == EPERM || errno == EACCES) {
-        skip_due_to_permissions = true;
-        permission_error = std::strerror(errno);
-      }
-    }
-  }
-
-  if (skip_due_to_permissions) {
-    GTEST_SKIP() << "Skipping TcpServerTest: unable to create AF_INET socket (" << permission_error
-                 << "). WSL/OS is blocking TCP sockets; enable networking to run this test.";
-  }
-}
 
 int TcpServerTest::CreateClientSocket(uint16_t port) {
   constexpr int kConnectTimeoutSec = 5;
@@ -255,7 +231,7 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
  * Before the fix, only EQ was implemented and other operators were ignored.
  */
 TEST_F(TcpServerTest, FilterOperators) {
-  SkipIfSocketCreationBlocked();
+  mygramdb::test::SkipIfSocketCreationBlocked();
 
   // Add documents with filter values
   storage::FilterMap filters1;

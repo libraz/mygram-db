@@ -125,10 +125,13 @@ target_link_libraries(thread_pool_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
+# SLOW: Multiple sleep_for calls for timing-dependent thread pool behavior
 gtest_discover_tests(thread_pool_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
 )
 
 # Thread Pool shutdown tests
@@ -348,6 +351,24 @@ gtest_discover_tests(request_dispatcher_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
+)
+
+# SyncOperationManager Cancel Replication Restart tests (H-3 regression)
+
+add_executable(sync_cancel_replication_test
+  sync_cancel_replication_test.cpp
+)
+
+target_link_libraries(sync_cancel_replication_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
+gtest_discover_tests(sync_cancel_replication_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
 )
 
 # SyncOperationManager Deadlock Prevention tests

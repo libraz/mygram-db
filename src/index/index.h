@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -17,6 +18,8 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "index/posting_list.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/hash_utils.h"
 #include "utils/string_utils.h"
 
@@ -228,30 +231,30 @@ class Index {
   /**
    * @brief Serialize index to file
    * @param filepath Output file path
-   * @return true if successful
+   * @return Success or error with context
    */
-  [[nodiscard]] bool SaveToFile(const std::string& filepath) const;
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> SaveToFile(const std::string& filepath) const;
 
   /**
    * @brief Serialize index to output stream
    * @param output_stream Output stream
-   * @return true if successful
+   * @return Success or error with context
    */
-  [[nodiscard]] bool SaveToStream(std::ostream& output_stream) const;
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> SaveToStream(std::ostream& output_stream) const;
 
   /**
    * @brief Deserialize index from file
    * @param filepath Input file path
-   * @return true if successful
+   * @return Success or error with context
    */
-  [[nodiscard]] bool LoadFromFile(const std::string& filepath);
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromFile(const std::string& filepath);
 
   /**
    * @brief Deserialize index from input stream
    * @param input_stream Input stream
-   * @return true if successful
+   * @return Success or error with context
    */
-  [[nodiscard]] bool LoadFromStream(std::istream& input_stream);
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromStream(std::istream& input_stream);
 
   /**
    * @brief Get posting list for term (read-only)

@@ -14,7 +14,7 @@ tables:
       column: "content"
 
 replication:
-  server_id: 12345
+  server_id: 83917  # MUST be unique across all instances. Generate: shuf -i 2-4294967295 -n 1
 
 network:
   allow_cidrs:

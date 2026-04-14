@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "config/config.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::config {
 
@@ -40,11 +42,10 @@ struct ConfigHelpInfo {
 class ConfigSchemaExplorer {
  public:
   /**
-   * @brief Initialize from embedded schema
-   *
-   * @throws std::runtime_error if schema cannot be loaded or parsed
+   * @brief Create a ConfigSchemaExplorer from embedded schema
+   * @return ConfigSchemaExplorer on success, or Error if schema cannot be parsed
    */
-  ConfigSchemaExplorer();
+  static mygram::utils::Expected<ConfigSchemaExplorer, mygram::utils::Error> Create();
 
   /**
    * @brief Get help for a configuration path
@@ -81,6 +82,12 @@ class ConfigSchemaExplorer {
                                     const std::string& parent_path = "");
 
  private:
+  /**
+   * @brief Private constructor for use by factory method
+   * @param schema Parsed JSON schema
+   */
+  explicit ConfigSchemaExplorer(nlohmann::json schema) : schema_(std::move(schema)) {}
+
   nlohmann::json schema_;  // Parsed schema
 
   /**
@@ -131,9 +138,9 @@ std::string MaskSensitiveValue(const std::string& path, const std::string& value
  *
  * @param config Configuration object
  * @param path Optional path to show only specific section
- * @return Formatted YAML string with sensitive fields masked
- * @throws std::runtime_error if path is invalid
+ * @return Formatted YAML string with sensitive fields masked, or Error if path is invalid
  */
-std::string FormatConfigForDisplay(const Config& config, const std::string& path = "");
+mygram::utils::Expected<std::string, mygram::utils::Error> FormatConfigForDisplay(const Config& config,
+                                                                                  const std::string& path = "");
 
 }  // namespace mygramdb::config

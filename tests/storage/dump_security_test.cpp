@@ -310,9 +310,10 @@ TEST(DumpSecurityTest, PathTraversalDetection) {
       ++base_parts;
     }
 
-    // Most temp directories should be within system, so this might be true or false
-    // The important thing is the logic executes without error
-    EXPECT_TRUE(within_bounds || !within_bounds) << "Path validation logic should execute";
+    // Verify that canonical path does not contain ".." components
+    std::string canonical_str = canonical_dump.string();
+    EXPECT_EQ(canonical_str.find(".."), std::string::npos)
+        << "Canonical dump path should not contain '..' components: " << canonical_str;
 
     std::filesystem::remove_all(temp_dir);
   }

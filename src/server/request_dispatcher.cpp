@@ -62,7 +62,12 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   try {
     return handler_iter->second->Handle(*query, conn_ctx);
   } catch (const std::exception& e) {
-    return ResponseFormatter::FormatError(std::string("Exception: ") + e.what());
+    mygram::utils::StructuredLog()
+        .Event("request_dispatch_error")
+        .Field("table", query->table)
+        .Field("error", e.what())
+        .Error();
+    return ResponseFormatter::FormatError("Internal server error");
   }
 }
 

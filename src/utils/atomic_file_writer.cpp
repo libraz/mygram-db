@@ -35,7 +35,7 @@ AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : f
 }
 
 AtomicFileWriter::~AtomicFileWriter() {
-  if (!committed_) {
+  if (!committed_ && !rolled_back_) {
     Rollback();
   }
 }
@@ -107,11 +107,10 @@ Expected<void, Error> AtomicFileWriter::Commit() {
 }
 
 void AtomicFileWriter::Rollback() {
-  if (!committed_) {
+  if (!committed_ && !rolled_back_) {
     std::error_code ec;
     std::filesystem::remove(temp_filepath_, ec);
-    // Prevent double-removal in destructor
-    committed_ = true;
+    rolled_back_ = true;
   }
 }
 

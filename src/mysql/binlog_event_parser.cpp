@@ -249,18 +249,18 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       }
       const auto& ctx = *ctx_opt;
 
-      auto rows_opt = ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                          ctx.text_column, event_type);
+      auto rows_result = ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                             ctx.text_column, event_type);
 
-      if (!rows_opt || rows_opt->empty()) {
+      if (!rows_result || rows_result->empty()) {
         return {};
       }
 
       // Create events for ALL rows (multi-row event support)
       std::vector<BinlogEvent> events;
-      events.reserve(rows_opt->size());
+      events.reserve(rows_result->size());
 
-      for (const auto& row : *rows_opt) {
+      for (const auto& row : *rows_result) {
         BinlogEvent event;
         event.type = BinlogEventType::INSERT;
         event.table_name = ctx.table_meta->table_name;
@@ -299,18 +299,18 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto row_pairs_opt = ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                                ctx.text_column, event_type);
+      auto row_pairs_result = ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                                   ctx.text_column, event_type);
 
-      if (!row_pairs_opt || row_pairs_opt->empty()) {
+      if (!row_pairs_result || row_pairs_result->empty()) {
         return {};
       }
 
       // Create events for ALL row pairs (multi-row event support)
       std::vector<BinlogEvent> events;
-      events.reserve(row_pairs_opt->size());
+      events.reserve(row_pairs_result->size());
 
-      for (const auto& row_pair : *row_pairs_opt) {
+      for (const auto& row_pair : *row_pairs_result) {
         const auto& before_row = row_pair.first;  // Before image
         const auto& after_row = row_pair.second;  // After image
 
@@ -353,18 +353,18 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       const auto& ctx = *ctx_opt;
 
       // Parse rows using rows_parser
-      auto rows_opt = ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                           ctx.text_column, event_type);
+      auto rows_result = ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
+                                              ctx.text_column, event_type);
 
-      if (!rows_opt || rows_opt->empty()) {
+      if (!rows_result || rows_result->empty()) {
         return {};
       }
 
       // Create events for ALL rows (multi-row event support)
       std::vector<BinlogEvent> events;
-      events.reserve(rows_opt->size());
+      events.reserve(rows_result->size());
 
-      for (const auto& row : *rows_opt) {
+      for (const auto& row : *rows_result) {
         BinlogEvent event;
         event.type = BinlogEventType::DELETE;
         event.table_name = ctx.table_meta->table_name;

@@ -14,6 +14,8 @@
 
 #include "mysql/connection.h"
 #include "mysql/server_flavor.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
@@ -30,24 +32,25 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
 
   // 1. Check GTID mode
-  std::string gtid_error;
-  if (!CheckGTIDEnabled(conn, gtid_error)) {
-    result.error_message = gtid_error;
+  auto gtid_check = CheckGTIDEnabled(conn);
+  if (!gtid_check) {
+    result.error_message = gtid_check.error().message();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "gtid_disabled")
-        .Field("error", gtid_error)
+        .Field("error", result.error_message)
         .Error();
     return result;
   }
 
   // 2. Check server UUID and detect failover
-  std::string actual_uuid;
-  if (!CheckServerUUID(conn, expected_uuid, actual_uuid, result.warnings)) {
-    result.error_message = "Failed to retrieve server UUID";
+  auto uuid_check = CheckServerUUID(conn, expected_uuid, result.warnings);
+  if (!uuid_check) {
+    result.error_message = uuid_check.error().message();
     mygram::utils::StructuredLog().Event("connection_validation_failed").Field("reason", "uuid_check_failed").Error();
     return result;
   }
+  std::string actual_uuid = *uuid_check;
   result.server_uuid = actual_uuid;
 
   // Detect failover (server UUID/ID changed)
@@ -93,33 +96,27 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
 
   // 3. Check required tables exist
-  std::vector<std::string> missing_tables;
-  if (!CheckTablesExist(conn, required_tables, missing_tables)) {
-    result.error_message = "Required tables are missing: ";
-    for (size_t i = 0; i < missing_tables.size(); ++i) {
-      if (i > 0) {
-        result.error_message += ", ";
-      }
-      result.error_message += missing_tables[i];
-    }
+  auto tables_check = CheckTablesExist(conn, required_tables);
+  if (!tables_check) {
+    result.error_message = tables_check.error().message();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "missing_tables")
-        .Field("missing_count", static_cast<int64_t>(missing_tables.size()))
+        .Field("error", result.error_message)
         .Error();
     return result;
   }
 
   // 4. Check GTID consistency (if we have an expected state)
-  std::string gtid_consistency_error;
-  if (!CheckGTIDConsistency(conn, last_gtid, gtid_consistency_error)) {
-    result.warnings.push_back("GTID consistency check: " + gtid_consistency_error);
+  auto gtid_consistency_check = CheckGTIDConsistency(conn, last_gtid);
+  if (!gtid_consistency_check) {
+    result.warnings.push_back("GTID consistency check: " + gtid_consistency_check.error().message());
   }
 
   // 5. Check binlog compression (TRANSACTION_PAYLOAD_EVENT not supported)
-  std::string compression_error;
-  if (!CheckBinlogCompression(conn, compression_error)) {
-    result.error_message = compression_error;
+  auto compression_check = CheckBinlogCompression(conn);
+  if (!compression_check) {
+    result.error_message = compression_check.error().message();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_compression_enabled")
@@ -128,9 +125,9 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
 
   // 6. Check binlog_row_image=FULL (required for correct NULL bitmap parsing)
-  std::string row_image_error;
-  if (!CheckBinlogRowImage(conn, row_image_error)) {
-    result.error_message = row_image_error;
+  auto row_image_check = CheckBinlogRowImage(conn);
+  if (!row_image_check) {
+    result.error_message = row_image_check.error().message();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_row_image_not_full")
@@ -139,9 +136,9 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
 
   // 7. Check binlog_format=ROW (required for row-level replication)
-  std::string format_error;
-  if (!CheckBinlogFormat(conn, format_error)) {
-    result.error_message = format_error;
+  auto format_check = CheckBinlogFormat(conn);
+  if (!format_check) {
+    result.error_message = format_check.error().message();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_format_not_row")
@@ -168,17 +165,17 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   return result;
 }
 
-bool ConnectionValidator::CheckGTIDEnabled(Connection& conn, std::string& error) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGTIDEnabled(Connection& conn) {
   if (!conn.IsGTIDModeEnabled()) {
-    error = "GTID mode is not enabled on MySQL server (gtid_mode != ON)";
-    return false;
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kMySQLGTIDNotEnabled, "GTID mode is not enabled on MySQL server (gtid_mode != ON)"));
   }
-  return true;
+  return {};
 }
 
-bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<std::string>& tables,
-                                           std::vector<std::string>& missing_tables) {
-  missing_tables.clear();
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTablesExist(
+    Connection& conn, const std::vector<std::string>& tables) {
+  std::vector<std::string> missing_tables;
 
   for (const auto& table : tables) {
     // Validate table name to prevent SQL injection
@@ -227,17 +224,30 @@ bool ConnectionValidator::CheckTablesExist(Connection& conn, const std::vector<s
     }
   }
 
-  return missing_tables.empty();
-}
-
-bool ConnectionValidator::CheckServerUUID(Connection& conn, const std::optional<std::string>& expected_uuid,
-                                          std::string& actual_uuid, std::vector<std::string>& warnings) {
-  auto uuid_opt = conn.GetServerUUID();
-  if (!uuid_opt) {
-    return false;
+  if (!missing_tables.empty()) {
+    std::string error_msg = "Required tables are missing: ";
+    for (size_t i = 0; i < missing_tables.size(); ++i) {
+      if (i > 0) {
+        error_msg += ", ";
+      }
+      error_msg += missing_tables[i];
+    }
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLTableNotFound, error_msg));
   }
 
-  actual_uuid = *uuid_opt;
+  return {};
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> ConnectionValidator::CheckServerUUID(
+    Connection& conn, const std::optional<std::string>& expected_uuid, std::vector<std::string>& warnings) {
+  auto uuid_opt = conn.GetServerUUID();
+  if (!uuid_opt) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed, "Failed to retrieve server UUID"));
+  }
+
+  std::string actual_uuid = *uuid_opt;
 
   // Check if UUID matches expected (failover detection)
   if (expected_uuid && *expected_uuid != actual_uuid) {
@@ -251,16 +261,19 @@ bool ConnectionValidator::CheckServerUUID(Connection& conn, const std::optional<
         .Warn();
   }
 
-  return true;
+  return actual_uuid;
 }
 
-bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::optional<std::string>& last_gtid,
-                                               std::string& error) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGTIDConsistency(
+    Connection& conn, const std::optional<std::string>& last_gtid) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Get current executed GTID set
   auto executed_gtid = conn.GetExecutedGTID();
   if (!executed_gtid) {
-    error = "Failed to retrieve executed GTID set";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to retrieve executed GTID set"));
   }
 
   // MariaDB doesn't have gtid_purged or GTID_SUBSET function.
@@ -272,14 +285,13 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
         .Field("executed_gtid", *executed_gtid)
         .Field("flavor", "MariaDB")
         .Debug();
-    return true;
+    return {};
   }
 
   // Get purged GTID set (MySQL only)
   auto purged_gtid = conn.GetPurgedGTID();
   if (!purged_gtid) {
-    error = "Failed to retrieve purged GTID set";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to retrieve purged GTID set"));
   }
 
   // If we have a last GTID, check if it has been purged using MySQL's GTID_SUBSET function
@@ -291,8 +303,9 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
     for (char chr : gtid_str) {  // NOLINT(readability-identifier-length)
       if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' && chr != ' ' &&
           chr != '\n' && chr != '\r') {
-        error = "Invalid GTID format: contains illegal character '" + std::string(1, chr) + "'";
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
+                                        "Invalid GTID format: contains illegal character '" + std::string(1, chr) + "'",
+                                        gtid_str));
       }
     }
 
@@ -302,13 +315,14 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
     if (result) {
       MYSQL_ROW row = mysql_fetch_row(result->get());
       if (row != nullptr && row[0] != nullptr && std::string(row[0]) == "1") {
-        error = "Start GTID '" + gtid_str +
-                "' has been purged from server binlog. "
-                "Available positions start after purged set: " +
-                *purged_gtid +
-                ". "
-                "Run SYNC command to establish a new position.";
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError,
+                                        "Start GTID '" + gtid_str +
+                                            "' has been purged from server binlog. "
+                                            "Available positions start after purged set: " +
+                                            *purged_gtid +
+                                            ". "
+                                            "Run SYNC command to establish a new position.",
+                                        gtid_str));
       }
     }
   }
@@ -320,50 +334,50 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
       .Field("purged_gtid", *purged_gtid)
       .Debug();
 
-  return true;
+  return {};
 }
 
-bool ConnectionValidator::CheckBinlogCompression(Connection& conn, std::string& error) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogCompression(Connection& conn) {
   // MariaDB doesn't support binlog_transaction_compression
   if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    return true;
+    return {};
   }
 
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
   if (!result) {
     // Variable doesn't exist (MySQL < 8.0.20) - OK
-    return true;
+    return {};
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if (row == nullptr) {
     // Variable not found - OK (MySQL < 8.0.20)
-    return true;
+    return {};
   }
 
   // row[0] = variable name, row[1] = value
   if (row[1] != nullptr && std::string(row[1]) == "ON") {
-    error =
-        "binlog_transaction_compression=ON is not supported. "
-        "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
-        "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
-    return false;
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                 "binlog_transaction_compression=ON is not supported. "
+                                 "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
+                                 "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF"));
   }
 
-  return true;
+  return {};
 }
 
-bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& error) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogRowImage(Connection& conn) {
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_image'");
   if (!result) {
     // Cannot determine - assume FULL (variable always exists in MySQL 5.6+)
-    return true;
+    return {};
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if (row == nullptr) {
     // Variable not found - shouldn't happen but assume FULL
-    return true;
+    return {};
   }
 
   if (row[1] != nullptr) {
@@ -371,28 +385,29 @@ bool ConnectionValidator::CheckBinlogRowImage(Connection& conn, std::string& err
     std::string upper_value = value;
     std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
     if (upper_value != "FULL") {
-      error = "binlog_row_image=" + value +
-              " is not supported. "
-              "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
-              "Set it with: SET GLOBAL binlog_row_image=FULL";
-      return false;
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                   "binlog_row_image=" + value +
+                                       " is not supported. "
+                                       "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
+                                       "Set it with: SET GLOBAL binlog_row_image=FULL"));
     }
   }
 
-  return true;
+  return {};
 }
 
-bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogFormat(Connection& conn) {
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_format'");
   if (!result) {
     // Cannot determine - assume ROW (variable always exists in MySQL 5.6+)
-    return true;
+    return {};
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if (row == nullptr) {
     // Variable not found - shouldn't happen but assume ROW
-    return true;
+    return {};
   }
 
   if (row[1] != nullptr) {
@@ -400,15 +415,16 @@ bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error
     std::string upper_value = value;
     std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
     if (upper_value != "ROW") {
-      error = "binlog_format=" + value +
-              " is not supported. "
-              "MygramDB requires binlog_format=ROW for row-level replication. "
-              "Set it with: SET GLOBAL binlog_format=ROW";
-      return false;
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                   "binlog_format=" + value +
+                                       " is not supported. "
+                                       "MygramDB requires binlog_format=ROW for row-level replication. "
+                                       "Set it with: SET GLOBAL binlog_format=ROW"));
     }
   }
 
-  return true;
+  return {};
 }
 
 bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings) {

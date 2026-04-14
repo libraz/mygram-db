@@ -37,6 +37,9 @@ namespace mygramdb::mysql {
 /// Log every Nth no-data occurrence to avoid spam
 static constexpr int kLogSampleInterval = 100;
 
+/// Polling interval when no binlog data is available (milliseconds)
+static constexpr int kNoDataPollIntervalMs = 10;
+
 void BinlogReader::ReaderThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_reader_thread_started").Info();
 
@@ -169,6 +172,9 @@ void BinlogReader::ReaderThreadFunc() {
       continue;
     }
 
+    // Reset no-data counter on successful stream open (reconnection)
+    no_data_log_count_.store(0);
+
     // Log stream opened - use Debug level for idle timeout reconnects to avoid noisy logs
     if (idle_timeout_reconnect) {
       mygram::utils::StructuredLog().Event("binlog_stream_opened").Field("gtid", GetCurrentGTID()).Debug();
@@ -211,7 +217,7 @@ void BinlogReader::ReaderThreadFunc() {
                 .Field("count", static_cast<int64_t>(current_no_data))
                 .Debug();
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          std::this_thread::sleep_for(std::chrono::milliseconds(kNoDataPollIntervalMs));
           continue;
         }
 
@@ -537,6 +543,12 @@ void BinlogReader::ReaderThreadFunc() {
       break;
     }
   }
+
+  // Wake the worker thread in case it is blocked in PopEvent() waiting on
+  // queue_cv_. Without this notification the worker would hang indefinitely
+  // when the reader exits due to a fatal error (should_stop_ = true) because
+  // no more events will ever be pushed and the predicate would never flip.
+  queue_cv_.notify_all();
 
   mygram::utils::StructuredLog().Event("binlog_reader_thread_stopped").Info();
 }

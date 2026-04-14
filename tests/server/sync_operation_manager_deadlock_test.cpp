@@ -240,4 +240,26 @@ TEST_F(SyncOperationManagerDeadlockTest, GetSyncStatusUsesCRLFLineEndings) {
   manager.reset();
 }
 
+/**
+ * @test M-4: WaitForCompletion returns promptly when no syncs are active
+ *
+ * Verifies that WaitForCompletion uses condition variable notification
+ * instead of busy-polling, returning quickly when syncing_tables_ is empty.
+ */
+TEST_F(SyncOperationManagerDeadlockTest, WaitForCompletionReturnsPromptly) {
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), nullptr);
+
+  // No syncs active: should return immediately (well under the 100ms poll interval)
+  auto start = std::chrono::steady_clock::now();
+  bool result = manager->WaitForCompletion(5);
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+
+  EXPECT_TRUE(result);
+  // With CV-based implementation, this should return in < 10ms, not 100ms+ poll cycles
+  EXPECT_LT(elapsed.count(), 50) << "WaitForCompletion took " << elapsed.count()
+                                 << "ms for empty syncing_tables_, expected < 50ms";
+
+  manager.reset();
+}
+
 #endif  // USE_MYSQL

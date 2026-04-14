@@ -20,9 +20,17 @@
 #include "utils/constants.h"
 #include "utils/crc32.h"
 #include "utils/endian_utils.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::index {
+
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
 
 namespace {
 
@@ -36,7 +44,7 @@ constexpr size_t kCRC32Size = 4;
 
 }  // namespace
 
-bool Index::SaveToFile(const std::string& filepath) const {
+Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
   try {
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) {
@@ -46,12 +54,13 @@ bool Index::SaveToFile(const std::string& filepath) const {
           .Field("operation", "save")
           .Field("filepath", filepath)
           .Error();
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to open file for writing", filepath));
     }
 
     // Serialize to stream (includes CRC32 trailer in V2 format)
-    if (!SaveToStream(ofs)) {
-      return false;
+    auto result = SaveToStream(ofs);
+    if (!result) {
+      return result;
     }
 
     uint64_t term_count = 0;
@@ -85,7 +94,7 @@ bool Index::SaveToFile(const std::string& filepath) const {
         .Field("terms", term_count)
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
-    return true;
+    return {};
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
         .Event("index_io_error")
@@ -93,11 +102,11 @@ bool Index::SaveToFile(const std::string& filepath) const {
         .Field("operation", "save")
         .Field("error", e.what())
         .Error();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kIndexSerializationFailed, "Exception during index save", e.what()));
   }
 }
 
-bool Index::SaveToStream(std::ostream& output_stream) const {
+Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
   try {
     // V2 format:
     // [4 bytes: magic "MGIX"] [4 bytes: version=2] [4 bytes: ngram_size]
@@ -150,7 +159,8 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
             .Field("operation", "save_to_stream")
             .Field("term", term)
             .Error();
-        return false;
+        return MakeUnexpected(
+            MakeError(ErrorCode::kIndexSerializationFailed, "Failed to serialize posting list", term));
       }
 
       // Write posting list size and data
@@ -174,11 +184,11 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
           .Field("type", "stream_error")
           .Field("operation", "save_to_stream")
           .Error();
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Stream write error during index serialization"));
     }
 
     mygram::utils::StructuredLog().Event("index_saved_to_stream").Field("terms", term_count).Debug();
-    return true;
+    return {};
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
         .Event("index_io_error")
@@ -186,11 +196,11 @@ bool Index::SaveToStream(std::ostream& output_stream) const {
         .Field("operation", "save_to_stream")
         .Field("error", e.what())
         .Error();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kIndexSerializationFailed, "Exception during stream save", e.what()));
   }
 }
 
-bool Index::LoadFromFile(const std::string& filepath) {
+Expected<void, Error> Index::LoadFromFile(const std::string& filepath) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
@@ -200,7 +210,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
           .Field("operation", "load")
           .Field("filepath", filepath)
           .Error();
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageFileNotFound, "Failed to open index file", filepath));
     }
 
     // Read entire file into memory for CRC32 verification
@@ -208,8 +218,9 @@ bool Index::LoadFromFile(const std::string& filepath) {
     ifs.close();
 
     std::istringstream input_stream(file_data, std::ios::binary);
-    if (!LoadFromStream(input_stream)) {
-      return false;
+    auto result = LoadFromStream(input_stream);
+    if (!result) {
+      return result;
     }
 
     uint64_t term_count = 0;
@@ -223,7 +234,7 @@ bool Index::LoadFromFile(const std::string& filepath) {
         .Field("terms", term_count)
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
-    return true;
+    return {};
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
         .Event("index_io_error")
@@ -231,11 +242,11 @@ bool Index::LoadFromFile(const std::string& filepath) {
         .Field("operation", "load")
         .Field("error", e.what())
         .Error();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kIndexDeserializationFailed, "Exception during index load", e.what()));
   }
 }
 
-bool Index::LoadFromStream(std::istream& input_stream) {
+Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
   try {
     // Read entire stream into memory for CRC32 verification
     std::string all_data((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
@@ -251,7 +262,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
           .Field("operation", "load_from_stream")
           .Field("error", "data_too_short")
           .Error();
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageInvalidFormat, "Index data too short to be valid"));
     }
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
@@ -263,7 +274,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
           .Field("operation", "load_from_stream")
           .Field("error", "bad_magic_number")
           .Error();
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kStorageInvalidFormat, "Invalid magic number in index data"));
     }
 
     // Read version (offset 4)
@@ -278,7 +289,8 @@ bool Index::LoadFromStream(std::istream& input_stream) {
           .Field("operation", "load_from_stream")
           .Field("version", std::to_string(version))
           .Error();
-      return false;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageVersionMismatch, "Unsupported index format version", std::to_string(version)));
     }
 
     // For V2, verify CRC32 checksum before deserializing any data
@@ -291,7 +303,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("operation", "load_from_stream")
             .Field("error", "missing_crc32_trailer")
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageInvalidFormat, "Index data missing CRC32 trailer"));
       }
 
       // Split data: payload is everything except the trailing 4-byte CRC32
@@ -313,7 +325,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("expected_crc", static_cast<uint64_t>(stored_crc))
             .Field("computed_crc", static_cast<uint64_t>(computed_crc))
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCRCMismatch, "CRC32 checksum mismatch in index data"));
       }
 
       // Truncate to payload only for deserialization
@@ -357,7 +369,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("type", "truncated_data")
             .Field("operation", "load_from_stream")
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Truncated index data at term header"));
       }
 
       // Read term length and term
@@ -372,7 +384,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("type", "truncated_data")
             .Field("operation", "load_from_stream")
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Truncated index data at term string"));
       }
 
       std::string term(all_data.data() + pos, term_len);
@@ -384,7 +396,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("type", "truncated_data")
             .Field("operation", "load_from_stream")
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Truncated index data at posting list header"));
       }
 
       // Read posting list size and data
@@ -399,7 +411,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("type", "truncated_data")
             .Field("operation", "load_from_stream")
             .Error();
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Truncated index data at posting list body"));
       }
 
       std::vector<uint8_t> posting_data(posting_size);
@@ -416,7 +428,8 @@ bool Index::LoadFromStream(std::istream& input_stream) {
             .Field("operation", "load_from_stream")
             .Field("term", term)
             .Error();
-        return false;
+        return MakeUnexpected(
+            MakeError(ErrorCode::kIndexDeserializationFailed, "Failed to deserialize posting list", term));
       }
 
       new_postings[term] = std::move(posting);
@@ -433,7 +446,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
         .Field("terms", term_count)
         .Field("format_version", static_cast<uint64_t>(version))
         .Debug();
-    return true;
+    return {};
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()
         .Event("index_io_error")
@@ -441,7 +454,7 @@ bool Index::LoadFromStream(std::istream& input_stream) {
         .Field("operation", "load_from_stream")
         .Field("error", e.what())
         .Error();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kIndexDeserializationFailed, "Exception during stream load", e.what()));
   }
 }
 

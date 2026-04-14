@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -159,7 +160,7 @@ class SyncOperationManager {
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
   mysql::IBinlogReader* binlog_reader_;
-  cache::CacheManager* cache_manager_ = nullptr;
+  std::atomic<cache::CacheManager*> cache_manager_{nullptr};
 
   // State tracking
   //
@@ -180,6 +181,7 @@ class SyncOperationManager {
 
   std::unordered_set<std::string> syncing_tables_;
   mutable std::mutex syncing_tables_mutex_;
+  std::condition_variable syncing_tables_cv_;  ///< Notified when entries are removed from syncing_tables_
 
   std::unordered_map<std::string, loader::InitialLoader*> active_loaders_;
   mutable std::mutex loaders_mutex_;
@@ -205,6 +207,21 @@ class SyncOperationManager {
    * @brief Unregister active initial loader
    */
   void UnregisterLoader(const std::string& table_name);
+
+  /**
+   * @brief Restart replication from a saved GTID position
+   *
+   * Used to restore replication after SYNC cancellation, failure, or exception.
+   * The reader is stopped before calling this method. On success, replication
+   * resumes from the given GTID. On failure, a warning is logged.
+   *
+   * @param reader Binlog reader to restart (must not be nullptr)
+   * @param gtid GTID position to resume from
+   * @param table_name Table name for logging context
+   * @param reason Reason for restart (e.g., "sync_cancelled", "sync_failed")
+   */
+  void RestartReplicationFromGtid(mysql::IBinlogReader* reader, const std::string& gtid, const std::string& table_name,
+                                  const std::string& reason);
 };
 
 }  // namespace mygramdb::server

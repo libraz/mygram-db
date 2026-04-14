@@ -414,8 +414,9 @@ bool QueryCache::Erase(const CacheKey& key) {
 void QueryCache::Clear() {
   std::unique_lock lock(mutex_);
 
-  lru_list_.clear();
-  cache_map_.clear();
+  // Swap with empty containers to release allocated capacity
+  decltype(lru_list_)().swap(lru_list_);
+  decltype(cache_map_)().swap(cache_map_);
   total_memory_bytes_ = 0;
   stats_.current_entries = 0;
   stats_.current_memory_bytes = 0;

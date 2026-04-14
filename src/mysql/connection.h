@@ -206,11 +206,11 @@ class Connection {
    * @param database Database name
    * @param table Table name
    * @param column Column name to validate
-   * @param error_message Output parameter for error message
-   * @return true if column is unique, false otherwise
+   * @return Expected<void, Error> - success if column is unique, error otherwise
    */
-  bool ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
-                            std::string& error_message);
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateUniqueColumn(const std::string& database,
+                                                                           const std::string& table,
+                                                                           const std::string& column);
 
   /**
    * @brief Get last error message

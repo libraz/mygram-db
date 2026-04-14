@@ -445,3 +445,59 @@ TEST_F(RateLimiterTest, ResetStatsConcurrentConsistency) {
 
   EXPECT_FALSE(inconsistency_found.load()) << "Stats counters were inconsistent during concurrent ResetStats";
 }
+
+/**
+ * @brief Test that IPv6 addresses are treated as distinct clients
+ *
+ * Regression test: IPv6 clients previously all shared the "unknown" bucket
+ * because only AF_INET was handled in peer address extraction.
+ */
+TEST_F(RateLimiterTest, IPv6DistinctClients) {
+  RateLimiter limiter(5, 5);
+
+  // IPv6 client 1
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(limiter.AllowRequest("::1"));
+  }
+  // Should be blocked after exhausting quota
+  EXPECT_FALSE(limiter.AllowRequest("::1"));
+
+  // IPv6 client 2 should have its own independent quota
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(limiter.AllowRequest("2001:db8::1"));
+  }
+  EXPECT_FALSE(limiter.AllowRequest("2001:db8::1"));
+
+  // IPv4 client should also be independent
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_TRUE(limiter.AllowRequest("192.168.1.1"));
+  }
+  EXPECT_FALSE(limiter.AllowRequest("192.168.1.1"));
+
+  auto stats = limiter.GetStats();
+  EXPECT_EQ(stats.tracked_clients, 3);
+}
+
+/**
+ * @brief Test that full-length IPv6 addresses work as rate limiter keys
+ */
+TEST_F(RateLimiterTest, IPv6FullAddressFormat) {
+  RateLimiter limiter(3, 3);
+
+  // Full IPv6 address
+  std::string full_ipv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(limiter.AllowRequest(full_ipv6));
+  }
+  EXPECT_FALSE(limiter.AllowRequest(full_ipv6));
+
+  // Compressed form of a different address should be a separate client
+  std::string compressed_ipv6 = "fe80::1";
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(limiter.AllowRequest(compressed_ipv6));
+  }
+  EXPECT_FALSE(limiter.AllowRequest(compressed_ipv6));
+
+  auto stats = limiter.GetStats();
+  EXPECT_EQ(stats.tracked_clients, 2);
+}

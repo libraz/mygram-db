@@ -162,6 +162,17 @@ std::optional<std::string> ParseNumericPrimaryKey(std::string_view pk_str) {
  *
  * Centralizes the conversion logic used by GetSortKey, SortWithSchwartzianTransform,
  * and SortWithSchwartzianTransformPartial.
+ *
+ * Performance note: This converts numeric types to zero-padded strings for
+ * lexicographic comparison. While direct numeric comparison would avoid O(N)
+ * string allocations, the Schwartzian Transform requires a uniform key type
+ * for the pre-computed key array. Supporting mixed-type sort keys (string vs
+ * int64_t vs double) would require a tagged union or std::variant<string,
+ * int64_t, double> with a custom comparator, adding complexity for marginal
+ * gain. The bit-level transformations (sign-bit XOR for integers, IEEE 754
+ * flip for doubles) preserve total order correctly in the string domain.
+ * The SortComparator fallback path already uses direct numeric comparison
+ * for primary key ordering (see operator()).
  */
 static std::string FilterValueToSortKey(const storage::FilterValue& val) {
   return std::visit(
@@ -350,12 +361,12 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
   try {
     entries.reserve(results.size());
   } catch (const std::bad_alloc&) {
-    // Memory allocation failed - this shouldn't happen as caller checks size
+    // Memory allocation failed - OOM condition
     mygram::utils::StructuredLog()
         .Event("sort_fallback")
         .Field("reason", "memory_allocation_failed")
         .Field("size", static_cast<uint64_t>(results.size()))
-        .Warn();
+        .Error();
     return {};  // Let caller handle fallback
   }
 

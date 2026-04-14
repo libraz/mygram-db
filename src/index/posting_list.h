@@ -222,6 +222,16 @@ class PostingList {
   [[nodiscard]] size_t MemoryUsageApprox() const;
 
   /**
+   * @brief Update doc_count_ and increment version_ after a mutation
+   *
+   * Consolidates the repeated pattern of reading the current strategy,
+   * storing the appropriate cardinality into doc_count_, and bumping version_.
+   *
+   * @note Caller must already hold mutex_ exclusively
+   */
+  void UpdateCountsAndVersion();
+
+  /**
    * @brief Recompute and cache last_doc_id_ from delta_compressed_
    * @note Caller must already hold mutex_ exclusively
    */

@@ -541,11 +541,9 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOperationsDuringBatchedOptimization) {
 
   std::cout << "Searches completed during optimization: " << searches_completed.load() << std::endl;
 
-  // Note: If optimization is very fast (<1ms), searches may not complete
-  // This is expected and not a failure - it just means optimization is efficient
-  // The test primarily verifies that concurrent operations don't crash or deadlock
-  EXPECT_GE(searches_completed.load(), 0)
-      << "Concurrent searches should not crash (even if optimization is too fast to interleave)";
+  // The test primarily verifies that concurrent operations don't crash or deadlock.
+  // If optimization is very fast (<1ms), searches_completed may be 0, which is acceptable.
+  // Reaching this point without hanging proves no deadlock occurred.
 }
 
 /**

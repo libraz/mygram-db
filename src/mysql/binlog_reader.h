@@ -272,9 +272,20 @@ class BinlogReader final : public IBinlogReader {
   uint64_t GetCRCErrors() const { return crc_errors_; }
 
   /**
-   * @brief Get last error message
+   * @brief Get last error message (IBinlogReader interface)
    */
   std::string GetLastError() const override {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    return last_error_.message();
+  }
+
+  /**
+   * @brief Get last error as structured Error object
+   *
+   * Provides access to the full Error with code and context, unlike GetLastError()
+   * which only returns the message string for interface compatibility.
+   */
+  mygram::utils::Error GetLastErrorObject() const {
     std::lock_guard<std::mutex> lock(last_error_mutex_);
     return last_error_;
   }
@@ -341,7 +352,12 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<int> no_data_log_count_{0};
   std::atomic<int> skip_log_count_{0};
 
-  std::string last_error_;
+  // Error state is stored as a structured Error object rather than a plain string.
+  // This deviates from the pure Expected<T, Error> pattern because the error is
+  // produced asynchronously in background threads (ReaderThreadFunc/WorkerThreadFunc)
+  // and consumed by the main thread via polling. Expected cannot be used for this
+  // cross-thread error propagation pattern.
+  mygram::utils::Error last_error_;
   mutable std::mutex last_error_mutex_;
 
   // Failover detection: track last known server UUID
@@ -359,12 +375,24 @@ class BinlogReader final : public IBinlogReader {
   std::unique_ptr<IBinlogStream> binlog_stream_;
 
   /**
-   * @brief Set last error message (thread-safe)
-   * @param error Error message
+   * @brief Set last error (thread-safe)
+   * @param error Error object with code, message, and optional context
    */
-  void SetLastError(const std::string& error) {
+  void SetLastError(const mygram::utils::Error& error) {
     std::lock_guard<std::mutex> lock(last_error_mutex_);
     last_error_ = error;
+  }
+
+  /**
+   * @brief Set last error from a message string (convenience overload)
+   *
+   * Creates an Error with kMySQLBinlogError code. Prefer the Error overload
+   * when a more specific error code is available.
+   *
+   * @param message Error message
+   */
+  void SetLastError(const std::string& message) {
+    SetLastError(mygram::utils::Error(mygram::utils::ErrorCode::kMySQLBinlogError, message));
   }
 
   /**

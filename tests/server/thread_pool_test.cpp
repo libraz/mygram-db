@@ -126,6 +126,7 @@ TEST_F(ThreadPoolTest, BoundedQueue) {
   }
 
   // Should only accept 7 tasks (2 executing + 5 in queue)
+  EXPECT_GE(successful_submissions, 5);
   EXPECT_LE(successful_submissions, 7);
 
   // Allow tasks to complete
@@ -156,7 +157,7 @@ TEST_F(ThreadPoolTest, QueueFullRejectsTasks) {
 
   // Should only accept 3 tasks (1 executing + 2 in queue)
   EXPECT_LE(successful_submissions, 3);
-  EXPECT_GE(successful_submissions, 1);  // At least 1 should be accepted
+  EXPECT_GE(successful_submissions, 2);  // At least 1 executing + 1 queued
 
   // Clean up
   start_execution = true;

@@ -7,16 +7,29 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
+
+#include "utils/error.h"
+
 namespace mygramdb::config {
 
 class ConfigSchemaExplorerTest : public ::testing::Test {
  protected:
-  ConfigSchemaExplorer explorer_;
+  void SetUp() override {
+    auto result = ConfigSchemaExplorer::Create();
+    ASSERT_TRUE(result.has_value()) << "Failed to create ConfigSchemaExplorer: " << result.error().message();
+    explorer_.emplace(std::move(*result));
+  }
+
+  ConfigSchemaExplorer& explorer() { return explorer_.value(); }
+  const ConfigSchemaExplorer& explorer() const { return explorer_.value(); }
+
+  std::optional<ConfigSchemaExplorer> explorer_;
 };
 
 // Test GetHelp for simple property
 TEST_F(ConfigSchemaExplorerTest, GetHelpForSimpleProperty) {
-  auto help = explorer_.GetHelp("mysql.port");
+  auto help = explorer().GetHelp("mysql.port");
 
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->path, "mysql.port");
@@ -31,7 +44,7 @@ TEST_F(ConfigSchemaExplorerTest, GetHelpForSimpleProperty) {
 
 // Test GetHelp for nested property
 TEST_F(ConfigSchemaExplorerTest, GetHelpForNestedProperty) {
-  auto help = explorer_.GetHelp("memory.normalize.nfkc");
+  auto help = explorer().GetHelp("memory.normalize.nfkc");
 
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->path, "memory.normalize.nfkc");
@@ -42,7 +55,7 @@ TEST_F(ConfigSchemaExplorerTest, GetHelpForNestedProperty) {
 
 // Test GetHelp for enum property
 TEST_F(ConfigSchemaExplorerTest, GetHelpForEnumProperty) {
-  auto help = explorer_.GetHelp("mysql.binlog_format");
+  auto help = explorer().GetHelp("mysql.binlog_format");
 
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->type, "string");
@@ -52,20 +65,20 @@ TEST_F(ConfigSchemaExplorerTest, GetHelpForEnumProperty) {
 
 // Test GetHelp for non-existent path
 TEST_F(ConfigSchemaExplorerTest, GetHelpForNonExistentPath) {
-  auto help = explorer_.GetHelp("nonexistent.path");
+  auto help = explorer().GetHelp("nonexistent.path");
   EXPECT_FALSE(help.has_value());
 }
 
 // Test GetHelp for root
 TEST_F(ConfigSchemaExplorerTest, GetHelpForRoot) {
-  auto help = explorer_.GetHelp("");
+  auto help = explorer().GetHelp("");
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->type, "object");
 }
 
 // Test ListPaths for root
 TEST_F(ConfigSchemaExplorerTest, ListPathsRoot) {
-  auto paths = explorer_.ListPaths("");
+  auto paths = explorer().ListPaths("");
 
   EXPECT_FALSE(paths.empty());
   EXPECT_TRUE(paths.find("mysql") != paths.end());
@@ -81,7 +94,7 @@ TEST_F(ConfigSchemaExplorerTest, ListPathsRoot) {
 
 // Test ListPaths for specific section
 TEST_F(ConfigSchemaExplorerTest, ListPathsForSection) {
-  auto paths = explorer_.ListPaths("mysql");
+  auto paths = explorer().ListPaths("mysql");
 
   EXPECT_FALSE(paths.empty());
   EXPECT_TRUE(paths.find("host") != paths.end());
@@ -93,7 +106,7 @@ TEST_F(ConfigSchemaExplorerTest, ListPathsForSection) {
 
 // Test ListPaths for nested section
 TEST_F(ConfigSchemaExplorerTest, ListPathsForNestedSection) {
-  auto paths = explorer_.ListPaths("memory.normalize");
+  auto paths = explorer().ListPaths("memory.normalize");
 
   EXPECT_FALSE(paths.empty());
   EXPECT_TRUE(paths.find("nfkc") != paths.end());
@@ -103,13 +116,13 @@ TEST_F(ConfigSchemaExplorerTest, ListPathsForNestedSection) {
 
 // Test ListPaths for non-existent path
 TEST_F(ConfigSchemaExplorerTest, ListPathsForNonExistentPath) {
-  auto paths = explorer_.ListPaths("nonexistent");
+  auto paths = explorer().ListPaths("nonexistent");
   EXPECT_TRUE(paths.empty());
 }
 
 // Test FormatHelp
 TEST_F(ConfigSchemaExplorerTest, FormatHelp) {
-  auto help = explorer_.GetHelp("mysql.port");
+  auto help = explorer().GetHelp("mysql.port");
   ASSERT_TRUE(help.has_value());
 
   std::string formatted = ConfigSchemaExplorer::FormatHelp(help.value());
@@ -123,7 +136,7 @@ TEST_F(ConfigSchemaExplorerTest, FormatHelp) {
 
 // Test FormatPathList
 TEST_F(ConfigSchemaExplorerTest, FormatPathList) {
-  auto paths = explorer_.ListPaths("mysql");
+  auto paths = explorer().ListPaths("mysql");
   std::string formatted = ConfigSchemaExplorer::FormatPathList(paths, "mysql");
 
   EXPECT_FALSE(formatted.empty());
@@ -170,7 +183,9 @@ TEST(ConfigHelpTest, FormatConfigForDisplayMasksSensitive) {
   config.mysql.password = "secret123";
   config.mysql.database = "testdb";
 
-  std::string output = FormatConfigForDisplay(config, "mysql");
+  auto result = FormatConfigForDisplay(config, "mysql");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
 
   // Verify password is masked
   EXPECT_NE(output.find("password"), std::string::npos);
@@ -184,7 +199,9 @@ TEST(ConfigHelpTest, FormatConfigForDisplayMasksSensitive) {
 
 TEST(ConfigHelpTest, FormatConfigForDisplayInvalidPath) {
   Config config;
-  EXPECT_THROW(FormatConfigForDisplay(config, "nonexistent.path"), std::runtime_error);
+  auto result = FormatConfigForDisplay(config, "nonexistent.path");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
 }
 
 TEST(ConfigHelpTest, FormatConfigForDisplayEntireConfig) {
@@ -192,7 +209,9 @@ TEST(ConfigHelpTest, FormatConfigForDisplayEntireConfig) {
   config.mysql.host = "127.0.0.1";
   config.mysql.password = "secret123";
 
-  std::string output = FormatConfigForDisplay(config, "");
+  auto result = FormatConfigForDisplay(config, "");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
 
   // Verify output contains major sections
   EXPECT_NE(output.find("mysql:"), std::string::npos);
@@ -203,18 +222,18 @@ TEST(ConfigHelpTest, FormatConfigForDisplayEntireConfig) {
 
 // Test SplitPath (via public interface behavior)
 TEST_F(ConfigSchemaExplorerTest, PathNavigationSimple) {
-  auto help = explorer_.GetHelp("mysql");
+  auto help = explorer().GetHelp("mysql");
   ASSERT_TRUE(help.has_value());
 }
 
 TEST_F(ConfigSchemaExplorerTest, PathNavigationNested) {
-  auto help = explorer_.GetHelp("memory.normalize.nfkc");
+  auto help = explorer().GetHelp("memory.normalize.nfkc");
   ASSERT_TRUE(help.has_value());
 }
 
 TEST_F(ConfigSchemaExplorerTest, PathNavigationArraySchema) {
   // Test accessing array item schema
-  auto help = explorer_.GetHelp("tables.name");
+  auto help = explorer().GetHelp("tables.name");
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->type, "string");
 }

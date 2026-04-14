@@ -216,9 +216,10 @@ void InvalidationManager::ClearTable(const std::string& table_name) {
 
 void InvalidationManager::Clear() {
   std::unique_lock lock(mutex_);
-  ngram_to_cache_keys_.clear();
-  cache_metadata_.clear();
-  table_ngram_settings_.clear();
+  // Swap with empty maps to release allocated capacity (clear() retains bucket memory)
+  decltype(ngram_to_cache_keys_)().swap(ngram_to_cache_keys_);
+  decltype(cache_metadata_)().swap(cache_metadata_);
+  decltype(table_ngram_settings_)().swap(table_ngram_settings_);
 }
 
 size_t InvalidationManager::GetTrackedEntryCount() const {

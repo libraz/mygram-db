@@ -163,7 +163,7 @@ TEST(IndexConcurrentTest, SaveWithConcurrentReads) {
 
   // Save thread
   threads.emplace_back([&index, &test_file, &save_done]() {
-    EXPECT_TRUE(index.SaveToFile(test_file + ".index"));
+    EXPECT_TRUE(index.SaveToFile(test_file + ".index").has_value());
     save_done = true;
   });
 
@@ -198,7 +198,7 @@ TEST(IndexConcurrentTest, LoadFromFile) {
   }
 
   std::string test_file = "/tmp/test_index_load_" + std::to_string(std::time(nullptr));
-  ASSERT_TRUE(index1.SaveToFile(test_file + ".index"));
+  ASSERT_TRUE(index1.SaveToFile(test_file + ".index").has_value());
 
   Index index2(1);
 
@@ -219,7 +219,7 @@ TEST(IndexConcurrentTest, LoadFromFile) {
   // Thread that loads from file
   threads.emplace_back([&index2, &test_file, &load_done]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    EXPECT_TRUE(index2.LoadFromFile(test_file + ".index"));
+    EXPECT_TRUE(index2.LoadFromFile(test_file + ".index").has_value());
     load_done = true;
   });
 
@@ -703,7 +703,7 @@ TEST(IndexConcurrentTest, SaveToStreamDoesNotBlockSearch) {
   std::thread saver([&]() {
     std::ostringstream oss;
     save_started.store(true);
-    index.SaveToStream(oss);
+    [[maybe_unused]] auto result = index.SaveToStream(oss);
     save_done.store(true);
   });
 
@@ -734,8 +734,8 @@ TEST(IndexConcurrentTest, SaveToStreamConcurrentWithWrite) {
 
   std::thread saver([&]() {
     save_started.store(true);
-    bool result = index.SaveToStream(oss);
-    EXPECT_TRUE(result);
+    auto result = index.SaveToStream(oss);
+    EXPECT_TRUE(result.has_value());
   });
 
   std::thread writer([&]() {
@@ -756,7 +756,7 @@ TEST(IndexConcurrentTest, SaveToStreamConcurrentWithWrite) {
 
   Index loaded_index(2);
   std::istringstream iss(saved_data);
-  EXPECT_TRUE(loaded_index.LoadFromStream(iss));
+  EXPECT_TRUE(loaded_index.LoadFromStream(iss).has_value());
   auto results = loaded_index.SearchAnd({"he"});
   EXPECT_GE(results.size(), 5000u);
 }

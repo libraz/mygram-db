@@ -164,12 +164,7 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
-  if (strategy == PostingStrategy::kDeltaCompressed) {
-    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
-  } else {
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
-  }
-  version_.fetch_add(1, std::memory_order_release);
+  UpdateCountsAndVersion();
 }
 
 void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
@@ -194,12 +189,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
-  if (strategy == PostingStrategy::kDeltaCompressed) {
-    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
-  } else {
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
-  }
-  version_.fetch_add(1, std::memory_order_release);
+  UpdateCountsAndVersion();
 }
 
 void PostingList::Remove(DocId doc_id) {
@@ -218,12 +208,7 @@ void PostingList::Remove(DocId doc_id) {
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
   }
-  if (strategy == PostingStrategy::kDeltaCompressed) {
-    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
-  } else {
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
-  }
-  version_.fetch_add(1, std::memory_order_release);
+  UpdateCountsAndVersion();
 }
 
 bool PostingList::Contains(DocId doc_id) const {
@@ -362,7 +347,7 @@ uint64_t PostingList::Size() const {
 }
 
 uint64_t PostingList::SizeApprox() const {
-  return doc_count_.load(std::memory_order_relaxed);
+  return doc_count_.load(std::memory_order_acquire);
 }
 
 size_t PostingList::MemoryUsage() const {
@@ -371,11 +356,23 @@ size_t PostingList::MemoryUsage() const {
 }
 
 size_t PostingList::MemoryUsageApprox() const {
-  uint64_t count = doc_count_.load(std::memory_order_relaxed);
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  uint64_t count = doc_count_.load(std::memory_order_acquire);
+  if (strategy_.load(std::memory_order_acquire) == PostingStrategy::kDeltaCompressed) {
     return static_cast<size_t>(count) * sizeof(uint32_t);
   }
+  if (roaring_bitmap_ == nullptr) {
+    return 0;
+  }
   return roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
+}
+
+void PostingList::UpdateCountsAndVersion() {
+  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
+  } else {
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
+  }
+  version_.fetch_add(1, std::memory_order_release);
 }
 
 void PostingList::RecomputeLastDocId() {
@@ -391,6 +388,26 @@ void PostingList::RecomputeLastDocId() {
 }
 
 std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) const {
+  // Self-intersection guard: avoid UB from locking the same shared_mutex twice.
+  // A & A == A, so return a copy of this list.
+  if (&other == this) {
+    std::shared_lock lock(mutex_);
+    auto result = std::make_unique<PostingList>(roaring_threshold_);
+    std::vector<DocId> docs;
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+      docs = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      docs.resize(size);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+    }
+    if (!docs.empty()) {
+      lock.unlock();  // Release before calling AddBatch which acquires its own lock
+      result->AddBatch(docs);
+    }
+    return result;
+  }
+
   std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
   std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
   std::lock(lock1, lock2);                                // Deadlock-safe acquisition
@@ -441,6 +458,26 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
 }
 
 std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const {
+  // Self-union guard: avoid UB from locking the same shared_mutex twice.
+  // A | A == A, so return a copy of this list.
+  if (&other == this) {
+    std::shared_lock lock(mutex_);
+    auto result = std::make_unique<PostingList>(roaring_threshold_);
+    std::vector<DocId> docs;
+    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+      docs = DecodeDelta(delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      docs.resize(size);
+      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+    }
+    if (!docs.empty()) {
+      lock.unlock();  // Release before calling AddBatch which acquires its own lock
+      result->AddBatch(docs);
+    }
+    return result;
+  }
+
   std::shared_lock lock1(mutex_, std::defer_lock);        // Protect read access to this
   std::shared_lock lock2(other.mutex_, std::defer_lock);  // Protect read access to other
   std::lock(lock1, lock2);                                // Deadlock-safe acquisition

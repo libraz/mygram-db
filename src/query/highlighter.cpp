@@ -25,7 +25,13 @@ size_t CpToByte(std::string_view text, uint32_t cp_offset) {
     } else if ((byte & 0xE0) == 0xC0) {
       byte_pos += 2;
     } else if (byte < 0xC0) {
-      byte_pos += 1;  // Continuation byte (0x80-0xBF) — skip as invalid start
+      // Continuation byte (0x80-0xBF) encountered as start byte — skip it.
+      // NOTE: This does not fully validate UTF-8 (e.g., overlong encodings,
+      // missing continuation bytes). A more robust approach would use
+      // TryParseUtf8Char() from string_utils.cpp, but that function is not
+      // currently exposed in the header. For highlighter purposes, this
+      // simple heuristic is sufficient since input is pre-validated.
+      byte_pos += 1;
     } else if (byte < 0xF0) {
       byte_pos += 3;
     } else {

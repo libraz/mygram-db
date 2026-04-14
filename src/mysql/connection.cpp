@@ -636,12 +636,16 @@ std::optional<std::string> Connection::GetLatestGTID() {
   return gtid_set;
 }
 
-bool Connection::ValidateUniqueColumn(const std::string& database, const std::string& table, const std::string& column,
-                                      std::string& error_message) {
+mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueColumn(const std::string& database,
+                                                                                     const std::string& table,
+                                                                                     const std::string& column) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   // Check connection before using mysql_ handle
   if (mysql_ == nullptr) {
-    error_message = "Not connected to MySQL";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected to MySQL"));
   }
 
   // Escape parameters to prevent SQL injection
@@ -673,25 +677,26 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
 
   auto result_exp = Execute(query);
   if (!result_exp) {
-    error_message = "Failed to query table schema: " + GetLastError();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to query table schema: " + last_error_,
+                                    database + "." + table));
   }
 
   MYSQL_ROW row = mysql_fetch_row(result_exp->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    error_message = "Failed to fetch result for unique column validation";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to fetch result for unique column validation",
+                                    database + "." + table + "." + column));
   }
 
   int count = 0;
   try {
     count = std::stoi(row[0]);
   } catch (const std::invalid_argument& e) {
-    error_message = "Invalid count value in unique column validation";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema, "Invalid count value in unique column validation",
+                                    database + "." + table + "." + column));
   } catch (const std::out_of_range& e) {
-    error_message = "Count value out of range in unique column validation";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                    "Count value out of range in unique column validation",
+                                    database + "." + table + "." + column));
   }
   // result is automatically freed by MySQLResult destructor
 
@@ -709,22 +714,25 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
       if ((col_row != nullptr) && (col_row[0] != nullptr)) {
         try {
           if (std::stoi(col_row[0]) == 0) {
-            error_message = "Column '" + column + "' does not exist in table '" + database + "." + table + "'";
-            return false;
+            return MakeUnexpected(
+                MakeError(ErrorCode::kMySQLColumnNotFound,
+                          "Column '" + column + "' does not exist in table '" + database + "." + table + "'",
+                          database + "." + table + "." + column));
           }
         } catch (const std::exception& e) {
-          error_message = "Invalid column count value";
-          return false;
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema, "Invalid column count value",
+                                          database + "." + table + "." + column));
         }
       }
       // col_result is automatically freed by MySQLResult destructor
     }
 
     // Column exists but is not unique
-    error_message = "Column '" + column + "' in table '" + database + "." + table +
-                    "' must be a single-column PRIMARY KEY or UNIQUE KEY. "
-                    "Composite keys are not supported.";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDuplicateColumn,
+                                    "Column '" + column + "' in table '" + database + "." + table +
+                                        "' must be a single-column PRIMARY KEY or UNIQUE KEY. "
+                                        "Composite keys are not supported.",
+                                    database + "." + table + "." + column));
   }
 
   mygram::utils::StructuredLog()
@@ -733,7 +741,7 @@ bool Connection::ValidateUniqueColumn(const std::string& database, const std::st
       .Field("table", table)
       .Field("column", column)
       .Info();
-  return true;
+  return {};
 }
 
 void Connection::SetMySQLError() {
