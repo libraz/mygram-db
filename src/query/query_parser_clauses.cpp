@@ -4,6 +4,7 @@
  */
 
 #include <array>
+#include <charconv>
 #include <climits>
 #include <cstdint>
 #include <optional>
@@ -413,23 +414,25 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
 
 bool QueryParser::ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // FUZZY [distance]
-  // pos is at the token AFTER "FUZZY"
+  pos++;  // Skip "FUZZY" (consistent with other ParseX methods)
   uint32_t max_distance = 1;  // Default
 
   // Check if next token is a number (optional distance parameter)
   if (pos < tokens.size() && !internal::IsClauseKeyword(tokens[pos])) {
-    try {
-      int val = std::stoi(tokens[pos]);
+    uint32_t val = 0;
+    const auto& token = tokens[pos];
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), val);
+    if (ec == std::errc() && ptr == token.data() + token.size()) {
+      // Successfully parsed as number — validate range
       if (val < 1 || val > 2) {
-        SetError("FUZZY distance must be 1 or 2, got: " + tokens[pos]);
+        SetError("FUZZY distance must be 1 or 2, got: " + token);
         return false;
       }
-      max_distance = static_cast<uint32_t>(val);
+      max_distance = val;
       ++pos;
-    } catch (...) {
-      SetError("Invalid FUZZY distance: " + tokens[pos]);
-      return false;
     }
+    // If not a valid number, don't consume — leave for next clause to handle
   }
 
   query.fuzzy_max_distance = max_distance;

@@ -11,6 +11,7 @@
 #include <array>
 #include <charconv>
 #include <cstring>
+#include <optional>
 #include <variant>
 
 #include "query/query_parser_internal.h"
@@ -35,6 +36,9 @@ constexpr size_t kNumericBufferSize = 32;
 
 // Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
 constexpr size_t kToCharsBufferSize = 21;
+
+// Buffer size for std::from_chars parsing
+constexpr size_t kFromCharsBufferSize = 21;
 
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;
@@ -135,6 +139,25 @@ inline std::string ToZeroPaddedDoubleString(double value, int width) {
 }
 
 /**
+ * @brief Parse a numeric primary key string and return zero-padded sort key
+ *
+ * Uses std::from_chars for no-throw, no-allocation numeric parsing.
+ *
+ * @param pk_str Primary key string (must be all-digit)
+ * @return Zero-padded string if successfully parsed, std::nullopt otherwise
+ */
+std::optional<std::string> ParseNumericPrimaryKey(std::string_view pk_str) {
+  uint64_t num = 0;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  auto [ptr, ec] = std::from_chars(pk_str.data(), pk_str.data() + pk_str.size(), num);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  if (ec == std::errc() && ptr == pk_str.data() + pk_str.size()) {
+    return ToZeroPaddedString(num, kNumericWidth);
+  }
+  return std::nullopt;
+}
+
+/**
  * @brief Convert a FilterValue variant to a sort-key string
  *
  * Centralizes the conversion logic used by GetSortKey, SortWithSchwartzianTransform,
@@ -195,14 +218,9 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
       // Try to parse as numeric and convert to zero-padded string for correct lexicographic ordering
       if (!pk_str.empty() &&
           std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-        try {
-          uint64_t num = std::stoull(pk_str);
-          // Convert to zero-padded string (20 digits) for lexicographic comparison
-          // This ensures: "00000000000000000001" < "00000000000000000002" < "00000000000000000010"
-          // Using std::to_chars (locale-independent, no lock contention)
-          return ToZeroPaddedString(num, kNumericWidth);
-        } catch (const std::exception&) {
-          // Overflow or parse error - fall through to string comparison
+        auto padded = ParseNumericPrimaryKey(pk_str);
+        if (padded.has_value()) {
+          return padded.value();
         }
       }
 
@@ -268,12 +286,8 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
       const auto& pk_str = primary_keys[i];
       if (!pk_str.empty()) {
         if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          try {
-            uint64_t num = std::stoull(pk_str);
-            sort_key = ToZeroPaddedString(num, kNumericWidth);
-          } catch (const std::exception&) {
-            sort_key = pk_str;
-          }
+          auto padded = ParseNumericPrimaryKey(pk_str);
+          sort_key = padded.has_value() ? padded.value() : pk_str;
         } else {
           sort_key = pk_str;
         }
@@ -360,13 +374,8 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
       if (!pk_str.empty()) {
         // Numeric primary keys: pad with zeros for lexicographic ordering
         if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          try {
-            uint64_t num = std::stoull(pk_str);
-            // Use std::to_chars (locale-independent, no lock contention)
-            sort_key = ToZeroPaddedString(num, kNumericWidth);
-          } catch (const std::exception&) {
-            sort_key = pk_str;  // Overflow - use as string
-          }
+          auto padded = ParseNumericPrimaryKey(pk_str);
+          sort_key = padded.has_value() ? padded.value() : pk_str;
         } else {
           sort_key = pk_str;  // String primary key
         }

@@ -70,6 +70,10 @@ TEST(BM25ScorerTest, CountTermOccurrencesNonOverlapping) {
   EXPECT_EQ(BM25Scorer::CountTermOccurrences("aaaa", "aa"), 2);
 }
 
+TEST(BM25ScorerTest, CountTermOccurrencesTermLongerThanText) {
+  EXPECT_EQ(BM25Scorer::CountTermOccurrences("hi", "hello world test"), 0u);
+}
+
 TEST(BM25ScorerTest, CountTermOccurrencesCJK) {
   EXPECT_EQ(BM25Scorer::CountTermOccurrences(
                 "\xe6\x9d\xb1\xe4\xba\xac\xe3\x81\xaf\xe6\x97\xa5\xe6\x9c\xac\xe3\x81\xae\xe9\xa6\x96\xe9\x83\xbd\xe3"

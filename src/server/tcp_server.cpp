@@ -172,6 +172,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   debug_handler_ = std::move(components.debug_handler);
   cache_handler_ = std::move(components.cache_handler);
   variable_handler_ = std::move(components.variable_handler);
+  facet_handler_ = std::move(components.facet_handler);
 #ifdef USE_MYSQL
   sync_handler_ = std::move(components.sync_handler);
 #endif

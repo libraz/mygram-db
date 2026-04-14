@@ -30,6 +30,98 @@ namespace {
 constexpr size_t kResponseBaseBufferSize = 32;
 // Average primary key size estimate (including space delimiter)
 constexpr size_t kEstimatedPrimaryKeySize = 12;
+
+/**
+ * @brief Append debug information block to a response string
+ *
+ * Shared logic for FormatSearchResponse and FormatSearchResponseWithHighlights.
+ *
+ * @param response Output string to append to
+ * @param debug_info Debug information to format
+ * @param include_detailed_counts If true, include candidates/after_intersection/after_not/after_filters
+ *        and detailed cache info (age, saved, cost, reason, key). If false, include only simple cache status.
+ */
+void AppendDebugBlock(std::string& response, const query::DebugInfo& debug_info, bool include_detailed_counts) {
+  std::ostringstream oss;
+  oss << "\r\n\r\n# DEBUG\r\n";
+  oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info.query_time_ms << "ms\r\n";
+  oss << "index_time: " << debug_info.index_time_ms << "ms\r\n";
+  if (debug_info.filter_time_ms > 0.0) {
+    oss << "filter_time: " << debug_info.filter_time_ms << "ms\r\n";
+  }
+  oss << "terms: " << debug_info.search_terms.size() << "\r\n";
+  oss << "ngrams: " << debug_info.ngrams_used.size() << "\r\n";
+
+  if (include_detailed_counts) {
+    oss << "candidates: " << debug_info.total_candidates << "\r\n";
+    oss << "after_intersection: " << debug_info.after_intersection << "\r\n";
+    if (debug_info.after_not > 0) {
+      oss << "after_not: " << debug_info.after_not << "\r\n";
+    }
+    if (debug_info.after_filters > 0) {
+      oss << "after_filters: " << debug_info.after_filters << "\r\n";
+    }
+  }
+
+  oss << "final: " << debug_info.final_results << "\r\n";
+  if (!debug_info.optimization_used.empty()) {
+    oss << "optimization: " << debug_info.optimization_used << "\r\n";
+  }
+  if (!debug_info.order_by_applied.empty()) {
+    oss << "sort: " << debug_info.order_by_applied << "\r\n";
+  }
+  oss << "limit: " << debug_info.limit_applied;
+  if (!debug_info.limit_explicit) {
+    oss << " (default)";
+  }
+  oss << "\r\n";
+  if (debug_info.offset_applied > 0) {
+    oss << "offset: " << debug_info.offset_applied;
+    if (!debug_info.offset_explicit) {
+      oss << " (default)";
+    }
+    oss << "\r\n";
+  }
+
+  if (!include_detailed_counts) {
+    oss << "highlight: on\r\n";
+  }
+
+  // Cache debug information
+  switch (debug_info.cache_info.status) {
+    case query::CacheDebugInfo::Status::HIT:
+      oss << "cache: hit\r\n";
+      if (include_detailed_counts) {
+        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.cache_age_ms << "\r\n";
+        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.cache_saved_ms
+            << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+      oss << "cache: miss\r\n";
+      if (include_detailed_counts) {
+        oss << "cache_reason: not_found\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.query_cost_ms << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+      oss << "cache: miss\r\n";
+      if (include_detailed_counts) {
+        oss << "cache_reason: invalidated\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.query_cost_ms << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_DISABLED:
+      oss << "cache: disabled\r\n";
+      break;
+  }
+  if (include_detailed_counts && !debug_info.cache_info.cache_key.empty()) {
+    oss << "cache_key: " << debug_info.cache_info.cache_key << "\r\n";
+  }
+
+  response += oss.str();
+}
+
 }  // namespace
 
 std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::DocId>& results, size_t total_results,
@@ -78,76 +170,9 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
         .Warn();
   }
 
-  // Add debug information if provided (debug path uses ostringstream for convenience)
+  // Add debug information if provided
   if (debug_info != nullptr) {
-    std::ostringstream oss;
-    oss << "\r\n\r\n# DEBUG\r\n";
-    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
-    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
-    if (debug_info->filter_time_ms > 0.0) {
-      oss << "filter_time: " << debug_info->filter_time_ms << "ms\r\n";
-    }
-    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
-    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
-    oss << "candidates: " << debug_info->total_candidates << "\r\n";
-    oss << "after_intersection: " << debug_info->after_intersection << "\r\n";
-    if (debug_info->after_not > 0) {
-      oss << "after_not: " << debug_info->after_not << "\r\n";
-    }
-    if (debug_info->after_filters > 0) {
-      oss << "after_filters: " << debug_info->after_filters << "\r\n";
-    }
-    oss << "final: " << debug_info->final_results << "\r\n";
-    if (!debug_info->optimization_used.empty()) {
-      oss << "optimization: " << debug_info->optimization_used << "\r\n";
-    }
-    // Show applied SORT, LIMIT, OFFSET
-    if (!debug_info->order_by_applied.empty()) {
-      oss << "sort: " << debug_info->order_by_applied << "\r\n";
-    }
-    // Always show LIMIT (it has a default value of 100)
-    oss << "limit: " << debug_info->limit_applied;
-    if (!debug_info->limit_explicit) {
-      oss << " (default)";
-    }
-    oss << "\r\n";
-    // Show OFFSET if non-zero
-    if (debug_info->offset_applied > 0) {
-      oss << "offset: " << debug_info->offset_applied;
-      if (!debug_info->offset_explicit) {
-        oss << " (default)";
-      }
-      oss << "\r\n";
-    }
-
-    // Cache debug information
-    switch (debug_info->cache_info.status) {
-      case query::CacheDebugInfo::Status::HIT:
-        oss << "cache: hit\r\n";
-        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
-        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
-            << "\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
-        oss << "cache: miss\r\n";
-        oss << "cache_reason: not_found\r\n";
-        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
-            << "\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
-        oss << "cache: miss\r\n";
-        oss << "cache_reason: invalidated\r\n";
-        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms
-            << "\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_DISABLED:
-        oss << "cache: disabled\r\n";
-        break;
-    }
-    if (!debug_info->cache_info.cache_key.empty()) {
-      oss << "cache_key: " << debug_info->cache_info.cache_key << "\r\n";
-    }
-    response += oss.str();
+    AppendDebugBlock(response, *debug_info, /*include_detailed_counts=*/true);
   }
 
   return response;
@@ -189,53 +214,9 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
     }
   }
 
-  // Add debug information if provided (reuse same format as FormatSearchResponse)
+  // Add debug information if provided
   if (debug_info != nullptr) {
-    std::ostringstream oss;
-    oss << "\r\n\r\n# DEBUG\r\n";
-    oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
-    oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
-    if (debug_info->filter_time_ms > 0.0) {
-      oss << "filter_time: " << debug_info->filter_time_ms << "ms\r\n";
-    }
-    oss << "terms: " << debug_info->search_terms.size() << "\r\n";
-    oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
-    oss << "final: " << debug_info->final_results << "\r\n";
-    if (!debug_info->optimization_used.empty()) {
-      oss << "optimization: " << debug_info->optimization_used << "\r\n";
-    }
-    if (!debug_info->order_by_applied.empty()) {
-      oss << "sort: " << debug_info->order_by_applied << "\r\n";
-    }
-    oss << "limit: " << debug_info->limit_applied;
-    if (!debug_info->limit_explicit) {
-      oss << " (default)";
-    }
-    oss << "\r\n";
-    if (debug_info->offset_applied > 0) {
-      oss << "offset: " << debug_info->offset_applied;
-      if (!debug_info->offset_explicit) {
-        oss << " (default)";
-      }
-      oss << "\r\n";
-    }
-    oss << "highlight: on\r\n";
-
-    switch (debug_info->cache_info.status) {
-      case query::CacheDebugInfo::Status::HIT:
-        oss << "cache: hit\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
-        oss << "cache: miss\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_INVALIDATED:
-        oss << "cache: miss\r\n";
-        break;
-      case query::CacheDebugInfo::Status::MISS_DISABLED:
-        oss << "cache: disabled\r\n";
-        break;
-    }
-    response += oss.str();
+    AppendDebugBlock(response, *debug_info, /*include_detailed_counts=*/false);
   }
 
   return response;
@@ -286,7 +267,10 @@ std::string ResponseFormatter::FormatFacetResponse(
   std::string response = "OK FACET " + std::to_string(value_counts.size()) + "\r\n";
 
   for (const auto& [value, count] : value_counts) {
-    response += value;
+    // Escape tabs in value to prevent protocol ambiguity (tab is the separator)
+    for (char ch : value) {
+      response += (ch == '\t') ? ' ' : ch;
+    }
     response += '\t';
     response += std::to_string(count);
     response += "\r\n";
@@ -969,8 +953,10 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   return oss.str();
 }
 
-std::string ResponseFormatter::FormatError(const std::string& message) {
-  return "ERROR " + message;
+std::string ResponseFormatter::FormatError(std::string_view message) {
+  std::string result = "ERROR ";
+  result += message;
+  return result;
 }
 
 }  // namespace mygramdb::server

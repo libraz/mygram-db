@@ -83,6 +83,9 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
     out.write(replication_gtid.data(), static_cast<std::streamsize>(gtid_len));
   }
 
+  // Check stream after writing header section
+  if (!out.good()) return false;
+
   // Write document count
   auto doc_count = static_cast<uint64_t>(doc_id_to_pk_.size());
   WriteBinary(out, doc_count);
@@ -146,6 +149,9 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
       uint32_t text_len = 0;
       WriteBinary(out, text_len);
     }
+
+    // Periodic check to detect write failures early (e.g., disk full)
+    if (!out.good()) return false;
   }
 
   return out.good();
@@ -310,6 +316,10 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
         // Read filter type
         uint8_t type_idx = 0;
         ReadBinary(in, type_idx);
+        if (!in.good()) {
+          return MakeUnexpected(
+              MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read filter type", context));
+        }
 
         // Read filter value based on type
         FilterValue value;

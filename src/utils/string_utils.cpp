@@ -204,7 +204,7 @@ int Utf8CharLength(unsigned char first_byte) {
 
 std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
   std::vector<uint32_t> codepoints;
-  codepoints.reserve(text.size());  // Over-allocate for ASCII
+  codepoints.reserve(text.size() / 2 + 1);  // Balance between ASCII and CJK
 
   for (size_t i = 0; i < text.size();) {
     auto first_byte = static_cast<unsigned char>(text[i]);

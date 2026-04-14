@@ -8,16 +8,20 @@
  * - IsCacheStale: stale cache detection via sampling
  * - Type coercion: string/int/double/bool filter value matching
  * - NULL value handling in filters
+ * - ExecuteWithFuzzy: empty n-gram early exit (m-17)
+ * - Execute: NOT/filter applied internally, not double-applied (m-16)
  */
 
 #include "server/search_pipeline.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "index/index.h"
 #include "query/query_parser.h"
 #include "storage/document_store.h"
 
@@ -256,6 +260,174 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithNullManagerIsNoop) {
   std::vector<SearchTermInfo> term_infos;
   // Should not crash
   InsertToCache(nullptr, query, doc_ids_, term_infos, 1.0, 2, 0, false);
+}
+
+// =============================================================================
+// ExecuteWithFuzzy: empty n-gram detection (m-17)
+// =============================================================================
+// When a search term produces no n-grams (e.g., single character with bigram
+// indexing), ExecuteWithFuzzy must set empty_term_detected = true and return
+// empty results, rather than proceeding with an empty n-gram list that would
+// match all documents or crash.
+// =============================================================================
+
+class SearchPipelineFuzzyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    index_ = std::make_unique<index::Index>();
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+
+    // Add documents with text long enough to produce n-grams
+    auto d0 = doc_store_->AddDocument("pk0", {}, "hello world");
+    ASSERT_TRUE(d0.has_value());
+    index_->AddDocument(d0.value(), "hello world");
+
+    auto d1 = doc_store_->AddDocument("pk1", {}, "fuzzy search test");
+    ASSERT_TRUE(d1.has_value());
+    index_->AddDocument(d1.value(), "fuzzy search test");
+  }
+
+  std::unique_ptr<index::Index> index_;
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+};
+
+TEST_F(SearchPipelineFuzzyTest, EmptyNgramsSetEmptyTermDetected) {
+  // A term with empty n-grams should trigger empty_term_detected
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({/* ngrams= */ {}, /* estimated_size= */ 0});
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"x"};
+
+  auto result =
+      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
+                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
+                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+TEST_F(SearchPipelineFuzzyTest, EmptyNgramsAmongMultipleTermsSetsEmptyTermDetected) {
+  // If one of multiple terms has empty n-grams, the whole query should
+  // report empty_term_detected
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({{"he", "el", "ll", "lo"}, 2});  // valid term
+  term_infos.push_back({/* ngrams= */ {}, /* estimated_size= */ 0});  // empty
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"hello", "x"};
+
+  auto result =
+      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
+                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
+                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+TEST_F(SearchPipelineFuzzyTest, EmptyTermInfosSetEmptyTermDetected) {
+  // No terms at all should also trigger empty_term_detected
+  std::vector<SearchTermInfo> term_infos;
+  query::Query query;
+  std::vector<std::string> all_terms;
+
+  auto result =
+      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
+                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
+                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+// =============================================================================
+// Execute: NOT filter and column filters are applied within pipeline (m-16)
+// =============================================================================
+// This validates that Execute() applies NOT terms and column filters internally,
+// so callers (like FacetHandler) must NOT re-apply them when using Execute().
+// The regression was that facet_handler applied NOT/filters AFTER Execute(),
+// causing double-filtering that removed too many documents.
+// =============================================================================
+
+TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
+  // Add a document that will be excluded by NOT
+  auto d2 = doc_store_->AddDocument("pk2",
+                                    {{"status", storage::FilterValue{int64_t{1}}}},
+                                    "excluded hello world");
+  ASSERT_TRUE(d2.has_value());
+  index_->AddDocument(d2.value(), "excluded hello world");
+
+  // Search for "hello" NOT "excluded"
+  auto term_infos = GenerateTermInfos({"hello"}, index_.get(), 2, 1, true);
+  std::sort(term_infos.begin(), term_infos.end(),
+            [](const SearchTermInfo& a, const SearchTermInfo& b) {
+              return a.estimated_size < b.estimated_size;
+            });
+
+  query::Query query;
+  query.not_terms = {"excluded"};
+  std::vector<std::string> all_terms = {"hello"};
+
+  auto result = Execute(query, term_infos, all_terms, index_.get(),
+                        doc_store_.get(), /* full_config= */ nullptr,
+                        /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                        /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  // "hello world" (doc 0) should remain; "excluded hello world" (doc 2) removed
+  EXPECT_FALSE(result.empty_term_detected);
+  ASSERT_EQ(result.results.size(), 1);
+
+  // Verify the NOT filter was applied inside Execute -- applying it again
+  // should not change the results (no double-filtering)
+  auto double_filtered = ApplyNotFilter(result.results, query.not_terms,
+                                        index_.get(), 2, 1, true);
+  EXPECT_EQ(double_filtered.size(), result.results.size())
+      << "NOT filter was not applied inside Execute(); applying it again "
+         "changed the result set (double-filter bug)";
+}
+
+TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesColumnFiltersInternally) {
+  // Add documents with filter values
+  auto d2 = doc_store_->AddDocument("pk2",
+                                    {{"status", storage::FilterValue{int64_t{1}}}},
+                                    "status one hello");
+  ASSERT_TRUE(d2.has_value());
+  index_->AddDocument(d2.value(), "status one hello");
+
+  auto d3 = doc_store_->AddDocument("pk3",
+                                    {{"status", storage::FilterValue{int64_t{2}}}},
+                                    "status two hello");
+  ASSERT_TRUE(d3.has_value());
+  index_->AddDocument(d3.value(), "status two hello");
+
+  // Search for "hello" with FILTER status=1
+  auto term_infos = GenerateTermInfos({"hello"}, index_.get(), 2, 1, true);
+  std::sort(term_infos.begin(), term_infos.end(),
+            [](const SearchTermInfo& a, const SearchTermInfo& b) {
+              return a.estimated_size < b.estimated_size;
+            });
+
+  query::Query query;
+  query.filters = {{"status", query::FilterOp::EQ, "1"}};
+  std::vector<std::string> all_terms = {"hello"};
+
+  auto result = Execute(query, term_infos, all_terms, index_.get(),
+                        doc_store_.get(), /* full_config= */ nullptr,
+                        /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                        /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_FALSE(result.empty_term_detected);
+
+  // Verify that applying filters again produces the same result (no double-filter)
+  auto double_filtered = ApplyFilters(result.results, query.filters, doc_store_.get());
+  EXPECT_EQ(double_filtered.size(), result.results.size())
+      << "Column filters were not applied inside Execute(); applying them again "
+         "changed the result set (double-filter bug)";
 }
 
 }  // namespace mygramdb::server::search_pipeline

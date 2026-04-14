@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "server/handlers/search_handler.h"
 #include "server/search_pipeline.h"
 #include "storage/filter_index.h"
 #include "utils/string_utils.h"
@@ -36,6 +37,11 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     return error;
   }
 
+  // BUG-3: Null check after GetTableContext
+  if (current_doc_store == nullptr) {
+    return ResponseFormatter::FormatError("Document store not available");
+  }
+
   auto start_time = std::chrono::high_resolution_clock::now();
 
   // Get filter index snapshot
@@ -44,19 +50,30 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     return ResponseFormatter::FormatError("Filter index not available");
   }
 
+  // EDGE-5: Re-check dump_load_in_progress after snapshot
+  if (ctx_.dump_load_in_progress) {
+    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  }
+
   std::vector<std::pair<std::string, uint64_t>> value_counts;
 
-  if (!query.search_text.empty() || !query.filters.empty()) {
+  bool has_search = !query.search_text.empty() || !query.and_terms.empty();
+  bool has_not = !query.not_terms.empty();
+  bool has_filters = !query.filters.empty();
+
+  if (has_search || has_not || has_filters) {
     // Need to restrict facet to a subset of documents
     std::vector<storage::DocId> results;
+    bool cross_boundary = current_index->GetCrossBoundaryNgrams();
 
-    if (!query.search_text.empty()) {
-      // Run search pipeline
+    if (has_search) {
+      // Run search pipeline (handles search_text + and_terms + NOT + filters)
       std::vector<std::string> all_search_terms;
-      all_search_terms.push_back(query.search_text);
+      if (!query.search_text.empty()) {
+        all_search_terms.push_back(query.search_text);
+      }
       all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
-      bool cross_boundary = current_index->GetCrossBoundaryNgrams();
       auto term_infos =
           search_pipeline::GenerateTermInfos(all_search_terms, current_index, ngram_size, kanji_ngram_size,
                                              cross_boundary);
@@ -66,29 +83,25 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
         return a.estimated_size < b.estimated_size;
       });
 
-      // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-      constexpr size_t kDefaultFilterThreshold = 1000;
-      // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       auto pipeline_result =
           search_pipeline::Execute(query, term_infos, all_search_terms, current_index, current_doc_store,
                                    ctx_.full_config, ngram_size, kanji_ngram_size, cross_boundary,
-                                   kDefaultFilterThreshold);
+                                   SearchHandler::GetFilterThreshold());
       results = std::move(pipeline_result.results);
     } else {
-      // No search text, but has filters — start with all docs
+      // No search text and no and_terms — start with all docs
       results = current_doc_store->GetAllDocIds();
 
-      // Apply filters
-      if (!query.filters.empty()) {
+      // Apply NOT filter (only for non-search path; Execute already handles it)
+      if (has_not) {
+        results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, ngram_size,
+                                                  kanji_ngram_size, cross_boundary);
+      }
+
+      // Apply column filters (only for non-search path; Execute already handles it)
+      if (has_filters) {
         results = search_pipeline::ApplyFiltersWithBitmap(results, query.filters, current_doc_store);
       }
-    }
-
-    // Apply NOT filter if present (for filter-only path)
-    if (query.search_text.empty() && !query.not_terms.empty()) {
-      bool cross_boundary = current_index->GetCrossBoundaryNgrams();
-      results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, ngram_size,
-                                                kanji_ngram_size, cross_boundary);
     }
 
     if (results.empty()) {
@@ -100,10 +113,14 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
           roaring_bitmap_create(), roaring_bitmap_free);
       roaring_bitmap_add_many(result_bitmap.get(), results.size(), results.data());
 
+      // Free the results vector before bitmap operations (reduce peak memory)
+      results.clear();
+      results.shrink_to_fit();
+
       value_counts = filter_index->GetColumnValueCountsFiltered(query.facet_column, result_bitmap.get());
     }
   } else {
-    // Facet all documents (no search, no filters)
+    // Facet all documents (no search, no filters, no NOT)
     value_counts = filter_index->GetColumnValueCounts(query.facet_column);
   }
 

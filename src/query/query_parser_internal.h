@@ -49,7 +49,7 @@ inline bool EqualsIgnoreCase(std::string_view lhs, std::string_view rhs) {
  */
 inline bool IsClauseKeyword(const std::string& token) {
   return token == "AND" || token == "OR" || token == "NOT" || token == "FILTER" || token == "SORT" ||
-         token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" || token == "FUZZY";
+         token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" || token == "FUZZY" || token == "FACET";
 }
 
 }  // namespace mygramdb::query::internal

@@ -422,12 +422,12 @@ TEST(DocumentStoreTest, DocIdAutoIncrement) {
 }
 
 /**
- * @brief Test DocID overflow detection
+ * @brief Test DocID sequential assignment and size tracking
  *
- * Verifies that the DocumentStore properly detects and rejects document
- * addition when the DocID space is exhausted (approaching UINT32_MAX).
+ * Verifies that the DocumentStore assigns monotonically increasing DocIDs
+ * and correctly tracks the number of documents.
  */
-TEST(DocumentStoreTest, DocIdOverflowDetection) {
+TEST(DocumentStoreTest, DocIdSequentialAssignmentAndSize) {
   DocumentStore store;
 
   // This test requires access to internal state for setting next_doc_id_

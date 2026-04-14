@@ -57,6 +57,9 @@ class FilterIndex {
   /// The returned bitmap is an independent copy safe to use without holding any lock.
   [[nodiscard]] RoaringBitmapPtr GetEqBitmap(const std::string& column, const std::string& serialized_value) const;
 
+  /// @brief Check if a column exists in the filter index
+  bool HasColumn(const std::string& column) const;
+
   /// Clear all bitmaps
   void Clear();
 

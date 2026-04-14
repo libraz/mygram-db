@@ -185,3 +185,98 @@ TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_NullType) {
 TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_EmptyString) {
   EXPECT_EQ(FilterIndex::DeserializeToDisplayString(""), "NULL");
 }
+
+// BUG-5: DeserializeToDisplayString for double is locale-independent
+TEST_F(FilterIndexFacetTest, DeserializeDoubleLocaleIndependent) {
+  // Verify that decimal point is always '.' not ','
+  FilterValue double_val = 3.14;
+  std::string serialized = FilterIndex::SerializeFilterValue(double_val);
+  std::string display = FilterIndex::DeserializeToDisplayString(serialized);
+  EXPECT_EQ(display.find(','), std::string::npos)
+      << "Display should not contain ',' as decimal separator, got: " << display;
+  EXPECT_NE(display.find('.'), std::string::npos)
+      << "Display should contain '.' as decimal separator, got: " << display;
+  // Check specific value
+  EXPECT_EQ(display, "3.14");
+}
+
+TEST_F(FilterIndexFacetTest, DeserializeDoubleWholeNumber) {
+  FilterValue double_val = 42.0;
+  std::string serialized = FilterIndex::SerializeFilterValue(double_val);
+  std::string display = FilterIndex::DeserializeToDisplayString(serialized);
+  // to_chars produces "42" for 42.0 (minimal representation)
+  EXPECT_EQ(display, "42");
+}
+
+// =============================================================================
+// Facet + pre-filtered bitmap: no double-application of exclusion (m-16)
+// =============================================================================
+// When a search pipeline has already removed documents (via NOT or column
+// filters), the result bitmap passed to GetColumnValueCountsFiltered should
+// yield correct counts. Applying the exclusion again on the bitmap before
+// passing it would incorrectly reduce counts further.
+//
+// This tests the correct pattern: exclude documents from the bitmap ONCE,
+// then pass the bitmap to GetColumnValueCountsFiltered.
+// =============================================================================
+
+TEST_F(FilterIndexFacetTest, FilteredFacetAfterNotExclusion) {
+  // Scenario: user searches with NOT status="inactive"
+  // Docs 1,2,4,5 have status="active", doc 3 has status="inactive"
+  // After NOT filter, the result set should be {1, 2, 4, 5}
+
+  // Build result bitmap excluding doc 3 (simulating NOT filter applied once)
+  roaring_bitmap_t* bm = roaring_bitmap_create();
+  roaring_bitmap_add(bm, 1);
+  roaring_bitmap_add(bm, 2);
+  roaring_bitmap_add(bm, 4);
+  roaring_bitmap_add(bm, 5);
+
+  auto counts = filter_index_.GetColumnValueCountsFiltered("category", bm);
+  roaring_bitmap_free(bm);
+
+  // news: docs 1,5 -> 2; sports: doc 2 -> 1; tech: doc 4 -> 1
+  ASSERT_EQ(counts.size(), 3);
+  EXPECT_EQ(FindCount(counts, "news"), 2);
+  EXPECT_EQ(FindCount(counts, "sports"), 1);
+  EXPECT_EQ(FindCount(counts, "tech"), 1);
+}
+
+TEST_F(FilterIndexFacetTest, FilteredFacetAfterColumnFilter) {
+  // Scenario: user filters by status="active"
+  // Active docs: 1, 2, 4, 5
+  // The pipeline has already filtered to these docs; facet on "category"
+
+  roaring_bitmap_t* bm = roaring_bitmap_create();
+  roaring_bitmap_add(bm, 1);
+  roaring_bitmap_add(bm, 2);
+  roaring_bitmap_add(bm, 4);
+  roaring_bitmap_add(bm, 5);
+
+  auto counts = filter_index_.GetColumnValueCountsFiltered("category", bm);
+  roaring_bitmap_free(bm);
+
+  // Same as above: news=2, sports=1, tech=1
+  EXPECT_EQ(FindCount(counts, "news"), 2);
+  EXPECT_EQ(FindCount(counts, "sports"), 1);
+  EXPECT_EQ(FindCount(counts, "tech"), 1);
+}
+
+TEST_F(FilterIndexFacetTest, FilteredFacetIdempotentWithSameBitmap) {
+  // Verify that calling GetColumnValueCountsFiltered twice with the same
+  // bitmap produces identical results (no internal state mutation)
+  roaring_bitmap_t* bm = roaring_bitmap_create();
+  roaring_bitmap_add(bm, 1);
+  roaring_bitmap_add(bm, 2);
+  roaring_bitmap_add(bm, 3);
+
+  auto counts1 = filter_index_.GetColumnValueCountsFiltered("category", bm);
+  auto counts2 = filter_index_.GetColumnValueCountsFiltered("category", bm);
+  roaring_bitmap_free(bm);
+
+  ASSERT_EQ(counts1.size(), counts2.size());
+  for (size_t i = 0; i < counts1.size(); ++i) {
+    EXPECT_EQ(counts1[i].first, counts2[i].first);
+    EXPECT_EQ(counts1[i].second, counts2[i].second);
+  }
+}

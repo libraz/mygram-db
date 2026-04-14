@@ -28,6 +28,9 @@ uint32_t BM25Scorer::CountTermOccurrences(std::string_view text, std::string_vie
   if (text.empty() || term.empty()) {
     return 0;
   }
+  if (term.size() > text.size()) {
+    return 0;
+  }
   uint32_t count = 0;
   size_t pos = 0;
   while (pos <= text.size() - term.size()) {
@@ -56,10 +59,14 @@ std::vector<ScoredDoc> BM25Scorer::ScoreDocuments(const std::vector<storage::Doc
     idfs.push_back(ComputeIDF(total_docs, term_doc_freqs[i]));
   }
 
-  for (auto doc_id : candidates) {
+  // Batch fetch all normalized texts in a single lock acquisition
+  auto all_texts = doc_store.GetNormalizedTextBatch(candidates);
+
+  for (size_t doc_idx = 0; doc_idx < candidates.size(); ++doc_idx) {
+    auto doc_id = candidates[doc_idx];
     double score = 0.0;
 
-    auto text_opt = doc_store.GetNormalizedText(doc_id);
+    const auto& text_opt = all_texts[doc_idx];
     if (text_opt.has_value() && !text_opt->empty()) {
       const auto& text = *text_opt;
       auto doc_length = static_cast<double>(mygram::utils::CountCodePoints(text));

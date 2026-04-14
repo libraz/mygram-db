@@ -22,12 +22,18 @@ size_t CpToByte(std::string_view text, uint32_t cp_offset) {
     auto byte = static_cast<unsigned char>(text[byte_pos]);
     if (byte < 0x80) {
       byte_pos += 1;
-    } else if (byte < 0xE0) {
+    } else if ((byte & 0xE0) == 0xC0) {
       byte_pos += 2;
+    } else if (byte < 0xC0) {
+      byte_pos += 1;  // Continuation byte (0x80-0xBF) — skip as invalid start
     } else if (byte < 0xF0) {
       byte_pos += 3;
     } else {
       byte_pos += 4;
+    }
+    if (byte_pos > text.size()) {
+      byte_pos = text.size();
+      break;
     }
     cp_count++;
   }

@@ -354,3 +354,147 @@ TEST_F(EndToEndTest, WorkflowWithEmoji) {
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0);
   EXPECT_TRUE(response.find("emoji1") != std::string::npos);
 }
+
+/**
+ * @brief Test FUZZY search workflow
+ */
+TEST_F(EndToEndTest, WorkflowWithFuzzySearch) {
+  TcpClient client("127.0.0.1", port_);
+
+  // Add documents
+  auto doc_id1 = table_context_.doc_store->AddDocument("f1", {});
+  table_context_.index->AddDocument(*doc_id1, "hello world");
+  table_context_.doc_store->SetNormalizedText(*doc_id1, "hello world");
+
+  auto doc_id2 = table_context_.doc_store->AddDocument("f2", {});
+  table_context_.index->AddDocument(*doc_id2, "help world");
+  table_context_.doc_store->SetNormalizedText(*doc_id2, "help world");
+
+  auto doc_id3 = table_context_.doc_store->AddDocument("f3", {});
+  table_context_.index->AddDocument(*doc_id3, "goodbye earth");
+  table_context_.doc_store->SetNormalizedText(*doc_id3, "goodbye earth");
+
+  // Exact search for "hello" — should match only doc with "hello"
+  std::string response = client.SendCommand("SEARCH posts hello");
+  EXPECT_TRUE(response.find("OK RESULTS") == 0);
+  EXPECT_TRUE(response.find("f1") != std::string::npos);
+
+  // Fuzzy search for "helo" (distance 1 from "hello" and "help")
+  response = client.SendCommand("SEARCH posts helo FUZZY");
+  EXPECT_TRUE(response.find("OK RESULTS") == 0);
+  // Should find at least f1 (hello→helo is distance 1)
+  EXPECT_TRUE(response.find("f1") != std::string::npos);
+
+  // Fuzzy search for "wrld" (distance 1 from "world")
+  response = client.SendCommand("SEARCH posts wrld FUZZY");
+  EXPECT_TRUE(response.find("OK RESULTS") == 0);
+
+  // BUG-1 regression: Short term in multi-term fuzzy should work correctly
+  // "hello" AND "x" FUZZY — "x" has no ngrams, should return empty (not silently skip)
+  response = client.SendCommand("SEARCH posts hello AND x FUZZY");
+  // "x" generates no trigrams, so it should yield 0 results
+  EXPECT_TRUE(response.find("OK RESULTS 0") == 0);
+
+  // FUZZY with distance 2
+  response = client.SendCommand("SEARCH posts hllo FUZZY 2");
+  EXPECT_TRUE(response.find("OK RESULTS") == 0);
+}
+
+/**
+ * @brief Test FACET command workflow
+ */
+TEST_F(EndToEndTest, WorkflowWithFacet) {
+  TcpClient client("127.0.0.1", port_);
+
+  // Add documents with category filter
+  auto doc_id1 = table_context_.doc_store->AddDocument("c1", {{"category", std::string("news")}});
+  table_context_.index->AddDocument(*doc_id1, "breaking news today");
+
+  auto doc_id2 = table_context_.doc_store->AddDocument("c2", {{"category", std::string("news")}});
+  table_context_.index->AddDocument(*doc_id2, "latest news update");
+
+  auto doc_id3 = table_context_.doc_store->AddDocument("c3", {{"category", std::string("sports")}});
+  table_context_.index->AddDocument(*doc_id3, "sports news live");
+
+  auto doc_id4 = table_context_.doc_store->AddDocument("c4", {{"category", std::string("tech")}});
+  table_context_.index->AddDocument(*doc_id4, "tech review article");
+
+  // Facet all documents by category
+  std::string response = client.SendCommand("FACET posts category");
+  EXPECT_TRUE(response.find("OK FACET") == 0);
+  EXPECT_TRUE(response.find("news") != std::string::npos);
+  EXPECT_TRUE(response.find("sports") != std::string::npos);
+  EXPECT_TRUE(response.find("tech") != std::string::npos);
+
+  // Facet with search text — only "news" documents
+  response = client.SendCommand("FACET posts category news");
+  EXPECT_TRUE(response.find("OK FACET") == 0);
+  EXPECT_TRUE(response.find("news") != std::string::npos);
+
+  // Facet with LIMIT
+  response = client.SendCommand("FACET posts category LIMIT 1");
+  EXPECT_TRUE(response.find("OK FACET 1") == 0);
+  // "news" has most docs (3 including "sports news"), should be first
+  EXPECT_TRUE(response.find("news") != std::string::npos);
+
+  // Facet on non-existent column — should return empty
+  response = client.SendCommand("FACET posts nonexistent");
+  EXPECT_TRUE(response.find("OK FACET 0") == 0);
+
+  // Facet on non-existent table — should return error
+  response = client.SendCommand("FACET nonexistent category");
+  EXPECT_TRUE(response.find("ERROR") == 0);
+}
+
+/**
+ * @brief Test FACET with NOT filter (BUG-2 regression)
+ */
+TEST_F(EndToEndTest, FacetWithNotFilter) {
+  TcpClient client("127.0.0.1", port_);
+
+  // Add documents with status filter
+  // NOT operates on search text n-grams, so "archived" must NOT appear in the text
+  auto doc_id1 = table_context_.doc_store->AddDocument("n1", {{"status", std::string("active")}});
+  table_context_.index->AddDocument(*doc_id1, "active document one");
+
+  auto doc_id2 = table_context_.doc_store->AddDocument("n2", {{"status", std::string("active")}});
+  table_context_.index->AddDocument(*doc_id2, "active document two");
+
+  auto doc_id3 = table_context_.doc_store->AddDocument("n3", {{"status", std::string("deleted")}});
+  table_context_.index->AddDocument(*doc_id3, "removed old entry");
+
+  // Search "document" NOT "removed" — should find n1, n2 (contain "document"), not n3
+  std::string response = client.SendCommand("FACET posts status document NOT removed");
+  EXPECT_TRUE(response.find("OK FACET") == 0);
+  // n1 and n2 match "document" and don't match NOT "removed", so "active" should appear
+  EXPECT_TRUE(response.find("active") != std::string::npos);
+  // n3 matches NOT "removed", so "deleted" should be excluded
+  EXPECT_EQ(response.find("deleted"), std::string::npos);
+}
+
+/**
+ * @brief Test FACET with FILTER clause
+ */
+TEST_F(EndToEndTest, FacetWithFilter) {
+  TcpClient client("127.0.0.1", port_);
+
+  // Add documents with two filter columns
+  auto doc_id1 = table_context_.doc_store->AddDocument("ff1",
+      {{"category", std::string("news")}, {"priority", static_cast<int64_t>(1)}});
+  table_context_.index->AddDocument(*doc_id1, "important news");
+
+  auto doc_id2 = table_context_.doc_store->AddDocument("ff2",
+      {{"category", std::string("news")}, {"priority", static_cast<int64_t>(2)}});
+  table_context_.index->AddDocument(*doc_id2, "regular news");
+
+  auto doc_id3 = table_context_.doc_store->AddDocument("ff3",
+      {{"category", std::string("sports")}, {"priority", static_cast<int64_t>(1)}});
+  table_context_.index->AddDocument(*doc_id3, "important sports");
+
+  // Facet category with filter on priority=1
+  std::string response = client.SendCommand("FACET posts category FILTER priority = 1");
+  EXPECT_TRUE(response.find("OK FACET") == 0);
+  // Both "news" and "sports" have priority=1 docs
+  EXPECT_TRUE(response.find("news") != std::string::npos);
+  EXPECT_TRUE(response.find("sports") != std::string::npos);
+}

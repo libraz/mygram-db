@@ -113,7 +113,11 @@ std::vector<std::string> SynonymDictionary::Expand(const std::string& normalized
   if (it == term_to_group_.end()) {
     return {normalized_term};
   }
-  return groups_[it->second];
+  std::vector<std::string> result = groups_[it->second];
+  if (std::find(result.begin(), result.end(), normalized_term) == result.end()) {
+    result.insert(result.begin(), normalized_term);
+  }
+  return result;
 }
 
 bool SynonymDictionary::IsEmpty() const {

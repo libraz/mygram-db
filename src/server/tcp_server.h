@@ -230,6 +230,7 @@ class TcpServer {
   std::unique_ptr<CommandHandler> debug_handler_;
   std::unique_ptr<CommandHandler> cache_handler_;
   std::unique_ptr<CommandHandler> variable_handler_;
+  std::unique_ptr<CommandHandler> facet_handler_;
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler_;
 #endif

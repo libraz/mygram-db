@@ -1681,9 +1681,12 @@ TEST(QueryParserTest, Bug27_SetCommandTrailingComma) {
   QueryParser parser;
 
   auto query = parser.Parse("SET var = value,");
-  // Either error or ignore trailing comma - but should NOT crash
-  // Current implementation might allow this - just verify no crash
-  SUCCEED();
+  // The parser strips the trailing comma from the value and continues the loop.
+  // Since no more tokens follow, the loop exits with one valid assignment.
+  ASSERT_TRUE(query.has_value());
+  ASSERT_EQ(query->variable_assignments.size(), 1u);
+  EXPECT_EQ(query->variable_assignments[0].first, "var");
+  EXPECT_EQ(query->variable_assignments[0].second, "value");
 }
 
 /**
@@ -2618,6 +2621,15 @@ TEST(QueryParserFuzzyTest, FuzzyInvalidNonNumeric) {
   EXPECT_FALSE(result.has_value());
 }
 
+// BUG-4: from_chars instead of stoi - non-numeric after FUZZY is an error
+TEST(QueryParserFuzzyTest, FuzzyNonNumericIsError) {
+  // Non-numeric token after FUZZY should not be consumed as a number.
+  // "nonsense" is not a valid keyword, so parser should error.
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t hello FUZZY nonsense");
+  EXPECT_FALSE(result.has_value());
+}
+
 // ============================================================
 // FACET command tests
 // ============================================================
@@ -2702,4 +2714,13 @@ TEST(QueryParserFacetTest, FacetWithAndNot) {
   EXPECT_EQ(result->and_terms[0], "world");
   EXPECT_EQ(result->not_terms.size(), 1);
   EXPECT_EQ(result->not_terms[0], "bad");
+}
+
+// DESIGN-2: facet_column length validation
+TEST(QueryParserFacetTest, FacetColumnNameTooLong) {
+  QueryParser parser;
+  std::string long_name(200, 'x');
+  auto result = parser.Parse("FACET t " + long_name);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("maximum length"), std::string::npos);
 }

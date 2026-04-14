@@ -298,6 +298,17 @@ class DocumentStore {
    */
   [[nodiscard]] std::optional<std::string> GetNormalizedText(DocId doc_id) const;
 
+  /**
+   * @brief Get normalized text for multiple documents (batch operation)
+   *
+   * Optimized for retrieving many normalized texts in a single lock acquisition.
+   *
+   * @param doc_ids Vector of document IDs
+   * @return Vector of optional normalized texts (nullopt if doc_id not found or text not stored)
+   */
+  [[nodiscard]] std::vector<std::optional<std::string>> GetNormalizedTextBatch(
+      const std::vector<DocId>& doc_ids) const;
+
   /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 

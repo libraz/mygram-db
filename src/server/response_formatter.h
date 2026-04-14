@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -190,7 +191,7 @@ class ResponseFormatter {
    * @param message Error message
    * @return Formatted response
    */
-  static std::string FormatError(const std::string& message);
+  static std::string FormatError(std::string_view message);
 };
 
 }  // namespace mygramdb::server

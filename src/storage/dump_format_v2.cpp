@@ -786,6 +786,20 @@ Expected<void, Error> ReadDumpV2(
       ++sections_read;
     }
 
+    // Validate section count matches header
+    if (sections_read != header.section_count) {
+      StructuredLog()
+          .Event("storage_validation_error")
+          .Field("type", "section_count_mismatch")
+          .Field("filepath", filepath)
+          .Field("expected", static_cast<uint64_t>(header.section_count))
+          .Field("actual", static_cast<uint64_t>(sections_read))
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                      "Expected " + std::to_string(header.section_count) + " sections but found " +
+                                          std::to_string(sections_read)));
+    }
+
     // Validate required sections
     if (!config_found) {
       StructuredLog()

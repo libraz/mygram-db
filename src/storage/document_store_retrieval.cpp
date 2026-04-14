@@ -114,28 +114,38 @@ std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(cons
 
 std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, const FilterValue& value) const {
   std::shared_lock lock(mutex_);
-  std::vector<DocId> results;
 
-  for (const auto& [doc_id, filters] : doc_filters_) {
-    auto iterator = filters.find(filter_name);
-    if (iterator != filters.end() && iterator->second == value) {
-      results.push_back(doc_id);
+  // Monostate (NULL) values are not indexed — fall back to scan
+  if (!filter_index_ || std::holds_alternative<std::monostate>(value)) {
+    std::vector<DocId> results;
+    for (const auto& [doc_id, filters] : doc_filters_) {
+      auto iterator = filters.find(filter_name);
+      if (iterator != filters.end() && iterator->second == value) {
+        results.push_back(doc_id);
+      }
     }
+    std::sort(results.begin(), results.end());
+    return results;
   }
 
-  // Sort results for consistency
-  std::sort(results.begin(), results.end());
+  auto serialized = FilterIndex::SerializeFilterValue(value);
+  auto bitmap = filter_index_->GetEqBitmap(std::string(filter_name), serialized);
+  if (!bitmap) {
+    return {};
+  }
 
-  return results;
+  uint32_t card = roaring_bitmap_get_cardinality(bitmap.get());
+  std::vector<DocId> results(card);
+  roaring_bitmap_to_uint32_array(bitmap.get(), results.data());
+  return results;  // Already sorted (roaring guarantees sorted order)
 }
 
 bool DocumentStore::HasFilterColumn(std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
-
-  // Check if any document has this filter column
-  return std::any_of(doc_filters_.begin(), doc_filters_.end(), [&filter_name](const auto& doc_filter) {
-    return doc_filter.second.find(filter_name) != doc_filter.second.end();
-  });
+  if (filter_index_) {
+    return filter_index_->HasColumn(std::string(filter_name));
+  }
+  return false;
 }
 
 std::vector<DocId> DocumentStore::GetAllDocIds() const {
@@ -168,6 +178,22 @@ std::optional<std::string> DocumentStore::GetNormalizedText(DocId doc_id) const 
     return std::nullopt;
   }
   return it->second;
+}
+
+std::vector<std::optional<std::string>> DocumentStore::GetNormalizedTextBatch(
+    const std::vector<DocId>& doc_ids) const {
+  std::shared_lock lock(mutex_);
+  std::vector<std::optional<std::string>> results;
+  results.reserve(doc_ids.size());
+  for (const auto& doc_id : doc_ids) {
+    auto it = doc_texts_.find(doc_id);
+    if (it != doc_texts_.end()) {
+      results.push_back(it->second);
+    } else {
+      results.emplace_back(std::nullopt);
+    }
+  }
+  return results;
 }
 
 }  // namespace mygramdb::storage

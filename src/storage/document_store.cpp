@@ -130,10 +130,10 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     doc_id_to_pk_[doc_id] = doc.primary_key;
     pk_to_doc_id_[doc.primary_key] = doc_id;
 
-    // Store filters
+    // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
     if (!doc.filters.empty()) {
-      doc_filters_[doc_id] = doc.filters;
       filter_index_->AddDocument(doc_id, doc.filters);
+      doc_filters_[doc_id] = doc.filters;
     }
 
     // Store normalized text for n-gram post-filter verification

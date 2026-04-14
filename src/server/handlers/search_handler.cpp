@@ -58,6 +58,12 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
           output.current_doc_store = cache_doc_store;
           output.query_time_ms = cache_lookup_time_ms;
 
+          if (!query.search_text.empty()) {
+            output.all_search_terms.push_back(query.search_text);
+          }
+          output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(),
+                                         query.and_terms.end());
+
           if (conn_ctx.debug_mode) {
             output.debug_info.query_time_ms = cache_lookup_time_ms;
             output.debug_info.final_results = output.results.size();
@@ -94,7 +100,9 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   auto index_start = std::chrono::high_resolution_clock::now();
 
   // Collect all search terms (main + AND terms)
-  output.all_search_terms.push_back(query.search_text);
+  if (!query.search_text.empty()) {
+    output.all_search_terms.push_back(query.search_text);
+  }
   output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
   // Collect debug info for search terms

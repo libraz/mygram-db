@@ -101,6 +101,16 @@ std::string TempFilePath(const std::string& suffix) {
 /// Helper: cleanup temp file
 void CleanupFile(const std::string& path) { std::filesystem::remove(path); }
 
+/// RAII guard that cleans up a temp file on construction and destruction.
+/// Ensures cleanup even if the test fails mid-way.
+struct ScopedCleanup {
+  std::string path;
+  explicit ScopedCleanup(const std::string& p) : path(p) { CleanupFile(p); }
+  ~ScopedCleanup() { CleanupFile(path); }
+  ScopedCleanup(const ScopedCleanup&) = delete;
+  ScopedCleanup& operator=(const ScopedCleanup&) = delete;
+};
+
 }  // namespace
 
 // ============================================================================
@@ -211,8 +221,7 @@ TEST(DumpFormatV2Test, SectionEnvelopeSize) {
 
 TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   auto filepath = TempFilePath("full_roundtrip");
-  auto cleanup = [&]() { CleanupFile(filepath); };
-  cleanup();
+  ScopedCleanup cleanup(filepath);
 
   Config write_config = MakeTestConfig();
   std::string write_gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:100";
@@ -251,14 +260,11 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   EXPECT_EQ(read_config.tables.size(), 1u);
   EXPECT_EQ(read_config.tables[0].name, "articles");
   EXPECT_EQ(read_config.api.max_query_length, write_config.api.max_query_length);
-
-  cleanup();
 }
 
 TEST(DumpFormatV2Test, FullDumpWithStatistics) {
   auto filepath = TempFilePath("with_stats");
-  auto cleanup = [&]() { CleanupFile(filepath); };
-  cleanup();
+  ScopedCleanup cleanup(filepath);
 
   Config cfg = MakeTestConfig();
   std::string gtid = "GTID:42";
@@ -294,14 +300,11 @@ TEST(DumpFormatV2Test, FullDumpWithStatistics) {
   EXPECT_EQ(read_stats.total_index_bytes, 1024u * 1024);
   EXPECT_EQ(read_stats.total_docstore_bytes, 2u * 1024 * 1024);
   EXPECT_EQ(read_stats.dump_time_ms, 150u);
-
-  cleanup();
 }
 
 TEST(DumpFormatV2Test, DumpWithoutStatistics) {
   auto filepath = TempFilePath("no_stats");
-  auto cleanup = [&]() { CleanupFile(filepath); };
-  cleanup();
+  ScopedCleanup cleanup(filepath);
 
   Config cfg = MakeTestConfig();
   Index idx;
@@ -327,8 +330,6 @@ TEST(DumpFormatV2Test, DumpWithoutStatistics) {
 
   // Stats should not have been overwritten (no stats section in dump)
   EXPECT_EQ(read_stats.total_documents, 999u);
-
-  cleanup();
 }
 
 // ============================================================================
@@ -404,8 +405,7 @@ TEST(DumpFormatV2Test, DispatchReadsV2File) {
 
 TEST(DumpFormatV2Test, IntegrityVerificationPasses) {
   auto filepath = TempFilePath("integrity_ok");
-  auto cleanup = [&]() { CleanupFile(filepath); };
-  cleanup();
+  ScopedCleanup cleanup(filepath);
 
   Config cfg = MakeTestConfig();
   Index idx;

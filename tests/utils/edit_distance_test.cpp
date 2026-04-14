@@ -126,3 +126,68 @@ TEST_F(EditDistanceTest, NoWordsCloseEnough) {
 TEST_F(EditDistanceTest, ExactWordAmongMany) {
   EXPECT_TRUE(ContainsFuzzyMatch("a b c hello d e", "hello", 0));
 }
+
+// --- PERF-1: Stack allocation - verify correctness for various lengths ---
+
+TEST_F(EditDistanceTest, LongAsciiStrings) {
+  // Strings longer than typical but still ASCII
+  std::string a(100, 'a');
+  std::string b(100, 'a');
+  b[50] = 'b';  // Single substitution
+  EXPECT_EQ(LevenshteinDistance(a, b, 5), 1);
+}
+
+// --- EDGE-1: Whitespace splitting - tabs and newlines ---
+
+TEST_F(EditDistanceTest, TabSeparatedWords) {
+  EXPECT_TRUE(ContainsFuzzyMatch("hello\tworld", "hello", 0));
+  EXPECT_TRUE(ContainsFuzzyMatch("hello\tworld", "world", 0));
+}
+
+TEST_F(EditDistanceTest, NewlineSeparatedWords) {
+  EXPECT_TRUE(ContainsFuzzyMatch("hello\nworld", "hello", 0));
+  EXPECT_TRUE(ContainsFuzzyMatch("hello\r\nworld", "world", 0));
+}
+
+TEST_F(EditDistanceTest, MixedWhitespace) {
+  EXPECT_TRUE(ContainsFuzzyMatch("one\ttwo\nthree four", "three", 0));
+  EXPECT_TRUE(ContainsFuzzyMatch("one\ttwo\nthree four", "threa", 1));  // fuzzy: 1 edit from "three"
+}
+
+// --- kStackDpLimit boundary tests (kStackDpLimit = 256 in edit_distance.cpp) ---
+
+TEST_F(EditDistanceTest, AtStackDpLimitBoundary) {
+  // 255 chars: a_len+1 == 256 == kStackDpLimit, uses stack path
+  std::string a255(255, 'a');
+  std::string b255(255, 'a');
+  b255[127] = 'b';
+  EXPECT_EQ(LevenshteinDistance(a255, b255, 5), 1u);
+}
+
+TEST_F(EditDistanceTest, ExactlyAtStackDpLimit) {
+  // 256 chars: a_len+1 == 257 > kStackDpLimit, uses heap path
+  std::string a256(256, 'a');
+  std::string b256(256, 'a');
+  b256[0] = 'b';
+  b256[255] = 'b';
+  EXPECT_EQ(LevenshteinDistance(a256, b256, 5), 2u);
+}
+
+TEST_F(EditDistanceTest, AboveStackDpLimit) {
+  // 257 chars: clearly above kStackDpLimit, must use heap allocation
+  std::string a257(257, 'a');
+  std::string b257(257, 'a');
+  b257[128] = 'b';
+  EXPECT_EQ(LevenshteinDistance(a257, b257, 5), 1u);
+}
+
+TEST_F(EditDistanceTest, SameLengthHighDistance) {
+  // Same length, all different — tests row_min > max_distance early termination
+  // Returns max_distance+1 when distance exceeds threshold
+  EXPECT_EQ(LevenshteinDistance("aaaaa", "bbbbb", 1), 2u);
+}
+
+TEST_F(EditDistanceTest, SingleCharacterTermFuzzyMatch) {
+  EXPECT_TRUE(ContainsFuzzyMatch("a b c", "b", 0));
+  EXPECT_TRUE(ContainsFuzzyMatch("a b c", "x", 1));  // "a", "b", or "c" within distance 1 of "x"
+}
