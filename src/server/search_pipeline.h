@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -161,6 +162,24 @@ std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> re
                                                   const std::vector<std::string>& search_terms,
                                                   index::Index* current_index, storage::DocumentStore* doc_store,
                                                   const config::Config* full_config);
+
+/// @brief Result of a cache lookup attempt
+struct CacheLookupResult {
+  std::vector<storage::DocId> results;  ///< Cached search results
+  double cache_age_ms = 0.0;            ///< Time since cache entry was created
+  double cache_saved_ms = 0.0;          ///< Query time saved by cache hit
+};
+
+/// @brief Try to look up a query result from cache
+///
+/// Checks if cache is enabled, looks up the query, and validates staleness.
+///
+/// @param query Parsed query (used as cache key)
+/// @param cache_manager Cache manager (may be nullptr; returns nullopt if null or disabled)
+/// @param doc_store Document store for staleness check
+/// @return CacheLookupResult if cache hit (non-stale), std::nullopt if miss/stale/disabled
+std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache::CacheManager* cache_manager,
+                                                storage::DocumentStore* doc_store);
 
 /// @brief Check if cached results contain stale DocIds by sampling
 ///

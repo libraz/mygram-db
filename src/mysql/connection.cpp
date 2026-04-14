@@ -413,17 +413,19 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
   return {};
 }
 
-std::optional<std::string> Connection::GetExecutedGTID() {
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetExecutedGTID() {
+  using mygram::utils::MakeUnexpected;
+
   const char* query =
       (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.gtid_current_pos" : "SELECT @@GLOBAL.gtid_executed";
   auto result = Execute(query);
   if (!result) {
-    return std::nullopt;
+    return MakeUnexpected(result.error());
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    return std::nullopt;
+    return std::string{};  // No GTID configured yet — valid state
   }
 
   std::string gtid(row[0]);
@@ -435,19 +437,21 @@ std::optional<std::string> Connection::GetExecutedGTID() {
   return gtid;
 }
 
-std::optional<std::string> Connection::GetPurgedGTID() {
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetPurgedGTID() {
+  using mygram::utils::MakeUnexpected;
+
   if (flavor_ == ServerFlavor::kMariaDB) {
-    return std::nullopt;
+    return std::string{};  // MariaDB doesn't have gtid_purged — not an error
   }
 
   auto result = Execute("SELECT @@GLOBAL.gtid_purged");
   if (!result) {
-    return std::nullopt;
+    return MakeUnexpected(result.error());
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    return std::nullopt;
+    return std::string{};
   }
 
   std::string gtid(row[0]);

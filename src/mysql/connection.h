@@ -157,15 +157,17 @@ class Connection {
 
   /**
    * @brief Get current GTID executed on the server
-   * @return GTID string (e.g., "uuid:1-10")
+   * @return GTID string (e.g., "uuid:1-10"), empty string if no GTID configured,
+   *         or Error on query failure
    */
-  std::optional<std::string> GetExecutedGTID();
+  mygram::utils::Expected<std::string, mygram::utils::Error> GetExecutedGTID();
 
   /**
    * @brief Get purged GTID set (GTIDs no longer in binlog)
-   * @return GTID string
+   * @return GTID string, empty string if not applicable (e.g., MariaDB),
+   *         or Error on query failure
    */
-  std::optional<std::string> GetPurgedGTID();
+  mygram::utils::Expected<std::string, mygram::utils::Error> GetPurgedGTID();
 
   /**
    * @brief Set session GTID_NEXT for testing

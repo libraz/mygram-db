@@ -273,7 +273,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
   // Get current executed GTID set
   auto executed_gtid = conn.GetExecutedGTID();
   if (!executed_gtid) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to retrieve executed GTID set"));
+    return MakeUnexpected(executed_gtid.error());
   }
 
   // MariaDB doesn't have gtid_purged or GTID_SUBSET function.
@@ -291,7 +291,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
   // Get purged GTID set (MySQL only)
   auto purged_gtid = conn.GetPurgedGTID();
   if (!purged_gtid) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to retrieve purged GTID set"));
+    return MakeUnexpected(purged_gtid.error());
   }
 
   // If we have a last GTID, check if it has been purged using MySQL's GTID_SUBSET function

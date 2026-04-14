@@ -333,7 +333,7 @@ bool BinlogReader::RefreshExecutedGtidSet() {
     mygram::utils::StructuredLog()
         .Event("binlog_warning")
         .Field("type", "refresh_executed_gtid_failed")
-        .Field("error", "Failed to query @@GLOBAL.gtid_executed")
+        .Field("error", gtid_set.error().message())
         .Warn();
     return false;
   }

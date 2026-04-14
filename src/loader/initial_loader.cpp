@@ -126,9 +126,9 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   // Uses flavor-aware GetExecutedGTID() which queries:
   //   MySQL:   @@GLOBAL.gtid_executed
   //   MariaDB: @@GLOBAL.gtid_current_pos
-  auto gtid_opt = connection_.GetExecutedGTID();
-  if (gtid_opt && !gtid_opt->empty()) {
-    start_gtid_ = *gtid_opt;
+  auto gtid_result = connection_.GetExecutedGTID();
+  if (gtid_result && !gtid_result->empty()) {
+    start_gtid_ = *gtid_result;
     // Remove whitespace (MySQL may include newlines in multi-UUID sets)
     start_gtid_.erase(
         std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),

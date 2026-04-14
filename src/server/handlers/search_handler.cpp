@@ -36,54 +36,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     return ResponseFormatter::FormatError("Server is loading, please try again later");
   }
 
-  // Try cache lookup first
-  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
-  if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-    auto cached_lookup = ctx_.cache_manager->LookupWithMetadata(query);
-    if (cached_lookup.has_value()) {
-      storage::DocumentStore* cache_doc_store = nullptr;
-      index::Index* dummy_index = nullptr;
-      int dummy_ngram = 0;
-      int dummy_kanji_ngram = 0;
-      std::string error =
-          GetTableContext(query.table, &dummy_index, &cache_doc_store, &dummy_ngram, &dummy_kanji_ngram);
-      if (error.empty() && cache_doc_store != nullptr) {
-        auto full_results = cached_lookup.value().results;
-
-        if (!search_pipeline::IsCacheStale(full_results, cache_doc_store)) {
-          auto cache_lookup_end = std::chrono::high_resolution_clock::now();
-          double cache_lookup_time_ms =
-              std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
-
-          output.results = std::move(full_results);
-          output.current_doc_store = cache_doc_store;
-          output.query_time_ms = cache_lookup_time_ms;
-
-          if (!query.search_text.empty()) {
-            output.all_search_terms.push_back(query.search_text);
-          }
-          output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-          if (conn_ctx.debug_mode) {
-            output.debug_info.query_time_ms = cache_lookup_time_ms;
-            output.debug_info.final_results = output.results.size();
-
-            auto now = std::chrono::steady_clock::now();
-            output.debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
-            output.debug_info.cache_info.cache_age_ms =
-                std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
-            output.debug_info.cache_info.cache_saved_ms = cached_lookup.value().query_cost_ms;
-          }
-
-          // Empty string = success (cache hit)
-          return "";
-        }
-      }
-      // Cache stale or table context unavailable - fall through to normal execution
-    }
-  }
-
-  // Get table context
+  // Get table context (needed for both cache lookup and search)
   std::string error = GetTableContext(query.table, &output.current_index, &output.current_doc_store,
                                       &output.current_ngram_size, &output.current_kanji_ngram_size);
   if (!error.empty()) {
@@ -93,6 +46,34 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   // Verify index is available
   if (output.current_index == nullptr) {
     return ResponseFormatter::FormatError("Index not available");
+  }
+
+  // Try cache lookup first
+  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
+  auto cache_result = search_pipeline::TryCacheLookup(query, ctx_.cache_manager, output.current_doc_store);
+  if (cache_result) {
+    auto cache_lookup_end = std::chrono::high_resolution_clock::now();
+    double cache_lookup_time_ms =
+        std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
+
+    output.results = std::move(cache_result->results);
+    output.query_time_ms = cache_lookup_time_ms;
+
+    if (!query.search_text.empty()) {
+      output.all_search_terms.push_back(query.search_text);
+    }
+    output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.query_time_ms = cache_lookup_time_ms;
+      output.debug_info.final_results = output.results.size();
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
+      output.debug_info.cache_info.cache_age_ms = cache_result->cache_age_ms;
+      output.debug_info.cache_info.cache_saved_ms = cache_result->cache_saved_ms;
+    }
+
+    // Empty string = success (cache hit)
+    return "";
   }
 
   // Start timing

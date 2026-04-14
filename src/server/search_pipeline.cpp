@@ -558,6 +558,30 @@ std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> re
   return PostFilterByText(results, normalized_terms, doc_store);
 }
 
+std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache::CacheManager* cache_manager,
+                                                storage::DocumentStore* doc_store) {
+  if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
+    return std::nullopt;
+  }
+
+  auto cached_lookup = cache_manager->LookupWithMetadata(query);
+  if (!cached_lookup.has_value()) {
+    return std::nullopt;
+  }
+
+  auto full_results = cached_lookup.value().results;
+  if (IsCacheStale(full_results, doc_store)) {
+    return std::nullopt;
+  }
+
+  CacheLookupResult result;
+  result.results = std::move(full_results);
+  auto now = std::chrono::steady_clock::now();
+  result.cache_age_ms = std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
+  result.cache_saved_ms = cached_lookup.value().query_cost_ms;
+  return result;
+}
+
 bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentStore* doc_store) {
   if (results.empty()) {
     return false;
@@ -864,25 +888,18 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   }
 
   // Try cache lookup first
-  if (params.cache_manager != nullptr && params.cache_manager->IsEnabled()) {
-    auto cached_lookup = params.cache_manager->LookupWithMetadata(query);
-    if (cached_lookup.has_value()) {
-      auto full_results = cached_lookup.value().results;
+  auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store);
+  if (cache_result) {
+    output.results = std::move(cache_result->results);
+    output.cache_hit = true;
+    output.query_time_ms = 0.0;
 
-      if (!IsCacheStale(full_results, params.current_doc_store)) {
-        output.results = std::move(full_results);
-        output.cache_hit = true;
-        output.query_time_ms = 0.0;
-
-        // Collect search terms for downstream use (highlighting, etc.)
-        if (!query.search_text.empty()) {
-          output.all_search_terms.push_back(query.search_text);
-        }
-        output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-        return output;
-      }
-      // Cache stale - fall through to normal execution
+    // Collect search terms for downstream use (highlighting, etc.)
+    if (!query.search_text.empty()) {
+      output.all_search_terms.push_back(query.search_text);
     }
+    output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+    return output;
   }
 
   // Start timing
