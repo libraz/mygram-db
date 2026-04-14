@@ -53,14 +53,19 @@ fi
 # Create results directories
 mkdir -p results/reports results/metrics
 
+# Ensure cleanup happens even if pytest (or any later step) fails
+cleanup() {
+    echo "Cleaning up MySQL container..."
+    docker compose -f docker/docker-compose.yml down -v
+}
+trap cleanup EXIT
+
 # Run tests (MygramDB binary is started/stopped by conftest.py)
 echo "Running tests..."
+set +e
 python3 -m pytest tests/ "${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}"
 EXIT_CODE=$?
-
-# Cleanup
-echo "Cleaning up MySQL container..."
-docker compose -f docker/docker-compose.yml down -v
+set -e
 
 echo "=== E2E tests finished (exit code: $EXIT_CODE) ==="
 exit $EXIT_CODE
