@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -77,6 +78,19 @@ class ResponseFormatter {
    * @return Formatted response
    */
   static std::string FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info = nullptr);
+
+  /**
+   * @brief Format FACET response
+   *
+   * Format:
+   *   OK FACET <num_values>\r\n<value>\t<count>\r\n<value>\t<count>\r\n...
+   *
+   * @param value_counts Vector of (display_value, count) pairs (already sorted)
+   * @param debug_info Optional debug information
+   * @return Formatted response
+   */
+  static std::string FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
+                                          const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response

@@ -14,6 +14,8 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "storage/document_store.h"
 #include "types/doc_id.h"
@@ -63,6 +65,22 @@ class FilterIndex {
 
   /// Serialize FilterValue to a comparable string key (type tag + value bytes)
   static std::string SerializeFilterValue(const FilterValue& value);
+
+  /// Get all (serialized_value, doc_count) pairs for a column, sorted by count DESC.
+  /// Returns empty vector if column not found.
+  [[nodiscard]] std::vector<std::pair<std::string, uint64_t>> GetColumnValueCounts(
+      const std::string& column) const;
+
+  /// Get (serialized_value, doc_count) pairs for a column, filtered by a result bitmap.
+  /// Only includes values with non-zero count after filtering. Sorted by count DESC.
+  /// @param column Filter column name
+  /// @param filter_bitmap Roaring bitmap of allowed doc_ids (e.g., search results)
+  [[nodiscard]] std::vector<std::pair<std::string, uint64_t>> GetColumnValueCountsFiltered(
+      const std::string& column, const roaring_bitmap_t* filter_bitmap) const;
+
+  /// Deserialize a serialized filter value back to a human-readable display string.
+  /// The output matches the string format users see in FILTER clause values.
+  static std::string DeserializeToDisplayString(const std::string& serialized);
 
  private:
   /// Add doc_id to bitmaps for given filters. Caller must hold unique_lock on mutex_.

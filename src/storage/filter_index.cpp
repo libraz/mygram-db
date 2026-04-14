@@ -5,6 +5,7 @@
 
 #include "storage/filter_index.h"
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 
@@ -186,6 +187,150 @@ std::string FilterIndex::SerializeFilterValue(const FilterValue& value) {
         }
       },
       value);
+}
+
+std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCounts(
+    const std::string& column) const {
+  std::shared_lock lock(mutex_);
+  auto col_it = eq_bitmaps_.find(column);
+  if (col_it == eq_bitmaps_.end()) {
+    return {};
+  }
+
+  std::vector<std::pair<std::string, uint64_t>> result;
+  result.reserve(col_it->second.size());
+
+  for (const auto& [serialized_value, bitmap] : col_it->second) {
+    uint64_t count = roaring_bitmap_get_cardinality(bitmap);
+    if (count > 0) {
+      result.emplace_back(serialized_value, count);
+    }
+  }
+
+  // Sort by count descending
+  std::sort(result.begin(), result.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+
+  return result;
+}
+
+std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCountsFiltered(
+    const std::string& column, const roaring_bitmap_t* filter_bitmap) const {
+  if (filter_bitmap == nullptr) {
+    return GetColumnValueCounts(column);
+  }
+
+  std::shared_lock lock(mutex_);
+  auto col_it = eq_bitmaps_.find(column);
+  if (col_it == eq_bitmaps_.end()) {
+    return {};
+  }
+
+  std::vector<std::pair<std::string, uint64_t>> result;
+  result.reserve(col_it->second.size());
+
+  for (const auto& [serialized_value, bitmap] : col_it->second) {
+    // Use roaring_bitmap_and_cardinality for efficient counting without materializing intersection
+    uint64_t count = roaring_bitmap_and_cardinality(bitmap, filter_bitmap);
+    if (count > 0) {
+      result.emplace_back(serialized_value, count);
+    }
+  }
+
+  // Sort by count descending
+  std::sort(result.begin(), result.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+
+  return result;
+}
+
+std::string FilterIndex::DeserializeToDisplayString(const std::string& serialized) {
+  if (serialized.empty()) {
+    return "NULL";
+  }
+
+  uint8_t tag = static_cast<uint8_t>(serialized[0]);
+  const char* data = serialized.data() + 1;
+  size_t data_len = serialized.size() - 1;
+
+  switch (tag) {
+    case 0x00:  // NULL
+      return "NULL";
+    case 0x01:  // bool
+      return (data_len > 0 && data[0] != '\0') ? "true" : "false";
+    case 0x02: {  // int8_t
+      if (data_len < sizeof(int8_t)) return "";
+      return std::to_string(static_cast<int8_t>(data[0]));
+    }
+    case 0x03: {  // uint8_t
+      if (data_len < sizeof(uint8_t)) return "";
+      return std::to_string(static_cast<uint8_t>(data[0]));
+    }
+    case 0x04: {  // int16_t
+      if (data_len < sizeof(int16_t)) return "";
+      int16_t val = 0;
+      std::memcpy(&val, data, sizeof(int16_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x05: {  // uint16_t
+      if (data_len < sizeof(uint16_t)) return "";
+      uint16_t val = 0;
+      std::memcpy(&val, data, sizeof(uint16_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x06: {  // int32_t
+      if (data_len < sizeof(int32_t)) return "";
+      int32_t val = 0;
+      std::memcpy(&val, data, sizeof(int32_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x07: {  // uint32_t
+      if (data_len < sizeof(uint32_t)) return "";
+      uint32_t val = 0;
+      std::memcpy(&val, data, sizeof(uint32_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x08: {  // int64_t
+      if (data_len < sizeof(int64_t)) return "";
+      int64_t val = 0;
+      std::memcpy(&val, data, sizeof(int64_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x09: {  // uint64_t
+      if (data_len < sizeof(uint64_t)) return "";
+      uint64_t val = 0;
+      std::memcpy(&val, data, sizeof(uint64_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x0A: {  // TimeValue (int64_t seconds)
+      if (data_len < sizeof(int64_t)) return "";
+      int64_t val = 0;
+      std::memcpy(&val, data, sizeof(int64_t));
+      return std::to_string(mygram::utils::FromLittleEndian(val));
+    }
+    case 0x0B:  // string
+      return std::string(data, data_len);
+    case 0x0C: {  // double
+      if (data_len < sizeof(double)) return "";
+      double val = 0.0;
+      std::memcpy(&val, data, sizeof(double));
+      val = mygram::utils::FromLittleEndianDouble(val);
+      // Remove trailing zeros for cleaner display
+      std::string str = std::to_string(val);
+      size_t dot_pos = str.find('.');
+      if (dot_pos != std::string::npos) {
+        size_t last_nonzero = str.find_last_not_of('0');
+        if (last_nonzero == dot_pos) {
+          str.erase(dot_pos);  // Remove trailing ".000000"
+        } else {
+          str.erase(last_nonzero + 1);  // Keep at least one decimal
+        }
+      }
+      return str;
+    }
+    default:
+      return "";
+  }
 }
 
 }  // namespace mygramdb::storage

@@ -21,6 +21,7 @@ add_library(mygramdb_server STATIC
   rate_limiter.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
+  handlers/facet_handler.cpp
   handlers/document_handler.cpp
   handlers/dump_handler.cpp
   handlers/admin_handler.cpp

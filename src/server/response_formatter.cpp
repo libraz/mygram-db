@@ -281,6 +281,27 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
   return oss.str();
 }
 
+std::string ResponseFormatter::FormatFacetResponse(
+    const std::vector<std::pair<std::string, uint64_t>>& value_counts, const query::DebugInfo* debug_info) {
+  std::string response = "OK FACET " + std::to_string(value_counts.size()) + "\r\n";
+
+  for (const auto& [value, count] : value_counts) {
+    response += value;
+    response += '\t';
+    response += std::to_string(count);
+    response += "\r\n";
+  }
+
+  if (debug_info != nullptr) {
+    response += "# query_time_ms: " + std::to_string(debug_info->query_time_ms) + "\r\n";
+    if (debug_info->final_results > 0) {
+      response += "# total_docs_searched: " + std::to_string(debug_info->final_results) + "\r\n";
+    }
+  }
+
+  return response;
+}
+
 std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Document>& doc) {
   if (!doc) {
     return FormatError("Document not found");

@@ -50,6 +50,7 @@ struct InitializedComponents {
 
   // Command handlers
   std::unique_ptr<CommandHandler> search_handler;
+  std::unique_ptr<CommandHandler> facet_handler;
   std::unique_ptr<CommandHandler> document_handler;
   std::unique_ptr<CommandHandler> dump_handler;
   std::unique_ptr<CommandHandler> admin_handler;

@@ -12,6 +12,7 @@
 #include "server/handlers/admin_handler.h"
 #include "server/handlers/cache_handler.h"
 #include "server/handlers/debug_handler.h"
+#include "server/handlers/facet_handler.h"
 #include "server/handlers/document_handler.h"
 #include "server/handlers/dump_handler.h"
 #include "server/handlers/replication_handler.h"
@@ -153,6 +154,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
     // Move handlers into components
     components.search_handler = std::move(handlers_result->search_handler);
+    components.facet_handler = std::move(handlers_result->facet_handler);
     components.document_handler = std::move(handlers_result->document_handler);
     components.dump_handler = std::move(handlers_result->dump_handler);
     components.admin_handler = std::move(handlers_result->admin_handler);
@@ -347,6 +349,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
   try {
     handlers.search_handler = std::make_unique<SearchHandler>(handler_context);
+    handlers.facet_handler = std::make_unique<FacetHandler>(handler_context);
     handlers.document_handler = std::make_unique<DocumentHandler>(handler_context);
     handlers.dump_handler = std::make_unique<DumpHandler>(handler_context);
     handlers.admin_handler = std::make_unique<AdminHandler>(handler_context);
@@ -385,6 +388,7 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
     // Register all command handlers
     dispatcher->RegisterHandler(query::QueryType::SEARCH, handlers.search_handler.get());
     dispatcher->RegisterHandler(query::QueryType::COUNT, handlers.search_handler.get());
+    dispatcher->RegisterHandler(query::QueryType::FACET, handlers.facet_handler.get());
     dispatcher->RegisterHandler(query::QueryType::GET, handlers.document_handler.get());
     dispatcher->RegisterHandler(query::QueryType::DUMP_SAVE, handlers.dump_handler.get());
     dispatcher->RegisterHandler(query::QueryType::DUMP_LOAD, handlers.dump_handler.get());
