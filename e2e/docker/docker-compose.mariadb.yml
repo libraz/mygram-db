@@ -1,0 +1,33 @@
+# MariaDB test container — uses the same port (13306) and DB name as MySQL
+# so that mygramdb-test.yaml works unchanged.
+services:
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.4}
+    container_name: inttest_mariadb
+    ports:
+      - "13306:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: test_root_password
+      MARIADB_DATABASE: testdb
+      MARIADB_USER: repl_user
+      MARIADB_PASSWORD: test_password
+    command:
+      - --server-id=1
+      - --log-bin=mariadb-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - inttest_mariadb_data:/var/lib/mysql
+      # Reuse mysql-init but skip 02-* (ngram parser is MySQL-only)
+      - ./mariadb-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  inttest_mariadb_data:

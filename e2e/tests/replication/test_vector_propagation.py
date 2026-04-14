@@ -29,7 +29,9 @@ def _vector_to_hex(floats: list[float]) -> str:
     return "0x" + binary.hex()
 
 
-def _skip_if_no_vector(mysql_version: tuple[int, int]) -> None:
+def _skip_if_no_vector(mysql_version: tuple[int, int], db_flavor: str = "mysql") -> None:
+    if db_flavor == "mariadb":
+        pytest.skip("VECTOR type is MySQL-only (not available in MariaDB)")
     if mysql_version[0] < 9:
         pytest.skip("VECTOR type requires MySQL >= 9.0")
 
@@ -38,10 +40,10 @@ class TestVectorPropagation:
     """Test that tables with VECTOR columns replicate correctly."""
 
     def test_insert_with_vector_column(
-        self, mysql, mygramdb, mysql_version, setup_vector_table, seed_data
+        self, mysql, mygramdb, mysql_version, db_flavor, setup_vector_table, seed_data
     ):
         """INSERT into table with VECTOR column should not break replication."""
-        _skip_if_no_vector(mysql_version)
+        _skip_if_no_vector(mysql_version, db_flavor)
 
         marker = f"vec_ins_{uuid.uuid4().hex[:8]}"
         vec_hex = _vector_to_hex([1.0, 2.0, 3.0])
@@ -75,10 +77,10 @@ class TestVectorPropagation:
         )
 
     def test_update_with_vector_column(
-        self, mysql, mygramdb, mysql_version, setup_vector_table, seed_data
+        self, mysql, mygramdb, mysql_version, db_flavor, setup_vector_table, seed_data
     ):
         """UPDATE on table with VECTOR column should not break replication."""
-        _skip_if_no_vector(mysql_version)
+        _skip_if_no_vector(mysql_version, db_flavor)
 
         marker = f"vec_upd_{uuid.uuid4().hex[:8]}"
         vec_hex = _vector_to_hex([0.1, 0.2, 0.3])
@@ -118,10 +120,10 @@ class TestVectorPropagation:
         )
 
     def test_delete_with_vector_column(
-        self, mysql, mygramdb, mysql_version, setup_vector_table, seed_data
+        self, mysql, mygramdb, mysql_version, db_flavor, setup_vector_table, seed_data
     ):
         """DELETE on table with VECTOR column should not break replication."""
-        _skip_if_no_vector(mysql_version)
+        _skip_if_no_vector(mysql_version, db_flavor)
 
         marker = f"vec_del_{uuid.uuid4().hex[:8]}"
         vec_hex = _vector_to_hex([9.0, 8.0, 7.0])
@@ -156,10 +158,10 @@ class TestVectorPropagation:
         )
 
     def test_batch_inserts_with_vector(
-        self, mysql, mygramdb, mysql_version, setup_vector_table, seed_data
+        self, mysql, mygramdb, mysql_version, db_flavor, setup_vector_table, seed_data
     ):
         """Batch INSERTs with VECTOR columns should not break replication."""
-        _skip_if_no_vector(mysql_version)
+        _skip_if_no_vector(mysql_version, db_flavor)
 
         marker = f"vec_batch_{uuid.uuid4().hex[:8]}"
 

@@ -1,5 +1,6 @@
-"""Test MySQL restart recovery."""
+"""Test MySQL/MariaDB restart recovery."""
 
+import os
 import subprocess
 import uuid
 
@@ -9,7 +10,8 @@ from lib.wait import wait_until
 
 pytestmark = pytest.mark.resilience
 
-MYSQL_CONTAINER = "inttest_mysql"
+_DB_FLAVOR = os.environ.get("DB_FLAVOR", "mysql")
+MYSQL_CONTAINER = "inttest_mariadb" if _DB_FLAVOR == "mariadb" else "inttest_mysql"
 
 
 class TestMySQLRestart:

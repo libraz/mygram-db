@@ -17,7 +17,8 @@ from lib.mysql_client import MysqlClient
 from lib.wait import wait_until
 
 # Constants
-MYSQL_CONTAINER = "inttest_mysql"
+DB_FLAVOR = os.environ.get("DB_FLAVOR", "mysql")  # "mysql" or "mariadb"
+MYSQL_CONTAINER = "inttest_mariadb" if DB_FLAVOR == "mariadb" else "inttest_mysql"
 MYSQL_HOST = "127.0.0.1"
 MYSQL_PORT = 13306
 MYGRAMDB_HOST = "127.0.0.1"
@@ -38,8 +39,24 @@ def _mysql_major_minor(version_str: str) -> tuple[int, int]:
 
 
 @pytest.fixture(scope="session")
+def db_flavor() -> str:
+    """Database flavor: 'mysql' or 'mariadb'."""
+    return DB_FLAVOR
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-skip tests marked mysql_only when running against MariaDB."""
+    if DB_FLAVOR != "mariadb":
+        return
+    skip_marker = pytest.mark.skip(reason="MySQL-only test (requires ngram FULLTEXT)")
+    for item in items:
+        if "mysql_only" in item.keywords:
+            item.add_marker(skip_marker)
+
+
+@pytest.fixture(scope="session")
 def mysql_version() -> tuple[int, int]:
-    """MySQL version as (major, minor) tuple, from MYSQL_VERSION env var."""
+    """MySQL/MariaDB version as (major, minor) tuple, from MYSQL_VERSION env var."""
     return _mysql_major_minor(os.environ.get("MYSQL_VERSION", "8.4"))
 
 
@@ -114,9 +131,9 @@ def mygramdb(mygramdb_process: subprocess.Popen) -> MygramdbClient:
 
 
 @pytest.fixture(scope="session")
-def setup_vector_table(mysql: MysqlClient, mysql_version: tuple[int, int]) -> bool:
+def setup_vector_table(mysql: MysqlClient, mysql_version: tuple[int, int], db_flavor: str) -> bool:
     """Create VECTOR table if MySQL >= 9.0. Returns True if created."""
-    if mysql_version[0] < 9:
+    if db_flavor == "mariadb" or mysql_version[0] < 9:
         return False
     mysql.execute(
         "CREATE TABLE IF NOT EXISTS vec_articles ("

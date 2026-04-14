@@ -122,17 +122,17 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Capture GTID inside the transaction — consistent with the snapshot
-  auto gtid_exp = connection_.Execute("SELECT @@global.gtid_executed");
-  if (gtid_exp) {
-    MYSQL_ROW row = mysql_fetch_row(gtid_exp->get());
-    if (row != nullptr && row[0] != nullptr) {
-      start_gtid_ = std::string(row[0]);
-      // Remove whitespace (MySQL may include newlines in multi-UUID sets)
-      start_gtid_.erase(
-          std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
-          start_gtid_.end());
-    }
+  // Capture GTID inside the transaction — consistent with the snapshot.
+  // Uses flavor-aware GetExecutedGTID() which queries:
+  //   MySQL:   @@GLOBAL.gtid_executed
+  //   MariaDB: @@GLOBAL.gtid_current_pos
+  auto gtid_opt = connection_.GetExecutedGTID();
+  if (gtid_opt && !gtid_opt->empty()) {
+    start_gtid_ = *gtid_opt;
+    // Remove whitespace (MySQL may include newlines in multi-UUID sets)
+    start_gtid_.erase(
+        std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
+        start_gtid_.end());
   }
 
   // GTID must not be empty for replication to work

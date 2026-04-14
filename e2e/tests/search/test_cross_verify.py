@@ -6,7 +6,10 @@ import pytest
 
 from lib.wait import wait_until_gte
 
-pytestmark = pytest.mark.search
+pytestmark = [
+    pytest.mark.search,
+    pytest.mark.mysql_only,
+]
 
 
 class TestCrossVerify:

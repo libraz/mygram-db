@@ -20,15 +20,22 @@ class TestConnectionLifecycle:
         """MySQL must be reachable."""
         assert mysql.ping()
 
-    def test_server_uuid_consistent(self, mysql: MysqlClient) -> None:
-        """Server UUID must be stable across queries."""
-        r1 = mysql.execute("SELECT @@server_uuid as uuid")
-        r2 = mysql.execute("SELECT @@server_uuid as uuid")
+    def test_server_uuid_consistent(self, mysql: MysqlClient, db_flavor: str) -> None:
+        """Server identity must be stable across queries."""
+        if db_flavor == "mariadb":
+            r1 = mysql.execute("SELECT @@server_id as uuid")
+            r2 = mysql.execute("SELECT @@server_id as uuid")
+        else:
+            r1 = mysql.execute("SELECT @@server_uuid as uuid")
+            r2 = mysql.execute("SELECT @@server_uuid as uuid")
         assert r1[0]["uuid"] == r2[0]["uuid"]
 
-    def test_gtid_executed_available(self, mysql: MysqlClient) -> None:
-        """GTID executed set must be available."""
-        result = mysql.execute("SELECT @@gtid_executed as gtid")
+    def test_gtid_executed_available(self, mysql: MysqlClient, db_flavor: str) -> None:
+        """GTID executed/current_pos must be available."""
+        if db_flavor == "mariadb":
+            result = mysql.execute("SELECT @@gtid_current_pos as gtid")
+        else:
+            result = mysql.execute("SELECT @@gtid_executed as gtid")
         assert result[0]["gtid"] is not None
 
     def test_reconnect_after_close(self, mysql: MysqlClient) -> None:
