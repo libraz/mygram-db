@@ -7,9 +7,16 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 
+#include "storage/dump_format.h"
+#include "utils/binary_io.h"
+
 using namespace mygramdb::storage::dump_v1;
+using mygram::utils::WriteBinary;
 
 /**
  * @brief Test that header_size is non-zero after write
@@ -71,4 +78,109 @@ TEST(DumpFormatV1Test, HeaderSizeWithEmptyGtid) {
   ASSERT_TRUE(read_result.has_value());
 
   EXPECT_EQ(read_header.header_size, expected_size);
+}
+
+// ============================================================================
+// Config section bounds check (#6)
+// ============================================================================
+
+/**
+ * @brief Test that ReadHeaderV1 fails on truncated stream
+ */
+TEST(DumpFormatV1Test, ReadHeaderV1FailsOnTruncatedStream) {
+  // Write only partial header data (just header_size field)
+  std::ostringstream oss;
+  uint32_t partial = 32;
+  WriteBinary(oss, partial);
+  // No more data - stream is truncated
+
+  std::istringstream iss(oss.str());
+  HeaderV1 header;
+  auto result = ReadHeaderV1(iss, header);
+  EXPECT_FALSE(result.has_value()) << "ReadHeaderV1 should fail on truncated stream";
+}
+
+// ============================================================================
+// VerifyDumpIntegrity with corrupted header (#27)
+// ============================================================================
+
+namespace {
+
+/// Create a temporary file path for testing
+std::string TestTempFilePath(const std::string& name) {
+  auto dir = std::filesystem::temp_directory_path() / "mygramdb_v1_test";
+  std::filesystem::create_directories(dir);
+  return (dir / (name + ".dmp")).string();
+}
+
+/// Clean up a test file
+void CleanupTestFile(const std::string& path) {
+  std::filesystem::remove(path);
+}
+
+}  // namespace
+
+/**
+ * @brief Test that VerifyDumpIntegrity propagates ReadHeaderV1 error details
+ */
+TEST(DumpFormatV1Test, VerifyDumpIntegrityCorruptedHeader) {
+  auto filepath = TestTempFilePath("corrupted_header");
+  CleanupTestFile(filepath);
+
+  // Write a file with valid magic and version but corrupted/truncated V1 header
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    // Write valid magic number
+    ofs.write(mygramdb::storage::dump_format::kMagicNumber.data(), 4);
+    // Write valid version (V1 = 1)
+    uint32_t version = 1;
+    WriteBinary(ofs, version);
+    // Write truncated header - just a header_size field with no following data
+    uint32_t header_size = 100;  // Claims 100 bytes but file ends here
+    WriteBinary(ofs, header_size);
+  }
+
+  mygramdb::storage::dump_format::IntegrityError error;
+  auto result = VerifyDumpIntegrity(filepath, error);
+  EXPECT_FALSE(result.has_value()) << "Should fail with corrupted header";
+  EXPECT_EQ(error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+  // Error message should contain details from ReadHeaderV1, not just a generic message
+  EXPECT_TRUE(error.message.find("Failed to read V1 header:") != std::string::npos)
+      << "Error message should propagate ReadHeaderV1 details, got: " << error.message;
+
+  CleanupTestFile(filepath);
+}
+
+/**
+ * @brief Test that VerifyDumpIntegrity fails on non-existent file
+ */
+TEST(DumpFormatV1Test, VerifyDumpIntegrityNonExistentFile) {
+  mygramdb::storage::dump_format::IntegrityError error;
+  auto result = VerifyDumpIntegrity("/tmp/nonexistent_file_12345.dmp", error);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+}
+
+/**
+ * @brief Test that VerifyDumpIntegrity fails on invalid magic number
+ */
+TEST(DumpFormatV1Test, VerifyDumpIntegrityInvalidMagic) {
+  auto filepath = TestTempFilePath("invalid_magic");
+  CleanupTestFile(filepath);
+
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    ofs.write("XXXX", 4);  // Invalid magic
+    uint32_t version = 1;
+    WriteBinary(ofs, version);
+  }
+
+  mygramdb::storage::dump_format::IntegrityError error;
+  auto result = VerifyDumpIntegrity(filepath, error);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+
+  CleanupTestFile(filepath);
 }

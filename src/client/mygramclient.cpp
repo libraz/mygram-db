@@ -6,6 +6,7 @@
 #include "client/mygramclient.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -21,6 +22,7 @@
 #include <thread>
 #include <utility>
 
+#include "client/protocol_detection.h"
 #include "server/protocol_constants.h"
 #include "utils/constants.h"
 #include "utils/error.h"
@@ -175,8 +177,13 @@ std::string EscapeQueryString(const std::string& str) {
   for (char character : str) {
     if (character == '"' || character == '\\') {
       result += '\\';
+      result += character;
+    } else if (static_cast<unsigned char>(character) < 0x20) {
+      // Skip control characters to prevent command injection
+      continue;
+    } else {
+      result += character;
     }
-    result += character;
   }
   result += '"';
   return result;
@@ -298,10 +305,20 @@ class MygramClient::Impl {
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(config_.port);
 
-    if (inet_pton(AF_INET, config_.host.c_str(), &server_addr.sin_addr) <= 0) {
-      close(sock_);
-      sock_ = -1;
-      return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed, "Invalid address: " + config_.host));
+    {
+      struct addrinfo hints {
+      }, *addr_result = nullptr;
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      int gai_err = getaddrinfo(config_.host.c_str(), nullptr, &hints, &addr_result);
+      if (gai_err != 0 || addr_result == nullptr) {
+        close(sock_);
+        sock_ = -1;
+        return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed, "Failed to resolve host: " + config_.host));
+      }
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
+      server_addr.sin_addr = reinterpret_cast<struct sockaddr_in*>(addr_result->ai_addr)->sin_addr;
+      freeaddrinfo(addr_result);
     }
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
@@ -355,18 +372,15 @@ class MygramClient::Impl {
             MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to receive response: ") + strerror(errno)));
       }
 
-      buffer[received] = '\0';
-      response.append(buffer.data(), received);
+      response.append(buffer.data(), static_cast<size_t>(received));
 
-      // Check if response is complete by looking for \r\n terminator
-      // All protocol responses end with \r\n
-      if (response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n') {
-        // Response is complete
+      // Check if the accumulated response is complete
+      if (detail::IsResponseComplete(response)) {
         break;
       }
     }
 
-    // Remove trailing \r\n
+    // Remove trailing \r\n (strip all trailing CR/LF characters)
     while (!response.empty() && (response.back() == '\n' || response.back() == '\r')) {
       response.pop_back();
     }

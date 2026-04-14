@@ -326,9 +326,10 @@ TEST_F(ConfigHandlerTest, ConfigHelpUsesCRLFLineEndings) {
     }
   }
 
-  // Verify response does not end with trailing CRLF (SendResponse adds it)
-  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should not end with CRLF (SendResponse adds it)";
+  // Response body should end with CRLF so that the server-appended CRLF
+  // produces the \r\n\r\n end-of-response marker for multi-line detection
+  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should end with CRLF for multi-line end-of-response detection";
 }
 
 TEST_F(ConfigHandlerTest, ConfigShowUsesCRLFLineEndings) {
@@ -348,9 +349,10 @@ TEST_F(ConfigHandlerTest, ConfigShowUsesCRLFLineEndings) {
     }
   }
 
-  // Verify response does not end with trailing CRLF (SendResponse adds it)
-  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should not end with CRLF (SendResponse adds it)";
+  // Response body should end with CRLF so that the server-appended CRLF
+  // produces the \r\n\r\n end-of-response marker for multi-line detection
+  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should end with CRLF for multi-line end-of-response detection";
 }
 
 TEST_F(ConfigHandlerTest, ConfigHelpSpecificPathUsesCRLFLineEndings) {
@@ -388,9 +390,10 @@ TEST_F(ConfigHandlerTest, ConfigShowSpecificSectionUsesCRLFLineEndings) {
     }
   }
 
-  // Verify response does not end with trailing CRLF (SendResponse adds it)
-  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should not end with CRLF (SendResponse adds it)";
+  // Response body should end with CRLF so that the server-appended CRLF
+  // produces the \r\n\r\n end-of-response marker for multi-line detection
+  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
+      << "Response should end with CRLF for multi-line end-of-response detection";
 }
 
 }  // namespace mygramdb::server

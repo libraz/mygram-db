@@ -11,6 +11,8 @@
 #include <regex>
 #include <sstream>
 
+#include "utils/constants.h"
+
 namespace mygram::utils {
 
 using mygram::utils::ErrorCode;
@@ -29,9 +31,9 @@ constexpr int kMaxTimezoneHour = 14;         // Maximum timezone offset hour (UT
 constexpr int kMaxMinute = 59;               // Maximum minute value (0-59)
 constexpr int kMinutesFirstDigitMax = 5;     // First digit of minutes (0-5)
 
-// Time conversion constants
-constexpr int kSecondsPerHour = 3600;  // 3600 seconds per hour
-constexpr int kSecondsPerMinute = 60;  // 60 seconds per minute
+// Time conversion constants (from shared constants)
+constexpr int kSecondsPerHour = mygram::constants::kSecondsPerHour;
+constexpr int kSecondsPerMinute = mygram::constants::kSecondsPerMinute;
 
 // MySQL TIME type constants
 constexpr int kMaxMySQLTimeHours = 838;  // MySQL TIME allows -838:59:59 to 838:59:59

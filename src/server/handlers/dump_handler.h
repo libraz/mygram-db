@@ -6,6 +6,8 @@
 #pragma once
 
 #include "server/handlers/command_handler.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::server {
 
@@ -52,6 +54,19 @@ class DumpHandler : public CommandHandler {
    * @return true if the dump was saved successfully, false otherwise
    */
   bool DumpSaveWorker(const std::string& filepath);
+
+  /**
+   * @brief Resolve and validate a dump file path
+   *
+   * Prepends dump_dir for relative paths and validates the resolved path
+   * is within the dump directory (prevents path traversal).
+   *
+   * @param input Raw filepath from the query
+   * @param dump_dir Base dump directory
+   * @return Resolved canonical filepath, or error on traversal/invalid path
+   */
+  static mygram::utils::Expected<std::string, mygram::utils::Error> ResolveDumpPath(const std::string& input,
+                                                                                    const std::string& dump_dir);
 };
 
 }  // namespace mygramdb::server

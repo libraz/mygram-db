@@ -823,10 +823,7 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
   ASSERT_EQ(doc_store_->Size(), 3);
 
   // Process TRUNCATE DDL event
-  BinlogEvent ddl_event;
-  ddl_event.type = BinlogEventType::DDL;
-  ddl_event.text = "TRUNCATE TABLE test_table";
-  ddl_event.table_name = "test_table";
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "TRUNCATE TABLE test_table");
 
   bool result =
       BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
@@ -860,10 +857,7 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
   ASSERT_EQ(doc_store_->Size(), 3);
 
   // Process DROP DDL event
-  BinlogEvent ddl_event;
-  ddl_event.type = BinlogEventType::DDL;
-  ddl_event.text = "DROP TABLE test_table";
-  ddl_event.table_name = "test_table";
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "DROP TABLE test_table");
 
   bool result =
       BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
@@ -1000,6 +994,64 @@ TEST_F(BinlogEventProcessorTest, UpdateFilterOnlyKeepsTextSearchable) {
 TEST_F(BinlogEventProcessorTest, ProcessEventWithNullCacheManager) {
   BinlogEvent event = BinlogEvent::CreateInsert("test_table", "pk_cache1", "hello world");
   EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_));
+}
+
+/**
+ * @brief Test DDLType classification via CreateDDL factory
+ */
+TEST_F(BinlogEventProcessorTest, DDLTypeClassification) {
+  // TRUNCATE
+  auto truncate_event = BinlogEvent::CreateDDL("t", "TRUNCATE TABLE t");
+  EXPECT_EQ(truncate_event.ddl_type, DDLType::kTruncate);
+
+  // ALTER
+  auto alter_event = BinlogEvent::CreateDDL("t", "ALTER TABLE t ADD COLUMN x INT");
+  EXPECT_EQ(alter_event.ddl_type, DDLType::kAlter);
+
+  // DROP
+  auto drop_event = BinlogEvent::CreateDDL("t", "DROP TABLE t");
+  EXPECT_EQ(drop_event.ddl_type, DDLType::kDrop);
+
+  // RENAME
+  auto rename_event = BinlogEvent::CreateDDL("t", "RENAME TABLE t TO t2");
+  EXPECT_EQ(rename_event.ddl_type, DDLType::kRename);
+
+  // Unknown DDL
+  auto unknown_event = BinlogEvent::CreateDDL("t", "CREATE INDEX idx ON t(x)");
+  EXPECT_EQ(unknown_event.ddl_type, DDLType::kUnknown);
+
+  // Case insensitive
+  auto lower_truncate = BinlogEvent::CreateDDL("t", "truncate table t");
+  EXPECT_EQ(lower_truncate.ddl_type, DDLType::kTruncate);
+}
+
+/**
+ * @brief Test that ALTER TABLE ... DROP COLUMN is classified as ALTER, not DROP
+ *
+ * The ClassifyDDL function checks ALTER before DROP to handle this case correctly.
+ */
+TEST_F(BinlogEventProcessorTest, AlterDropColumnClassifiedAsAlter) {
+  auto event = BinlogEvent::CreateDDL("t", "ALTER TABLE t DROP COLUMN old_col");
+  EXPECT_EQ(event.ddl_type, DDLType::kAlter);
+}
+
+/**
+ * @brief Test that DDL events with pre-classified type are processed correctly
+ */
+TEST_F(BinlogEventProcessorTest, DDLTypeUsedInProcessing) {
+  // INSERT a document first
+  BinlogEvent insert_event = BinlogEvent::CreateInsert("test_table", "pk1", "alpha beta");
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_));
+
+  ASSERT_EQ(doc_store_->Size(), 1);
+
+  // Process ALTER DDL - should NOT clear data (only logs warning)
+  BinlogEvent alter_event = BinlogEvent::CreateDDL("test_table", "ALTER TABLE test_table ADD COLUMN x INT");
+  EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(alter_event, *index_, *doc_store_, table_config_, mysql_config_));
+
+  // Data should still be present after ALTER
+  EXPECT_EQ(doc_store_->Size(), 1);
+  EXPECT_EQ(index_->SearchAnd({"al"}).size(), 1);
 }
 
 }  // namespace mygramdb::mysql

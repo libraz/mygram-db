@@ -87,35 +87,35 @@ std::vector<std::pair<uint32_t, uint32_t>> MergeWindows(std::vector<std::pair<ui
 
 std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
     std::string_view normalized_text, const std::vector<std::string>& search_terms) {
-  // Convert text to codepoints for position tracking
-  auto text_cps = mygram::utils::Utf8ToCodepoints(normalized_text);
-  uint32_t text_len = static_cast<uint32_t>(text_cps.size());
-
   std::vector<std::pair<uint32_t, uint32_t>> positions;
 
   for (const auto& term : search_terms) {
     if (term.empty()) {
       continue;
     }
-    auto term_cps = mygram::utils::Utf8ToCodepoints(term);
-    uint32_t term_len = static_cast<uint32_t>(term_cps.size());
-    if (term_len > text_len) {
+    if (term.size() > normalized_text.size()) {
       continue;
     }
 
-    // Find all occurrences of term (non-overlapping, greedy left-to-right)
-    for (uint32_t i = 0; i + term_len <= text_len; ++i) {
-      bool match = true;
-      for (uint32_t j = 0; j < term_len; ++j) {
-        if (text_cps[i + j] != term_cps[j]) {
-          match = false;
-          break;
-        }
+    // Do byte-level matching first with string_view::find to locate candidate
+    // positions, then convert only matched byte offsets to codepoint positions.
+    // This avoids converting the entire document text to a codepoint array
+    // when there are few or no matches.
+    auto term_cp_count = static_cast<uint32_t>(mygram::utils::CountCodePoints(term));
+
+    size_t search_start = 0;
+    while (search_start <= normalized_text.size() - term.size()) {
+      size_t byte_pos = normalized_text.find(term, search_start);
+      if (byte_pos == std::string_view::npos) {
+        break;
       }
-      if (match) {
-        positions.emplace_back(i, i + term_len);
-        i += term_len - 1;  // Skip past match (loop will increment by 1)
-      }
+
+      // Convert byte offset to codepoint offset
+      uint32_t cp_start = mygram::utils::CountCodePoints(normalized_text.substr(0, byte_pos));
+      positions.emplace_back(cp_start, cp_start + term_cp_count);
+
+      // Skip past the match (non-overlapping)
+      search_start = byte_pos + term.size();
     }
   }
 

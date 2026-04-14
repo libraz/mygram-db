@@ -336,6 +336,8 @@ class QueryCache {
   // Background LRU refresh thread
   std::atomic<bool> should_stop_{false};
   std::thread lru_refresh_thread_;
+  std::mutex stop_mutex_;            ///< Mutex for stop_cv_ condition variable
+  std::condition_variable stop_cv_;  ///< Notified on shutdown to avoid busy-poll sleep
 
   /**
    * @brief Evict entries to make room for new entry
@@ -374,6 +376,14 @@ class QueryCache {
    * Called by RefreshLRUWorker() while holding exclusive lock.
    */
   void RefreshLRU();
+
+  /**
+   * @brief Internal lookup implementation shared by Lookup and LookupWithMetadata
+   * @param key Cache key
+   * @param metadata If non-null, populated with cache entry metadata on hit
+   * @return Decompressed result if found and not invalidated, nullopt otherwise
+   */
+  std::optional<std::vector<DocId>> LookupInternal(const CacheKey& key, LookupMetadata* metadata);
 };
 
 }  // namespace mygramdb::cache

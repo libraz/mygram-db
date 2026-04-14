@@ -91,6 +91,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # JSON field decoder tests
+  add_executable(rows_parser_json_decode_test
+    rows_parser_json_decode_test.cpp
+  )
+
+  target_link_libraries(rows_parser_json_decode_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(rows_parser_json_decode_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # Table metadata cache tests (no MySQL connection required)
   add_executable(table_metadata_test
     table_metadata_test.cpp

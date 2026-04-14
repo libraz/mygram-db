@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "client/mygramclient_c.h"
+#include "client/protocol_detection.h"
 #include "index/index.h"
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
@@ -334,6 +335,53 @@ TEST_F(MygramClientTest, Info) {
 }
 
 /**
+ * @brief Test INFO command returns complete multi-line response
+ *
+ * Validates that the multi-line INFO response is fully received, including
+ * all sections (Server, Stats, Memory, Index, Tables, Clients, Cache).
+ * This tests the fix for premature \r\n termination on multi-line responses.
+ */
+TEST_F(MygramClientTest, InfoMultiLineComplete) {
+  AddTestDocuments();
+
+  ASSERT_TRUE(client_->Connect());
+
+  // Use raw SendCommand to verify the full multi-line response
+  auto result = client_->SendCommand("INFO");
+  ASSERT_TRUE(result) << "SendCommand INFO error: " << result.error().message();
+
+  const std::string& response = *result;
+
+  // Verify the response starts with OK INFO
+  EXPECT_EQ(response.substr(0, 7), "OK INFO") << "Response should start with 'OK INFO'";
+
+  // Verify the response contains key sections from the multi-line format
+  EXPECT_NE(response.find("# Server"), std::string::npos) << "Missing '# Server' section";
+  EXPECT_NE(response.find("version:"), std::string::npos) << "Missing 'version:' field";
+  EXPECT_NE(response.find("# Stats"), std::string::npos) << "Missing '# Stats' section";
+  EXPECT_NE(response.find("# Memory"), std::string::npos) << "Missing '# Memory' section";
+  EXPECT_NE(response.find("# Index"), std::string::npos) << "Missing '# Index' section";
+  EXPECT_NE(response.find("# Tables"), std::string::npos) << "Missing '# Tables' section";
+  EXPECT_NE(response.find("# Clients"), std::string::npos) << "Missing '# Clients' section";
+  EXPECT_NE(response.find("# Cache"), std::string::npos) << "Missing '# Cache' section";
+
+  // Verify the response ends with END (the multi-line terminator)
+  EXPECT_NE(response.find("END"), std::string::npos) << "Response should contain 'END' marker";
+  // After trailing CRLF stripping, response should end with "END"
+  EXPECT_GE(response.size(), 3);
+  EXPECT_EQ(response.substr(response.size() - 3), "END") << "Response should end with 'END'";
+
+  // Also verify that the parsed Info() method gets all expected fields
+  auto info_result = client_->Info();
+  ASSERT_TRUE(info_result) << "Info error: " << info_result.error().message();
+
+  auto info = *info_result;
+  EXPECT_FALSE(info.version.empty()) << "version should be non-empty";
+  EXPECT_EQ(info.doc_count, 3) << "doc_count should reflect added documents";
+  EXPECT_FALSE(info.tables.empty()) << "tables list should not be empty";
+}
+
+/**
  * @brief Test CONFIG command
  */
 TEST_F(MygramClientTest, GetConfig) {
@@ -345,6 +393,32 @@ TEST_F(MygramClientTest, GetConfig) {
 
   auto config = *result;
   EXPECT_FALSE(config.empty());
+}
+
+/**
+ * @brief Test CONFIG command returns complete multi-line response
+ *
+ * Validates that the CONFIG multi-line response (which uses +OK prefix)
+ * is fully received and contains all configuration sections.
+ */
+TEST_F(MygramClientTest, GetConfigMultiLineComplete) {
+  ASSERT_TRUE(client_->Connect());
+
+  // Use raw SendCommand to verify the full multi-line response
+  auto result = client_->SendCommand("CONFIG");
+  ASSERT_TRUE(result) << "SendCommand CONFIG error: " << result.error().message();
+
+  const std::string& response = *result;
+
+  // CONFIG responses start with +OK
+  EXPECT_EQ(response.substr(0, 3), "+OK") << "Response should start with '+OK'";
+
+  // Verify the response contains configuration content
+  // (the exact content depends on the test config, but should have table names)
+  EXPECT_NE(response.find("test"), std::string::npos) << "Response should contain table name 'test'";
+
+  // Verify the response is multi-line (contains internal CRLF or LF)
+  EXPECT_NE(response.find('\n'), std::string::npos) << "CONFIG response should be multi-line";
 }
 
 /**
@@ -886,4 +960,178 @@ TEST_F(MygramClientCApiTest, ParseSearchExpression_EmptyExpression) {
 TEST_F(MygramClientCApiTest, FreeParseExpression_NullSafety) {
   // Should not crash
   mygramclient_free_parsed_expression(nullptr);
+}
+
+/**
+ * @brief Test that control characters in search queries are stripped by EscapeQueryString
+ *
+ * EscapeQueryString now strips bytes < 0x20 to prevent command injection.
+ * We test indirectly via Search: a query with embedded \r\n should not cause
+ * protocol-level issues (the control chars are stripped before sending).
+ *
+ * Note: The ValidateNoControlCharacters check runs before EscapeQueryString,
+ * so this tests that the validation layer rejects control characters.
+ */
+TEST_F(MygramClientTest, EscapeQueryStringStripsControlCharacters) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  // The client-side ValidateNoControlCharacters should reject queries with control chars
+  auto result = client_->Search("test", "hello\x01world", 100);
+  ASSERT_FALSE(result) << "Expected error for control character in query";
+  EXPECT_NE(result.error().message().find("control character"), std::string::npos);
+}
+
+/**
+ * @brief Test that hostname "localhost" resolves via getaddrinfo
+ *
+ * After replacing inet_pton with getaddrinfo, hostnames like "localhost"
+ * should be resolved successfully.
+ */
+TEST_F(MygramClientTest, ConnectViaLocalhost) {
+  // Create a client using "localhost" instead of "127.0.0.1"
+  ClientConfig localhost_config;
+  localhost_config.host = "localhost";
+  localhost_config.port = server_->GetPort();
+  localhost_config.timeout_ms = 5000;
+
+  MygramClient localhost_client(localhost_config);
+  auto result = localhost_client.Connect();
+  EXPECT_TRUE(result) << "Failed to connect via 'localhost': " << result.error().message();
+  if (result) {
+    EXPECT_TRUE(localhost_client.IsConnected());
+    localhost_client.Disconnect();
+  }
+}
+
+/**
+ * @brief Test that invalid hostname returns proper error
+ */
+TEST_F(MygramClientTest, ConnectInvalidHostnameReturnsError) {
+  ClientConfig bad_config;
+  bad_config.host = "this.host.does.not.exist.invalid";
+  bad_config.port = 12345;
+  bad_config.timeout_ms = 3000;
+
+  MygramClient bad_client(bad_config);
+  auto result = bad_client.Connect();
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("Failed to resolve host"), std::string::npos)
+      << "Error: " << result.error().message();
+}
+
+// =============================================================================
+// Unit tests for IsResponseComplete (protocol detection logic)
+// =============================================================================
+
+using mygramdb::client::detail::IsResponseComplete;
+
+/**
+ * @brief Test single-line response detection
+ */
+TEST(IsResponseCompleteTest, SingleLineResponseComplete) {
+  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK DOC pk1 status=active\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK SAVED /path/to/dump\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK LOADED /path/to/dump\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STOPPED\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STARTED\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK DEBUG ON\r\n"));
+  EXPECT_TRUE(IsResponseComplete("ERROR Table not found\r\n"));
+}
+
+/**
+ * @brief Test incomplete response (no CRLF at end)
+ */
+TEST(IsResponseCompleteTest, IncompleteNoCrlf) {
+  EXPECT_FALSE(IsResponseComplete("OK RESULTS 5 pk1 pk2"));
+  EXPECT_FALSE(IsResponseComplete("OK INFO"));
+  EXPECT_FALSE(IsResponseComplete("OK INFO\r"));
+  EXPECT_FALSE(IsResponseComplete(""));
+  EXPECT_FALSE(IsResponseComplete("X"));
+  EXPECT_FALSE(IsResponseComplete("XY"));
+}
+
+/**
+ * @brief Test INFO multi-line response requires END marker
+ */
+TEST(IsResponseCompleteTest, InfoRequiresEndMarker) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK INFO\r\n"));
+
+  // Partial response with some content but no END
+  EXPECT_FALSE(IsResponseComplete("OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\n"));
+
+  // Complete response with END marker
+  EXPECT_TRUE(IsResponseComplete("OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\nEND\r\n"));
+
+  // Minimal complete INFO
+  EXPECT_TRUE(IsResponseComplete("OK INFO\r\nEND\r\n"));
+}
+
+/**
+ * @brief Test REPLICATION STATUS multi-line response requires END marker
+ */
+TEST(IsResponseCompleteTest, ReplicationRequiresEndMarker) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK REPLICATION\r\n"));
+
+  // Partial response
+  EXPECT_FALSE(IsResponseComplete("OK REPLICATION\r\nstatus: running\r\n"));
+
+  // Complete response with END
+  EXPECT_TRUE(IsResponseComplete("OK REPLICATION\r\nstatus: running\r\nEND\r\n"));
+
+  // REPLICATION_STOPPED is a single-line response (different prefix)
+  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STOPPED\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STARTED\r\n"));
+}
+
+/**
+ * @brief Test CONFIG (+OK prefix) multi-line response requires double CRLF
+ */
+TEST(IsResponseCompleteTest, ConfigRequiresDoubleCrlf) {
+  // Just +OK line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("+OK\r\n"));
+
+  // Partial content
+  EXPECT_FALSE(IsResponseComplete("+OK\r\nmysql:\r\n  host: localhost\r\n"));
+
+  // Complete with double CRLF
+  EXPECT_TRUE(IsResponseComplete("+OK\r\nmysql:\r\n  host: localhost\r\n\r\n"));
+
+  // Also works for CONFIG HELP
+  EXPECT_TRUE(IsResponseComplete("+OK\r\nAvailable sections:\r\n  mysql\r\n\r\n"));
+}
+
+/**
+ * @brief Test FACET multi-line response requires double CRLF
+ */
+TEST(IsResponseCompleteTest, FacetRequiresDoubleCrlf) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK FACET 3\r\n"));
+
+  // Partial response
+  EXPECT_FALSE(IsResponseComplete("OK FACET 3\r\nval1\t10\r\n"));
+
+  // Complete with double CRLF
+  EXPECT_TRUE(IsResponseComplete("OK FACET 3\r\nval1\t10\r\nval2\t5\r\n\r\n"));
+}
+
+/**
+ * @brief Test SEARCH/COUNT with DEBUG block (multi-line via content detection)
+ */
+TEST(IsResponseCompleteTest, SearchWithDebugRequiresDoubleCrlf) {
+  // Single-line SEARCH without debug - complete
+  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n"));
+
+  // SEARCH with DEBUG block - NOT complete (no double CRLF)
+  EXPECT_FALSE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\n"));
+
+  // SEARCH with DEBUG block - complete (double CRLF at end)
+  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\ncache: miss\r\n\r\n"));
+
+  // COUNT with DEBUG block
+  EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n\r\n# DEBUG\r\nquery_time: 2.0ms\r\n\r\n"));
 }

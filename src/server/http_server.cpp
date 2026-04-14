@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <type_traits>
@@ -51,8 +52,8 @@ constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
 
-// Server startup delay (milliseconds)
-constexpr int kStartupDelayMs = 100;
+// Server startup timeout (seconds)
+constexpr int kStartupTimeoutSec = 5;
 
 std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
   std::vector<mygram::utils::CIDR> parsed;
@@ -91,6 +92,71 @@ json FilterValueToJson(const storage::FilterValue& value) {
       value);
   return serialized;
 }
+/**
+ * @brief Parse filter conditions from a JSON "filters" object into a query
+ *
+ * Supports two formats:
+ * - Format 1: {"col": "value"} or {"col": 123} - defaults to EQ operator
+ * - Format 2: {"col": {"op": "GT", "value": "10"}} - full operator support
+ *
+ * @param filters_json The JSON object containing filter definitions
+ * @param query The query to populate with parsed filter conditions
+ * @param[out] error_message Set to error description on failure
+ * @return true on success, false on parse error (error_message is set)
+ */
+bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::string& error_message) {
+  query.filters.clear();
+  for (const auto& [key, val] : filters_json.items()) {
+    query::FilterCondition filter;
+    filter.column = key;
+
+    // Check if value is an object with operator specification
+    if (val.is_object() && val.contains("value")) {
+      // Format 2: full operator support
+      std::string op_str = val.value("op", "EQ");
+      auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
+      if (!parsed_op.has_value()) {
+        error_message = "Invalid filter operator: " + op_str;
+        return false;
+      }
+      filter.op = parsed_op.value();
+
+      // Get the value
+      const json& value_field = val["value"];
+      if (value_field.is_string()) {
+        filter.value = value_field.get<std::string>();
+      } else if (value_field.is_number_integer()) {
+        filter.value = std::to_string(value_field.get<int64_t>());
+      } else if (value_field.is_number_float()) {
+        filter.value = std::to_string(value_field.get<double>());
+      } else if (value_field.is_boolean()) {
+        filter.value = value_field.get<bool>() ? "1" : "0";
+      } else {
+        error_message = "Invalid filter value type for column: " + key;
+        return false;
+      }
+    } else {
+      // Format 1: backward compatible (defaults to EQ)
+      filter.op = query::FilterOp::EQ;
+      if (val.is_string()) {
+        filter.value = val.get<std::string>();
+      } else if (val.is_number_integer()) {
+        filter.value = std::to_string(val.get<int64_t>());
+      } else if (val.is_number_float()) {
+        filter.value = std::to_string(val.get<double>());
+      } else if (val.is_boolean()) {
+        filter.value = val.get<bool>() ? "1" : "0";
+      } else {
+        error_message = "Invalid filter value type for column: " + key;
+        return false;
+      }
+    }
+
+    query.filters.push_back(std::move(filter));
+  }
+  return true;
+}
+
 }  // namespace
 
 using storage::DocId;
@@ -260,43 +326,61 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   // Set running flag before starting thread to avoid race condition
   running_ = true;
 
-  // Store error from thread (if any)
-  std::string thread_error;
-  std::mutex error_mutex;
+  // Use a promise/future to safely communicate bind result from the thread
+  auto start_promise = std::make_shared<std::promise<std::string>>();
+  auto start_future = start_promise->get_future();
 
   // Start server in separate thread
-  server_thread_ = std::make_unique<std::thread>([this, &thread_error, &error_mutex]() {
+  server_thread_ = std::make_unique<std::thread>([this, start_promise]() {
     mygram::utils::StructuredLog()
         .Event("http_server_starting")
         .Field("bind", config_.bind)
         .Field("port", static_cast<uint64_t>(config_.port))
         .Info();
 
-    if (!server_->listen(config_.bind, config_.port)) {
-      std::lock_guard<std::mutex> lock(error_mutex);
-      thread_error = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
+    // Bind first, then signal success/failure before blocking on listen
+    if (!server_->bind_to_port(config_.bind, config_.port)) {
+      std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
       mygram::utils::StructuredLog()
           .Event("server_error")
           .Field("operation", "http_server_listen")
           .Field("bind", config_.bind)
           .Field("port", static_cast<uint64_t>(config_.port))
-          .Field("error", thread_error)
+          .Field("error", error_msg)
           .Error();
       running_ = false;
+      start_promise->set_value(std::move(error_msg));
       return;
+    }
+
+    // Bind succeeded, signal the caller
+    start_promise->set_value("");
+
+    // Block on accepting connections (runs until server_->stop() is called)
+    if (!server_->listen_after_bind()) {
+      running_ = false;
     }
   });
 
-  // Wait a bit for server to start
-  std::this_thread::sleep_for(std::chrono::milliseconds(kStartupDelayMs));
-
-  if (!running_) {
+  // Wait for the thread to report bind result (with timeout)
+  auto status = start_future.wait_for(std::chrono::seconds(kStartupTimeoutSec));
+  if (status == std::future_status::timeout) {
+    // Timed out waiting for bind; stop the server and join
+    server_->stop();
     if (server_thread_ && server_thread_->joinable()) {
       server_thread_->join();
     }
-    std::lock_guard<std::mutex> lock(error_mutex);
-    auto error =
-        MakeError(ErrorCode::kNetworkBindFailed, thread_error.empty() ? "Failed to start HTTP server" : thread_error);
+    running_ = false;
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server startup timed out");
+    return MakeUnexpected(error);
+  }
+
+  std::string thread_error = start_future.get();
+  if (!thread_error.empty()) {
+    if (server_thread_ && server_thread_->joinable()) {
+      server_thread_->join();
+    }
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, thread_error);
     return MakeUnexpected(error);
   }
 
@@ -350,8 +434,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
       return;
     }
-    auto* current_index = table_iter->second->index.get();
-    auto* current_doc_store = table_iter->second->doc_store.get();
+    auto* table_ctx = table_iter->second;
+    auto* current_doc_store = table_ctx->doc_store.get();
 
     // Parse JSON body
     json body;
@@ -416,146 +500,47 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     }
 
     // Apply filters from JSON payload
-    // Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
-    // Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
     if (body.contains("filters") && body["filters"].is_object()) {
-      query->filters.clear();
-      for (const auto& [key, val] : body["filters"].items()) {
-        query::FilterCondition filter;
-        filter.column = key;
-
-        // Check if value is an object with operator specification
-        if (val.is_object() && val.contains("value")) {
-          // Format 2: full operator support
-          std::string op_str = val.value("op", "EQ");
-          // Parse operator
-          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
-          if (!parsed_op.has_value()) {
-            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
-            return;
-          }
-          filter.op = parsed_op.value();
-          // Get value from nested object
-          const auto& val_field = val["value"];
-          filter.value = val_field.is_string() ? val_field.get<std::string>() : val_field.dump();
-        } else {
-          // Format 1: backward compatible, defaults to EQ
-          filter.op = query::FilterOp::EQ;
-          filter.value = val.is_string() ? val.get<std::string>() : val.dump();
-        }
-        query->filters.push_back(std::move(filter));
+      std::string filter_error;
+      if (!ParseFiltersFromJson(body["filters"], *query, filter_error)) {
+        SendError(res, kHttpBadRequest, filter_error);
+        return;
       }
     }
 
-    // Try cache lookup first
-    if (cache_manager_ != nullptr && cache_manager_->IsEnabled()) {
-      auto cached_result = cache_manager_->Lookup(*query);
-      if (cached_result.has_value()) {
-        // Cache hit! Return cached results directly
-        std::vector<DocId> cached_doc_ids = cached_result.value();  // Make non-const copy
+    // Build pipeline parameters from table context
+    search_pipeline::FullPipelineParams params;
+    params.current_index = table_ctx->index.get();
+    params.current_doc_store = current_doc_store;
+    params.full_config = full_config_;
+    params.cache_manager = cache_manager_;
+    params.ngram_size = table_ctx->config.ngram_size;
+    params.kanji_ngram_size = table_ctx->config.kanji_ngram_size;
+    params.cross_boundary_ngrams = table_ctx->config.cross_boundary_ngrams;
+    params.filter_threshold = SearchHandler::GetFilterThreshold();
+    params.primary_key_column = table_ctx->config.primary_key;
+    params.bm25_stats = &table_ctx->bm25_stats;
 
-        // Apply ORDER BY, LIMIT, OFFSET on cached results
-        std::vector<DocId> sorted_results;
-        if (query->order_by.has_value()) {
-          // Get primary key column name from table config
-          std::string pk_col = "id";
-          auto tbl_it = table_contexts_.find(table);
-          if (tbl_it != table_contexts_.end()) {
-            pk_col = tbl_it->second->config.primary_key;
-          }
-
-          auto result = query::ResultSorter::SortAndPaginate(cached_doc_ids, *current_doc_store, *query, pk_col);
-          if (!result.has_value()) {
-            SendError(res, kHttpBadRequest, result.error().message());
-            return;
-          }
-          sorted_results = std::move(result.value());
-        } else {
-          size_t start_idx = std::min(static_cast<size_t>(query->offset), cached_doc_ids.size());
-          size_t end_idx = std::min(start_idx + query->limit, cached_doc_ids.size());
-          if (start_idx < cached_doc_ids.size()) {
-            sorted_results =
-                std::vector<DocId>(cached_doc_ids.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
-                                   cached_doc_ids.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
-          }
-        }
-
-        // Build JSON response from cache
-        json response;
-        response["count"] = cached_doc_ids.size();
-        response["limit"] = query->limit;
-        response["offset"] = query->offset;
-
-        json results_array = json::array();
-        for (const auto& doc_id : sorted_results) {
-          auto doc = current_doc_store->GetDocument(doc_id);
-          if (doc) {
-            json doc_obj;
-            doc_obj["doc_id"] = doc->doc_id;
-            doc_obj["primary_key"] = doc->primary_key;
-            if (!doc->filters.empty()) {
-              json filters_obj;
-              for (const auto& [key, val] : doc->filters) {
-                filters_obj[key] = FilterValueToJson(val);
-              }
-              doc_obj["filters"] = filters_obj;
-            }
-            results_array.push_back(doc_obj);
-          }
-        }
-        response["results"] = results_array;
-        SendJson(res, kHttpOk, response);
-        return;  // Cache hit, early return
-      }
+    // Set synonym dictionary if available
+    if (table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
+      params.synonym_dict = table_ctx->synonym_dict.get();
     }
 
-    // Get ngram sizes for this table
-    int current_ngram_size = table_iter->second->config.ngram_size;
-    int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
-    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
-
-    // Collect all search terms (main + AND terms)
-    std::vector<std::string> all_search_terms;
-    if (!query->search_text.empty()) {
-      all_search_terms.push_back(query->search_text);
+    // Execute the unified search pipeline
+    auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
+    if (!pipeline_output.success) {
+      SendError(res, kHttpInternalServerError, pipeline_output.error_message);
+      return;
     }
-    all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
 
-    // Generate term infos using shared pipeline
-    auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, current_ngram_size,
-                                                         current_kanji_ngram_size, current_cross_boundary);
-
-    // Sort by estimated size (smallest first for faster intersection)
-    std::sort(term_infos.begin(), term_infos.end(),
-              [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
-
-    // Execute search pipeline
-    auto pipeline_result = search_pipeline::Execute(
-        *query, term_infos, all_search_terms, current_index, current_doc_store, full_config_, current_ngram_size,
-        current_kanji_ngram_size, current_cross_boundary, SearchHandler::GetFilterThreshold());
-
-    auto& results = pipeline_result.results;
-
-    // Store total count before applying ORDER BY and limit/offset
+    auto& results = pipeline_output.results;
     size_t total_count = results.size();
 
-    // Insert into cache (cache stores results before pagination)
-    search_pipeline::InsertToCache(cache_manager_, *query, results, term_infos, 0.0, current_ngram_size,
-                                   current_kanji_ngram_size, current_cross_boundary);
-
     // Apply ORDER BY, LIMIT, OFFSET
-    // Only use ResultSorter if ORDER BY is explicitly specified
     std::vector<DocId> sorted_results;
     if (query->order_by.has_value()) {
-      // Get primary key column name from table config
-      std::string pk_col = "id";
-      auto tbl_it = table_contexts_.find(table);
-      if (tbl_it != table_contexts_.end()) {
-        pk_col = tbl_it->second->config.primary_key;
-      }
-
-      // Use ResultSorter for ORDER BY support (same as TCP)
-      auto result = query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, pk_col);
+      auto result =
+          query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, params.primary_key_column);
       if (!result.has_value()) {
         SendError(res, kHttpBadRequest, result.error().message());
         return;
@@ -636,8 +621,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
       SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
       return;
     }
-    auto* current_index = table_iter->second->index.get();
-    auto* current_doc_store = table_iter->second->doc_store.get();
+    auto* table_ctx = table_iter->second;
 
     // Parse JSON body
     json body;
@@ -688,86 +672,40 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 
     // Apply filters from JSON payload (same logic as search)
     if (body.contains("filters") && body["filters"].is_object()) {
-      query->filters.clear();
-      for (const auto& [key, val] : body["filters"].items()) {
-        query::FilterCondition filter;
-        filter.column = key;
-
-        // Check if value is an object with operator specification
-        if (val.is_object() && val.contains("value")) {
-          // Format 2: full operator support
-          std::string op_str = val.value("op", "EQ");
-          // Parse operator
-          auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
-          if (!parsed_op.has_value()) {
-            SendError(res, kHttpBadRequest, "Invalid filter operator: " + op_str);
-            return;
-          }
-          filter.op = parsed_op.value();
-
-          // Get the value
-          json value_field = val["value"];
-          if (value_field.is_string()) {
-            filter.value = value_field.get<std::string>();
-          } else if (value_field.is_number_integer()) {
-            filter.value = std::to_string(value_field.get<int64_t>());
-          } else if (value_field.is_number_float()) {
-            filter.value = std::to_string(value_field.get<double>());
-          } else if (value_field.is_boolean()) {
-            filter.value = value_field.get<bool>() ? "1" : "0";
-          } else {
-            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
-            return;
-          }
-        } else {
-          // Format 1: backward compatible (defaults to EQ)
-          filter.op = query::FilterOp::EQ;
-          if (val.is_string()) {
-            filter.value = val.get<std::string>();
-          } else if (val.is_number_integer()) {
-            filter.value = std::to_string(val.get<int64_t>());
-          } else if (val.is_number_float()) {
-            filter.value = std::to_string(val.get<double>());
-          } else if (val.is_boolean()) {
-            filter.value = val.get<bool>() ? "1" : "0";
-          } else {
-            SendError(res, kHttpBadRequest, "Invalid filter value type for column: " + key);
-            return;
-          }
-        }
-
-        query->filters.push_back(filter);
+      std::string filter_error;
+      if (!ParseFiltersFromJson(body["filters"], *query, filter_error)) {
+        SendError(res, kHttpBadRequest, filter_error);
+        return;
       }
     }
 
-    // Get ngram sizes for this table
-    int current_ngram_size = table_iter->second->config.ngram_size;
-    int current_kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
-    bool current_cross_boundary = table_iter->second->config.cross_boundary_ngrams;
+    // Build pipeline parameters from table context
+    search_pipeline::FullPipelineParams params;
+    params.current_index = table_ctx->index.get();
+    params.current_doc_store = table_ctx->doc_store.get();
+    params.full_config = full_config_;
+    params.cache_manager = cache_manager_;
+    params.ngram_size = table_ctx->config.ngram_size;
+    params.kanji_ngram_size = table_ctx->config.kanji_ngram_size;
+    params.cross_boundary_ngrams = table_ctx->config.cross_boundary_ngrams;
+    params.filter_threshold = SearchHandler::GetFilterThreshold();
+    params.primary_key_column = table_ctx->config.primary_key;
 
-    // Collect all search terms (main + AND terms)
-    std::vector<std::string> all_search_terms;
-    if (!query->search_text.empty()) {
-      all_search_terms.push_back(query->search_text);
+    // Set synonym dictionary if available
+    if (table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
+      params.synonym_dict = table_ctx->synonym_dict.get();
     }
-    all_search_terms.insert(all_search_terms.end(), query->and_terms.begin(), query->and_terms.end());
 
-    // Generate term infos using shared pipeline
-    auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, current_ngram_size,
-                                                         current_kanji_ngram_size, current_cross_boundary);
-
-    // Sort by estimated size (smallest first for faster intersection)
-    std::sort(term_infos.begin(), term_infos.end(),
-              [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
-
-    // Execute search pipeline
-    auto pipeline_result = search_pipeline::Execute(
-        *query, term_infos, all_search_terms, current_index, current_doc_store, full_config_, current_ngram_size,
-        current_kanji_ngram_size, current_cross_boundary, SearchHandler::GetFilterThreshold());
+    // Execute the unified search pipeline
+    auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
+    if (!pipeline_output.success) {
+      SendError(res, kHttpInternalServerError, pipeline_output.error_message);
+      return;
+    }
 
     // Build JSON response - just return count
     json response;
-    response["count"] = pipeline_result.results.size();
+    response["count"] = pipeline_output.results.size();
 
     SendJson(res, kHttpOk, response);
 

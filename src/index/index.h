@@ -257,13 +257,6 @@ class Index {
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromStream(std::istream& input_stream);
 
   /**
-   * @brief Get posting list for term (read-only)
-   * @param term Search term
-   * @return Pointer to posting list, or nullptr if not found
-   */
-  [[nodiscard]] const PostingList* GetPostingList(std::string_view term) const;
-
-  /**
    * @brief Estimate posting list size for a term (thread-safe)
    * @param term Search term
    * @return Estimated size of the posting list, or 0 if term not found
@@ -330,6 +323,18 @@ class Index {
 
   // Flag to prevent concurrent optimization
   std::atomic<bool> is_optimizing_{false};
+
+  // Generation counter incremented by LoadFromStream.
+  // Optimize checks this before applying results to detect stale data.
+  std::atomic<uint64_t> load_generation_{0};
+
+  /**
+   * @brief Get posting list for term (read-only)
+   * @param term Search term
+   * @return Pointer to posting list, or nullptr if not found
+   * @pre Caller must hold postings_mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] const PostingList* GetPostingList(std::string_view term) const;
 
   /**
    * @brief Get or create posting list for term

@@ -42,6 +42,10 @@ void Index::Optimize(uint64_t total_docs) {
 
   OptimizationGuard guard(is_optimizing_);
 
+  // Capture load generation before snapshotting — if LoadFromStream runs
+  // concurrently and replaces term_postings_, our snapshot is stale.
+  const uint64_t gen_before = load_generation_.load(std::memory_order_acquire);
+
   // Phase 1a: Take snapshot of posting list VERSIONS and pointers (brief shared_lock)
   // IMPORTANT: We store both versions and shared_ptrs:
   // - shared_ptr copies keep posting lists alive during optimization
@@ -74,36 +78,46 @@ void Index::Optimize(uint64_t total_docs) {
   {
     std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
-    term_count = optimized_postings.size();
+    // If LoadFromStream replaced term_postings_ since we took our snapshot,
+    // discard all optimization results to avoid overwriting fresh data.
+    if (load_generation_.load(std::memory_order_acquire) != gen_before) {
+      mygram::utils::StructuredLog()
+          .Event("index_optimization_discarded")
+          .Field("reason", "load_generation_changed")
+          .Info();
+      // term_count and merged_count stay 0 — skip the loop entirely
+    } else {
+      term_count = optimized_postings.size();
 
-    // Update only terms that still exist in the index
-    // This preserves concurrent modifications:
-    // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
-    // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-    // - Terms modified during Phase 1: keep current version (source of truth),
-    //   skip optimization for this term
-    for (auto& [term, optimized_posting] : optimized_postings) {
-      auto current_it = term_postings_.find(term);
-      if (current_it != term_postings_.end()) {
-        const auto& current_posting = current_it->second;
-        auto snapshot_version_it = snapshot_versions.find(term);
+      // Update only terms that still exist in the index
+      // This preserves concurrent modifications:
+      // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
+      // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
+      // - Terms modified during Phase 1: keep current version (source of truth),
+      //   skip optimization for this term
+      for (auto& [term, optimized_posting] : optimized_postings) {
+        auto current_it = term_postings_.find(term);
+        if (current_it != term_postings_.end()) {
+          const auto& current_posting = current_it->second;
+          auto snapshot_version_it = snapshot_versions.find(term);
 
-        // Check if posting list was modified during optimization
-        // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
-        // catches balanced Remove+Add operations where size stays the same but data changed.
-        if (snapshot_version_it != snapshot_versions.end() &&
-            current_posting->Version() != snapshot_version_it->second) {
-          // Posting list was modified during optimization.
-          // Keep current_posting as-is (source of truth) rather than Union,
-          // which would resurrect documents removed during optimization.
-          // This term will be optimized in the next optimization cycle.
-          merged_count++;
-        } else {
-          // No changes: use optimized version as-is
-          term_postings_[term] = std::move(optimized_posting);
+          // Check if posting list was modified during optimization
+          // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
+          // catches balanced Remove+Add operations where size stays the same but data changed.
+          if (snapshot_version_it != snapshot_versions.end() &&
+              current_posting->Version() != snapshot_version_it->second) {
+            // Posting list was modified during optimization.
+            // Keep current_posting as-is (source of truth) rather than Union,
+            // which would resurrect documents removed during optimization.
+            // This term will be optimized in the next optimization cycle.
+            merged_count++;
+          } else {
+            // No changes: use optimized version as-is
+            term_postings_[term] = std::move(optimized_posting);
+          }
         }
+        // If term was removed, don't re-add it
       }
-      // If term was removed, don't re-add it
     }
   }
 
@@ -139,6 +153,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   }
 
   OptimizationGuard guard(is_optimizing_);
+
+  // Capture load generation before starting — if LoadFromStream runs
+  // concurrently and replaces term_postings_, our snapshots are stale.
+  const uint64_t gen_before = load_generation_.load(std::memory_order_acquire);
 
   size_t initial_term_count;
   {
@@ -219,6 +237,17 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     // Phase 2: Atomically swap the optimized batch (brief exclusive lock)
     {
       std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+
+      // If LoadFromStream replaced term_postings_ since we started,
+      // discard remaining optimization results to avoid overwriting fresh data.
+      if (load_generation_.load(std::memory_order_acquire) != gen_before) {
+        mygram::utils::StructuredLog()
+            .Event("index_batch_optimization_discarded")
+            .Field("reason", "load_generation_changed")
+            .Field("batch_offset", static_cast<uint64_t>(i))
+            .Info();
+        break;  // Exit the batch loop entirely
+      }
 
       // Update only terms that still exist in the index
       // This preserves concurrent modifications:

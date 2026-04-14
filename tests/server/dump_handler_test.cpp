@@ -1025,6 +1025,9 @@ class MockBinlogReader : public mysql::IBinlogReader {
   mygram::utils::Expected<void, mygram::utils::Error> Start() override {
     running_ = true;
     start_called_ = true;
+    if (observed_flag_ != nullptr) {
+      flag_value_at_start_ = observed_flag_->load(std::memory_order_acquire);
+    }
     return {};
   }
 
@@ -1061,7 +1064,14 @@ class MockBinlogReader : public mysql::IBinlogReader {
     stop_called_ = false;
     set_gtid_called_ = false;
     last_set_gtid_.clear();
+    flag_value_at_start_ = false;
   }
+
+  /// Set an atomic flag to observe when Start() is called
+  void ObserveFlagOnStart(std::atomic<bool>* flag) { observed_flag_ = flag; }
+
+  /// Returns the value of the observed flag at the time Start() was called
+  bool GetFlagValueAtStart() const { return flag_value_at_start_; }
 
  private:
   std::string current_gtid_;
@@ -1075,6 +1085,8 @@ class MockBinlogReader : public mysql::IBinlogReader {
   bool stop_called_ = false;
   bool set_gtid_called_ = false;
   std::string last_set_gtid_;
+  std::atomic<bool>* observed_flag_ = nullptr;
+  bool flag_value_at_start_ = false;
 };
 
 /**
@@ -1445,6 +1457,53 @@ TEST_F(DumpHandlerGtidTest, MultipleDumpLoadsWithDifferentGtids) {
   ASSERT_TRUE(handler_->Handle(load1, conn_ctx_).find("OK") == 0);
   EXPECT_EQ(mock_binlog_reader_->GetLastSetGtid(), gtid1);
 }
+
+/**
+ * @brief Test that dump_load_in_progress is cleared BEFORE replication restarts
+ *
+ * This verifies the fix for Issue #7: Previously, the loading guard was destroyed
+ * at the end of HandleDumpLoad, which meant dump_load_in_progress was still true
+ * when binlog_reader->Start() was called. Other handlers (Search, Document) refuse
+ * to serve queries while dump_load_in_progress is set, creating an inconsistency
+ * window where the system appeared unavailable despite the dump being fully loaded.
+ */
+TEST_F(DumpHandlerGtidTest, LoadingFlagClearedBeforeReplicationRestart) {
+  const std::string test_gtid = "uuid:44444";
+
+  // Save a dump with a GTID
+  mock_binlog_reader_->SetGtidForTest(test_gtid);
+  mock_binlog_reader_->SetRunningForTest(true);
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_dump_dir_.string() + "/flag_order_test.dmp";
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
+
+  // Configure mock to observe dump_load_in_progress when Start() is called
+  mock_binlog_reader_->SetGtidForTest("");
+  mock_binlog_reader_->SetRunningForTest(true);  // Replication was running
+  mock_binlog_reader_->ResetTestFlags();
+  mock_binlog_reader_->ObserveFlagOnStart(&dump_load_in_progress_);
+
+  // Load the dump - this should clear loading flag BEFORE calling Start()
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_dump_dir_.string() + "/flag_order_test.dmp";
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0) << "Load failed: " << load_response;
+
+  // Verify Start() was called
+  ASSERT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after DUMP LOAD";
+
+  // Verify dump_load_in_progress was false when Start() was called
+  EXPECT_FALSE(mock_binlog_reader_->GetFlagValueAtStart())
+      << "dump_load_in_progress must be false BEFORE replication restarts. "
+         "Other handlers check this flag and refuse queries while it is true.";
+
+  // Verify flag is also false after completion
+  EXPECT_FALSE(dump_load_in_progress_);
+}
+
 #endif  // USE_MYSQL
 
 // ============================================================================
@@ -1735,5 +1794,33 @@ TEST_F(DumpHandlerTest, DumpSaveStopsReplicationBeforeCapturingGtid) {
   handler_ctx_->binlog_reader = nullptr;
 }
 #endif  // USE_MYSQL
+
+/**
+ * @brief Test that DumpSave canonical path check handles paths without "./" or "../"
+ *
+ * After removing the redundant substring pre-check, the canonical path validation
+ * must still correctly reject path traversal via absolute paths outside dump_dir
+ * and accept valid simple filenames.
+ */
+TEST_F(DumpHandlerTest, DumpSaveCanonicalPathCheckOnlyRejectsTraversal) {
+  // A simple filename should work (no "./" or "../")
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = "valid_filename.dmp";
+
+  std::string response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(response.find("OK SAVED") == 0) << "Response: " << response;
+}
+
+TEST_F(DumpHandlerTest, DumpSaveRejectsAbsolutePathOutsideDumpDir) {
+  // An absolute path outside dump_dir should be rejected by canonical check
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = "/etc/passwd";
+
+  std::string response = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("dump directory") != std::string::npos) << "Response: " << response;
+}
 
 }  // namespace mygramdb::server

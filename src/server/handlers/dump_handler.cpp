@@ -29,6 +29,29 @@
 
 namespace mygramdb::server {
 
+mygram::utils::Expected<std::string, mygram::utils::Error> DumpHandler::ResolveDumpPath(const std::string& input,
+                                                                                        const std::string& dump_dir) {
+  std::string filepath = input;
+  if (filepath[0] != '/') {
+    filepath = dump_dir + "/" + filepath;
+  }
+  // Canonicalize path and validate it's within dump_dir
+  try {
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
+    std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(dump_dir);
+    auto rel = canonical.lexically_relative(dump_canonical);
+    if (rel.empty() || rel.string().substr(0, 2) == "..") {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
+                                   "Invalid filepath: path must be within dump directory (" + dump_dir + ")"));
+    }
+  } catch (const std::exception& e) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
+                                                                  std::string("Invalid filepath: ") + e.what()));
+  }
+  return filepath;
+}
+
 std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
   (void)conn_ctx;  // Unused for dump commands
 
@@ -103,35 +126,11 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   // Determine filepath
   std::string filepath;
   if (!query.filepath.empty()) {
-    filepath = query.filepath;
-
-    // Security check: reject relative paths containing "./" or "../"
-    // Only allow: simple filename (no '/') or absolute path (starts with '/')
-    if (filepath.find("./") != std::string::npos || filepath.find("../") != std::string::npos) {
-      return ResponseFormatter::FormatError(
-          "Invalid filepath: relative paths with './' or '../' are not allowed. "
-          "Use a simple filename (saved to dump directory) or an absolute path.");
+    auto resolved = ResolveDumpPath(query.filepath, ctx_.dump_dir);
+    if (!resolved) {
+      return ResponseFormatter::FormatError(resolved.error().message());
     }
-
-    // Prepend dump_dir only for simple filenames (no path separator)
-    if (filepath.find('/') == std::string::npos) {
-      filepath = ctx_.dump_dir + "/" + filepath;
-    }
-
-    // For absolute paths, validate they're within dump_dir for security
-    if (filepath[0] == '/') {
-      try {
-        std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-        std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
-        auto rel = canonical.lexically_relative(dump_canonical);
-        if (rel.empty() || rel.string().substr(0, 2) == "..") {
-          return ResponseFormatter::FormatError("Invalid filepath: absolute path must be within dump directory (" +
-                                                ctx_.dump_dir + ")");
-        }
-      } catch (const std::exception& e) {
-        return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
-      }
-    }
+    filepath = std::move(*resolved);
   } else {
     filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
@@ -357,26 +356,14 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
 #endif
 
-  std::string filepath;
-  if (!query.filepath.empty()) {
-    filepath = query.filepath;
-    if (filepath[0] != '/') {
-      filepath = ctx_.dump_dir + "/" + filepath;
-    }
-    // Canonicalize path and validate it's within dump_dir
-    try {
-      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
-      auto rel = canonical.lexically_relative(dump_canonical);
-      if (rel.empty() || rel.string().substr(0, 2) == "..") {
-        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
-      }
-    } catch (const std::exception& e) {
-      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
-    }
-  } else {
+  if (query.filepath.empty()) {
     return ResponseFormatter::FormatError("DUMP LOAD requires a filepath");
   }
+  auto resolved = ResolveDumpPath(query.filepath, ctx_.dump_dir);
+  if (!resolved) {
+    return ResponseFormatter::FormatError(resolved.error().message());
+  }
+  std::string filepath = std::move(*resolved);
 
   mygram::utils::StructuredLog().Event("dump_load_starting").Field("path", filepath).Info();
 
@@ -394,6 +381,12 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Call dump API (auto-detects V1 or V2 format)
   auto result =
       storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error);
+
+  // Clear the loading flag now that the dump data is loaded.
+  // This must happen BEFORE restarting replication and rebuilding caches,
+  // so that other handlers (Search, Document) can serve queries immediately
+  // rather than waiting for the replication restart to complete.
+  loading_guard.Release();
 
 #ifdef USE_MYSQL
   // Update GTID from loaded dump (if load was successful and GTID is available)
@@ -474,26 +467,14 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 }
 
 std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
-  std::string filepath;
-  if (!query.filepath.empty()) {
-    filepath = query.filepath;
-    if (filepath[0] != '/') {
-      filepath = ctx_.dump_dir + "/" + filepath;
-    }
-    // Canonicalize path and validate it's within dump_dir
-    try {
-      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
-      auto rel = canonical.lexically_relative(dump_canonical);
-      if (rel.empty() || rel.string().substr(0, 2) == "..") {
-        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
-      }
-    } catch (const std::exception& e) {
-      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
-    }
-  } else {
+  if (query.filepath.empty()) {
     return ResponseFormatter::FormatError("DUMP VERIFY requires a filepath");
   }
+  auto resolved = ResolveDumpPath(query.filepath, ctx_.dump_dir);
+  if (!resolved) {
+    return ResponseFormatter::FormatError(resolved.error().message());
+  }
+  std::string filepath = std::move(*resolved);
 
   mygram::utils::StructuredLog().Event("dump_verify_starting").Field("path", filepath).Info();
 
@@ -519,26 +500,14 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
 }
 
 std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
-  std::string filepath;
-  if (!query.filepath.empty()) {
-    filepath = query.filepath;
-    if (filepath[0] != '/') {
-      filepath = ctx_.dump_dir + "/" + filepath;
-    }
-    // Canonicalize path and validate it's within dump_dir
-    try {
-      std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-      std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(ctx_.dump_dir);
-      auto rel = canonical.lexically_relative(dump_canonical);
-      if (rel.empty() || rel.string().substr(0, 2) == "..") {
-        return ResponseFormatter::FormatError("Invalid filepath: path traversal detected");
-      }
-    } catch (const std::exception& e) {
-      return ResponseFormatter::FormatError(std::string("Invalid filepath: ") + e.what());
-    }
-  } else {
+  if (query.filepath.empty()) {
     return ResponseFormatter::FormatError("DUMP INFO requires a filepath");
   }
+  auto resolved = ResolveDumpPath(query.filepath, ctx_.dump_dir);
+  if (!resolved) {
+    return ResponseFormatter::FormatError(resolved.error().message());
+  }
+  std::string filepath = std::move(*resolved);
 
   mygram::utils::StructuredLog().Event("dump_info_reading").Field("path", filepath).Info();
 

@@ -34,7 +34,8 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(
       hw = kFallbackCpuCount;  // Fallback when the runtime can't detect core count
     }
     constexpr size_t kMinAutoWorkers = 4;
-    num_threads = std::max<size_t>(static_cast<size_t>(hw) * 2, kMinAutoWorkers);
+    constexpr size_t kAutoWorkerCpuMultiplier = 2;
+    num_threads = std::max<size_t>(static_cast<size_t>(hw) * kAutoWorkerCpuMultiplier, kMinAutoWorkers);
   }
 
   mygram::utils::StructuredLog()

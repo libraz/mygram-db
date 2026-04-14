@@ -101,4 +101,15 @@ std::string IPv4ToString(uint32_t ip_addr);
  */
 std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs);
 
+/**
+ * @brief Extract peer IP address from a connected socket file descriptor
+ *
+ * Uses getpeername() and inet_ntop() to resolve the peer IP.
+ * Supports both IPv4 (AF_INET) and IPv6 (AF_INET6).
+ *
+ * @param fd Connected socket file descriptor
+ * @return Peer IP address string, or "unknown" on failure
+ */
+std::string GetPeerIP(int fd);
+
 }  // namespace mygram::utils

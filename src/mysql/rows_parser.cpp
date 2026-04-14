@@ -178,6 +178,180 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
 }
 
 // ---------------------------------------------------------------------------
+// ParseSingleRow -- shared per-row column decode loop
+// ---------------------------------------------------------------------------
+
+mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> internal::ParseSingleRow(
+    const unsigned char* ptr, const unsigned char* end, const TableMetadata* meta, const unsigned char* columns_present,
+    size_t null_bitmap_size, uint64_t column_count, int pk_col_idx, int text_col_idx, const char* event_type_label,
+    const char* image_label) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  // NULL bitmap for this row
+  if (ptr + null_bitmap_size > end) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLFieldTruncated, std::string(event_type_label) + " row truncated at null bitmap"));
+  }
+  const unsigned char* null_bitmap = ptr;
+  ptr += null_bitmap_size;
+
+  // Debug: Show bitmaps
+  if (spdlog::should_log(spdlog::level::debug)) {
+    std::string col_bitmap_str;
+    std::string null_bitmap_str;
+    for (uint64_t i = 0; i < column_count; i++) {
+      col_bitmap_str += binlog_util::bitmap_is_set(columns_present, i) ? "1" : "0";
+      null_bitmap_str += binlog_util::bitmap_is_set(null_bitmap, i) ? "N" : ".";
+    }
+    std::string action = "image_bitmaps";
+    if (image_label[0] != '\0') {
+      action = std::string(image_label) + "_image_bitmaps";
+    }
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", action)
+        .Field("columns_bitmap", col_bitmap_str)
+        .Field("null_bitmap", null_bitmap_str)
+        .Debug();
+  }
+
+  RowData row;
+
+  // Parse each column value
+  for (uint64_t col_idx = 0; col_idx < column_count; col_idx++) {
+    // Check if column is present in this event
+    if (!binlog_util::bitmap_is_set(columns_present, col_idx)) {
+      if (spdlog::should_log(spdlog::level::debug)) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "column_not_in_bitmap")
+            .Field("col_idx", col_idx)
+            .Field("col_name", col_idx < meta->columns.size() ? meta->columns[col_idx].name : "?")
+            .Debug();
+      }
+      continue;
+    }
+
+    const auto& col_meta = meta->columns[col_idx];
+    bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
+
+    if (spdlog::should_log(spdlog::level::debug)) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "parsing_column")
+          .Field("col_idx", col_idx)
+          .Field("col_name", col_meta.name)
+          .Field("col_type", static_cast<int64_t>(col_meta.type))
+          .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+          .Field("is_null", is_null)
+          .Debug();
+    }
+
+    if (!is_null && ptr >= end) {
+      std::string msg = std::string(event_type_label) + " event truncated at column " + std::to_string(col_idx);
+      if (image_label[0] != '\0') {
+        msg += std::string(" (") + image_label + " image)";
+      }
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", std::string(event_type_label) + "_truncated")
+          .Field("column_index", col_idx)
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg));
+    }
+
+    // Decode field value
+    auto value_result = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
+                                         col_meta.is_unsigned);
+    if (!value_result) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "field_decode_error")
+          .Field("event_type", event_type_label)
+          .Field("column_index", col_idx)
+          .Field("error", value_result.error().message())
+          .Error();
+      return MakeUnexpected(value_result.error());
+    }
+    std::string value = *value_result;
+
+    // Check pointer validity after decode
+    if (ptr > end) {
+      std::string msg =
+          std::string(event_type_label) + " exceeded buffer after decode at column " + std::to_string(col_idx);
+      if (image_label[0] != '\0') {
+        msg += std::string(" (") + image_label + " image)";
+      }
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg));
+    }
+
+    // Store in row data
+    row.columns[col_meta.name] = value;
+
+    // Check if this is the primary key or text column (using cached indices)
+    if (static_cast<int>(col_idx) == pk_col_idx) {
+      row.primary_key = value;
+      if (spdlog::should_log(spdlog::level::debug)) {
+        mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "set_pk").Field("value", value).Debug();
+      }
+    }
+    if (static_cast<int>(col_idx) == text_col_idx) {
+      row.text = value;
+    }
+
+    // Advance pointer by field size (if not NULL)
+    if (!is_null) {
+      uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
+      if (field_size == 0) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "unsupported_column_type")
+            .Field("event_type", event_type_label)
+            .Field("column_type", static_cast<int64_t>(col_meta.type))
+            .Field("column_name", col_meta.name)
+            .Warn();
+        std::string msg = std::string("Unsupported column type in ") + event_type_label + " event";
+        if (image_label[0] != '\0') {
+          msg += std::string(" ") + image_label + " image";
+        }
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType, msg, col_meta.name));
+      }
+      if (ptr + field_size > end) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "field_size_exceeds_buffer")
+            .Field("event_type", event_type_label)
+            .Field("field_size", static_cast<uint64_t>(field_size))
+            .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
+            .Error();
+        std::string msg = std::string("Field size exceeds buffer in ") + event_type_label + " event";
+        if (image_label[0] != '\0') {
+          msg += std::string(" ") + image_label + " image";
+        }
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg, col_meta.name));
+      }
+      if (spdlog::should_log(spdlog::level::debug)) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "decoded_value")
+            .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
+            .Field("field_size", static_cast<uint64_t>(field_size))
+            .Debug();
+      }
+      ptr += field_size;
+    } else {
+      if (spdlog::should_log(spdlog::level::debug)) {
+        mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
+      }
+    }
+  }
+
+  return SingleRowResult{std::move(row), ptr};
+}
+
+// ---------------------------------------------------------------------------
 // ParseWriteRowsEvent
 // ---------------------------------------------------------------------------
 
@@ -202,107 +376,27 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
 
     const unsigned char* ptr = header->row_data_ptr;
     const unsigned char* end = header->end;
-    const uint64_t column_count = header->column_count;
-    const unsigned char* columns_present = header->columns_present;
-    const size_t kNullBitmapSize = header->null_bitmap_size;
-    const int pk_col_idx = header->pk_col_idx;
-    const int text_col_idx = header->text_col_idx;
 
     // Parse rows
     std::vector<RowData> rows;
-    // Reserve space for estimated rows
     size_t estimated_rows = (end - ptr) / mygram::constants::kEstimatedBytesPerBinlogRow;
     if (estimated_rows > 0 && estimated_rows < mygram::constants::kMaxPreReserveRows) {
       rows.reserve(estimated_rows);
     }
 
     while (ptr < end) {
-      RowData row;
-
-      // NULL bitmap for this row
-      if (ptr + kNullBitmapSize > end) {
-        break;  // End of rows
+      auto result =
+          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->null_bitmap_size,
+                                   header->column_count, header->pk_col_idx, header->text_col_idx, "WRITE_ROWS", "");
+      if (!result) {
+        // Truncation at null bitmap boundary means we reached end of rows
+        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->null_bitmap_size > end) {
+          break;
+        }
+        return MakeUnexpected(result.error());
       }
-      const unsigned char* null_bitmap = ptr;
-      ptr += kNullBitmapSize;
-
-      // Parse each column value
-      for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
-        // Check if column is present in this event
-        if (!binlog_util::bitmap_is_set(columns_present, col_idx)) {
-          continue;
-        }
-
-        const auto& col_meta = table_metadata->columns[col_idx];
-        bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
-
-        if (!is_null && ptr >= end) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "write_rows_truncated")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Error();
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                          "WRITE_ROWS event truncated at column " + std::to_string(col_idx)));
-        }
-
-        // Decode field value
-        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
-                                                       is_null, end, col_meta.is_unsigned);
-        if (!value_result) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "field_decode_error")
-              .Field("event_type", "write_rows")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Field("error", value_result.error().message())
-              .Error();
-          return MakeUnexpected(value_result.error());
-        }
-        std::string value = *value_result;
-
-        // Store in row data
-        row.columns[col_meta.name] = value;
-
-        // Check if this is the primary key or text column (using cached indices)
-        if (static_cast<int>(col_idx) == pk_col_idx) {
-          row.primary_key = value;
-        }
-        if (static_cast<int>(col_idx) == text_col_idx) {
-          row.text = value;
-        }
-
-        // Advance pointer by field size (if not NULL)
-        if (!is_null) {
-          uint32_t field_size =
-              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
-          if (field_size == 0) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_warning")
-                .Field("type", "unsupported_column_type")
-                .Field("event_type", "write_rows")
-                .Field("column_type", static_cast<int64_t>(col_meta.type))
-                .Field("column_name", col_meta.name)
-                .Warn();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
-                                            "Unsupported column type in WRITE_ROWS event", col_meta.name));
-          }
-          if (ptr + field_size > end) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_error")
-                .Field("type", "field_size_exceeds_buffer")
-                .Field("event_type", "write_rows")
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-                .Error();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                            "Field size exceeds buffer in WRITE_ROWS event", col_meta.name));
-          }
-          ptr += field_size;
-        }
-      }
-
-      rows.push_back(std::move(row));
+      ptr = result->next_ptr;
+      rows.push_back(std::move(result->row));
     }
 
     mygram::utils::StructuredLog()
@@ -352,12 +446,7 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
 
     const unsigned char* ptr = header->row_data_ptr;
     const unsigned char* end = header->end;
-    const uint64_t column_count = header->column_count;
-    const unsigned char* columns_before = header->columns_present;
     const size_t bitmap_size = header->bitmap_size;
-    const size_t kNullBitmapSize = header->null_bitmap_size;
-    const int pk_col_idx = header->pk_col_idx;
-    const int text_col_idx = header->text_col_idx;
 
     // UPDATE events have a second bitmap: columns_after_image
     if (ptr + bitmap_size > end) {
@@ -374,7 +463,6 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
 
     // Parse rows (each row has before and after images)
     std::vector<std::pair<RowData, RowData>> row_pairs;
-    // Reserve space for estimated row pairs (each pair is ~2x a single row)
     size_t estimated_pairs = (end - ptr) / (2 * mygram::constants::kEstimatedBytesPerBinlogRow);
     if (estimated_pairs > 0 && estimated_pairs < mygram::constants::kMaxPreReserveRows) {
       row_pairs.reserve(estimated_pairs);
@@ -388,352 +476,57 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
         .Field("available_bytes", static_cast<int64_t>(end - ptr))
         .Debug();
 
-    bool parse_ended_early = false;
-
-    while (ptr < end && !parse_ended_early) {
-      RowData before_row;
-      RowData after_row;
-
+    while (ptr < end) {
       if (spdlog::should_log(spdlog::level::debug)) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "row_start")
             .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
-            .Field("null_bitmap_size", static_cast<uint64_t>(kNullBitmapSize))
+            .Field("null_bitmap_size", static_cast<uint64_t>(header->null_bitmap_size))
             .Debug();
       }
 
       // Parse before image
-      if (ptr + kNullBitmapSize > end) {
-        if (spdlog::should_log(spdlog::level::debug)) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "insufficient_space_for_null_bitmap")
-              .Debug();
-        }
-        break;
-      }
-      const unsigned char* null_bitmap_before = ptr;
-      ptr += kNullBitmapSize;
-
-      // Debug: Show which columns are in columns_before bitmap and null_bitmap_before
-      if (spdlog::should_log(spdlog::level::debug)) {
-        std::string col_bitmap_str;
-        std::string null_bitmap_str;
-        for (size_t i = 0; i < column_count; i++) {
-          col_bitmap_str += binlog_util::bitmap_is_set(columns_before, i) ? "1" : "0";
-          null_bitmap_str += binlog_util::bitmap_is_set(null_bitmap_before, i) ? "N" : ".";
-        }
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "before_image_bitmaps")
-            .Field("columns_bitmap", col_bitmap_str)
-            .Field("null_bitmap", null_bitmap_str)
-            .Debug();
-      }
-
-      for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
-        if (!binlog_util::bitmap_is_set(columns_before, col_idx)) {
+      auto before_result = internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present,
+                                                    header->null_bitmap_size, header->column_count, header->pk_col_idx,
+                                                    header->text_col_idx, "UPDATE_ROWS", "before");
+      if (!before_result) {
+        // Truncation in UPDATE is treated as end-of-rows (lenient)
+        if (before_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
-                .Field("action", "column_not_in_bitmap")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Field("col_name",
-                       col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?")
+                .Field("action", "parse_ended_early_before_image")
+                .Field("error", before_result.error().message())
                 .Debug();
           }
-          continue;
-        }
-
-        const auto& col_meta = table_metadata->columns[col_idx];
-        bool is_null = binlog_util::bitmap_is_set(null_bitmap_before, col_idx);
-
-        if (spdlog::should_log(spdlog::level::debug)) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "parsing_column")
-              .Field("col_idx", static_cast<uint64_t>(col_idx))
-              .Field("col_name", col_meta.name)
-              .Field("col_type", static_cast<int64_t>(col_meta.type))
-              .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
-              .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-              .Field("is_null", is_null)
-              .Debug();
-        }
-
-        // Check if we have data remaining before attempting to decode
-        // NULL columns consume no buffer space, so ptr >= end is OK for them
-        if (!is_null && ptr >= end) {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "reached_end_before_image")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Debug();
-          }
-          parse_ended_early = true;
           break;
         }
-
-        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
-                                                       is_null, end, col_meta.is_unsigned);
-        if (!value_result) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "field_decode_error")
-              .Field("event_type", "update_rows")
-              .Field("image", "before")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Field("error", value_result.error().message())
-              .Error();
-          return MakeUnexpected(value_result.error());
-        }
-        std::string value = *value_result;
-
-        // Check again after decode, as DecodeFieldValue advances ptr
-        if (ptr > end) {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "exceeded_end_after_decode")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Debug();
-          }
-          parse_ended_early = true;
-          break;
-        }
-
-        before_row.columns[col_meta.name] = value;
-
-        // Check using cached indices
-        if (static_cast<int>(col_idx) == pk_col_idx) {
-          before_row.primary_key = value;
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "set_pk")
-                .Field("value", value)
-                .Debug();
-          }
-        }
-        if (static_cast<int>(col_idx) == text_col_idx) {
-          before_row.text = value;
-        }
-
-        if (!is_null) {
-          uint32_t field_size =
-              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
-          if (field_size == 0) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_warning")
-                .Field("type", "unsupported_column_type")
-                .Field("event_type", "update_rows")
-                .Field("image", "before")
-                .Field("column_type", static_cast<int64_t>(col_meta.type))
-                .Field("column_name", col_meta.name)
-                .Warn();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
-                                            "Unsupported column type in UPDATE_ROWS before image", col_meta.name));
-          }
-          if (ptr + field_size > end) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_error")
-                .Field("type", "field_size_exceeds_buffer")
-                .Field("event_type", "update_rows")
-                .Field("image", "before")
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-                .Error();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                            "Field size exceeds buffer in UPDATE_ROWS before image", col_meta.name));
-          }
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "decoded_value")
-                .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("new_ptr_offset", static_cast<int64_t>((ptr + field_size) - buffer))
-                .Debug();
-          }
-          ptr += field_size;
-        } else {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
-          }
-        }
+        return MakeUnexpected(before_result.error());
       }
-
-      if (parse_ended_early) {
-        break;
-      }
+      ptr = before_result->next_ptr;
 
       // Parse after image
-      if (ptr + kNullBitmapSize > end) {
-        if (spdlog::should_log(spdlog::level::debug)) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "insufficient_space_for_after_null_bitmap")
-              .Debug();
-        }
-        break;
-      }
-      const unsigned char* null_bitmap_after = ptr;
-      ptr += kNullBitmapSize;
-
-      // Debug: Show which columns are in columns_after bitmap and null_bitmap_after
-      if (spdlog::should_log(spdlog::level::debug)) {
-        std::string col_bitmap_after_str;
-        std::string null_bitmap_after_str;
-        for (size_t i = 0; i < column_count; i++) {
-          col_bitmap_after_str += binlog_util::bitmap_is_set(columns_after, i) ? "1" : "0";
-          null_bitmap_after_str += binlog_util::bitmap_is_set(null_bitmap_after, i) ? "N" : ".";
-        }
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "after_image_bitmaps")
-            .Field("columns_bitmap", col_bitmap_after_str)
-            .Field("null_bitmap", null_bitmap_after_str)
-            .Debug();
-      }
-
-      for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
-        if (!binlog_util::bitmap_is_set(columns_after, col_idx)) {
+      auto after_result = internal::ParseSingleRow(ptr, end, table_metadata, columns_after, header->null_bitmap_size,
+                                                   header->column_count, header->pk_col_idx, header->text_col_idx,
+                                                   "UPDATE_ROWS", "after");
+      if (!after_result) {
+        // Truncation in UPDATE is treated as end-of-rows (lenient)
+        if (after_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
           if (spdlog::should_log(spdlog::level::debug)) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
-                .Field("action", "column_not_in_after_bitmap")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Field("col_name",
-                       col_idx < table_metadata->columns.size() ? table_metadata->columns[col_idx].name : "?")
+                .Field("action", "parse_ended_early_after_image")
+                .Field("error", after_result.error().message())
                 .Debug();
           }
-          continue;
-        }
-
-        const auto& col_meta = table_metadata->columns[col_idx];
-        bool is_null = binlog_util::bitmap_is_set(null_bitmap_after, col_idx);
-
-        if (spdlog::should_log(spdlog::level::debug)) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_debug")
-              .Field("action", "parsing_column")
-              .Field("col_idx", static_cast<uint64_t>(col_idx))
-              .Field("col_name", col_meta.name)
-              .Field("col_type", static_cast<int64_t>(col_meta.type))
-              .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
-              .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-              .Field("is_null", is_null)
-              .Debug();
-        }
-
-        // Check if we have data remaining before attempting to decode
-        // NULL columns consume no buffer space, so ptr >= end is OK for them
-        if (!is_null && ptr >= end) {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "reached_end_after_image")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Debug();
-          }
-          parse_ended_early = true;
           break;
         }
-
-        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
-                                                       is_null, end, col_meta.is_unsigned);
-        if (!value_result) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "field_decode_error")
-              .Field("event_type", "update_rows")
-              .Field("image", "after")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Field("error", value_result.error().message())
-              .Error();
-          return MakeUnexpected(value_result.error());
-        }
-        std::string value = *value_result;
-
-        // Check again after decode
-        if (ptr > end) {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "exceeded_end_after_decode_after_image")
-                .Field("col_idx", static_cast<uint64_t>(col_idx))
-                .Debug();
-          }
-          parse_ended_early = true;
-          break;
-        }
-
-        after_row.columns[col_meta.name] = value;
-
-        // Check using cached indices
-        if (static_cast<int>(col_idx) == pk_col_idx) {
-          after_row.primary_key = value;
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "set_pk")
-                .Field("value", value)
-                .Debug();
-          }
-        }
-        if (static_cast<int>(col_idx) == text_col_idx) {
-          after_row.text = value;
-        }
-
-        if (!is_null) {
-          uint32_t field_size =
-              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
-          if (field_size == 0) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_warning")
-                .Field("type", "unsupported_column_type")
-                .Field("event_type", "update_rows")
-                .Field("image", "after")
-                .Field("column_type", static_cast<int64_t>(col_meta.type))
-                .Field("column_name", col_meta.name)
-                .Warn();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
-                                            "Unsupported column type in UPDATE_ROWS after image", col_meta.name));
-          }
-          if (ptr + field_size > end) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_error")
-                .Field("type", "field_size_exceeds_buffer")
-                .Field("event_type", "update_rows")
-                .Field("image", "after")
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-                .Error();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                            "Field size exceeds buffer in UPDATE_ROWS after image", col_meta.name));
-          }
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "decoded_value")
-                .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("new_ptr_offset", static_cast<int64_t>((ptr + field_size) - buffer))
-                .Debug();
-          }
-          ptr += field_size;
-        } else {
-          if (spdlog::should_log(spdlog::level::debug)) {
-            mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
-          }
-        }
+        return MakeUnexpected(after_result.error());
       }
+      ptr = after_result->next_ptr;
 
-      if (!parse_ended_early) {
-        row_pairs.emplace_back(std::move(before_row), std::move(after_row));
-      }
+      row_pairs.emplace_back(std::move(before_result->row), std::move(after_result->row));
     }
 
     mygram::utils::StructuredLog()
@@ -783,103 +576,27 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
 
     const unsigned char* ptr = header->row_data_ptr;
     const unsigned char* end = header->end;
-    const uint64_t column_count = header->column_count;
-    const unsigned char* columns_present = header->columns_present;
-    const size_t kNullBitmapSize = header->null_bitmap_size;
-    const int pk_col_idx = header->pk_col_idx;
-    const int text_col_idx = header->text_col_idx;
 
     // Parse rows
     std::vector<RowData> rows;
-    // Reserve space for estimated rows
     size_t estimated_rows = (end - ptr) / mygram::constants::kEstimatedBytesPerBinlogRow;
     if (estimated_rows > 0 && estimated_rows < mygram::constants::kMaxPreReserveRows) {
       rows.reserve(estimated_rows);
     }
 
     while (ptr < end) {
-      RowData row;
-
-      // NULL bitmap for this row
-      if (ptr + kNullBitmapSize > end) {
-        break;
+      auto result =
+          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->null_bitmap_size,
+                                   header->column_count, header->pk_col_idx, header->text_col_idx, "DELETE_ROWS", "");
+      if (!result) {
+        // Truncation at null bitmap boundary means we reached end of rows
+        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->null_bitmap_size > end) {
+          break;
+        }
+        return MakeUnexpected(result.error());
       }
-      const unsigned char* null_bitmap = ptr;
-      ptr += kNullBitmapSize;
-
-      // Parse each column value
-      for (size_t col_idx = 0; col_idx < column_count; col_idx++) {
-        if (!binlog_util::bitmap_is_set(columns_present, col_idx)) {
-          continue;
-        }
-
-        const auto& col_meta = table_metadata->columns[col_idx];
-        bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
-
-        if (!is_null && ptr >= end) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "delete_rows_truncated")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Error();
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                          "DELETE_ROWS event truncated at column " + std::to_string(col_idx)));
-        }
-
-        auto value_result = internal::DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata,
-                                                       is_null, end, col_meta.is_unsigned);
-        if (!value_result) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "field_decode_error")
-              .Field("event_type", "delete_rows")
-              .Field("column_index", static_cast<uint64_t>(col_idx))
-              .Field("error", value_result.error().message())
-              .Error();
-          return MakeUnexpected(value_result.error());
-        }
-        std::string value = *value_result;
-
-        row.columns[col_meta.name] = value;
-
-        // Check using cached indices
-        if (static_cast<int>(col_idx) == pk_col_idx) {
-          row.primary_key = value;
-        }
-        if (static_cast<int>(col_idx) == text_col_idx) {
-          row.text = value;
-        }
-
-        if (!is_null) {
-          uint32_t field_size =
-              binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
-          if (field_size == 0) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_warning")
-                .Field("type", "unsupported_column_type")
-                .Field("event_type", "delete_rows")
-                .Field("column_type", static_cast<int64_t>(col_meta.type))
-                .Field("column_name", col_meta.name)
-                .Warn();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType,
-                                            "Unsupported column type in DELETE_ROWS event", col_meta.name));
-          }
-          if (ptr + field_size > end) {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_error")
-                .Field("type", "field_size_exceeds_buffer")
-                .Field("event_type", "delete_rows")
-                .Field("field_size", static_cast<uint64_t>(field_size))
-                .Field("remaining_bytes", static_cast<int64_t>(end - ptr))
-                .Error();
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated,
-                                            "Field size exceeds buffer in DELETE_ROWS event", col_meta.name));
-          }
-          ptr += field_size;
-        }
-      }
-
-      rows.push_back(std::move(row));
+      ptr = result->next_ptr;
+      rows.push_back(std::move(result->row));
     }
 
     mygram::utils::StructuredLog()

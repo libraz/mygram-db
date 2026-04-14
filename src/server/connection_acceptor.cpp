@@ -403,38 +403,8 @@ void ConnectionAcceptor::AcceptLoop() {
 
     if (!IsUnixSocket()) {
       // Convert client IP to string for ACL checks
-      std::string client_ip;
-      struct sockaddr_storage addr_storage {};
-      socklen_t peer_len = sizeof(addr_storage);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-      if (getpeername(client_fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &peer_len) == 0) {
-        if (addr_storage.ss_family == AF_INET) {
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-          auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
-          // C-style array required by POSIX inet_ntop API
-          // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          char ip_buffer[INET_ADDRSTRLEN] = {};
-          // Array-to-pointer decay required by POSIX inet_ntop API
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          if (inet_ntop(AF_INET, &addr_in->sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            client_ip.assign(ip_buffer);
-          }
-        } else if (addr_storage.ss_family == AF_INET6) {
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
-          auto* addr_in6 = reinterpret_cast<struct sockaddr_in6*>(&addr_storage);
-          // C-style array required by POSIX inet_ntop API
-          // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-          char ip_buffer[INET6_ADDRSTRLEN] = {};
-          // Array-to-pointer decay required by POSIX inet_ntop API
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-          if (inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-            client_ip.assign(ip_buffer);
-          }
-        }
-      }
-      if (client_ip.empty()) {
+      std::string client_ip = mygram::utils::GetPeerIP(client_fd);
+      if (client_ip == "unknown") {
         mygram::utils::StructuredLog().Event("server_warning").Field("type", "client_address_parse_failed").Warn();
       }
 
@@ -442,7 +412,7 @@ void ConnectionAcceptor::AcceptLoop() {
         mygram::utils::StructuredLog()
             .Event("server_warning")
             .Field("type", "connection_rejected_acl")
-            .Field("client_ip", client_ip.empty() ? "<unknown>" : client_ip)
+            .Field("client_ip", client_ip)
             .Warn();
         close(client_fd);
         continue;

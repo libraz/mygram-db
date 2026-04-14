@@ -258,3 +258,49 @@ TEST(ConfigSecurityTest, BindAddressWithSlashRejected) {
 
   ASSERT_FALSE(result.has_value());
 }
+
+// --- ValidatePathNoTraversal correctness (uses internal:: implementation) ---
+
+TEST(ConfigSecurityTest, PathWithDoubleDotSubstringAllowed) {
+  // "foo..bar" contains ".." as a substring but is NOT a path traversal.
+  // The correct implementation (internal::ValidatePathNoTraversal) allows this.
+  std::string extra =
+      "logging:\n"
+      "  file: \"foo..bar.log\"\n";
+
+  std::string path = CreateMinimalConfig(extra);
+  auto result = LoadConfig(path);
+  std::filesystem::remove(path);
+
+  ASSERT_TRUE(result.has_value()) << "Error: " << result.error().to_string();
+  EXPECT_EQ(result->logging.file, "foo..bar.log");
+}
+
+TEST(ConfigSecurityTest, PathWithTraversalComponentRejected) {
+  // "../foo" is a real traversal and should be rejected
+  std::string extra =
+      "logging:\n"
+      "  file: \"../foo.log\"\n";
+
+  std::string path = CreateMinimalConfig(extra);
+  auto result = LoadConfig(path);
+  std::filesystem::remove(path);
+
+  ASSERT_FALSE(result.has_value());
+  auto err_str = result.error().to_string();
+  EXPECT_TRUE(err_str.find("traversal") != std::string::npos || err_str.find("..") != std::string::npos)
+      << "Error was: " << err_str;
+}
+
+TEST(ConfigSecurityTest, PathWithMiddleTraversalRejected) {
+  // "foo/../bar" is a traversal and should be rejected
+  std::string extra =
+      "logging:\n"
+      "  file: \"foo/../bar.log\"\n";
+
+  std::string path = CreateMinimalConfig(extra);
+  auto result = LoadConfig(path);
+  std::filesystem::remove(path);
+
+  ASSERT_FALSE(result.has_value());
+}

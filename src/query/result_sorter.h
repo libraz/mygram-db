@@ -115,6 +115,22 @@ class ResultSorter {
                                 const std::string& primary_key_column = "id");
 
   /**
+   * @brief Pre-compute sort keys for all DocIDs (Phase 1 of Schwartzian Transform)
+   *
+   * Builds the SortEntry vector with pre-computed sort keys using batch lookups.
+   * Shared by SortWithSchwartzianTransform and SortWithSchwartzianTransformPartial.
+   *
+   * @param results Document IDs to build sort keys for
+   * @param doc_store Document store for retrieving sort values
+   * @param order_by ORDER BY clause
+   * @param primary_key_column Primary key column name
+   * @param[out] entries Output vector of SortEntry (pre-allocated by caller)
+   */
+  static void PrecomputeSortKeys(const std::vector<DocId>& results, const storage::DocumentStore& doc_store,
+                                 const OrderByClause& order_by, const std::string& primary_key_column,
+                                 std::vector<SortEntry>& entries);
+
+  /**
    * @brief Sort using Schwartzian Transform (pre-compute sort keys)
    *
    * This optimization eliminates repeated GetPrimaryKey()/GetSortKey() calls

@@ -35,6 +35,7 @@ inline void WriteUint32LE(std::vector<uint8_t>& buf, uint32_t val) {
  * @brief Read a uint32_t in little-endian byte order from a buffer
  */
 inline uint32_t ReadUint32LE(const std::vector<uint8_t>& buf, size_t& offset) {
+  assert(offset + 4 <= buf.size() && "ReadUint32LE: buffer overflow");
   uint32_t val = static_cast<uint32_t>(buf[offset]) | (static_cast<uint32_t>(buf[offset + 1]) << 8) |
                  (static_cast<uint32_t>(buf[offset + 2]) << 16) | (static_cast<uint32_t>(buf[offset + 3]) << 24);
   offset += 4;
@@ -391,18 +392,19 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
   // Self-intersection guard: avoid UB from locking the same shared_mutex twice.
   // A & A == A, so return a copy of this list.
   if (&other == this) {
-    std::shared_lock lock(mutex_);
     auto result = std::make_unique<PostingList>(roaring_threshold_);
     std::vector<DocId> docs;
-    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs = DecodeDelta(delta_compressed_);
-    } else {
-      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
-      docs.resize(size);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
-    }
+    {
+      std::shared_lock lock(mutex_);
+      if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+        docs = DecodeDelta(delta_compressed_);
+      } else {
+        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+        docs.resize(size);
+        roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+      }
+    }  // lock released here
     if (!docs.empty()) {
-      lock.unlock();  // Release before calling AddBatch which acquires its own lock
       result->AddBatch(docs);
     }
     return result;
@@ -461,18 +463,19 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
   // Self-union guard: avoid UB from locking the same shared_mutex twice.
   // A | A == A, so return a copy of this list.
   if (&other == this) {
-    std::shared_lock lock(mutex_);
     auto result = std::make_unique<PostingList>(roaring_threshold_);
     std::vector<DocId> docs;
-    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs = DecodeDelta(delta_compressed_);
-    } else {
-      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
-      docs.resize(size);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
-    }
+    {
+      std::shared_lock lock(mutex_);
+      if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+        docs = DecodeDelta(delta_compressed_);
+      } else {
+        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+        docs.resize(size);
+        roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+      }
+    }  // lock released here
     if (!docs.empty()) {
-      lock.unlock();  // Release before calling AddBatch which acquires its own lock
       result->AddBatch(docs);
     }
     return result;
@@ -791,6 +794,7 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
   }
 
+  version_.fetch_add(1, std::memory_order_release);
   return true;
 }
 

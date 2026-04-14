@@ -13,6 +13,7 @@
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_util.h"
+#include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
 
 #ifdef USE_MYSQL
@@ -3214,6 +3215,178 @@ TEST_F(RowsParserTest, WriteRowsEventSizeExceedsLength) {
   auto result =
       ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
   EXPECT_FALSE(result.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// ParseSingleRow direct tests
+// ---------------------------------------------------------------------------
+
+class ParseSingleRowTest : public ::testing::Test {
+ protected:
+  /// Build a columns_present bitmap with all bits set for @p col_count columns.
+  static std::vector<unsigned char> AllColumnsPresent(size_t col_count) {
+    size_t bitmap_bytes = (col_count + 7) / 8;
+    return std::vector<unsigned char>(bitmap_bytes, 0xFF);
+  }
+};
+
+TEST_F(ParseSingleRowTest, BasicIntRow) {
+  // Two INT columns: id=42, value=99
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  meta.columns.push_back({ColumnType::LONG, "value", 0, false});
+
+  auto cols_present = AllColumnsPresent(2);
+  size_t null_bitmap_size = (2 + 7) / 8;  // 1 byte
+
+  // Row buffer: null_bitmap (1 byte, no NULLs) + id (4 bytes LE) + value (4 bytes LE)
+  std::vector<unsigned char> buf;
+  buf.push_back(0x00);  // null bitmap: no NULLs
+
+  // id = 42
+  int32_t id_val = 42;
+  for (int i = 0; i < 4; i++)
+    buf.push_back((id_val >> (i * 8)) & 0xFF);
+  // value = 99
+  int32_t val_val = 99;
+  for (int i = 0; i < 4; i++)
+    buf.push_back((val_val >> (i * 8)) & 0xFF);
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 2,
+                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ("42", result->row.primary_key);
+  EXPECT_EQ("42", result->row.columns.at("id"));
+  EXPECT_EQ("99", result->row.columns.at("value"));
+  EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
+}
+
+TEST_F(ParseSingleRowTest, NullColumn) {
+  // Two INT columns: id=7, value=NULL
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  meta.columns.push_back({ColumnType::LONG, "value", 0, false});
+
+  auto cols_present = AllColumnsPresent(2);
+  size_t null_bitmap_size = 1;
+
+  // null bitmap: bit 1 set (column index 1 is NULL)
+  std::vector<unsigned char> buf;
+  buf.push_back(0x02);  // bit 1 set
+
+  // id = 7
+  int32_t id_val = 7;
+  for (int i = 0; i < 4; i++)
+    buf.push_back((id_val >> (i * 8)) & 0xFF);
+  // value is NULL -- no data bytes
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 2,
+                                                          /*pk_col_idx=*/0, /*text_col_idx=*/1, "test", "");
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ("7", result->row.primary_key);
+  EXPECT_EQ("", result->row.text);  // NULL is represented as empty string
+  EXPECT_EQ("", result->row.columns.at("value"));
+  EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
+}
+
+TEST_F(ParseSingleRowTest, VarcharColumn) {
+  // One VARCHAR column (metadata=255, so 1-byte length prefix)
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, false});
+
+  auto cols_present = AllColumnsPresent(1);
+  size_t null_bitmap_size = 1;
+
+  std::vector<unsigned char> buf;
+  buf.push_back(0x00);  // null bitmap: no NULLs
+
+  // VARCHAR with 1-byte length prefix
+  std::string text = "hello";
+  buf.push_back(static_cast<unsigned char>(text.size()));
+  for (char c : text)
+    buf.push_back(static_cast<unsigned char>(c));
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 1,
+                                                          /*pk_col_idx=*/-1, /*text_col_idx=*/0, "test", "");
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ("hello", result->row.text);
+  EXPECT_EQ("hello", result->row.columns.at("name"));
+}
+
+TEST_F(ParseSingleRowTest, TruncatedAtNullBitmap) {
+  // Buffer too short for null bitmap
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  auto cols_present = AllColumnsPresent(1);
+  size_t null_bitmap_size = 1;
+
+  // Empty buffer -- can't even read null bitmap
+  std::vector<unsigned char> buf;
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 1,
+                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
+}
+
+TEST_F(ParseSingleRowTest, PartialColumnBitmapSkipsColumns) {
+  // 3 columns but only column 0 and 2 present in bitmap
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::LONG, "a", 0, false});
+  meta.columns.push_back({ColumnType::LONG, "b", 0, false});
+  meta.columns.push_back({ColumnType::LONG, "c", 0, false});
+
+  // columns_present: bits 0 and 2 set, bit 1 clear -> 0b00000101 = 0x05
+  std::vector<unsigned char> cols_present = {0x05};
+  size_t null_bitmap_size = 1;
+
+  std::vector<unsigned char> buf;
+  buf.push_back(0x00);  // null bitmap: no NULLs
+
+  // column a = 10
+  int32_t a_val = 10;
+  for (int i = 0; i < 4; i++)
+    buf.push_back((a_val >> (i * 8)) & 0xFF);
+  // column b is NOT present -- no data
+  // column c = 30
+  int32_t c_val = 30;
+  for (int i = 0; i < 4; i++)
+    buf.push_back((c_val >> (i * 8)) & 0xFF);
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 3,
+                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ("10", result->row.primary_key);
+  EXPECT_EQ("10", result->row.columns.at("a"));
+  EXPECT_EQ("30", result->row.columns.at("c"));
+  // column b should not be in the map
+  EXPECT_EQ(result->row.columns.find("b"), result->row.columns.end());
 }
 
 #endif  // USE_MYSQL

@@ -62,6 +62,60 @@ TEST_F(PostingListTest, SizeLargeDataset) {
 }
 
 /**
+ * @brief Test SizeApprox returns the same value as Size after Add operations
+ *
+ * SizeApprox() reads doc_count_ atomically without acquiring the per-PostingList
+ * mutex, so it should always agree with Size() when no concurrent writers exist.
+ */
+TEST_F(PostingListTest, SizeApproxMatchesSize) {
+  PostingList posting(0.5);
+
+  EXPECT_EQ(posting.SizeApprox(), 0);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+
+  posting.Add(10);
+  EXPECT_EQ(posting.SizeApprox(), 1);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+
+  posting.Add(20);
+  posting.Add(30);
+  EXPECT_EQ(posting.SizeApprox(), 3);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+
+  posting.Remove(20);
+  EXPECT_EQ(posting.SizeApprox(), 2);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+
+  // Test with batch add
+  std::vector<DocId> batch = {100, 200, 300, 400, 500};
+  posting.AddBatch(batch);
+  EXPECT_EQ(posting.SizeApprox(), 7);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+}
+
+/**
+ * @brief Test SizeApprox after strategy conversion (Roaring)
+ */
+TEST_F(PostingListTest, SizeApproxAfterRoaringConversion) {
+  PostingList posting(0.01);
+
+  std::vector<DocId> ids;
+  for (DocId id = 1; id <= 50; ++id) {
+    ids.push_back(id);
+  }
+  posting.AddBatch(ids);
+  posting.Optimize(50);  // Force Roaring
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_EQ(posting.SizeApprox(), 50);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+
+  posting.Remove(25);
+  EXPECT_EQ(posting.SizeApprox(), 49);
+  EXPECT_EQ(posting.SizeApprox(), posting.Size());
+}
+
+/**
  * @brief Test Contains() for small delta-compressed arrays (linear search path)
  */
 TEST_F(PostingListTest, ContainsSmallDeltaArray) {
@@ -910,6 +964,58 @@ TEST_F(PostingListTest, SelfUnionEmpty) {
   EXPECT_EQ(result->Size(), 0);
 }
 
+/**
+ * @brief Test self-intersection on Roaring bitmap strategy
+ *
+ * Uses a large dataset to trigger Roaring conversion, then verifies that
+ * self-intersection returns a correct copy without crashing (previously
+ * this path had a double-unlock UB).
+ */
+TEST_F(PostingListTest, SelfIntersectRoaring) {
+  // Use a very low threshold so even a small batch triggers Roaring
+  PostingList posting(0.01);
+  std::vector<DocId> docs;
+  for (DocId id = 1; id <= 200; ++id) {
+    docs.push_back(id);
+  }
+  posting.AddBatch(docs);
+  // Force conversion to Roaring
+  posting.Optimize(200);
+
+  auto result = posting.Intersect(posting);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 200);
+
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 200);
+  for (DocId id = 1; id <= 200; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}
+
+/**
+ * @brief Test self-union on Roaring bitmap strategy
+ */
+TEST_F(PostingListTest, SelfUnionRoaring) {
+  PostingList posting(0.01);
+  std::vector<DocId> docs;
+  for (DocId id = 1; id <= 200; ++id) {
+    docs.push_back(id);
+  }
+  posting.AddBatch(docs);
+  posting.Optimize(200);
+
+  auto result = posting.Union(posting);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->Size(), 200);
+
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 200);
+  for (DocId id = 1; id <= 200; ++id) {
+    EXPECT_EQ(all[id - 1], id);
+  }
+}
+
 // =============================================================================
 // Intersect/Union doc_count_ and last_doc_id_ tests
 // =============================================================================
@@ -1105,4 +1211,92 @@ TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
   for (DocId id = 1; id <= 100; ++id) {
     EXPECT_EQ(all[id - 1], id);
   }
+}
+
+// =============================================================================
+// Deserialize truncated buffer test (#5)
+// =============================================================================
+
+/**
+ * @brief Test that Deserialize fails gracefully on a truncated buffer
+ */
+TEST_F(PostingListTest, DeserializeTruncatedBuffer) {
+  // Create a valid serialized posting list first
+  PostingList original;
+  original.Add(10);
+  original.Add(20);
+  original.Add(30);
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(original.Serialize(buffer));
+  ASSERT_GT(buffer.size(), 4u);
+
+  // Truncate at various points and verify Deserialize returns false
+  for (size_t truncate_at = 0; truncate_at < buffer.size() - 1; ++truncate_at) {
+    std::vector<uint8_t> truncated(buffer.begin(), buffer.begin() + static_cast<long>(truncate_at));
+    PostingList deserialized;
+    size_t offset = 0;
+    EXPECT_FALSE(deserialized.Deserialize(truncated, offset))
+        << "Deserialize should fail with buffer truncated at " << truncate_at;
+  }
+
+  // Full buffer should succeed
+  PostingList deserialized;
+  size_t offset = 0;
+  EXPECT_TRUE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Size(), 3u);
+}
+
+/**
+ * @brief Test that Deserialize with empty buffer returns false
+ */
+TEST_F(PostingListTest, DeserializeEmptyBuffer) {
+  std::vector<uint8_t> empty;
+  PostingList posting;
+  size_t offset = 0;
+  EXPECT_FALSE(posting.Deserialize(empty, offset));
+}
+
+// =============================================================================
+// Deserialize increments version test (#12)
+// =============================================================================
+
+/**
+ * @brief Test that version is incremented after successful Deserialize
+ */
+TEST_F(PostingListTest, DeserializeIncrementsVersion) {
+  // Create and serialize a posting list
+  PostingList original;
+  original.Add(100);
+  original.Add(200);
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(original.Serialize(buffer));
+
+  // Deserialize into a fresh posting list
+  PostingList deserialized;
+  EXPECT_EQ(deserialized.Version(), 0u) << "Fresh posting list should have version 0";
+
+  size_t offset = 0;
+  ASSERT_TRUE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Version(), 1u) << "Version should be 1 after first Deserialize";
+
+  // Deserialize again - version should increment further
+  offset = 0;
+  ASSERT_TRUE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Version(), 2u) << "Version should be 2 after second Deserialize";
+}
+
+/**
+ * @brief Test that version is NOT incremented on failed Deserialize
+ */
+TEST_F(PostingListTest, DeserializeFailDoesNotIncrementVersion) {
+  PostingList posting;
+  posting.Add(42);
+  uint64_t version_before = posting.Version();
+
+  std::vector<uint8_t> empty;
+  size_t offset = 0;
+  EXPECT_FALSE(posting.Deserialize(empty, offset));
+  EXPECT_EQ(posting.Version(), version_before) << "Version should not change on failed Deserialize";
 }

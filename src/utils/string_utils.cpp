@@ -206,76 +206,14 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
   std::vector<uint32_t> codepoints;
   codepoints.reserve(text.size() / 2 + 1);  // Balance between ASCII and CJK
 
-  for (size_t i = 0; i < text.size();) {
-    auto first_byte = static_cast<unsigned char>(text[i]);
-    int char_len = Utf8CharLength(first_byte);
-
-    if (i + char_len > text.size()) {
-      // Incomplete UTF-8 sequence, skip
-      ++i;
-      continue;
-    }
-
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
+  size_t i = 0;
+  while (i < text.size()) {
     uint32_t codepoint = 0;
-    bool valid = true;
-
-    if (char_len == 1) {
-      codepoint = first_byte;
-    } else if (char_len == 2) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      // Validate continuation byte
-      if (!IsValidContinuationByte(byte1)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) | (byte1 & kUtf8ContinuationMask);
-        // Check for overlong encoding
-        if (codepoint < kMinTwoByteCodepoint) {
-          valid = false;
-        }
-      }
-    } else if (char_len == 3) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      auto byte2 = static_cast<unsigned char>(text[i + 2]);
-      // Validate continuation bytes
-      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
-                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte2 & kUtf8ContinuationMask);
-        // Check for overlong encoding
-        if (codepoint < kMinThreeByteCodepoint) {
-          valid = false;
-        }
-        // Check for UTF-16 surrogate (invalid in UTF-8)
-        if (IsSurrogateCodepoint(codepoint)) {
-          valid = false;
-        }
-      }
-    } else if (char_len == 4) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      auto byte2 = static_cast<unsigned char>(text[i + 2]);
-      auto byte3 = static_cast<unsigned char>(text[i + 3]);
-      // Validate continuation bytes
-      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2) || !IsValidContinuationByte(byte3)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
-                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift12) |
-                    ((byte2 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte3 & kUtf8ContinuationMask);
-        // Check for overlong encoding
-        if (codepoint < kMinFourByteCodepoint) {
-          valid = false;
-        }
-        // Check for codepoint beyond Unicode maximum
-        if (codepoint > kUnicodeMaxCodepoint) {
-          valid = false;
-        }
-      }
-    }
-
-    if (valid) {
+    int char_len = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
+    if (char_len > 0) {
       codepoints.push_back(codepoint);
-      i += char_len;
+      i += static_cast<size_t>(char_len);
     } else {
       // Invalid sequence, skip one byte and try again (replacement strategy)
       ++i;
@@ -288,70 +226,17 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
 size_t Utf8ToCodepoints(std::string_view text, uint32_t* buffer, size_t buffer_capacity) {
   size_t count = 0;
 
-  for (size_t i = 0; i < text.size();) {
-    auto first_byte = static_cast<unsigned char>(text[i]);
-    int char_len = Utf8CharLength(first_byte);
-
-    if (i + char_len > text.size()) {
-      ++i;
-      continue;
-    }
-
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
+  size_t i = 0;
+  while (i < text.size()) {
     uint32_t codepoint = 0;
-    bool valid = true;
-
-    if (char_len == 1) {
-      codepoint = first_byte;
-    } else if (char_len == 2) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      if (!IsValidContinuationByte(byte1)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) | (byte1 & kUtf8ContinuationMask);
-        if (codepoint < kMinTwoByteCodepoint) {
-          valid = false;
-        }
-      }
-    } else if (char_len == 3) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      auto byte2 = static_cast<unsigned char>(text[i + 2]);
-      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
-                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte2 & kUtf8ContinuationMask);
-        if (codepoint < kMinThreeByteCodepoint) {
-          valid = false;
-        }
-        if (IsSurrogateCodepoint(codepoint)) {
-          valid = false;
-        }
-      }
-    } else if (char_len == 4) {
-      auto byte1 = static_cast<unsigned char>(text[i + 1]);
-      auto byte2 = static_cast<unsigned char>(text[i + 2]);
-      auto byte3 = static_cast<unsigned char>(text[i + 3]);
-      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2) || !IsValidContinuationByte(byte3)) {
-        valid = false;
-      } else {
-        codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
-                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift12) |
-                    ((byte2 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte3 & kUtf8ContinuationMask);
-        if (codepoint < kMinFourByteCodepoint) {
-          valid = false;
-        }
-        if (codepoint > kUnicodeMaxCodepoint) {
-          valid = false;
-        }
-      }
-    }
-
-    if (valid) {
+    int char_len = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
+    if (char_len > 0) {
       if (count >= buffer_capacity) {
         return 0;  // Buffer too small, caller should fall back to vector version
       }
       buffer[count++] = codepoint;
-      i += char_len;
+      i += static_cast<size_t>(char_len);
     } else {
       ++i;
     }
@@ -714,6 +599,10 @@ uint32_t CountCodePoints(std::string_view text) {
     auto byte = static_cast<unsigned char>(text[i]);
     if (byte < 0x80) {
       i += 1;
+    } else if ((byte & 0xC0) == 0x80) {
+      // Bare continuation byte — skip without counting
+      i += 1;
+      continue;
     } else if ((byte & 0xE0) == 0xC0) {
       i += 2;
     } else if ((byte & 0xF0) == 0xE0) {
@@ -721,11 +610,77 @@ uint32_t CountCodePoints(std::string_view text) {
     } else if ((byte & 0xF8) == 0xF0) {
       i += 4;
     } else {
-      i += 1;  // Invalid byte, skip
+      i += 1;  // Invalid byte, skip without counting
+      continue;
     }
     ++count;
   }
   return count;
 }
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len) {
+  if (pos >= text.size()) {
+    return false;
+  }
+  auto byte = static_cast<unsigned char>(text[pos]);
+
+  // ASCII whitespace (space, tab, newline, etc.)
+  if (std::isspace(byte) != 0) {
+    char_len = 1;
+    return true;
+  }
+
+  // U+00A0 (No-Break Space): 0xC2 0xA0
+  if (byte == 0xC2 && pos + 1 < text.size() && static_cast<unsigned char>(text[pos + 1]) == 0xA0) {
+    char_len = 2;
+    return true;
+  }
+
+  // 3-byte sequences
+  if (pos + 2 < text.size()) {
+    auto byte2 = static_cast<unsigned char>(text[pos + 1]);
+    auto byte3 = static_cast<unsigned char>(text[pos + 2]);
+
+    // U+1680 (Ogham Space Mark): 0xE1 0x9A 0x80
+    if (byte == 0xE1 && byte2 == 0x9A && byte3 == 0x80) {
+      char_len = 3;
+      return true;
+    }
+
+    if (byte == 0xE2) {
+      // U+2000-U+200B: 0xE2 0x80 0x80-0x8B
+      if (byte2 == 0x80 && byte3 >= 0x80 && byte3 <= 0x8B) {
+        char_len = 3;
+        return true;
+      }
+      // U+2028 (Line Separator): 0xE2 0x80 0xA8
+      // U+2029 (Paragraph Separator): 0xE2 0x80 0xA9
+      if (byte2 == 0x80 && (byte3 == 0xA8 || byte3 == 0xA9)) {
+        char_len = 3;
+        return true;
+      }
+      // U+202F (Narrow No-Break Space): 0xE2 0x80 0xAF
+      if (byte2 == 0x80 && byte3 == 0xAF) {
+        char_len = 3;
+        return true;
+      }
+      // U+205F (Medium Mathematical Space): 0xE2 0x81 0x9F
+      if (byte2 == 0x81 && byte3 == 0x9F) {
+        char_len = 3;
+        return true;
+      }
+    }
+
+    // U+3000 (Ideographic Space): 0xE3 0x80 0x80
+    if (byte == 0xE3 && byte2 == 0x80 && byte3 == 0x80) {
+      char_len = 3;
+      return true;
+    }
+  }
+
+  return false;
+}
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 }  // namespace mygram::utils

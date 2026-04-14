@@ -257,6 +257,42 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
   return FilterValueToSortKey(filter_val.value());
 }
 
+void ResultSorter::PrecomputeSortKeys(const std::vector<DocId>& results, const storage::DocumentStore& doc_store,
+                                      const OrderByClause& order_by, const std::string& primary_key_column,
+                                      std::vector<SortEntry>& entries) {
+  bool is_pk_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
+
+  if (is_pk_order) {
+    // Batch primary key lookup: single lock acquisition for all keys
+    auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
+    for (size_t i = 0; i < results.size(); ++i) {
+      std::string sort_key;
+      const auto& pk_str = primary_keys[i];
+      if (!pk_str.empty()) {
+        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+          auto padded = ParseNumericPrimaryKey(pk_str);
+          sort_key = padded.has_value() ? padded.value() : pk_str;
+        } else {
+          sort_key = pk_str;
+        }
+      } else {
+        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
+      }
+      entries.push_back({results[i], std::move(sort_key)});
+    }
+  } else {
+    // Batch filter value lookup: single lock acquisition
+    auto batch_values = doc_store.GetFilterValuesBatch(results, order_by.column);
+    for (size_t i = 0; i < results.size(); ++i) {
+      std::string sort_key;
+      if (batch_values[i].has_value()) {
+        sort_key = FilterValueToSortKey(batch_values[i].value());
+      }
+      entries.push_back({results[i], std::move(sort_key)});
+    }
+  }
+}
+
 std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<DocId>& results,
                                                               const storage::DocumentStore& doc_store,
                                                               const OrderByClause& order_by,
@@ -288,36 +324,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   }
 
   // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
-  bool is_pk_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
-  if (is_pk_order) {
-    // Batch primary key lookup: single lock acquisition
-    auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
-    for (size_t i = 0; i < results.size(); ++i) {
-      std::string sort_key;
-      const auto& pk_str = primary_keys[i];
-      if (!pk_str.empty()) {
-        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          auto padded = ParseNumericPrimaryKey(pk_str);
-          sort_key = padded.has_value() ? padded.value() : pk_str;
-        } else {
-          sort_key = pk_str;
-        }
-      } else {
-        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
-      }
-      entries.push_back({results[i], std::move(sort_key)});
-    }
-  } else {
-    // Batch filter value lookup: single lock acquisition
-    auto batch_values = doc_store.GetFilterValuesBatch(results, order_by.column);
-    for (size_t i = 0; i < results.size(); ++i) {
-      std::string sort_key;
-      if (batch_values[i].has_value()) {
-        sort_key = FilterValueToSortKey(batch_values[i].value());
-      }
-      entries.push_back({results[i], std::move(sort_key)});
-    }
-  }
+  PrecomputeSortKeys(results, doc_store, order_by, primary_key_column, entries);
 
   // Phase 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);
@@ -371,44 +378,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
   }
 
   // Phase 1: Pre-compute sort keys for all DocIDs
-  // Use batch lookup for primary key ordering (single lock acquisition)
-  bool is_primary_key_order = order_by.IsPrimaryKey() || EqualsIgnoreCase(order_by.column, primary_key_column);
-
-  if (is_primary_key_order) {
-    // Batch primary key lookup: single lock acquisition for all keys
-    auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
-
-    for (size_t i = 0; i < results.size(); ++i) {
-      const auto& pk_str = primary_keys[i];
-      std::string sort_key;
-
-      if (!pk_str.empty()) {
-        // Numeric primary keys: pad with zeros for lexicographic ordering
-        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          auto padded = ParseNumericPrimaryKey(pk_str);
-          sort_key = padded.has_value() ? padded.value() : pk_str;
-        } else {
-          sort_key = pk_str;  // String primary key
-        }
-      } else {
-        // Fallback: use DocID as sort key (locale-independent)
-        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
-      }
-
-      entries.push_back({results[i], std::move(sort_key)});
-    }
-  } else {
-    // Filter column: batch lookup (single lock acquisition)
-    auto batch_values = doc_store.GetFilterValuesBatch(results, order_by.column);
-
-    for (size_t i = 0; i < results.size(); ++i) {
-      std::string sort_key;
-      if (batch_values[i].has_value()) {
-        sort_key = FilterValueToSortKey(batch_values[i].value());
-      }
-      entries.push_back({results[i], std::move(sort_key)});
-    }
-  }
+  PrecomputeSortKeys(results, doc_store, order_by, primary_key_column, entries);
 
   // Phase 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);

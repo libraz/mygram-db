@@ -177,6 +177,16 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
     YAML::Node yaml_root = YAML::LoadFile(path);
     json json_root = internal::YamlToJson(yaml_root);
 
+    // Validate config against schema (same as LoadConfig does for YAML)
+    {
+      std::string config_json_str = json_root.dump();
+      std::string empty_schema;  // Use embedded schema
+      auto validation_result = ValidateConfigJson(config_json_str, empty_schema);
+      if (!validation_result) {
+        return MakeUnexpected(validation_result.error());
+      }
+    }
+
     // Parse config from JSON object
     auto config_result = internal::ParseConfigFromJson(json_root);
     if (!config_result) {

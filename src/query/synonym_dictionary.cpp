@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "utils/binary_io.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::query {
@@ -145,15 +146,19 @@ bool SynonymDictionary::SaveToStream(std::ostream& output_stream) const {
   std::shared_lock lock(mutex_);
 
   auto group_count = static_cast<uint32_t>(groups_.size());
-  output_stream.write(reinterpret_cast<const char*>(&group_count), sizeof(group_count));
+  if (!mygram::utils::WriteBinary(output_stream, group_count)) {
+    return false;
+  }
 
   for (const auto& group : groups_) {
     auto term_count = static_cast<uint32_t>(group.size());
-    output_stream.write(reinterpret_cast<const char*>(&term_count), sizeof(term_count));
+    if (!mygram::utils::WriteBinary(output_stream, term_count)) {
+      return false;
+    }
     for (const auto& term : group) {
-      auto len = static_cast<uint32_t>(term.size());
-      output_stream.write(reinterpret_cast<const char*>(&len), sizeof(len));
-      output_stream.write(term.data(), static_cast<std::streamsize>(term.size()));
+      if (!mygram::utils::WriteString(output_stream, term)) {
+        return false;
+      }
     }
   }
 
@@ -166,8 +171,7 @@ bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
   term_to_group_.clear();
 
   uint32_t group_count = 0;
-  input_stream.read(reinterpret_cast<char*>(&group_count), sizeof(group_count));
-  if (!input_stream.good()) {
+  if (!mygram::utils::ReadBinary(input_stream, group_count)) {
     return false;
   }
 
@@ -180,8 +184,7 @@ bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
   groups_.reserve(group_count);
   for (uint32_t g = 0; g < group_count; ++g) {
     uint32_t term_count = 0;
-    input_stream.read(reinterpret_cast<char*>(&term_count), sizeof(term_count));
-    if (!input_stream.good()) {
+    if (!mygram::utils::ReadBinary(input_stream, term_count)) {
       return false;
     }
 
@@ -192,20 +195,8 @@ bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
     std::vector<std::string> group;
     group.reserve(term_count);
     for (uint32_t t = 0; t < term_count; ++t) {
-      uint32_t len = 0;
-      input_stream.read(reinterpret_cast<char*>(&len), sizeof(len));
-      if (!input_stream.good()) {
-        return false;
-      }
-
-      constexpr uint32_t kMaxTermLength = 10'000;
-      if (len > kMaxTermLength) {
-        return false;
-      }
-
-      std::string term(len, '\0');
-      input_stream.read(term.data(), static_cast<std::streamsize>(len));
-      if (!input_stream.good()) {
+      std::string term;
+      if (!mygram::utils::ReadString(input_stream, term)) {
         return false;
       }
 

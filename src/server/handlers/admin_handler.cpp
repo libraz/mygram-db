@@ -66,6 +66,10 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     // Show top-level sections
     auto paths = explorer.ListPaths("");
     std::string result = config::ConfigSchemaExplorer::FormatPathList(paths, "");
+    // Ensure result ends with \r\n for multi-line end-of-response detection
+    if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
+      result.append("\r\n");
+    }
     return "+OK\r\n" + result;
   }
 
@@ -76,6 +80,10 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   }
 
   std::string result = config::ConfigSchemaExplorer::FormatHelp(help_info.value());
+  // Ensure result ends with \r\n for multi-line end-of-response detection
+  if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
+    result.append("\r\n");
+  }
   return "+OK\r\n" + result;
 }
 
@@ -100,9 +108,11 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
   }
 
   std::string result = std::move(*format_result);
-  // Strip trailing CRLF if present (SendResponse will add CRLF)
-  while (result.size() >= 2 && result[result.size() - 2] == '\r' && result[result.size() - 1] == '\n') {
-    result.erase(result.size() - 2);
+  // Ensure result ends with \r\n so the server's appended \r\n produces
+  // the \r\n\r\n end-of-response marker that clients use to detect
+  // multi-line response completion.
+  if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
+    result.append("\r\n");
   }
   return "+OK\r\n" + result;
 }
@@ -157,7 +167,8 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     summary << ")";
   }
   summary << "\r\n";
-  summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port;
+  summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port
+          << "\r\n";
 
   return "+OK\r\n" + summary.str();
 }

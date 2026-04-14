@@ -251,6 +251,72 @@ TEST(IndexConcurrentTest, LoadFromFile) {
 }
 
 /**
+ * @brief Test that LoadFromStream during Optimize discards stale optimization results
+ *
+ * Regression test for: Optimize held shared_ptr copies of old posting lists while
+ * working outside the lock. If LoadFromStream replaced term_postings_ concurrently,
+ * Optimize would overwrite the new data with stale optimized copies in Phase 2.
+ * Fix: load_generation_ counter incremented by LoadFromStream; Optimize checks it
+ * before applying results and discards them if generation changed.
+ */
+TEST(IndexConcurrentTest, LoadFromStreamDuringOptimizeDiscardsStaleResults) {
+  // Create index with initial data (using "abc" terms)
+  Index index(1);
+  for (DocId i = 1; i <= 5000; i++) {
+    index.AddDocument(i, "abc");
+  }
+
+  // Save the initial state
+  std::ostringstream oss;
+  ASSERT_TRUE(index.SaveToStream(oss).has_value());
+  std::string saved_data = oss.str();
+
+  // Create a different index state with "xyz" terms, save it
+  Index index2(1);
+  for (DocId i = 1; i <= 3000; i++) {
+    index2.AddDocument(i, "xyz");
+  }
+
+  std::ostringstream oss2;
+  ASSERT_TRUE(index2.SaveToStream(oss2).has_value());
+  std::string new_data = oss2.str();
+
+  // Now run Optimize on the original index while LoadFromStream replaces it
+  std::atomic<bool> optimize_started{false};
+  std::atomic<bool> optimize_done{false};
+
+  std::thread optimize_thread([&]() {
+    optimize_started = true;
+    index.Optimize(5000);
+    optimize_done = true;
+  });
+
+  // Wait for optimize to start, then load new data
+  while (!optimize_started.load()) {
+    std::this_thread::yield();
+  }
+
+  // LoadFromStream replaces the entire index with different data
+  std::istringstream iss(new_data);
+  ASSERT_TRUE(index.LoadFromStream(iss).has_value());
+
+  optimize_thread.join();
+
+  // After both operations complete, the index should contain the loaded data
+  // ("xyz" terms, 3000 docs), not the old optimized data ("abc" terms, 5000 docs).
+  auto results_xyz = index.SearchAnd({"x"});
+  auto results_abc = index.SearchAnd({"a"});
+
+  // The loaded data should be present
+  EXPECT_EQ(results_xyz.size(), 3000u)
+      << "LoadFromStream data should be preserved, not overwritten by stale Optimize results";
+
+  // The old data should not be present (Optimize should have discarded its results
+  // or the load replaced them)
+  EXPECT_EQ(results_abc.size(), 0u) << "Old data should not be present after LoadFromStream replaced the index";
+}
+
+/**
  * @brief Test concurrent SearchOr and SearchNot
  */
 TEST(IndexConcurrentTest, ConcurrentSearchOrAndNot) {

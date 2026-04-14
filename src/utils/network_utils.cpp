@@ -150,4 +150,33 @@ std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
   return parsed;
 }
 
+std::string GetPeerIP(int fd) {
+  struct sockaddr_storage addr_storage {};
+  socklen_t addr_len = sizeof(addr_storage);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+  if (getpeername(fd, reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len) != 0) {
+    return "unknown";
+  }
+  if (addr_storage.ss_family == AF_INET) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+    auto* addr_in = reinterpret_cast<struct sockaddr_in*>(&addr_storage);
+    // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    char ip_buffer[INET_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET, &addr_in->sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+      return {ip_buffer};
+    }
+    // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  } else if (addr_storage.ss_family == AF_INET6) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - POSIX socket API
+    auto* addr_in6 = reinterpret_cast<struct sockaddr_in6*>(&addr_storage);
+    // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    char ip_buffer[INET6_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
+      return {ip_buffer};
+    }
+    // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+  }
+  return "unknown";
+}
+
 }  // namespace mygram::utils

@@ -9,6 +9,8 @@
 #include <cctype>
 #include <string>
 
+#include "utils/string_utils.h"
+
 namespace mygramdb::cache {
 
 std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column) {
@@ -74,76 +76,14 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
   std::string normalized;
   normalized.reserve(text.size());
 
-  // UTF-8 byte sequence constants for Unicode spaces
-  // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  constexpr unsigned char kNoBreakSpaceByte1 = 0xC2;  // U+00A0
-  constexpr unsigned char kNoBreakSpaceByte2 = 0xA0;
-  constexpr unsigned char kUnicodeSpace3Byte1 = 0xE2;   // U+2000-U+200B, U+202F, U+205F
-  constexpr unsigned char kFullWidthSpaceByte1 = 0xE3;  // U+3000
-  constexpr unsigned char kFullWidthSpaceByte2 = 0x80;
-  constexpr unsigned char kFullWidthSpaceByte3 = 0x80;
-  // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-
   bool prev_was_space = false;
   for (size_t i = 0; i < text.size(); ++i) {
-    bool is_space = false;
-    auto byte = static_cast<unsigned char>(text[i]);
-
-    // Check for ASCII whitespace (space, tab, newline, etc.)
-    if (std::isspace(byte) != 0) {
-      is_space = true;
-    }
-    // Check for UTF-8 No-Break Space U+00A0 (0xC2 0xA0)
-    else if (byte == kNoBreakSpaceByte1 && i + 1 < text.size() &&
-             static_cast<unsigned char>(text[i + 1]) == kNoBreakSpaceByte2) {
-      is_space = true;
-      i += 1;  // Skip 1 extra byte (2-byte sequence)
-    }
-    // Check for 3-byte Unicode spaces starting with 0xE2
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    else if (byte == kUnicodeSpace3Byte1 && i + 2 < text.size()) {
-      auto byte2 = static_cast<unsigned char>(text[i + 1]);
-      auto byte3 = static_cast<unsigned char>(text[i + 2]);
-      // U+2000-U+200B: 0xE2 0x80 0x80-0x8B
-      if (byte2 == 0x80 && byte3 >= 0x80 && byte3 <= 0x8B) {
-        is_space = true;
-        i += 2;
-      }
-      // U+2028 (Line Separator): 0xE2 0x80 0xA8
-      // U+2029 (Paragraph Separator): 0xE2 0x80 0xA9
-      else if (byte2 == 0x80 && (byte3 == 0xA8 || byte3 == 0xA9)) {
-        is_space = true;
-        i += 2;
-      }
-      // U+202F (Narrow No-Break Space): 0xE2 0x80 0xAF
-      else if (byte2 == 0x80 && byte3 == 0xAF) {
-        is_space = true;
-        i += 2;
-      }
-      // U+205F (Medium Mathematical Space): 0xE2 0x81 0x9F
-      else if (byte2 == 0x81 && byte3 == 0x9F) {
-        is_space = true;
-        i += 2;
-      }
-    }
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    // Check for UTF-8 Ogham Space Mark U+1680 (0xE1 0x9A 0x80)
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    else if (byte == 0xE1 && i + 2 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x9A &&
-             static_cast<unsigned char>(text[i + 2]) == 0x80) {
-      is_space = true;
-      i += 2;
-    }
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    // Check for UTF-8 full-width space U+3000 (0xE3 0x80 0x80)
-    else if (byte == kFullWidthSpaceByte1 && i + 2 < text.size() &&
-             static_cast<unsigned char>(text[i + 1]) == kFullWidthSpaceByte2 &&
-             static_cast<unsigned char>(text[i + 2]) == kFullWidthSpaceByte3) {
-      is_space = true;
-      i += 2;  // Skip 2 extra bytes (3-byte sequence)
-    }
+    size_t ws_len = 0;
+    bool is_space = mygram::utils::IsUnicodeWhitespace(text, i, ws_len);
 
     if (is_space) {
+      // Skip extra bytes of multi-byte whitespace character (loop will ++i)
+      i += ws_len - 1;
       if (!prev_was_space && !normalized.empty()) {
         normalized += ' ';
         prev_was_space = true;

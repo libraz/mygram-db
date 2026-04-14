@@ -174,10 +174,7 @@ TEST_F(BinlogReaderFixture, ProcessDdlTruncateClearsState) {
   ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "5", 1, "Body")));
   EXPECT_EQ(doc_store_.Size(), 1);
 
-  BinlogEvent ddl_event;
-  ddl_event.type = BinlogEventType::DDL;
-  ddl_event.table_name = table_config_.name;
-  ddl_event.text = "TRUNCATE TABLE articles";
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "TRUNCATE TABLE articles");
   ASSERT_TRUE(reader_->ProcessEvent(ddl_event));
   EXPECT_EQ(doc_store_.Size(), 0);
 }

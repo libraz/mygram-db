@@ -138,6 +138,9 @@ class InvalidationQueue {
 
   // Pending invalidations: (table, cache_key_hex) -> first seen timestamp
   // Using map to automatically deduplicate
+  // TODO(perf): Replace string composite key with a struct { string table; CacheKey key; }
+  // to avoid CacheKey -> hex string -> CacheKey round-trip in Enqueue/ProcessBatch.
+  // This would eliminate ToString()/stoull() overhead on the invalidation hot path.
   std::unordered_map<std::string,  // Composite key: "table:cache_key_hex"
                      std::chrono::steady_clock::time_point>
       pending_cache_keys_;

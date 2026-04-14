@@ -1051,4 +1051,53 @@ TEST(InvalidationQueueTest, TableNameWithColonInvalidatesCorrectly) {
   EXPECT_FALSE(cache.Lookup(key).has_value());
 }
 
+/**
+ * @brief Test that re-enqueuing preserves original timestamp
+ *
+ * Regression test for: re-enqueuing a key overwrote its timestamp with now(),
+ * making oldest_timestamp_ stale (pointing to a time earlier than any entry).
+ * Fix uses emplace() so existing entries keep their original timestamp.
+ */
+TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // Set short delay so oldest_timestamp_ drives processing
+  queue.SetBatchSize(10000);  // Large batch so delay triggers first
+  queue.SetMaxDelay(100);     // 100ms delay
+
+  // Register cache entry
+  auto key = CacheKeyGenerator::Generate("query_reenqueue");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+
+  std::vector<DocId> result = {1, 2, 3};
+  cache.Insert(key, result, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  queue.Start();
+
+  // Enqueue the same invalidation multiple times with delays
+  // Without the fix, each re-enqueue would update the timestamp to now(),
+  // making oldest_timestamp_ stale and delaying batch processing.
+  queue.Enqueue("posts", "", "golang tutorial");
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  queue.Enqueue("posts", "", "golang tutorial");
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  queue.Enqueue("posts", "", "golang tutorial");
+
+  // Wait for max_delay to trigger (100ms from first enqueue)
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+  queue.Stop();
+
+  // Entry should be erased — the batch should have been processed
+  // because oldest_timestamp_ correctly reflects the first enqueue time,
+  // not the last re-enqueue time.
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
 }  // namespace mygramdb::cache

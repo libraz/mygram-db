@@ -10,6 +10,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -78,7 +79,7 @@ class InitialLoader {
   /**
    * @brief Get total rows processed
    */
-  uint64_t GetProcessedRows() const { return processed_rows_; }
+  uint64_t GetProcessedRows() const { return processed_rows_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Cancel ongoing load
@@ -99,7 +100,7 @@ class InitialLoader {
   config::MysqlConfig mysql_config_;
   config::BuildConfig build_config_;
 
-  uint64_t processed_rows_ = 0;
+  std::atomic<uint64_t> processed_rows_{0};
   std::atomic<bool> cancelled_{false};
   std::string start_gtid_;  // GTID captured at load time
 
@@ -127,6 +128,32 @@ class InitialLoader {
    * @brief Check if column type is text (VARCHAR/TEXT)
    */
   static bool IsTextColumn(enum_field_types type);
+
+  /// Map from field name to column index, built once per query result set
+  using FieldIndexMap = std::unordered_map<std::string, int>;
+
+  /**
+   * @brief Build a field-name-to-index map from MySQL result fields
+   * @param fields MySQL field metadata array
+   * @param num_fields Number of fields
+   * @return Map from field name to column index
+   */
+  static FieldIndexMap BuildFieldIndexMap(MYSQL_FIELD* fields, unsigned int num_fields);
+
+  /**
+   * @brief Extract text from row using pre-built field index map
+   */
+  std::string ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map) const;
+
+  /**
+   * @brief Extract primary key from row using pre-built field index map
+   */
+  std::string ExtractPrimaryKey(MYSQL_ROW row, const FieldIndexMap& field_map) const;
+
+  /**
+   * @brief Extract filter values from row using pre-built field index map
+   */
+  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map) const;
 
   /**
    * @brief Extract text from row based on text_source configuration

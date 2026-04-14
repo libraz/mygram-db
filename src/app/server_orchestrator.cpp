@@ -14,6 +14,7 @@
 #include "query/synonym_dictionary.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"
+#include "utils/constants.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -21,8 +22,8 @@ namespace mygramdb::app {
 
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
-constexpr size_t kGtidPrefixLength = 5;           // "gtid="
-constexpr int kMillisecondsPerSecond = 1000;      // Milliseconds to seconds conversion
+constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
+constexpr int kMillisecondsPerSecond = static_cast<int>(mygram::constants::kMillisecondsPerSecond);
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ServerOrchestrator>, mygram::utils::Error> ServerOrchestrator::Create(

@@ -211,6 +211,22 @@ struct DumpProgress {
   std::unique_ptr<std::thread> worker_thread;        // Background worker thread
 
   /**
+   * @brief Destructor - joins worker thread to prevent std::terminate
+   *
+   * If JoinWorker() was not called before destruction, this ensures the
+   * worker thread is properly joined. JoinWorker() is idempotent, so
+   * calling it in the destructor is safe even if it was already called.
+   */
+  ~DumpProgress() { JoinWorker(); }
+
+  // Non-copyable (has mutex and unique_ptr<thread>)
+  DumpProgress(const DumpProgress&) = delete;
+  DumpProgress& operator=(const DumpProgress&) = delete;
+
+  // Default constructor
+  DumpProgress() = default;
+
+  /**
    * @brief Reset progress for a new operation
    */
   void Reset(DumpStatus new_status, const std::string& path, size_t total_tables) {

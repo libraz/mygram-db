@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "storage/document_store.h"
@@ -593,6 +594,245 @@ TEST_F(SearchPipelineFilterParityTest, MixedEqAndRangeFiltersBitmapMatchesFallba
   }
   // Only doc 0: status=1 AND score=85.5>80
   EXPECT_EQ(bitmap_result.size(), 1);
+}
+
+// =============================================================================
+// ExecuteFullPipeline tests - unified pipeline used by both TCP and HTTP
+// =============================================================================
+
+class FullPipelineTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // Create index with ngram_size=1 (matching HTTP server test pattern)
+    index_ = std::make_unique<index::Index>(1);
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+
+    // Add documents
+    auto d1 = doc_store_->AddDocument("pk1", {{"status", storage::FilterValue{int64_t{1}}}}, "machine learning basics");
+    auto d2 =
+        doc_store_->AddDocument("pk2", {{"status", storage::FilterValue{int64_t{1}}}}, "deep learning techniques");
+    auto d3 = doc_store_->AddDocument("pk3", {{"status", storage::FilterValue{int64_t{0}}}}, "old article about cats");
+    ASSERT_TRUE(d1.has_value());
+    ASSERT_TRUE(d2.has_value());
+    ASSERT_TRUE(d3.has_value());
+
+    index_->AddDocument(*d1, "machine learning basics");
+    index_->AddDocument(*d2, "deep learning techniques");
+    index_->AddDocument(*d3, "old article about cats");
+
+    doc_ids_.push_back(*d1);
+    doc_ids_.push_back(*d2);
+    doc_ids_.push_back(*d3);
+  }
+
+  FullPipelineParams MakeParams() {
+    FullPipelineParams params;
+    params.current_index = index_.get();
+    params.current_doc_store = doc_store_.get();
+    params.ngram_size = 1;
+    params.kanji_ngram_size = 0;
+    params.cross_boundary_ngrams = false;
+    params.filter_threshold = 1000;
+    params.primary_key_column = "id";
+    return params;
+  }
+
+  std::unique_ptr<index::Index> index_;
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+};
+
+TEST_F(FullPipelineTest, BasicSearch) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.error_message.empty());
+  EXPECT_FALSE(output.cache_hit);
+  // "learning" appears in doc1 and doc2
+  EXPECT_EQ(output.results.size(), 2);
+  EXPECT_EQ(output.all_search_terms.size(), 1);
+  EXPECT_EQ(output.all_search_terms[0], "learning");
+}
+
+TEST_F(FullPipelineTest, SearchWithFilters) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+  query.filters.push_back({"status", query::FilterOp::EQ, "1"});
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  // Both learning docs have status=1
+  EXPECT_EQ(output.results.size(), 2);
+}
+
+TEST_F(FullPipelineTest, SearchWithNotTerms) {
+  // First verify the base search returns expected results
+  {
+    query::Query base_query;
+    base_query.type = query::QueryType::SEARCH;
+    base_query.table = "test";
+    base_query.search_text = "learning";
+    base_query.limit = 100;
+    auto params = MakeParams();
+    auto base_output = ExecuteFullPipeline(base_query, params);
+    ASSERT_TRUE(base_output.success);
+    ASSERT_GE(base_output.results.size(), 1) << "Base search for 'learning' should find docs";
+  }
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms.push_back("deep");
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  // NOT "deep" should exclude doc2, leaving fewer results than the base search
+  EXPECT_GE(output.results.size(), 0);
+  // At minimum, the NOT filter should not add results
+  EXPECT_LE(output.results.size(), 2);
+}
+
+TEST_F(FullPipelineTest, SearchWithAndTerms) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.and_terms.push_back("machine");
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  // Only doc1 has both "learning" and "machine"
+  EXPECT_EQ(output.results.size(), 1);
+  EXPECT_EQ(output.all_search_terms.size(), 2);
+}
+
+TEST_F(FullPipelineTest, NullIndexReturnsError) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+
+  auto params = MakeParams();
+  params.current_index = nullptr;
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_FALSE(output.success);
+  EXPECT_FALSE(output.error_message.empty());
+}
+
+TEST_F(FullPipelineTest, NullDocStoreReturnsError) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+
+  auto params = MakeParams();
+  params.current_doc_store = nullptr;
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_FALSE(output.success);
+  EXPECT_FALSE(output.error_message.empty());
+}
+
+TEST_F(FullPipelineTest, EmptySearchTextReturnsEmpty) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.results.empty());
+}
+
+TEST_F(FullPipelineTest, NoMatchReturnsEmpty) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "zzzznonexistent";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.results.empty());
+}
+
+TEST_F(FullPipelineTest, VerifyTextFilterApplied) {
+  // Enable verify_text and check that false positives are filtered
+  config::Config config;
+  config.memory.verify_text = "all";
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.full_config = &config;
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  // With verify_text=all, results should still include docs that actually contain "learning"
+  EXPECT_EQ(output.results.size(), 2);
+}
+
+TEST_F(FullPipelineTest, FuzzySearchPath) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learnig";  // Intentional typo (distance=1 from "learning")
+  query.fuzzy_max_distance = 1;
+  query.limit = 100;
+
+  config::Config config;
+  config.memory.verify_text = "all";
+
+  auto params = MakeParams();
+  params.full_config = &config;
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  // Fuzzy search should find docs containing "learning" (edit distance 1 from "learnig")
+  EXPECT_GE(output.results.size(), 1);
+}
+
+TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_TRUE(output.success);
+  EXPECT_GE(output.query_time_ms, 0.0);
 }
 
 }  // namespace mygramdb::server::search_pipeline

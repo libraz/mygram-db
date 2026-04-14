@@ -160,14 +160,12 @@ TEST_F(SyncCancelReplicationTest, CancelledSyncRestartsReplication) {
   if (mock_reader_->GetStopCallCount() == 0) {
     // Connection failed before replication was stopped — expected in test
     // environments without MySQL. Replication remains running.
-    EXPECT_TRUE(mock_reader_->IsRunning())
-        << "Replication should still be running when connection fails early";
+    EXPECT_TRUE(mock_reader_->IsRunning()) << "Replication should still be running when connection fails early";
     EXPECT_EQ(0, mock_reader_->GetStartCallCount())
         << "Start() should not be called when replication was never stopped";
   } else {
     // If we somehow reached the stop-replication path, verify restart
-    EXPECT_GE(mock_reader_->GetStartCallCount(), 1)
-        << "Replication should be restarted after being stopped";
+    EXPECT_GE(mock_reader_->GetStartCallCount(), 1) << "Replication should be restarted after being stopped";
   }
 
   manager.reset();

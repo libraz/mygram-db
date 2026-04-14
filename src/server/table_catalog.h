@@ -124,6 +124,11 @@ class TableCatalog {
    * This method is provided for cases where direct iteration is needed.
    * Prefer using the other methods when possible for better encapsulation.
    *
+   * @note Thread-safe: the table map is immutable after construction.
+   *       No entries are added or removed post-construction, so returning
+   *       a reference without holding mutex_ is safe. If table hot-add/remove
+   *       is ever implemented, this must return a snapshot copy instead.
+   *
    * @return Const reference to table map
    */
   const std::unordered_map<std::string, TableContext*>& GetTables() const { return tables_; }

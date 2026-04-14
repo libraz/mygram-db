@@ -49,6 +49,13 @@ enum class BinlogEventType : uint8_t {
 };
 
 /**
+ * @brief DDL operation type
+ *
+ * Classifies the DDL operation for structured handling in the event processor.
+ */
+enum class DDLType : uint8_t { kUnknown = 0, kTruncate, kAlter, kDrop, kRename };
+
+/**
  * @brief Binlog event
  *
  * Represents a parsed binlog event with validation and factory methods.
@@ -57,6 +64,7 @@ enum class BinlogEventType : uint8_t {
  */
 struct BinlogEvent {
   BinlogEventType type = BinlogEventType::UNKNOWN;
+  DDLType ddl_type = DDLType::kUnknown;  // DDL sub-type (only meaningful when type == DDL)
   std::string table_name;
   std::string primary_key;
   std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
@@ -168,7 +176,36 @@ struct BinlogEvent {
     event.table_name = table;
     event.text = query;
     event.gtid = gtid_val;
+    event.ddl_type = ClassifyDDL(query);
     return event;
+  }
+
+  /**
+   * @brief Classify DDL type from query text
+   * @param query DDL query string
+   * @return DDLType classification
+   */
+  static DDLType ClassifyDDL(const std::string& query) {
+    // Build uppercase copy for case-insensitive matching
+    std::string upper;
+    upper.reserve(query.size());
+    for (char c : query) {
+      upper += static_cast<char>(::toupper(static_cast<unsigned char>(c)));
+    }
+    if (upper.find("TRUNCATE") != std::string::npos) {
+      return DDLType::kTruncate;
+    }
+    // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
+    if (upper.find("ALTER") != std::string::npos) {
+      return DDLType::kAlter;
+    }
+    if (upper.find("DROP") != std::string::npos) {
+      return DDLType::kDrop;
+    }
+    if (upper.find("RENAME") != std::string::npos) {
+      return DDLType::kRename;
+    }
+    return DDLType::kUnknown;
   }
 };
 

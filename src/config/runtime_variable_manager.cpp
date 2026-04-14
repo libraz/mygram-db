@@ -174,21 +174,39 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
   // Static Apply* functions (logging) don't need the lock for their own work
   // but we still hold it to update runtime_values_ atomically.
 
-  // For logging variables, validate and apply (they are static/global, no member state)
+  // For logging variables: lock -> update runtime_values_ -> unlock -> apply side effect.
+  // This matches the pattern used by other Apply* methods (e.g., ApplyMysqlHost) and
+  // ensures GetVariable() sees the new value promptly. The side effect
+  // (spdlog level / StructuredLog format) is an atomic/thread-safe global,
+  // so applying it after unlock is safe. On validation failure, rollback.
   if (variable_name == "logging.level") {
+    std::string old_value;
+    {
+      std::unique_lock lock(mutex_);
+      old_value = runtime_values_[variable_name];
+      runtime_values_[variable_name] = value;
+    }
     auto result = ApplyLoggingLevel(value);
     if (!result) {
+      // Rollback on validation failure
+      std::unique_lock lock(mutex_);
+      runtime_values_[variable_name] = old_value;
       return result;
     }
-    std::unique_lock lock(mutex_);
-    runtime_values_[variable_name] = value;
   } else if (variable_name == "logging.format") {
+    std::string old_value;
+    {
+      std::unique_lock lock(mutex_);
+      old_value = runtime_values_[variable_name];
+      runtime_values_[variable_name] = value;
+    }
     auto result = ApplyLoggingFormat(value);
     if (!result) {
+      // Rollback on validation failure
+      std::unique_lock lock(mutex_);
+      runtime_values_[variable_name] = old_value;
       return result;
     }
-    std::unique_lock lock(mutex_);
-    runtime_values_[variable_name] = value;
   } else if (variable_name == "mysql.host") {
     auto result = ApplyMysqlHost(value);
     if (!result) {

@@ -1119,3 +1119,172 @@ TEST(StringUtilsBugFixTest, GenerateHybridNgramsNegativeSizeReturnsEmpty) {
   EXPECT_TRUE(GenerateHybridNgrams("hello", -1, 1).empty());
   EXPECT_TRUE(GenerateHybridNgrams("hello", 2, -1).empty());
 }
+
+/**
+ * @brief Test CountCodePoints with invalid UTF-8 continuation bytes
+ *
+ * Regression test for: bare continuation bytes (0x80-0xBF) were counted
+ * as codepoints instead of being skipped.
+ */
+TEST(StringUtilsBugFixTest, CountCodePointsSkipsBareContinuationBytes) {
+  // Valid ASCII
+  EXPECT_EQ(CountCodePoints("abc"), 3u);
+
+  // Valid multi-byte: "あ" = 3 bytes (E3 81 82)
+  EXPECT_EQ(CountCodePoints("あ"), 1u);
+
+  // Bare continuation byte (0x80) should not be counted
+  std::string bare_cont = "a";
+  bare_cont += static_cast<char>(0x80);
+  bare_cont += "b";
+  EXPECT_EQ(CountCodePoints(bare_cont), 2u);  // 'a' + 'b', continuation skipped
+
+  // Multiple bare continuation bytes
+  std::string multi_cont;
+  multi_cont += static_cast<char>(0x80);
+  multi_cont += static_cast<char>(0xBF);
+  multi_cont += static_cast<char>(0x90);
+  EXPECT_EQ(CountCodePoints(multi_cont), 0u);  // All continuation bytes, none counted
+
+  // Invalid lead byte (0xFF) should not be counted
+  std::string invalid_lead = "a";
+  invalid_lead += static_cast<char>(0xFF);
+  invalid_lead += "b";
+  EXPECT_EQ(CountCodePoints(invalid_lead), 2u);  // 'a' + 'b', invalid byte skipped
+
+  // Mixed valid and invalid bytes
+  std::string mixed;
+  mixed += static_cast<char>(0x80);  // bare continuation, skip
+  mixed += "a";                      // valid ASCII, count
+  mixed += static_cast<char>(0xBF);  // bare continuation, skip
+  EXPECT_EQ(CountCodePoints(mixed), 1u);
+
+  // Empty string
+  EXPECT_EQ(CountCodePoints(""), 0u);
+}
+
+// ============================================================
+// IsUnicodeWhitespace tests
+// ============================================================
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_AsciiSpace) {
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(" ", 0, len));
+  EXPECT_EQ(len, 1u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_AsciiTab) {
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace("\t", 0, len));
+  EXPECT_EQ(len, 1u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_AsciiNewline) {
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace("\n", 0, len));
+  EXPECT_EQ(len, 1u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_NonSpace) {
+  size_t len = 0;
+  EXPECT_FALSE(IsUnicodeWhitespace("a", 0, len));
+  EXPECT_FALSE(IsUnicodeWhitespace("Z", 0, len));
+  EXPECT_FALSE(IsUnicodeWhitespace("1", 0, len));
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_NoBreakSpace) {
+  // U+00A0 = 0xC2 0xA0
+  std::string nbsp("\xC2\xA0");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(nbsp, 0, len));
+  EXPECT_EQ(len, 2u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_OghamSpaceMark) {
+  // U+1680 = 0xE1 0x9A 0x80
+  std::string ogham("\xE1\x9A\x80");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(ogham, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_EnSpace) {
+  // U+2002 (En Space) = 0xE2 0x80 0x82
+  std::string en_space("\xE2\x80\x82");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(en_space, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_ZeroWidthSpace) {
+  // U+200B (Zero Width Space) = 0xE2 0x80 0x8B
+  std::string zws("\xE2\x80\x8B");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(zws, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_LineSeparator) {
+  // U+2028 = 0xE2 0x80 0xA8
+  std::string ls("\xE2\x80\xA8");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(ls, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_ParagraphSeparator) {
+  // U+2029 = 0xE2 0x80 0xA9
+  std::string ps("\xE2\x80\xA9");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(ps, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_NarrowNoBreakSpace) {
+  // U+202F = 0xE2 0x80 0xAF
+  std::string nnbsp("\xE2\x80\xAF");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(nnbsp, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_MediumMathematicalSpace) {
+  // U+205F = 0xE2 0x81 0x9F
+  std::string mms("\xE2\x81\x9F");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(mms, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_IdeographicSpace) {
+  // U+3000 = 0xE3 0x80 0x80
+  std::string ideo("\xE3\x80\x80");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(ideo, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_MidString) {
+  // Test detecting whitespace at a non-zero position
+  std::string text =
+      "ab\xC2\xA0"
+      "cd";
+  size_t len = 0;
+  EXPECT_FALSE(IsUnicodeWhitespace(text, 0, len));
+  EXPECT_FALSE(IsUnicodeWhitespace(text, 1, len));
+  EXPECT_TRUE(IsUnicodeWhitespace(text, 2, len));
+  EXPECT_EQ(len, 2u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_EmptyAndOutOfBounds) {
+  size_t len = 0;
+  EXPECT_FALSE(IsUnicodeWhitespace("", 0, len));
+  EXPECT_FALSE(IsUnicodeWhitespace("a", 5, len));
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_TruncatedSequence) {
+  // Only the first byte of a 2-byte sequence
+  std::string truncated("\xC2");
+  size_t len = 0;
+  EXPECT_FALSE(IsUnicodeWhitespace(truncated, 0, len));
+}

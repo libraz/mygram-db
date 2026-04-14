@@ -181,4 +181,19 @@ std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ng
  */
 uint32_t CountCodePoints(std::string_view text);
 
+/**
+ * @brief Check if a Unicode whitespace character starts at the given position
+ *
+ * Detects ASCII whitespace and Unicode whitespace characters including:
+ * U+00A0 (No-Break Space), U+1680 (Ogham Space Mark), U+2000-U+200B,
+ * U+2028 (Line Separator), U+2029 (Paragraph Separator), U+202F (Narrow No-Break Space),
+ * U+205F (Medium Mathematical Space), U+3000 (Ideographic Space).
+ *
+ * @param text Input text
+ * @param pos Position to check
+ * @param[out] char_len Set to the number of bytes consumed by the whitespace character (1-3)
+ * @return true if a whitespace character starts at pos
+ */
+bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len);
+
 }  // namespace mygram::utils

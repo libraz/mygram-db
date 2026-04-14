@@ -62,6 +62,20 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   // [filters...]
   // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
 
+  // Snapshot data structures under a brief lock, then serialize without holding
+  // the lock. This avoids blocking writers for the entire serialization duration.
+  uint32_t next_id = 0;
+  absl::flat_hash_map<DocId, std::string> snap_doc_id_to_pk;
+  absl::flat_hash_map<DocId, FilterMap> snap_doc_filters;
+  absl::flat_hash_map<DocId, std::string> snap_doc_texts;
+  {
+    std::shared_lock lock(mutex_);
+    next_id = static_cast<uint32_t>(next_doc_id_);
+    snap_doc_id_to_pk = doc_id_to_pk_;
+    snap_doc_filters = doc_filters_;
+    snap_doc_texts = doc_texts_;
+  }  // Lock released here — writers can proceed during serialization
+
   // Write magic number
   out.write("MGDS", 4);
 
@@ -69,11 +83,7 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   uint32_t version = 2;
   WriteBinary(out, version);
 
-  // Lock scope: read data structures
-  std::shared_lock lock(mutex_);
-
   // Write next_doc_id
-  auto next_id = static_cast<uint32_t>(next_doc_id_);
   WriteBinary(out, next_id);
 
   // Write GTID (for replication position)
@@ -88,11 +98,11 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
     return false;
 
   // Write document count
-  auto doc_count = static_cast<uint64_t>(doc_id_to_pk_.size());
+  auto doc_count = static_cast<uint64_t>(snap_doc_id_to_pk.size());
   WriteBinary(out, doc_count);
 
   // Write doc_id -> pk mappings
-  for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
+  for (const auto& [doc_id, primary_key_str] : snap_doc_id_to_pk) {
     // Write doc_id
     auto doc_id_value = static_cast<uint32_t>(doc_id);
     WriteBinary(out, doc_id_value);
@@ -103,9 +113,9 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
     out.write(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
 
     // Write filters for this document
-    auto filter_it = doc_filters_.find(doc_id);
+    auto filter_it = snap_doc_filters.find(doc_id);
     uint32_t filter_count = 0;
-    if (filter_it != doc_filters_.end()) {
+    if (filter_it != snap_doc_filters.end()) {
       filter_count = static_cast<uint32_t>(filter_it->second.size());
     }
     WriteBinary(out, filter_count);
@@ -141,8 +151,8 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
     }
 
     // Write normalized text (v2+)
-    auto text_it = doc_texts_.find(doc_id);
-    if (text_it != doc_texts_.end()) {
+    auto text_it = snap_doc_texts.find(doc_id);
+    if (text_it != snap_doc_texts.end()) {
       auto text_len = static_cast<uint32_t>(text_it->second.size());
       WriteBinary(out, text_len);
       out.write(text_it->second.data(), static_cast<std::streamsize>(text_len));

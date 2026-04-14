@@ -83,8 +83,11 @@ class StructuredLog {
    * @brief Add string field (const char*)
    */
   StructuredLog& Field(const std::string& key, const char* value) {
-    fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
-    fields_text_.push_back(MakeTextField(key, std::string(value)));
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
+    } else {
+      fields_text_.push_back(MakeTextField(key, std::string(value)));
+    }
     return *this;
   }
 
@@ -92,8 +95,11 @@ class StructuredLog {
    * @brief Add string field (std::string)
    */
   StructuredLog& Field(const std::string& key, const std::string& value) {
-    fields_.push_back(MakeJSONField(key, Escape(value)));
-    fields_text_.push_back(MakeTextField(key, value));
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, Escape(value)));
+    } else {
+      fields_text_.push_back(MakeTextField(key, value));
+    }
     return *this;
   }
 
@@ -101,8 +107,11 @@ class StructuredLog {
    * @brief Add string field (std::string_view)
    */
   StructuredLog& Field(const std::string& key, std::string_view value) {
-    fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
-    fields_text_.push_back(MakeTextField(key, std::string(value)));
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
+    } else {
+      fields_text_.push_back(MakeTextField(key, std::string(value)));
+    }
     return *this;
   }
 
@@ -111,8 +120,11 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, int64_t value) {
     std::string val_str = std::to_string(value);
-    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
-    fields_text_.push_back(key + "=" + val_str);
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, val_str, false));
+    } else {
+      fields_text_.push_back(key + "=" + val_str);
+    }
     return *this;
   }
 
@@ -121,8 +133,11 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, uint64_t value) {
     std::string val_str = std::to_string(value);
-    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
-    fields_text_.push_back(key + "=" + val_str);
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, val_str, false));
+    } else {
+      fields_text_.push_back(key + "=" + val_str);
+    }
     return *this;
   }
 
@@ -131,8 +146,11 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, double value) {
     std::string val_str = std::to_string(value);
-    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for numbers in JSON
-    fields_text_.push_back(key + "=" + val_str);
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, val_str, false));
+    } else {
+      fields_text_.push_back(key + "=" + val_str);
+    }
     return *this;
   }
 
@@ -141,8 +159,11 @@ class StructuredLog {
    */
   StructuredLog& Field(const std::string& key, bool value) {
     std::string val_str = value ? "true" : "false";
-    fields_.push_back(MakeJSONField(key, val_str, false));  // No quotes for booleans in JSON
-    fields_text_.push_back(key + "=" + val_str);
+    if (GetFormat() == LogFormat::JSON) {
+      fields_.push_back(MakeJSONField(key, val_str, false));
+    } else {
+      fields_text_.push_back(key + "=" + val_str);
+    }
     return *this;
   }
 

@@ -179,6 +179,28 @@ class PostingList {
    */
   bool Deserialize(const std::vector<uint8_t>& buffer, size_t& offset);
 
+  /**
+   * @brief Get approximate document count without acquiring mutex
+   *
+   * Returns the cached doc_count_ via atomic load. This avoids the overhead
+   * of acquiring the per-PostingList shared_mutex, making it suitable for
+   * use in hot paths (e.g., query planning in SearchAnd) where the caller
+   * already holds a higher-level lock or operates on an immutable snapshot.
+   *
+   * @return Approximate document count
+   */
+  [[nodiscard]] uint64_t SizeApprox() const;
+
+  /**
+   * @brief Get approximate memory usage without acquiring mutex
+   *
+   * Returns memory usage estimate via atomic strategy check. Avoids the
+   * overhead of acquiring the per-PostingList shared_mutex.
+   *
+   * @return Approximate memory usage in bytes
+   */
+  [[nodiscard]] size_t MemoryUsageApprox() const;
+
  private:
   std::atomic<PostingStrategy> strategy_{PostingStrategy::kDeltaCompressed};
   double roaring_threshold_;
@@ -204,22 +226,6 @@ class PostingList {
   // Protects all data members for thread-safe read/write operations
   // Uses shared_mutex to allow concurrent reads while serializing writes
   mutable std::shared_mutex mutex_;
-
-  /**
-   * @brief Get approximate document count without acquiring mutex
-   *
-   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
-   * under concurrent writes.
-   */
-  [[nodiscard]] uint64_t SizeApprox() const;
-
-  /**
-   * @brief Get approximate memory usage without acquiring mutex
-   *
-   * REQUIRES: caller holds postings_mutex_ (shared). Values are approximate
-   * under concurrent writes.
-   */
-  [[nodiscard]] size_t MemoryUsageApprox() const;
 
   /**
    * @brief Update doc_count_ and increment version_ after a mutation

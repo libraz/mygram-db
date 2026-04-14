@@ -13,6 +13,7 @@
 
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
+#include "mysql/table_metadata.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/string_utils.h"
@@ -219,7 +220,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
       unsigned char type = metadata >> 8;
-      if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
+      if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ||
+          type == static_cast<unsigned char>(mysql::ColumnType::SET)) {
         if (data + 1 > end) {
           return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
@@ -287,6 +289,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
           json_len = binlog_util::uint4korr(data);
           json_data = data + 4;
           break;
+        default:
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata,
+                                          "Unsupported JSON metadata length: " + std::to_string(len_bytes)));
       }
       if (json_len > kMaxFieldLength || json_data + json_len > end) {
         mygram::utils::StructuredLog()

@@ -249,5 +249,16 @@ TEST(NetworkUtilsTest, ParseAllowCidrs_MixedValidInvalid) {
   EXPECT_EQ(parsed[1].prefix_length, 8);
 }
 
+TEST(NetworkUtilsTest, GetPeerIP_InvalidFd) {
+  // An invalid file descriptor should return "unknown"
+  EXPECT_EQ(GetPeerIP(-1), "unknown");
+}
+
+TEST(NetworkUtilsTest, GetPeerIP_NonSocketFd) {
+  // A valid fd that is not a socket should return "unknown"
+  // (stdout is fd 1, not a socket)
+  EXPECT_EQ(GetPeerIP(1), "unknown");
+}
+
 }  // namespace utils
 }  // namespace mygram

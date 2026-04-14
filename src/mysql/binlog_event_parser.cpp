@@ -397,6 +397,9 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       std::string query = query_opt.value();
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "query_event").Field("query", query).Debug();
 
+      // Classify DDL type once for all events
+      DDLType classified_ddl_type = BinlogEvent::ClassifyDDL(query);
+
       // Check if this affects any of our target tables
       if (multi_table_mode) {
         // Multi-table mode: check all registered tables
@@ -405,6 +408,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           if (IsTableAffectingDDL(query, table_name)) {
             BinlogEvent event;
             event.type = BinlogEventType::DDL;
+            event.ddl_type = classified_ddl_type;
             event.table_name = table_name;
             event.text = query;  // Store the DDL query
             events.push_back(std::move(event));
@@ -418,6 +422,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         if (table_config != nullptr && IsTableAffectingDDL(query, table_config->name)) {
           BinlogEvent event;
           event.type = BinlogEventType::DDL;
+          event.ddl_type = classified_ddl_type;
           event.table_name = table_config->name;
           event.text = query;  // Store the DDL query
           return {event};      // Return as vector with single element

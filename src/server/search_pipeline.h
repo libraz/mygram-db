@@ -29,6 +29,10 @@ class SynonymDictionary;
 }  // namespace mygramdb::query
 
 namespace mygramdb::server {
+struct BM25Stats;
+}  // namespace mygramdb::server
+
+namespace mygramdb::server {
 
 /// @brief Term information with n-grams and estimated posting list size
 struct SearchTermInfo {
@@ -246,6 +250,47 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
 std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
                                                   const std::vector<std::string>& normalized_terms,
                                                   uint32_t max_distance, storage::DocumentStore* doc_store);
+
+/// @brief Parameters for full pipeline execution
+struct FullPipelineParams {
+  index::Index* current_index = nullptr;
+  storage::DocumentStore* current_doc_store = nullptr;
+  const config::Config* full_config = nullptr;
+  cache::CacheManager* cache_manager = nullptr;
+  const query::SynonymDictionary* synonym_dict = nullptr;  ///< Per-table synonym dictionary (may be nullptr)
+  int ngram_size = 0;
+  int kanji_ngram_size = 0;
+  bool cross_boundary_ngrams = false;
+  size_t filter_threshold = 1000;
+  const BM25Stats* bm25_stats = nullptr;  ///< BM25 corpus stats (may be nullptr)
+  std::string primary_key_column = "id";  ///< Primary key column name for this table
+};
+
+/// @brief Output from full pipeline execution
+struct FullPipelineOutput {
+  std::vector<storage::DocId> results;        ///< Full result set (before pagination)
+  std::vector<std::string> all_search_terms;  ///< All search terms (main + AND)
+  std::vector<SearchTermInfo> term_infos;     ///< Term information with n-grams
+  double query_time_ms = 0.0;                 ///< Query execution time in milliseconds
+  bool cache_hit = false;                     ///< True if results came from cache
+  bool success = true;                        ///< False if an error occurred
+  std::string error_message;                  ///< Error message (when success is false)
+};
+
+/// @brief Execute the full search pipeline: cache lookup, synonym/fuzzy expansion, search, cache insert
+///
+/// This is the unified entry point for both TCP and HTTP search handlers.
+/// Performs:
+/// 1. Cache lookup (with staleness check)
+/// 2. Synonym expansion (if synonym dictionary is available)
+/// 3. Fuzzy search (if fuzzy_max_distance is set on the query)
+/// 4. Standard n-gram search with intersection, NOT filter, column filters, verify_text
+/// 5. Cache insertion
+///
+/// @param query Parsed query
+/// @param params Pipeline parameters (index, doc_store, config, cache, etc.)
+/// @return Pipeline output with results and metadata
+FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipelineParams& params);
 
 }  // namespace search_pipeline
 }  // namespace mygramdb::server

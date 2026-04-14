@@ -26,7 +26,10 @@ namespace mygramdb::mysql {
  */
 struct RowData {
   std::string primary_key;
-  std::string text;                                      // Extracted text for full-text search
+  std::string text;  // Extracted text for full-text search
+  // TODO(perf): Consider changing to vector<string> indexed by column position
+  // to avoid per-row string key allocations. Requires updating all consumers
+  // (rows_parser.cpp, rows_event_processor.cpp, ExtractFilters).
   std::unordered_map<std::string, std::string> columns;  // All column values as strings
 };
 

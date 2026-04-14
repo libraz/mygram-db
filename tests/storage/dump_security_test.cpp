@@ -362,3 +362,60 @@ TEST(DumpSecurityTest, PathTraversalDetection) {
   }
 #endif
 }
+
+/**
+ * @brief Test that fd-based write produces a valid dump file (TOCTOU fix verification)
+ *
+ * This test verifies that the fd-based ostream used in WriteDumpV1 (instead of
+ * closing the fd and reopening by path) produces a dump file that passes
+ * integrity verification. This serves as a regression test for the TOCTOU fix.
+ */
+TEST(DumpSecurityTest, FdBasedWriteProducesValidDump) {
+#ifndef _WIN32
+  std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "dump_security_fd_write_test";
+  std::filesystem::create_directories(temp_dir);
+
+  std::string dump_path = (temp_dir / "fd_write_test.dmp").string();
+
+  // Clean up any existing file
+  std::filesystem::remove(dump_path);
+
+  // Create empty table contexts
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> contexts;
+
+  // Write the dump
+  auto config = CreateMinimalConfig();
+  std::string gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10";
+  auto write_result = WriteDumpV1(dump_path, gtid, config, contexts);
+  ASSERT_TRUE(write_result.has_value()) << "WriteDumpV1 should succeed: " << write_result.error().message();
+
+  // Verify the dump file exists and has non-trivial size
+  ASSERT_TRUE(std::filesystem::exists(dump_path));
+  auto file_size = std::filesystem::file_size(dump_path);
+  EXPECT_GT(file_size, 32u) << "Dump file should contain at least a header";
+
+  // Verify dump integrity (CRC32, file size, magic number)
+  dump_format::IntegrityError integrity_error;
+  auto verify_result = VerifyDumpIntegrity(dump_path, integrity_error);
+  EXPECT_TRUE(verify_result.has_value()) << "Dump integrity verification should pass: "
+                                         << verify_result.error().message();
+
+  // Read back and verify GTID round-trips
+  std::string read_gtid;
+  mygramdb::config::Config read_config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, DocumentStore*>> read_contexts;
+  auto read_result = ReadDumpV1(dump_path, read_gtid, read_config, read_contexts);
+  ASSERT_TRUE(read_result.has_value()) << "ReadDumpV1 should succeed: " << read_result.error().message();
+  EXPECT_EQ(read_gtid, gtid) << "GTID should round-trip correctly";
+
+  // Verify file permissions
+  struct stat st;
+  ASSERT_EQ(stat(dump_path.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, S_IRUSR | S_IWUSR) << "File should have 600 permissions";
+
+  // Cleanup
+  std::filesystem::remove_all(temp_dir);
+#else
+  GTEST_SKIP() << "fd-based write test not applicable on Windows";
+#endif
+}

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -845,6 +846,139 @@ std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::Doc
   }
 
   return verified;
+}
+
+FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipelineParams& params) {
+  FullPipelineOutput output;
+
+  // Validate required parameters
+  if (params.current_index == nullptr) {
+    output.success = false;
+    output.error_message = "Index not available";
+    return output;
+  }
+  if (params.current_doc_store == nullptr) {
+    output.success = false;
+    output.error_message = "Document store not available";
+    return output;
+  }
+
+  // Try cache lookup first
+  if (params.cache_manager != nullptr && params.cache_manager->IsEnabled()) {
+    auto cached_lookup = params.cache_manager->LookupWithMetadata(query);
+    if (cached_lookup.has_value()) {
+      auto full_results = cached_lookup.value().results;
+
+      if (!IsCacheStale(full_results, params.current_doc_store)) {
+        output.results = std::move(full_results);
+        output.cache_hit = true;
+        output.query_time_ms = 0.0;
+
+        // Collect search terms for downstream use (highlighting, etc.)
+        if (!query.search_text.empty()) {
+          output.all_search_terms.push_back(query.search_text);
+        }
+        output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+        return output;
+      }
+      // Cache stale - fall through to normal execution
+    }
+  }
+
+  // Start timing
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  // Collect all search terms (main + AND terms)
+  if (!query.search_text.empty()) {
+    output.all_search_terms.push_back(query.search_text);
+  }
+  output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+
+  bool cross_boundary = params.cross_boundary_ngrams;
+
+  // Fuzzy search path (takes precedence over synonyms)
+  if (query.fuzzy_max_distance.has_value()) {
+    output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
+                                          params.kanji_ngram_size, cross_boundary);
+
+    auto pipeline_result =
+        ExecuteWithFuzzy(query, output.term_infos, output.all_search_terms, *query.fuzzy_max_distance,
+                         params.current_index, params.current_doc_store, params.full_config, params.ngram_size,
+                         params.kanji_ngram_size, cross_boundary, params.filter_threshold);
+
+    if (pipeline_result.empty_term_detected) {
+      output.results.clear();
+    } else {
+      output.results = std::move(pipeline_result.results);
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    return output;
+  }
+
+  // Synonym-aware search path
+  if (params.synonym_dict != nullptr) {
+    auto synonym_groups = ExpandTermsWithSynonyms(output.all_search_terms, params.synonym_dict, params.current_index,
+                                                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+
+    auto pipeline_result =
+        ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store, params.full_config,
+                            params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
+
+    if (pipeline_result.empty_term_detected) {
+      output.results.clear();
+    } else {
+      output.results = std::move(pipeline_result.results);
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+    // Collect all n-grams for cache invalidation
+    std::vector<SearchTermInfo> all_term_infos;
+    for (const auto& group : synonym_groups) {
+      for (const auto& variant : group.variants) {
+        all_term_infos.push_back(variant);
+      }
+    }
+    InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms, params.ngram_size,
+                  params.kanji_ngram_size, cross_boundary);
+    return output;
+  }
+
+  // Standard search path: generate n-grams for each term and estimate result sizes
+  output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
+                                        params.kanji_ngram_size, cross_boundary);
+
+  // Sort terms by estimated size (smallest first for faster intersection)
+  std::sort(
+      output.term_infos.begin(), output.term_infos.end(),
+      [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
+
+  // Execute the core search pipeline (intersection, NOT filter, filters, verify_text)
+  auto pipeline_result =
+      Execute(query, output.term_infos, output.all_search_terms, params.current_index, params.current_doc_store,
+              params.full_config, params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
+
+  if (pipeline_result.empty_term_detected) {
+    output.results.clear();
+  } else {
+    output.results = std::move(pipeline_result.results);
+  }
+
+  // Calculate query execution time
+  auto end_time = std::chrono::high_resolution_clock::now();
+  output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+  // Store in cache if enabled
+  InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms, params.ngram_size,
+                params.kanji_ngram_size, cross_boundary);
+
+  return output;
 }
 
 }  // namespace mygramdb::server::search_pipeline

@@ -241,6 +241,25 @@ gtest_discover_tests(http_server_features_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+add_executable(http_server_test
+  http_server_test.cpp
+)
+
+target_link_libraries(http_server_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_server_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 # DumpProgress thread safety tests
 
 add_executable(dump_progress_test

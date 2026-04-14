@@ -231,7 +231,11 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     term_info.reserve(terms.size());
 
     for (const auto& snapshot : snapshots) {
-      term_info.emplace_back(snapshot->Size(), snapshot.get());
+      // Use SizeApprox() to avoid acquiring per-PostingList mutex on each
+      // snapshot. After TakePostingSnapshots(), the shared_ptrs keep the
+      // PostingLists alive and the atomic doc_count_ is sufficient for
+      // query planning decisions.
+      term_info.emplace_back(snapshot->SizeApprox(), snapshot.get());
     }
 
     // Find min and max sizes for selectivity estimation
@@ -283,7 +287,7 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
       for (size_t i = 2; i < sorted_info.size(); ++i) {
         intersected = intersected->Intersect(*sorted_info[i].second);
         // Early termination if intersection becomes empty
-        if (intersected->Size() == 0) {
+        if (intersected->SizeApprox() == 0) {
           break;
         }
       }
@@ -297,7 +301,7 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
           .Field("selectivity", selectivity)
           .Field("min_size", static_cast<uint64_t>(min_size))
           .Field("max_size", static_cast<uint64_t>(max_size))
-          .Field("intersected_size", intersected->Size())
+          .Field("intersected_size", intersected->SizeApprox())
           .Field("found", static_cast<uint64_t>(result.size()))
           .Debug();
       return result;

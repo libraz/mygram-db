@@ -16,6 +16,7 @@
 #include <string>
 
 #include "mysql/binlog_event_types.h"
+#include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -88,6 +89,38 @@ mygram::utils::Expected<std::string, mygram::utils::Error> DecodeFieldValue(uint
                                                                             uint16_t metadata, bool is_null,
                                                                             const unsigned char* end,
                                                                             bool is_unsigned = false);
+
+/**
+ * @brief Result of parsing a single row from a ROWS event
+ */
+struct SingleRowResult {
+  RowData row;                    ///< Parsed row data
+  const unsigned char* next_ptr;  ///< Pointer past this row's data
+};
+
+/**
+ * @brief Parse a single row from a ROWS event buffer
+ *
+ * Handles NULL bitmap reading, per-column type dispatch, field decoding,
+ * PK/text extraction, and pointer advancement. Used by ParseWriteRowsEvent,
+ * ParseUpdateRowsEvent, and ParseDeleteRowsEvent to avoid code duplication.
+ *
+ * @param ptr Pointer to the start of the row (null bitmap)
+ * @param end Pointer to end of parseable data
+ * @param meta Table metadata
+ * @param columns_present Column presence bitmap
+ * @param null_bitmap_size Size of the per-row null bitmap in bytes
+ * @param column_count Number of columns in the event
+ * @param pk_col_idx Index of primary key column, or -1 if not found
+ * @param text_col_idx Index of text column, or -1 if not found
+ * @param event_type_label Short label for log/error messages (e.g. "write_rows")
+ * @param image_label Image label for log/error messages (e.g. "before", "after", or "")
+ * @return Parsed row and pointer past the row data, or error
+ */
+mygram::utils::Expected<SingleRowResult, mygram::utils::Error> ParseSingleRow(
+    const unsigned char* ptr, const unsigned char* end, const TableMetadata* meta, const unsigned char* columns_present,
+    size_t null_bitmap_size, uint64_t column_count, int pk_col_idx, int text_col_idx, const char* event_type_label,
+    const char* image_label);
 
 }  // namespace mygramdb::mysql::internal
 

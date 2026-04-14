@@ -30,7 +30,25 @@ class AtomicFlagGuard {
  public:
   explicit AtomicFlagGuard(std::atomic<bool>& flag) : flag_(flag) { flag_.store(true, std::memory_order_release); }
 
-  ~AtomicFlagGuard() { flag_.store(false, std::memory_order_release); }
+  ~AtomicFlagGuard() {
+    if (!released_) {
+      flag_.store(false, std::memory_order_release);
+    }
+  }
+
+  /**
+   * @brief Manually release the guard, clearing the flag early.
+   *
+   * After calling Release(), the destructor becomes a no-op.
+   * This is useful when the flag must be cleared before the guard's
+   * natural scope ends.
+   */
+  void Release() {
+    if (!released_) {
+      flag_.store(false, std::memory_order_release);
+      released_ = true;
+    }
+  }
 
   AtomicFlagGuard(const AtomicFlagGuard&) = delete;
   AtomicFlagGuard& operator=(const AtomicFlagGuard&) = delete;
@@ -39,6 +57,7 @@ class AtomicFlagGuard {
 
  private:
   std::atomic<bool>& flag_;
+  bool released_ = false;
 };
 
 /**
@@ -63,7 +82,23 @@ class AtomicFlagResetGuard {
  public:
   explicit AtomicFlagResetGuard(std::atomic<bool>& flag) : flag_(flag) {}
 
-  ~AtomicFlagResetGuard() { flag_.store(false, std::memory_order_release); }
+  ~AtomicFlagResetGuard() {
+    if (!released_) {
+      flag_.store(false, std::memory_order_release);
+    }
+  }
+
+  /**
+   * @brief Manually release the guard, clearing the flag early.
+   *
+   * After calling Release(), the destructor becomes a no-op.
+   */
+  void Release() {
+    if (!released_) {
+      flag_.store(false, std::memory_order_release);
+      released_ = true;
+    }
+  }
 
   AtomicFlagResetGuard(const AtomicFlagResetGuard&) = delete;
   AtomicFlagResetGuard& operator=(const AtomicFlagResetGuard&) = delete;
@@ -72,6 +107,7 @@ class AtomicFlagResetGuard {
 
  private:
   std::atomic<bool>& flag_;
+  bool released_ = false;
 };
 
 }  // namespace mygram::utils

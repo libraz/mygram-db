@@ -273,8 +273,15 @@ class QueryParser {
 
   /**
    * @brief Get last error message
+   *
+   * @deprecated Redundant with Expected<Query, Error> return type from Parse().
+   *             Error details are available via the Error object in the unexpected case.
+   *             No external callers use this method; retained for backward compatibility.
    */
-  [[nodiscard]] const std::string& GetError() const { return error_; }
+  [[deprecated("Use the Error object from Parse()'s Expected return type instead")]] [[nodiscard]] const std::string&
+  GetError() const {
+    return error_;
+  }
 
   /**
    * @brief Configure maximum allowed query expression length (0 = unlimited)

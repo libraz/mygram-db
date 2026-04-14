@@ -42,19 +42,19 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   // Phase 2: Queue for deferred deletion or process immediately
-  // Reject enqueues after Stop() to prevent use-after-free
-  if (stopped_.load()) {
-    spdlog::warn(
-        "InvalidationQueue: Enqueue called after Stop(), "
-        "skipping deferred deletion for {} entries",
-        affected_keys.size());
-    return;
-  }
-
-  // Check running_ inside lock to prevent TOCTOU race condition
+  // Check stopped_ and running_ inside lock to prevent TOCTOU race with Stop()
   bool process_immediately = false;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+
+    // Reject enqueues after Stop() to prevent use-after-free
+    if (stopped_.load()) {
+      spdlog::warn(
+          "InvalidationQueue: Enqueue called after Stop(), "
+          "skipping deferred deletion for {} entries",
+          affected_keys.size());
+      return;
+    }
 
     if (!running_.load()) {
       // Worker not running (not yet started), process after releasing lock to avoid
@@ -68,11 +68,12 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
         spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
                      pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
       } else {
-        // Always update timestamp even if key exists to ensure proper batch processing
+        // Use emplace to preserve existing entries' original timestamps,
+        // preventing oldest_timestamp_ from becoming stale after re-enqueue.
         auto now = std::chrono::steady_clock::now();
         for (const auto& key : affected_keys) {
           const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-          pending_cache_keys_[composite_key] = now;
+          pending_cache_keys_.emplace(composite_key, now);
         }
         if (now < oldest_timestamp_) {
           oldest_timestamp_ = now;

@@ -9,8 +9,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
-
 #include "cache/cache_manager.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/tcp_server.h"  // For ServerStats
@@ -315,60 +313,73 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
     }
 
     case BinlogEventType::DDL: {
-      // Handle DDL operations (TRUNCATE, ALTER, DROP)
-      std::string query = event.text;
-      std::string query_upper = query;
-      std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
+      // Handle DDL operations using pre-classified DDL type
+      const std::string& query = event.text;
 
-      if (query_upper.find("TRUNCATE") != std::string::npos) {
-        // TRUNCATE TABLE - clear all data
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "truncate_table_detected")
-            .Field("table_name", event.table_name)
-            .Field("query", query)
-            .Warn();
-        index.Clear();
-        doc_store.Clear();
-        if (cache_manager != nullptr) {
-          cache_manager->ClearTable(event.table_name);
+      switch (event.ddl_type) {
+        case DDLType::kTruncate: {
+          // TRUNCATE TABLE - clear all data
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "truncate_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
+          index.Clear();
+          doc_store.Clear();
+          if (cache_manager != nullptr) {
+            cache_manager->ClearTable(event.table_name);
+          }
+          mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
+          break;
         }
-        mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
-      } else if (query_upper.find("ALTER") != std::string::npos) {
-        // ALTER TABLE - log warning about potential schema mismatch
-        // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
-        // as a DROP TABLE event
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "alter_table_detected")
-            .Field("table_name", event.table_name)
-            .Field("query", query)
-            .Warn();
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "schema_change_warning")
-            .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
-            .Warn();
-        // Note: We cannot automatically detect what changed (column type, name, etc.)
-        // Users should manually rebuild if text column type or PK changed
-      } else if (query_upper.find("DROP") != std::string::npos) {
-        // DROP TABLE - clear all data and warn
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_error")
-            .Field("type", "drop_table_detected")
-            .Field("table_name", event.table_name)
-            .Field("query", query)
-            .Error();
-        index.Clear();
-        doc_store.Clear();
-        if (cache_manager != nullptr) {
-          cache_manager->ClearTable(event.table_name);
+        case DDLType::kAlter: {
+          // ALTER TABLE - log warning about potential schema mismatch
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "alter_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "schema_change_warning")
+              .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
+              .Warn();
+          // Note: We cannot automatically detect what changed (column type, name, etc.)
+          // Users should manually rebuild if text column type or PK changed
+          break;
         }
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_error")
-            .Field("type", "table_dropped")
-            .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
-            .Error();
+        case DDLType::kDrop: {
+          // DROP TABLE - clear all data and warn
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "drop_table_detected")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Error();
+          index.Clear();
+          doc_store.Clear();
+          if (cache_manager != nullptr) {
+            cache_manager->ClearTable(event.table_name);
+          }
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "table_dropped")
+              .Field("message", "Index and document store cleared. Please reconfigure or stop MygramDB.")
+              .Error();
+          break;
+        }
+        case DDLType::kRename:
+        case DDLType::kUnknown:
+          // Log unhandled DDL for visibility
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "unhandled_ddl")
+              .Field("table_name", event.table_name)
+              .Field("query", query)
+              .Warn();
+          break;
       }
       if (stats != nullptr) {
         stats->IncrementReplDdlExecuted();

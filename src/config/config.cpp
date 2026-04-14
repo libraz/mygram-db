@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "config/config_internal.h"
+#include "utils/constants.h"
 #include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
@@ -24,7 +25,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr size_t kGtidPrefixLength = 5;  // "gtid="
+constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
 
 /**
  * @brief Get value from environment variable
@@ -67,96 +68,6 @@ std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json
   }
   // Use default
   return default_value;
-}
-
-/**
- * @brief Validate path for directory traversal attacks
- * @param path Path to validate
- * @param field_name Name of the field for error messages
- * @return Expected<void, Error> on success, or error if path contains traversal sequences
- */
-mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
-                                                                            const std::string& field_name) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  if (path.empty()) {
-    return {};  // Empty paths are allowed (will be validated elsewhere if required)
-  }
-
-  // Check for path traversal patterns
-  if (path.find("..") != std::string::npos) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kConfigInvalidValue,
-                  "Path traversal detected in '" + field_name +
-                      "': path contains '..' which is not allowed for security reasons. "
-                      "Use absolute paths or paths relative to the working directory without parent references."));
-  }
-
-  // Check for null bytes (could be used to truncate paths)
-  if (path.find('\0') != std::string::npos) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kConfigInvalidValue, "Invalid path in '" + field_name + "': path contains null bytes."));
-  }
-
-  return {};
-}
-
-/**
- * @brief Validate bind address format
- *
- * Checks that a bind address is a reasonable IP address or hostname.
- * Rejects path traversal sequences, null bytes, and obviously invalid formats
- * (e.g., paths with slashes, whitespace).
- *
- * @param address Bind address to validate
- * @param field_name Name of the field for error messages
- * @return Expected<void, Error> on success, or error if address is invalid
- */
-mygram::utils::Expected<void, mygram::utils::Error> ValidateBindAddress(const std::string& address,
-                                                                        const std::string& field_name) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  if (address.empty()) {
-    return {};  // Empty addresses use defaults
-  }
-
-  // Check for null bytes
-  if (address.find('\0') != std::string::npos) {
-    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
-                                    "Invalid bind address in '" + field_name + "': address contains null bytes."));
-  }
-
-  // Check for path traversal patterns
-  if (address.find("..") != std::string::npos) {
-    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
-                                    "Invalid bind address in '" + field_name +
-                                        "': address contains '..' which is not allowed. "
-                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
-  }
-
-  // Check for path separators (bind addresses should not contain slashes)
-  if (address.find('/') != std::string::npos) {
-    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
-                                    "Invalid bind address in '" + field_name +
-                                        "': address contains '/' which is not allowed. "
-                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
-  }
-
-  // Check for whitespace
-  for (char character : address) {
-    if (std::isspace(static_cast<unsigned char>(character)) != 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
-                                      "Invalid bind address in '" + field_name +
-                                          "': address contains whitespace. "
-                                          "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
-    }
-  }
-
-  return {};
 }
 
 /**
@@ -287,19 +198,19 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
   }
   if (json_obj.contains("ssl_ca")) {
     config.ssl_ca = json_obj["ssl_ca"].get<std::string>();
-    if (auto v = ValidatePathNoTraversal(config.ssl_ca, "mysql.ssl_ca"); !v) {
+    if (auto v = internal::ValidatePathNoTraversal(config.ssl_ca, "mysql.ssl_ca"); !v) {
       return mygram::utils::MakeUnexpected(v.error());
     }
   }
   if (json_obj.contains("ssl_cert")) {
     config.ssl_cert = json_obj["ssl_cert"].get<std::string>();
-    if (auto v = ValidatePathNoTraversal(config.ssl_cert, "mysql.ssl_cert"); !v) {
+    if (auto v = internal::ValidatePathNoTraversal(config.ssl_cert, "mysql.ssl_cert"); !v) {
       return mygram::utils::MakeUnexpected(v.error());
     }
   }
   if (json_obj.contains("ssl_key")) {
     config.ssl_key = json_obj["ssl_key"].get<std::string>();
-    if (auto v = ValidatePathNoTraversal(config.ssl_key, "mysql.ssl_key"); !v) {
+    if (auto v = internal::ValidatePathNoTraversal(config.ssl_key, "mysql.ssl_key"); !v) {
       return mygram::utils::MakeUnexpected(v.error());
     }
   }
@@ -741,7 +652,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
     const auto& dmp = root["dump"];
     if (dmp.contains("dir")) {
       config.dump.dir = dmp["dir"].get<std::string>();
-      if (auto v = ValidatePathNoTraversal(config.dump.dir, "dump.dir"); !v) {
+      if (auto v = internal::ValidatePathNoTraversal(config.dump.dir, "dump.dir"); !v) {
         return MakeUnexpected(v.error());
       }
     }
@@ -759,7 +670,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
     const auto& server = root["server"];
     if (server.contains("host")) {
       config.api.tcp.bind = server["host"].get<std::string>();
-      if (auto v = ValidateBindAddress(config.api.tcp.bind, "server.host"); !v) {
+      if (auto v = internal::ValidateBindAddress(config.api.tcp.bind, "server.host"); !v) {
         return MakeUnexpected(v.error());
       }
     }
@@ -773,7 +684,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
       const auto& tcp = api["tcp"];
       if (tcp.contains("bind")) {
         config.api.tcp.bind = tcp["bind"].get<std::string>();
-        if (auto v = ValidateBindAddress(config.api.tcp.bind, "api.tcp.bind"); !v) {
+        if (auto v = internal::ValidateBindAddress(config.api.tcp.bind, "api.tcp.bind"); !v) {
           return MakeUnexpected(v.error());
         }
       }
@@ -818,7 +729,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
       }
       if (http.contains("bind")) {
         config.api.http.bind = http["bind"].get<std::string>();
-        if (auto v = ValidateBindAddress(config.api.http.bind, "api.http.bind"); !v) {
+        if (auto v = internal::ValidateBindAddress(config.api.http.bind, "api.http.bind"); !v) {
           return MakeUnexpected(v.error());
         }
       }
@@ -880,7 +791,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
     }
     if (log.contains("file")) {
       config.logging.file = log["file"].get<std::string>();
-      if (auto v = ValidatePathNoTraversal(config.logging.file, "logging.file"); !v) {
+      if (auto v = internal::ValidatePathNoTraversal(config.logging.file, "logging.file"); !v) {
         return MakeUnexpected(v.error());
       }
     }
@@ -893,7 +804,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
       config.cache.enabled = cache["enabled"].get<bool>();
     }
     if (cache.contains("max_memory_mb")) {
-      constexpr size_t kBytesPerMB = 1024 * 1024;    // Bytes in one megabyte
+      constexpr size_t kBytesPerMB = mygram::constants::kBytesPerMegabyte;
       constexpr int64_t kMaxMemoryMB = 1024 * 1024;  // 1TB max (reasonable upper limit)
       int64_t max_memory_mb = cache["max_memory_mb"].get<int64_t>();
 
@@ -941,8 +852,8 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
     if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
       auto system_info = mygram::utils::GetSystemMemoryInfo();
       if (system_info) {
-        constexpr double kMaxCacheRatio = 0.5;       // Maximum 50% of physical memory
-        constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
+        constexpr double kMaxCacheRatio = 0.5;  // Maximum 50% of physical memory
+        constexpr size_t kBytesPerMB = mygram::constants::kBytesPerMegabyte;
         auto max_allowed_cache =
             static_cast<uint64_t>(static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
 

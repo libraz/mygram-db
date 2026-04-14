@@ -7,7 +7,6 @@
 
 #include <cstring>
 #include <fstream>
-#include <sstream>
 
 #include "index/index.h"
 
@@ -113,20 +112,32 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
     // [8 bytes: term_count] [terms and posting lists...]
     // [4 bytes: CRC32 of all preceding data]
     //
-    // Serialize all data to an intermediate buffer so we can compute the CRC32
-    // before writing to the output stream (which may not be seekable).
-    std::ostringstream buffer(std::ios::binary);
+    // Write directly to the output stream while computing CRC32 incrementally.
+    // This avoids the previous approach of buffering all data in an ostringstream
+    // then copying it, which caused 2x peak memory usage for large indexes.
+
+    uint32_t running_crc = 0;
+
+    // Helper: write data to output stream and update CRC32 incrementally
+    auto crc_write = [&](const void* data, size_t size) {
+      output_stream.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+      running_crc = mygram::utils::UpdateCRC32(running_crc, data, size);
+    };
+
+    // Helper: write a binary value with CRC update
+    auto crc_write_binary = [&](auto value) {
+      auto le_value = mygram::utils::ToLittleEndian(value);
+      crc_write(&le_value, sizeof(le_value));
+    };
 
     // Write magic number
-    buffer.write("MGIX", 4);
+    crc_write("MGIX", 4);
 
     // Write version
-    uint32_t version = kCurrentFormatVersion;
-    mygram::utils::WriteBinary(buffer, version);
+    crc_write_binary(kCurrentFormatVersion);
 
     // Write ngram_size
-    auto ngram = static_cast<uint32_t>(ngram_size_);
-    mygram::utils::WriteBinary(buffer, ngram);
+    crc_write_binary(static_cast<uint32_t>(ngram_size_));
 
     // RCU snapshot: Take short shared_lock to copy term->PostingList pairs, then
     // serialize lock-free. This allows searches to proceed during serialization.
@@ -141,14 +152,13 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
 
     // Write term count
     auto term_count = static_cast<uint64_t>(snapshot.size());
-    mygram::utils::WriteBinary(buffer, term_count);
+    crc_write_binary(term_count);
 
     // Write each term and its posting list (lock-free)
     for (const auto& [term, posting] : snapshot) {
       // Write term length and term
-      auto term_len = static_cast<uint32_t>(term.size());
-      mygram::utils::WriteBinary(buffer, term_len);
-      buffer.write(term.data(), static_cast<std::streamsize>(term_len));
+      crc_write_binary(static_cast<uint32_t>(term.size()));
+      crc_write(term.data(), term.size());
 
       // Serialize posting list to buffer
       std::vector<uint8_t> posting_data;
@@ -164,19 +174,14 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
       }
 
       // Write posting list size and data
-      uint64_t posting_size = posting_data.size();
-      mygram::utils::WriteBinary(buffer, posting_size);
+      auto posting_size = static_cast<uint64_t>(posting_data.size());
+      crc_write_binary(posting_size);
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O of raw bytes
-      buffer.write(reinterpret_cast<const char*>(posting_data.data()), static_cast<std::streamsize>(posting_size));
+      crc_write(reinterpret_cast<const char*>(posting_data.data()), posting_data.size());
     }
 
-    // Get the serialized data and compute CRC32
-    std::string data = buffer.str();
-    uint32_t crc = mygram::utils::ComputeCRC32(data.data(), data.size());
-
-    // Write data followed by CRC32 trailer to the actual output stream
-    output_stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-    mygram::utils::WriteBinary(output_stream, crc);
+    // Write CRC32 trailer (not included in the checksum itself)
+    mygram::utils::WriteBinary(output_stream, running_crc);
 
     if (!output_stream.good()) {
       mygram::utils::StructuredLog()
@@ -439,6 +444,8 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
     {
       std::scoped_lock lock(postings_mutex_);
       term_postings_ = std::move(new_postings);
+      // Increment generation so any in-progress Optimize() discards stale results
+      load_generation_.fetch_add(1, std::memory_order_release);
     }
 
     mygram::utils::StructuredLog()
