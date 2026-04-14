@@ -5,8 +5,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
+#include "utils/error.h"
 #include "utils/expected.h"
 
 namespace mygramdb::mysql {

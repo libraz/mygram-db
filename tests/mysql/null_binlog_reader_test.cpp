@@ -10,8 +10,6 @@
 
 #include <gtest/gtest.h>
 
-#include "utils/error.h"  // Must be included before null_binlog_reader.h (provides mygram::utils::Error)
-
 namespace mygramdb::mysql {
 
 /**
