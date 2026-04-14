@@ -213,7 +213,7 @@ class ServerStats {
 
  private:
   // Server start time (Unix timestamp)
-  uint64_t start_time_;
+  const uint64_t start_time_;
 
   // Command counters
   std::atomic<uint64_t> cmd_search_{0};

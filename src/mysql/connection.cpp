@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <sstream>
 #include <utility>
@@ -48,12 +49,13 @@ mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::strin
     txn_part = txn_part.substr(dash_pos + 1);
   }
 
-  try {
-    gtid.transaction_id = std::stoull(txn_part);
-  } catch (const std::exception& e) {
+  uint64_t txn_id = 0;
+  auto [ptr, ec] = std::from_chars(txn_part.data(), txn_part.data() + txn_part.size(), txn_id);
+  if (ec != std::errc{} || ptr != txn_part.data() + txn_part.size()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: invalid transaction ID", gtid_str));
   }
+  gtid.transaction_id = txn_id;
 
   return gtid;
 }
@@ -190,7 +192,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     // which attempts SSL handshake and can crash in csm_establish_ssl
     // during concurrent connection establishment.
     unsigned int ssl_mode = SSL_MODE_DISABLED;
-    mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode);
+    if (mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode) != 0) {
+      mygram::utils::StructuredLog().Event("mysql_warning").Field("type", "ssl_mode_disable_failed").Warn();
+    }
   }
 
   // Connect to MySQL
@@ -688,14 +692,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
   }
 
   int count = 0;
-  try {
-    count = std::stoi(row[0]);
-  } catch (const std::invalid_argument& e) {
+  auto [ptr, ec] = std::from_chars(row[0], row[0] + std::strlen(row[0]), count);
+  if (ec != std::errc{}) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema, "Invalid count value in unique column validation",
-                                    database + "." + table + "." + column));
-  } catch (const std::out_of_range& e) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
-                                    "Count value out of range in unique column validation",
                                     database + "." + table + "." + column));
   }
   // result is automatically freed by MySQLResult destructor

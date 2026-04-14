@@ -163,14 +163,14 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
 
 Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) const {
   if (connection == nullptr) {
-    return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Connection is null"));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Connection is null"));
   }
 
   // Validate connection including required tables check
   auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, required_tables_, std::nullopt);
 
   if (!validation_result.valid) {
-    return MakeUnexpected(MakeError(ErrorCode::kInternalError, validation_result.error_message));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, validation_result.error_message));
   }
 
   return {};

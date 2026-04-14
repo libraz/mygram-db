@@ -520,15 +520,19 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     RegisterLoader(table_name, &loader);
 
-    // Capture reference to SyncState to avoid map lookup in hot path.
-    // Safe: the key is created under sync_mutex_ in StartSync and never erased
-    // while the background thread runs, so the reference remains valid.
-    // total_rows and processed_rows are std::atomic, so concurrent reads are safe.
-    auto& state = sync_states_[table_name];
-    auto result = loader.Load([&state](const auto& progress) {
-      // Update progress atomically without mutex (these fields are std::atomic)
-      state.total_rows.store(progress.total_rows, std::memory_order_relaxed);
-      state.processed_rows.store(progress.processed_rows, std::memory_order_relaxed);
+    // Extract atomic pointers under sync_mutex_ to avoid dangling reference
+    // if sync_states_ rehashes from concurrent insertions.
+    std::atomic<uint64_t>* total_rows_ptr;
+    std::atomic<uint64_t>* processed_rows_ptr;
+    {
+      std::lock_guard<std::mutex> lock(sync_mutex_);
+      auto& state = sync_states_[table_name];
+      total_rows_ptr = &state.total_rows;
+      processed_rows_ptr = &state.processed_rows;
+    }
+    auto result = loader.Load([total_rows_ptr, processed_rows_ptr](const auto& progress) {
+      total_rows_ptr->store(progress.total_rows, std::memory_order_relaxed);
+      processed_rows_ptr->store(progress.processed_rows, std::memory_order_relaxed);
     });
 
     UnregisterLoader(table_name);

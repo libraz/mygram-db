@@ -66,7 +66,7 @@ nlohmann::json ConfigToJson(const Config& config) {
       {"host", config.mysql.host},
       {"port", config.mysql.port},
       {"user", config.mysql.user},
-      {"password", config.mysql.password},
+      {"password", config.mysql.password.empty() ? "" : "***"},
       {"database", config.mysql.database},
       {"use_gtid", config.mysql.use_gtid},
       {"binlog_format", config.mysql.binlog_format},

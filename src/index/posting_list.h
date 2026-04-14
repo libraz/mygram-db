@@ -218,6 +218,10 @@ class PostingList {
   // Updated atomically inside mutation methods that already hold the exclusive lock.
   std::atomic<uint64_t> doc_count_{0};
 
+  // Cached memory usage for lock-free reads in MemoryUsageApprox().
+  // Updated atomically inside mutation methods that already hold the exclusive lock.
+  std::atomic<size_t> cached_memory_size_{0};
+
   // Mutation version counter for change detection in Index::Optimize().
   // Atomic (not protected by mutex_) - incremented inside mutation methods
   // that already hold the exclusive lock.

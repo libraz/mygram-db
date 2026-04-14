@@ -189,7 +189,8 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
           .Field("type", "stream_error")
           .Field("operation", "save_to_stream")
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Stream write error during index serialization"));
+      return MakeUnexpected(
+          MakeError(ErrorCode::kIndexSerializationFailed, "Stream write error during index serialization"));
     }
 
     mygram::utils::StructuredLog().Event("index_saved_to_stream").Field("terms", term_count).Debug();

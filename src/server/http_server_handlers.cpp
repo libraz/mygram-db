@@ -178,17 +178,42 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       return;
     }
 
+    // Validate query text for control characters (CRLF injection prevention)
+    std::string query_text = body["q"].get<std::string>();
+    for (char c : query_text) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+        return;
+      }
+    }
+
+    // Validate table name for control characters
+    for (char c : table) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+        return;
+      }
+    }
+
     // Build query string for QueryParser
     std::ostringstream query_str;
-    query_str << "SEARCH " << table << " " << body["q"].get<std::string>();
+    query_str << "SEARCH " << table << " " << query_text;
 
     // Add limit
     if (body.contains("limit")) {
+      if (!body["limit"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
+        return;
+      }
       query_str << " LIMIT " << body["limit"].get<int>();
     }
 
     // Add offset
     if (body.contains("offset")) {
+      if (!body["offset"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
+        return;
+      }
       query_str << " OFFSET " << body["offset"].get<int>();
     }
 
@@ -422,9 +447,26 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
       return;
     }
 
+    // Validate query text for control characters (CRLF injection prevention)
+    std::string query_text = body["q"].get<std::string>();
+    for (char c : query_text) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+        return;
+      }
+    }
+
+    // Validate table name for control characters
+    for (char c : table) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+        return;
+      }
+    }
+
     // Build query string for QueryParser (COUNT query)
     std::ostringstream query_str;
-    query_str << "COUNT " << table << " " << body["q"].get<std::string>();
+    query_str << "COUNT " << table << " " << query_text;
 
     // Parse and execute query
     query::QueryParser query_parser;

@@ -10,6 +10,7 @@
 
 #ifdef USE_MYSQL
 
+#include <cctype>
 #include <cstring>
 #include <string>
 
@@ -76,6 +77,16 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
+
+  // Validate GTID format to prevent SQL injection.
+  // MariaDB GTID format: empty string, or "domain-server_id-sequence[,...]"
+  // Only allow alphanumeric, hyphens, commas, and periods.
+  for (char c : gtid) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != ',' && c != '.') {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMariaDBProtocolError, "Invalid GTID format: contains unexpected characters", gtid));
+    }
+  }
 
   // Set MariaDB GTID position via session variable BEFORE COM_BINLOG_DUMP.
   // MariaDB reads @slave_connect_state to know which GTIDs the replica already has.

@@ -98,7 +98,7 @@ bool IntersectSorted(std::vector<storage::DocId>& accumulator, std::vector<stora
   } else {
     accumulator.clear();
   }
-  return !accumulator.empty() || is_first;
+  return !accumulator.empty();
 }
 
 /// Apply NOT filter and column filters (shared by all Execute* functions)

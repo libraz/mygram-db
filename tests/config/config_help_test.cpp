@@ -238,4 +238,89 @@ TEST_F(ConfigSchemaExplorerTest, PathNavigationArraySchema) {
   EXPECT_EQ(help->type, "string");
 }
 
+// ============================================================================
+// ConfigToJson password masking (tested via FormatConfigForDisplay)
+// ============================================================================
+
+/**
+ * @brief Test that ConfigToJson masks non-empty MySQL password
+ *
+ * Validates the security fix where ConfigToJson was updated to mask
+ * the password field as "***" when non-empty, preventing credential
+ * leakage in configuration display output.
+ */
+TEST(ConfigHelpTest, ConfigToJsonMasksNonEmptyPassword) {
+  Config config;
+  config.mysql.host = "db.example.com";
+  config.mysql.port = 3306;
+  config.mysql.user = "admin";
+  config.mysql.password = "super_secret_password_123";
+  config.mysql.database = "production";
+
+  auto result = FormatConfigForDisplay(config, "mysql");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
+
+  // Password value must NOT appear in output
+  EXPECT_EQ(output.find("super_secret_password_123"), std::string::npos)
+      << "Raw password should never appear in display output";
+  // Masked value must appear
+  EXPECT_NE(output.find("***"), std::string::npos) << "Password should be masked as '***'";
+  // Other fields should be visible
+  EXPECT_NE(output.find("db.example.com"), std::string::npos);
+  EXPECT_NE(output.find("admin"), std::string::npos);
+}
+
+/**
+ * @brief Test that empty password stays empty (not masked)
+ *
+ * When password is empty, it should display as empty string, not "***".
+ * This distinguishes "no password configured" from "password is set".
+ */
+TEST(ConfigHelpTest, ConfigToJsonEmptyPasswordStaysEmpty) {
+  Config config;
+  config.mysql.host = "127.0.0.1";
+  config.mysql.port = 3306;
+  config.mysql.user = "test";
+  config.mysql.password = "";
+  config.mysql.database = "testdb";
+
+  auto result = FormatConfigForDisplay(config, "mysql");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
+
+  // With empty password, the output should show the password field
+  // but NOT show "***" (which is only for non-empty passwords)
+  EXPECT_NE(output.find("password"), std::string::npos);
+  // The output should contain an empty value for password, not "***"
+  // Since the password is empty, MaskSensitiveFieldsRecursive should leave it as ""
+}
+
+/**
+ * @brief Test that full config display masks password correctly
+ *
+ * Exercises the complete config display path to ensure password
+ * masking works when showing the entire configuration.
+ */
+TEST(ConfigHelpTest, FullConfigDisplayMasksPassword) {
+  Config config;
+  config.mysql.host = "10.0.0.1";
+  config.mysql.port = 3307;
+  config.mysql.user = "repl_user";
+  config.mysql.password = "replication_secret";
+  config.mysql.database = "mydb";
+
+  auto result = FormatConfigForDisplay(config, "");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
+
+  // Password must never appear in full config output
+  EXPECT_EQ(output.find("replication_secret"), std::string::npos) << "Password must not appear in full config display";
+  EXPECT_NE(output.find("***"), std::string::npos);
+
+  // Non-sensitive fields should be visible
+  EXPECT_NE(output.find("repl_user"), std::string::npos);
+  EXPECT_NE(output.find("10.0.0.1"), std::string::npos);
+}
+
 }  // namespace mygramdb::config

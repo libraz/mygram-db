@@ -1699,3 +1699,82 @@ TEST(DocumentStoreTest, GetFilterValuesBatchMultiColumnMissingDocs) {
   EXPECT_EQ(std::get<int32_t>(*results[0][0]), 10);
   EXPECT_FALSE(results[0][1].has_value());  // doc 999 does not exist
 }
+
+// =============================================================================
+// AddDocument consistency tests (exception safety)
+// =============================================================================
+
+/**
+ * @brief Test that AddDocument maintains mapping consistency
+ *
+ * When a document is added, both pk->DocId and DocId->pk mappings must be
+ * consistent. A duplicate primary key should return the existing DocId
+ * without creating a new one.
+ */
+TEST(DocumentStoreTest, AddDocumentMaintainsConsistency) {
+  DocumentStore store;
+  FilterMap filters;
+
+  auto result = store.AddDocument("pk1", filters, "text1");
+  ASSERT_TRUE(result.has_value());
+  DocId doc1 = *result;
+
+  // Duplicate returns same DocId
+  auto result2 = store.AddDocument("pk1", filters, "text1");
+  ASSERT_TRUE(result2.has_value());
+  EXPECT_EQ(*result2, doc1);
+
+  // Different key gets different DocId
+  auto result3 = store.AddDocument("pk2", filters, "text2");
+  ASSERT_TRUE(result3.has_value());
+  EXPECT_NE(*result3, doc1);
+
+  // Verify bidirectional mapping consistency
+  auto pk_for_doc1 = store.GetPrimaryKey(doc1);
+  ASSERT_TRUE(pk_for_doc1.has_value());
+  EXPECT_EQ(*pk_for_doc1, "pk1");
+
+  auto docid_for_pk1 = store.GetDocId("pk1");
+  ASSERT_TRUE(docid_for_pk1.has_value());
+  EXPECT_EQ(*docid_for_pk1, doc1);
+
+  auto pk_for_doc2 = store.GetPrimaryKey(*result3);
+  ASSERT_TRUE(pk_for_doc2.has_value());
+  EXPECT_EQ(*pk_for_doc2, "pk2");
+
+  auto docid_for_pk2 = store.GetDocId("pk2");
+  ASSERT_TRUE(docid_for_pk2.has_value());
+  EXPECT_EQ(*docid_for_pk2, *result3);
+
+  // Size should reflect only unique documents
+  EXPECT_EQ(store.Size(), 2);
+}
+
+/**
+ * @brief Test that AddDocument with normalized text stores text correctly
+ *
+ * Verifies the three-argument AddDocument overload stores the normalized
+ * text and that it can be retrieved consistently.
+ */
+TEST(DocumentStoreTest, AddDocumentWithNormalizedTextConsistency) {
+  DocumentStore store;
+  FilterMap filters;
+  filters["status"] = static_cast<int64_t>(1);
+
+  auto result = store.AddDocument("pk1", filters, "normalized hello world");
+  ASSERT_TRUE(result.has_value());
+  DocId doc1 = *result;
+
+  // Verify document, filters, and text are all retrievable
+  auto doc = store.GetDocument(doc1);
+  ASSERT_TRUE(doc.has_value());
+  EXPECT_EQ(doc->primary_key, "pk1");
+
+  auto text = store.GetNormalizedText(doc1);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ(*text, "normalized hello world");
+
+  auto status = store.GetFilterValue(doc1, "status");
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(std::get<int64_t>(*status), 1);
+}

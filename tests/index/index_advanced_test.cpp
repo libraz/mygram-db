@@ -552,3 +552,36 @@ TEST(IndexSerializationTest, TooShortDataReturnsError) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageInvalidFormat);
 }
+
+/**
+ * @brief Test LoadFromStream with unsupported version returns kStorageVersionMismatch
+ *
+ * Validates that the error code is kStorageVersionMismatch (not a generic error)
+ * when the index data has a version number that is not recognized.
+ */
+TEST(IndexSerializationTest, UnsupportedVersionReturnsVersionMismatch) {
+  // Build a minimal valid-looking index data with version=99
+  // Layout: magic(4) + version(4) + ngram_size(4) + term_count(8) = 20 bytes minimum
+  std::string data(20, '\0');
+  // Magic: "MGIX"
+  std::memcpy(data.data(), "MGIX", 4);
+  // Version: 99 (unsupported) in little-endian
+  uint32_t version = 99;
+  std::memcpy(data.data() + 4, &version, sizeof(version));
+  // ngram_size: 2
+  uint32_t ngram_size = 2;
+  std::memcpy(data.data() + 8, &ngram_size, sizeof(ngram_size));
+  // term_count: 0
+  uint64_t term_count = 0;
+  std::memcpy(data.data() + 12, &term_count, sizeof(term_count));
+
+  std::istringstream stream(data, std::ios::binary);
+
+  Index index(2, 1);
+  auto result = index.LoadFromStream(stream);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageVersionMismatch)
+      << "Unsupported version should return kStorageVersionMismatch, got: " << result.error().message();
+  // Context should include the version number
+  EXPECT_FALSE(result.error().context().empty()) << "Error context should include the unsupported version number";
+}

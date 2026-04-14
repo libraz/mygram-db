@@ -475,11 +475,19 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     // Add limit
     if (body.contains("limit")) {
+      if (!body["limit"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
+        return;
+      }
       query_str << " LIMIT " << body["limit"].get<int>();
     }
 
     // Add offset
     if (body.contains("offset")) {
+      if (!body["offset"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
+        return;
+      }
       query_str << " OFFSET " << body["offset"].get<int>();
     }
 

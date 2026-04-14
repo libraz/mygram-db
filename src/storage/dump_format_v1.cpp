@@ -1292,7 +1292,8 @@ Expected<void, Error> ReadDumpV1(
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
       LogStorageError("open_file", filepath, "Failed to open for reading");
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageDumpReadError, "Failed to open dump file for reading", filepath));
     }
 
     // Read and verify fixed file header
@@ -1304,12 +1305,12 @@ Expected<void, Error> ReadDumpV1(
           .Field("type", "invalid_magic_number")
           .Field("filepath", filepath)
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid magic number in dump file", filepath));
     }
 
     uint32_t version = 0;
     if (!ReadBinary(ifs, version)) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read dump file version", filepath));
     }
 
     // Version compatibility check
@@ -1321,7 +1322,7 @@ Expected<void, Error> ReadDumpV1(
           .Field("version", static_cast<uint64_t>(version))
           .Field("max_supported", static_cast<uint64_t>(dump_format::kMaxSupportedVersion))
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch, "Dump file version too new", filepath));
     }
     if (version < dump_format::kMinSupportedVersion) {
       StructuredLog()
@@ -1331,7 +1332,7 @@ Expected<void, Error> ReadDumpV1(
           .Field("version", static_cast<uint64_t>(version))
           .Field("min_supported", static_cast<uint64_t>(dump_format::kMinSupportedVersion))
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch, "Dump file version too old", filepath));
     }
 
     // Currently only V1 is implemented
@@ -1342,7 +1343,8 @@ Expected<void, Error> ReadDumpV1(
           .Field("filepath", filepath)
           .Field("version", static_cast<uint64_t>(version))
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageVersionMismatch, "Dump file version not implemented", filepath));
     }
 
     // Read V1 header

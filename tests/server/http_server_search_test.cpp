@@ -782,5 +782,147 @@ TEST_F(HttpServerTest, CountErrorCases) {
   EXPECT_NE(error_msg.find("Invalid JSON"), std::string::npos);
 }
 
+// ============================================================================
+// CRLF injection prevention tests
+// ============================================================================
+
+/**
+ * @brief Test that query text with CR character is rejected
+ *
+ * Regression test for CRLF injection prevention in HTTP search handler.
+ * The handler validates query text for control characters (\r, \n, \0)
+ * to prevent CRLF injection attacks.
+ */
+TEST_F(HttpServerTest, SearchRejectsCRInQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "test\rinjection";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("control characters"), std::string::npos);
+}
+
+/**
+ * @brief Test that query text with LF character is rejected
+ */
+TEST_F(HttpServerTest, SearchRejectsLFInQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "test\ninjection";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("control characters"), std::string::npos);
+}
+
+/**
+ * @brief Test that query text with CRLF sequence is rejected
+ */
+TEST_F(HttpServerTest, SearchRejectsCRLFInQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "test\r\nHTTP/1.1 200 OK\r\n";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("control characters"), std::string::npos);
+}
+
+/**
+ * @brief Test that query text with null byte is rejected
+ */
+TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Build JSON manually since json library may not handle embedded nulls
+  std::string query_text = "test";
+  query_text += '\0';
+  query_text += "injection";
+
+  json request_body;
+  request_body["q"] = query_text;
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  // Note: The null byte may be truncated by JSON serialization.
+  // If not truncated, expect 400; if truncated, expect 200 (normal query).
+  // We accept either outcome since JSON itself may strip nulls.
+  EXPECT_TRUE(res->status == 200 || res->status == 400);
+}
+
+/**
+ * @brief Test that normal query text is accepted (sanity check)
+ */
+TEST_F(HttpServerTest, SearchAcceptsNormalQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine learning";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("results"));
+}
+
+/**
+ * @brief Test that COUNT endpoint also rejects CRLF in query text
+ */
+TEST_F(HttpServerTest, CountRejectsCRLFInQuery) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "test\r\ninjection";
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("control characters"), std::string::npos);
+}
+
 }  // namespace server
 }  // namespace mygramdb

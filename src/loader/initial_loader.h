@@ -152,28 +152,11 @@ class InitialLoader {
 
   /**
    * @brief Extract filter values from row using pre-built field index map
+   * @param time_processor Optional pre-created DateTimeProcessor for TIME column conversion.
+   *                       When non-null, avoids re-creating the processor per row.
    */
-  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map) const;
-
-  /**
-   * @brief Extract text from row based on text_source configuration
-   */
-  std::string ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
-
-  /**
-   * @brief Extract primary key from row
-   */
-  std::string ExtractPrimaryKey(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
-
-  /**
-   * @brief Extract filter values from row
-   */
-  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, unsigned int num_fields) const;
-
-  /**
-   * @brief Find field index by name
-   */
-  static int FindFieldIndex(const std::string& field_name, MYSQL_FIELD* fields, unsigned int num_fields);
+  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map,
+                                    const mygram::utils::DateTimeProcessor* time_processor = nullptr) const;
 };
 
 }  // namespace mygramdb::loader

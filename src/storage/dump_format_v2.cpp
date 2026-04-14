@@ -325,6 +325,9 @@ Expected<void, Error> WriteDumpV2(
 
     // Prepare V2 header (placeholders for file_size, CRC, section_count)
     HeaderV2 header;
+    // header_size = header_size(4) + flags(4) + dump_timestamp(8) + total_file_size(8) +
+    //               file_crc32(4) + section_count(4) + gtid_length(4) + gtid(N)
+    //             = 36 + gtid.size()
     header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4 + gtid.size());
     header.flags = dump_format::flags_v2::kNone | dump_format::flags_v2::kWithCRC;
     if (stats != nullptr) {
@@ -439,7 +442,7 @@ Expected<void, Error> WriteDumpV2(
         table_stream.write(doc_data.data(), static_cast<std::streamsize>(doc_data.size()));
       }
 
-      // Write entire table as one section envelope (streaming, no .str() copy)
+      // Write entire table as one section envelope
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kTableData, table_stream); !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;

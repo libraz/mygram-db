@@ -11,9 +11,11 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #include "storage/dump_format.h"
 #include "utils/binary_io.h"
+#include "utils/error.h"
 
 using namespace mygramdb::storage::dump_v1;
 using mygram::utils::WriteBinary;
@@ -181,6 +183,125 @@ TEST(DumpFormatV1Test, VerifyDumpIntegrityInvalidMagic) {
   auto result = VerifyDumpIntegrity(filepath, error);
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+
+  CleanupTestFile(filepath);
+}
+
+// ============================================================================
+// ReadDumpV1 error code validation
+// ============================================================================
+
+/**
+ * @brief Test that ReadDumpV1 returns kStorageVersionMismatch for version too new
+ *
+ * Validates that the error propagation fix correctly returns a
+ * kStorageVersionMismatch error code when the dump file has a version
+ * number higher than the maximum supported version.
+ */
+TEST(DumpFormatV1Test, ReadDumpVersionTooNewReturnsVersionMismatch) {
+  auto filepath = TestTempFilePath("version_too_new");
+  CleanupTestFile(filepath);
+
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    // Write valid magic number
+    ofs.write(mygramdb::storage::dump_format::kMagicNumber.data(), 4);
+    // Write version 999 (far beyond max supported)
+    uint32_t version = 999;
+    WriteBinary(ofs, version);
+  }
+
+  std::string gtid;
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageVersionMismatch);
+  // Error message should indicate version is too new
+  EXPECT_NE(result.error().message().find("too new"), std::string::npos)
+      << "Error message should mention 'too new', got: " << result.error().message();
+  // Context should contain the filepath
+  EXPECT_FALSE(result.error().context().empty());
+
+  CleanupTestFile(filepath);
+}
+
+/**
+ * @brief Test that ReadDumpV1 returns kStorageDumpReadError for invalid magic
+ *
+ * Validates that reading a file with wrong magic bytes returns the correct
+ * error code with filepath context.
+ */
+TEST(DumpFormatV1Test, ReadDumpInvalidMagicReturnsDumpReadError) {
+  auto filepath = TestTempFilePath("bad_magic");
+  CleanupTestFile(filepath);
+
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    ofs.write("XXXX", 4);  // Invalid magic
+    uint32_t version = 1;
+    WriteBinary(ofs, version);
+  }
+
+  std::string gtid;
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  // Error message should mention magic number
+  EXPECT_NE(result.error().message().find("magic"), std::string::npos)
+      << "Error message should mention 'magic', got: " << result.error().message();
+  // Context should include the filepath
+  EXPECT_FALSE(result.error().context().empty());
+
+  CleanupTestFile(filepath);
+}
+
+/**
+ * @brief Test that ReadDumpV1 returns kStorageDumpReadError for non-existent file
+ */
+TEST(DumpFormatV1Test, ReadDumpNonExistentFileReturnsReadError) {
+  std::string filepath = "/tmp/mygramdb_nonexistent_dump_test_file.dmp";
+  std::filesystem::remove(filepath);  // Ensure it doesn't exist
+
+  std::string gtid;
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_FALSE(result.error().context().empty());
+}
+
+/**
+ * @brief Test that ReadDumpV1 returns kStorageDumpReadError for truncated file
+ *
+ * A file that has only the magic number but no version should fail.
+ */
+TEST(DumpFormatV1Test, ReadDumpTruncatedFileReturnsReadError) {
+  auto filepath = TestTempFilePath("truncated");
+  CleanupTestFile(filepath);
+
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    // Write only magic, no version
+    ofs.write(mygramdb::storage::dump_format::kMagicNumber.data(), 4);
+  }
+
+  std::string gtid;
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
 
   CleanupTestFile(filepath);
 }

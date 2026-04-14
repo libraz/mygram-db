@@ -140,14 +140,14 @@ Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_for
                                            const std::string& data);
 
 /**
- * @brief Write a section envelope from an ostringstream without copying its buffer
+ * @brief Write a section envelope from an ostringstream
  *
- * Streams CRC32 computation and data writing directly from the ostringstream's
- * internal buffer, avoiding the memory overhead of calling .str() on large sections.
+ * Convenience overload that extracts the data via .str() and delegates to
+ * the string overload. This creates a copy of the buffer contents.
  *
  * @param output_stream Output stream
  * @param type Section type
- * @param data_stream Stream containing section data (will be seeked to beginning)
+ * @param data_stream Stream containing section data
  * @return Expected<void, Error>
  */
 Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_format::SectionType type,

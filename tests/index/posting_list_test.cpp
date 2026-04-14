@@ -860,14 +860,18 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
  */
 TEST_F(PostingListTest, MemoryUsageApproxDeltaReturnsValue) {
   PostingList posting(0.5);
-  // Empty delta list: memory usage should be 0
+  // Empty delta list: cached memory usage is 0 (no mutations yet)
   EXPECT_EQ(posting.MemoryUsage(), 0);
 
   posting.Add(10);
   posting.Add(20);
   posting.Add(30);
-  // Delta compressed: 3 elements * sizeof(uint32_t) = 12
-  EXPECT_EQ(posting.MemoryUsage(), 3 * sizeof(uint32_t));
+  // Delta compressed: capacity * sizeof(uint32_t) + sizeof(vector)
+  // Capacity >= 3 (implementation-dependent growth factor)
+  size_t mem = posting.MemoryUsage();
+  EXPECT_GE(mem, 3 * sizeof(uint32_t) + sizeof(std::vector<uint32_t>));
+  // Upper bound: capacity shouldn't exceed 2x size for small vectors
+  EXPECT_LE(mem, 8 * sizeof(uint32_t) + sizeof(std::vector<uint32_t>));
 }
 
 /**
@@ -1299,4 +1303,146 @@ TEST_F(PostingListTest, DeserializeFailDoesNotIncrementVersion) {
   size_t offset = 0;
   EXPECT_FALSE(posting.Deserialize(empty, offset));
   EXPECT_EQ(posting.Version(), version_before) << "Version should not change on failed Deserialize";
+}
+
+// =============================================================================
+// Roaring bitmap Intersect/Union NULL safety tests
+// =============================================================================
+
+/**
+ * @brief Test Intersect of two Roaring-strategy PostingLists returns valid result
+ *
+ * Regression test for NULL safety in roaring_bitmap_and. When both PostingLists
+ * use Roaring strategy, Intersect must produce a valid (non-null) result with
+ * the correct cardinality.
+ */
+TEST_F(PostingListTest, IntersectRoaringBitmapReturnsValidResult) {
+  PostingList pl1(0.01);
+  PostingList pl2(0.01);
+
+  // Add enough docs to trigger Roaring conversion
+  for (DocId i = 1; i <= 10000; ++i) {
+    pl1.Add(i);
+  }
+  for (DocId i = 5000; i <= 15000; ++i) {
+    pl2.Add(i);
+  }
+  pl1.Optimize(10000);
+  pl2.Optimize(10000);
+
+  ASSERT_EQ(pl1.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  ASSERT_EQ(pl2.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto result = pl1.Intersect(pl2);
+  ASSERT_NE(result, nullptr);
+  // Intersection: {5000..10000} = 5001 elements
+  EXPECT_EQ(result->SizeApprox(), 5001);
+}
+
+/**
+ * @brief Test Union of two Roaring-strategy PostingLists returns valid result
+ *
+ * Regression test for NULL safety in roaring_bitmap_or. When both PostingLists
+ * use Roaring strategy, Union must produce a valid (non-null) result with the
+ * correct cardinality.
+ */
+TEST_F(PostingListTest, UnionRoaringBitmapReturnsValidResult) {
+  PostingList pl1(0.01);
+  PostingList pl2(0.01);
+
+  for (DocId i = 1; i <= 10000; ++i) {
+    pl1.Add(i);
+  }
+  for (DocId i = 5000; i <= 15000; ++i) {
+    pl2.Add(i);
+  }
+  pl1.Optimize(10000);
+  pl2.Optimize(10000);
+
+  ASSERT_EQ(pl1.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  ASSERT_EQ(pl2.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto result = pl1.Union(pl2);
+  ASSERT_NE(result, nullptr);
+  // Union: {1..15000} = 15000 elements
+  EXPECT_EQ(result->SizeApprox(), 15000);
+}
+
+/**
+ * @brief Test Intersect of one delta + one Roaring PostingList
+ *
+ * Tests cross-strategy intersection where one list uses delta-compressed
+ * storage and the other uses Roaring bitmap.
+ */
+TEST_F(PostingListTest, IntersectDeltaAndRoaringReturnsValidResult) {
+  PostingList pl_delta(0.5);     // High threshold to stay delta
+  PostingList pl_roaring(0.01);  // Low threshold to trigger Roaring
+
+  // pl_delta: small list, stays delta-compressed
+  for (DocId i = 1; i <= 100; ++i) {
+    pl_delta.Add(i);
+  }
+
+  // pl_roaring: large list, converted to Roaring
+  for (DocId i = 50; i <= 10000; ++i) {
+    pl_roaring.Add(i);
+  }
+  pl_roaring.Optimize(10000);
+
+  EXPECT_EQ(pl_delta.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(pl_roaring.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  auto result = pl_delta.Intersect(pl_roaring);
+  ASSERT_NE(result, nullptr);
+  // Intersection: {50..100} = 51 elements
+  EXPECT_EQ(result->SizeApprox(), 51);
+
+  // Verify the actual doc IDs
+  auto all = result->GetAll();
+  ASSERT_EQ(all.size(), 51);
+  EXPECT_EQ(all.front(), 50);
+  EXPECT_EQ(all.back(), 100);
+}
+
+// =============================================================================
+// MemoryUsageApprox cached value tests
+// =============================================================================
+
+/**
+ * @brief Test MemoryUsageApprox returns reasonable values for delta strategy
+ *
+ * After adding documents, MemoryUsageApprox should return a positive value
+ * reflecting the delta-compressed storage overhead.
+ */
+TEST_F(PostingListTest, MemoryUsageApproxCachedDelta) {
+  PostingList pl;
+  EXPECT_EQ(pl.MemoryUsageApprox(), 0);
+
+  pl.Add(1);
+  pl.Add(2);
+  pl.Add(3);
+  EXPECT_GT(pl.MemoryUsageApprox(), 0);
+  // Should include at least the storage for 3 uint32_t values
+  EXPECT_GE(pl.MemoryUsageApprox(), 3 * sizeof(uint32_t));
+}
+
+/**
+ * @brief Test MemoryUsageApprox returns reasonable values for Roaring strategy
+ *
+ * After conversion to Roaring bitmap, MemoryUsageApprox should return a
+ * positive value and match MemoryUsage (which acquires the lock).
+ */
+TEST_F(PostingListTest, MemoryUsageApproxCachedRoaring) {
+  PostingList pl(0.01);
+  for (DocId i = 1; i <= 10000; ++i) {
+    pl.Add(i);
+  }
+  pl.Optimize(10000);
+
+  ASSERT_EQ(pl.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  size_t mem = pl.MemoryUsageApprox();
+  EXPECT_GT(mem, 0);
+  // MemoryUsage (with lock) should return the same value
+  EXPECT_EQ(pl.MemoryUsage(), mem);
 }

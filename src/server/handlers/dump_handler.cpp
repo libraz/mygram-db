@@ -32,6 +32,10 @@ namespace mygramdb::server {
 mygram::utils::Expected<std::string, mygram::utils::Error> DumpHandler::ResolveDumpPath(const std::string& input,
                                                                                         const std::string& dump_dir) {
   std::string filepath = input;
+  if (filepath.empty()) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument, "Empty filepath"));
+  }
   if (filepath[0] != '/') {
     filepath = dump_dir + "/" + filepath;
   }
@@ -40,7 +44,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> DumpHandler::ResolveD
     std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
     std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(dump_dir);
     auto rel = canonical.lexically_relative(dump_canonical);
-    if (rel.empty() || rel.string().substr(0, 2) == "..") {
+    if (rel.empty() || *rel.begin() == std::filesystem::path("..")) {
       return mygram::utils::MakeUnexpected(
           mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
                                    "Invalid filepath: path must be within dump directory (" + dump_dir + ")"));

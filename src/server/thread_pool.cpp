@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <sstream>
 
 #include "utils/fd_guard.h"
 #include "utils/structured_log.h"
@@ -247,7 +248,13 @@ void ThreadPool::WorkerThread() {
             .Field("error", e.what())
             .Error();
       } catch (...) {
-        mygram::utils::StructuredLog().Event("server_error").Field("type", "worker_thread_unknown_exception").Error();
+        std::ostringstream tid;
+        tid << std::this_thread::get_id();
+        mygram::utils::StructuredLog()
+            .Event("server_error")
+            .Field("type", "worker_thread_unknown_exception")
+            .Field("thread_id", tid.str())
+            .Error();
       }
       // Note: worker_guard will automatically decrement active_workers_
     }
