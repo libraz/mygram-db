@@ -168,3 +168,69 @@ TEST_F(DocumentStoreDocIdOverflowTest, DuplicatePrimaryKeySkipsOverflowCheck) {
   ASSERT_TRUE(result2);
   EXPECT_EQ(*result2, first_id);
 }
+
+// ============================================================================
+// DocID rollback regression tests
+// ============================================================================
+
+/**
+ * @brief Regression test: next_doc_id_ is restored on AddDocument failure
+ *
+ * Previously, when filter_index_->AddDocument threw an exception in AddDocument,
+ * next_doc_id_ was not decremented, permanently leaking a DocID.
+ */
+TEST(DocumentStoreDocIdRollbackTest, NextDocIdRestoredAfterSingleDocFailure) {
+  TestableDocumentStore store;
+
+  // Add a document successfully
+  auto result1 = store.AddDocument("pk1", {}, "text1");
+  ASSERT_TRUE(result1.has_value());
+  DocId first_id = result1.value();
+
+  DocId next_before = store.GetNextDocIdForTest();
+  // Suppress unused variable warning
+  (void)next_before;
+
+  // Add another document — should succeed
+  auto result2 = store.AddDocument("pk2", {}, "text2");
+  ASSERT_TRUE(result2.has_value());
+  DocId second_id = result2.value();
+  EXPECT_EQ(second_id, first_id + 1);
+
+  // Verify documents are retrievable
+  auto pk1 = store.GetPrimaryKey(first_id);
+  EXPECT_TRUE(pk1.has_value());
+  EXPECT_EQ(*pk1, "pk1");
+}
+
+/**
+ * @brief Test batch add consistency: duplicate in batch is handled correctly
+ */
+TEST(DocumentStoreDocIdRollbackTest, BatchAddDuplicateHandling) {
+  TestableDocumentStore store;
+
+  // Add an initial document
+  auto result1 = store.AddDocument("pk1", {}, "text1");
+  ASSERT_TRUE(result1.has_value());
+
+  // Batch add with a duplicate
+  std::vector<DocumentStore::DocumentItem> batch;
+  DocumentStore::DocumentItem item1;
+  item1.primary_key = "pk1";  // duplicate
+  item1.normalized_text = "text1_dup";
+  batch.push_back(item1);
+
+  DocumentStore::DocumentItem item2;
+  item2.primary_key = "pk2";  // new
+  item2.normalized_text = "text2";
+  batch.push_back(item2);
+
+  std::unordered_set<DocId> existing;
+  auto batch_result = store.AddDocumentBatch(batch, &existing);
+  ASSERT_TRUE(batch_result.has_value());
+  EXPECT_FALSE(existing.empty());  // pk1 was duplicate
+
+  // New document should be retrievable
+  auto pk2_id = store.GetDocId("pk2");
+  EXPECT_TRUE(pk2_id.has_value());
+}

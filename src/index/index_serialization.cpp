@@ -384,6 +384,19 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
       term_len = mygram::utils::FromLittleEndian(term_len);
       pos += sizeof(term_len);
 
+      // Guard against malformed index files that could cause excessive memory allocation
+      constexpr uint32_t kMaxTermLength = 10000;
+      if (term_len > kMaxTermLength) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "invalid_term_length")
+            .Field("term_len", static_cast<uint64_t>(term_len))
+            .Field("max_allowed", static_cast<uint64_t>(kMaxTermLength))
+            .Field("operation", "load_from_stream")
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Term length exceeds maximum allowed size"));
+      }
+
       if (pos + term_len > data_size) {
         mygram::utils::StructuredLog()
             .Event("index_io_error")
@@ -410,6 +423,20 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
       std::memcpy(&posting_size, all_data.data() + pos, sizeof(posting_size));
       posting_size = mygram::utils::FromLittleEndian(posting_size);
       pos += sizeof(posting_size);
+
+      // Guard against malformed index files that could cause excessive memory allocation
+      constexpr uint64_t kMaxPostingSize = 100'000'000;
+      if (posting_size > kMaxPostingSize) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "invalid_posting_size")
+            .Field("posting_size", posting_size)
+            .Field("max_allowed", kMaxPostingSize)
+            .Field("operation", "load_from_stream")
+            .Error();
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageCorrupted, "Posting list size exceeds maximum allowed size"));
+      }
 
       if (pos + posting_size > data_size) {
         mygram::utils::StructuredLog()

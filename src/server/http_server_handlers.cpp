@@ -71,6 +71,11 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
  *   Format 1: {"filters": {"col": "value"}} - backward compatible, defaults to EQ
  *   Format 2: {"filters": {"col": {"op": "GT", "value": "10"}}} - full operator support
  *
+ * NOTE: A similar ParseFiltersFromJson exists in http_server.cpp with a
+ * slightly different signature (takes filters_json vs body, returns bool vs
+ * string). Both share the same parsing logic via JsonFilterValueToString.
+ * If modifying filter parsing, update both.
+ *
  * @param body JSON request body
  * @param[out] filters Output vector of filter conditions
  * @return Empty string on success, or error message on failure

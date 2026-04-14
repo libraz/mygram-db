@@ -97,6 +97,21 @@ gtest_discover_tests(index_gettopn_test
     TIMEOUT 180
 )
 
+# Index serialization validation tests
+add_executable(index_serialization_test
+  index_serialization_test.cpp
+)
+
+target_link_libraries(index_serialization_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(index_serialization_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # PostingList serialization tests
 add_executable(posting_list_serialization_test
   posting_list_serialization_test.cpp

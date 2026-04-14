@@ -206,6 +206,21 @@ gtest_discover_tests(dump_format_v2_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
+# DocumentStore retrieval regression tests
+add_executable(document_store_retrieval_test
+  document_store_retrieval_test.cpp
+)
+
+target_link_libraries(document_store_retrieval_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(document_store_retrieval_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # FilterIndex tests
 add_executable(filter_index_test
   filter_index_test.cpp

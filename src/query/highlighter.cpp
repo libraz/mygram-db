@@ -46,9 +46,10 @@ size_t CpToByte(std::string_view text, uint32_t cp_offset) {
   return byte_pos;
 }
 
-/// @brief Get total code point count
+/// @brief Get total code point count (narrowed to uint32_t for codepoint
+/// position arithmetic -- no practical text exceeds 4G codepoints)
 uint32_t TotalCodePoints(std::string_view text) {
-  return mygram::utils::CountCodePoints(text);
+  return static_cast<uint32_t>(mygram::utils::CountCodePoints(text));
 }
 
 /// @brief Extract a UTF-8 substring by code-point range [cp_start, cp_end)
@@ -101,7 +102,13 @@ std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
     // positions, then convert only matched byte offsets to codepoint positions.
     // This avoids converting the entire document text to a codepoint array
     // when there are few or no matches.
-    auto term_cp_count = static_cast<uint32_t>(mygram::utils::CountCodePoints(term));
+    auto term_cp_count = mygram::utils::CountCodePoints(term);
+
+    // Track byte/codepoint position from previous match to count incrementally
+    // instead of re-scanning from byte 0 for every match (O(n) per match ->
+    // O(n) total per term).
+    size_t prev_byte_pos = 0;
+    size_t prev_cp_pos = 0;
 
     size_t search_start = 0;
     while (search_start <= normalized_text.size() - term.size()) {
@@ -110,9 +117,13 @@ std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
         break;
       }
 
-      // Convert byte offset to codepoint offset
-      uint32_t cp_start = mygram::utils::CountCodePoints(normalized_text.substr(0, byte_pos));
-      positions.emplace_back(cp_start, cp_start + term_cp_count);
+      // Incrementally count codepoints from previous match position
+      prev_cp_pos += mygram::utils::CountCodePoints(normalized_text.substr(prev_byte_pos, byte_pos - prev_byte_pos));
+      prev_byte_pos = byte_pos;
+
+      auto cp_start = static_cast<uint32_t>(prev_cp_pos);
+      auto cp_end = static_cast<uint32_t>(prev_cp_pos + term_cp_count);
+      positions.emplace_back(cp_start, cp_end);
 
       // Skip past the match (non-overlapping)
       search_start = byte_pos + term.size();

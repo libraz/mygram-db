@@ -176,5 +176,61 @@ TEST_F(HighlighterTest, Generate_WholeTextFitsInSnippet) {
   EXPECT_NE(result.snippet.find("<em>keyword</em>"), std::string::npos);
 }
 
+// ============================================================================
+// Bug fix regression tests: incremental codepoint counting
+// ============================================================================
+
+/**
+ * @brief Regression test: FindMatchPositions with many matches is efficient
+ *
+ * Verifies that incremental codepoint counting produces correct results
+ * for text with many repeated matches (the optimization target).
+ */
+TEST_F(HighlighterTest, FindMatchPositions_ManyMatches) {
+  // Create text with "ab" repeated many times
+  std::string text;
+  for (int i = 0; i < 100; ++i) {
+    text += "ab ";
+  }
+  // Remove trailing space
+  text.pop_back();
+
+  auto positions = Highlighter::FindMatchPositions(text, {"ab"});
+  EXPECT_EQ(positions.size(), 100u);
+
+  // Verify first and last positions are correct
+  EXPECT_EQ(positions[0].first, 0u);
+  EXPECT_EQ(positions[0].second, 2u);
+  // Last "ab" starts at position 99*3 = 297 codepoints
+  EXPECT_EQ(positions[99].first, 297u);
+  EXPECT_EQ(positions[99].second, 299u);
+}
+
+/**
+ * @brief Regression test: FindMatchPositions with multi-byte UTF-8
+ *
+ * Ensures the incremental codepoint counter handles multi-byte sequences correctly.
+ */
+TEST_F(HighlighterTest, FindMatchPositions_MultiByteManyMatches) {
+  // "あいう" repeated with a separator
+  std::string text;
+  for (int i = 0; i < 10; ++i) {
+    if (i > 0)
+      text += " ";
+    text += "あいう";
+  }
+
+  auto positions = Highlighter::FindMatchPositions(text, {"あいう"});
+  EXPECT_EQ(positions.size(), 10u);
+
+  // First match at codepoint 0-3
+  EXPECT_EQ(positions[0].first, 0u);
+  EXPECT_EQ(positions[0].second, 3u);
+
+  // Second match at codepoint 4-7 (3 chars + 1 space)
+  EXPECT_EQ(positions[1].first, 4u);
+  EXPECT_EQ(positions[1].second, 7u);
+}
+
 }  // namespace
 }  // namespace mygramdb::query

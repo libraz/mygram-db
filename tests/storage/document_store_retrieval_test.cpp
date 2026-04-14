@@ -1,0 +1,117 @@
+/**
+ * @file document_store_retrieval_test.cpp
+ * @brief Regression tests for DocumentStore multi-column batch retrieval
+ *
+ * Verifies that GetFilterValuesBatchMultiColumn (transposed loop order)
+ * produces the same results as single-column GetFilterValuesBatch.
+ */
+
+#include <gtest/gtest.h>
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "storage/document_store.h"
+
+using namespace mygramdb::storage;
+
+/**
+ * @brief Regression test: GetFilterValuesBatchMultiColumn loop order optimization
+ *
+ * Verifies that the transposed loop order (doc_ids outer, columns inner)
+ * produces the same results as single-column retrieval.
+ */
+TEST(DocumentStoreRetrievalTest, MultiColumnBatchMatchesSingleColumn) {
+  DocumentStore store;
+
+  // Add documents with multiple filter columns
+  FilterMap filters1 = {{"color", std::string("red")}, {"size", int64_t(10)}};
+  FilterMap filters2 = {{"color", std::string("blue")}, {"size", int64_t(20)}};
+  FilterMap filters3 = {{"color", std::string("green")}};  // missing "size"
+
+  auto id1 = store.AddDocument("pk1", filters1, "text1");
+  auto id2 = store.AddDocument("pk2", filters2, "text2");
+  auto id3 = store.AddDocument("pk3", filters3, "text3");
+  ASSERT_TRUE(id1.has_value() && id2.has_value() && id3.has_value());
+
+  std::vector<DocId> doc_ids = {*id1, *id2, *id3};
+  std::vector<std::string> columns = {"color", "size"};
+
+  auto multi_results = store.GetFilterValuesBatchMultiColumn(doc_ids, columns);
+  ASSERT_EQ(multi_results.size(), 2u);  // 2 columns
+
+  // Column "color": all 3 docs have values
+  ASSERT_EQ(multi_results[0].size(), 3u);
+  EXPECT_TRUE(multi_results[0][0].has_value());
+  EXPECT_TRUE(multi_results[0][1].has_value());
+  EXPECT_TRUE(multi_results[0][2].has_value());
+
+  // Column "size": doc3 is missing
+  ASSERT_EQ(multi_results[1].size(), 3u);
+  EXPECT_TRUE(multi_results[1][0].has_value());
+  EXPECT_TRUE(multi_results[1][1].has_value());
+  EXPECT_FALSE(multi_results[1][2].has_value());  // doc3 has no "size"
+
+  // Verify single-column retrieval matches
+  auto single_color = store.GetFilterValuesBatch(doc_ids, "color");
+  auto single_size = store.GetFilterValuesBatch(doc_ids, "size");
+  ASSERT_EQ(single_color.size(), multi_results[0].size());
+  for (size_t i = 0; i < single_color.size(); ++i) {
+    EXPECT_EQ(single_color[i].has_value(), multi_results[0][i].has_value());
+  }
+  ASSERT_EQ(single_size.size(), multi_results[1].size());
+  for (size_t i = 0; i < single_size.size(); ++i) {
+    EXPECT_EQ(single_size[i].has_value(), multi_results[1][i].has_value());
+  }
+}
+
+/**
+ * @brief Test multi-column retrieval with empty inputs
+ */
+TEST(DocumentStoreRetrievalTest, MultiColumnBatchEmptyInputs) {
+  DocumentStore store;
+
+  // Empty doc_ids
+  std::vector<DocId> empty_ids;
+  std::vector<std::string> columns = {"color"};
+  auto result1 = store.GetFilterValuesBatchMultiColumn(empty_ids, columns);
+  ASSERT_EQ(result1.size(), 1u);
+  EXPECT_TRUE(result1[0].empty());
+
+  // Empty columns
+  FilterMap filters = {{"color", std::string("red")}};
+  auto id = store.AddDocument("pk1", filters, "text1");
+  ASSERT_TRUE(id.has_value());
+  std::vector<DocId> doc_ids = {*id};
+  std::vector<std::string> empty_cols;
+  auto result2 = store.GetFilterValuesBatchMultiColumn(doc_ids, empty_cols);
+  EXPECT_TRUE(result2.empty());
+}
+
+/**
+ * @brief Test multi-column retrieval with non-existent doc IDs
+ */
+TEST(DocumentStoreRetrievalTest, MultiColumnBatchNonExistentDocIds) {
+  DocumentStore store;
+
+  FilterMap filters = {{"color", std::string("red")}};
+  auto id = store.AddDocument("pk1", filters, "text1");
+  ASSERT_TRUE(id.has_value());
+
+  // Include a non-existent doc ID
+  std::vector<DocId> doc_ids = {*id, 99999};
+  std::vector<std::string> columns = {"color"};
+
+  auto multi_results = store.GetFilterValuesBatchMultiColumn(doc_ids, columns);
+  ASSERT_EQ(multi_results.size(), 1u);
+  ASSERT_EQ(multi_results[0].size(), 2u);
+  EXPECT_TRUE(multi_results[0][0].has_value());
+  EXPECT_FALSE(multi_results[0][1].has_value());  // non-existent doc
+
+  // Should match single-column retrieval
+  auto single = store.GetFilterValuesBatch(doc_ids, "color");
+  ASSERT_EQ(single.size(), 2u);
+  EXPECT_EQ(single[0].has_value(), multi_results[0][0].has_value());
+  EXPECT_EQ(single[1].has_value(), multi_results[0][1].has_value());
+}

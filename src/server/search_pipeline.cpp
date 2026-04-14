@@ -152,11 +152,14 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
                              int ngram_size, int kanji_ngram_size, bool cross_boundary, size_t filter_threshold) {
   SearchPipelineResult result;
 
-  // Check for empty term (early exit)
-  if (!term_infos.empty() &&
-      (term_infos[0].estimated_size == 0 || term_infos[0].estimated_size == std::numeric_limits<size_t>::max())) {
-    result.empty_term_detected = true;
-    return result;
+  // Check ALL terms for empty n-gram results (not just the first).
+  // If any term has zero or max estimated size, the intersection result
+  // is guaranteed to be empty, so skip the expensive search.
+  for (const auto& ti : term_infos) {
+    if (ti.estimated_size == 0 || ti.estimated_size == std::numeric_limits<size_t>::max()) {
+      result.empty_term_detected = true;
+      return result;
+    }
   }
 
   // Perform intersection (AND of all terms)
@@ -214,7 +217,10 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
 
 namespace {
 
-/// @brief Convert FilterOp enum to the string representation used by CompareValues
+/// @brief Convert FilterOp enum to the string representation used by CompareValues.
+/// NOTE: A separate FilterOpToString exists in QueryNormalizer for cache-key
+/// normalization, with a different default ("=" vs "" here). These serve
+/// different purposes and are intentionally separate.
 inline std::string_view FilterOpToString(query::FilterOp op) {
   switch (op) {
     case query::FilterOp::EQ:

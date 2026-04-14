@@ -365,14 +365,19 @@ size_t PostingList::MemoryUsageApprox() const {
 }
 
 void PostingList::UpdateCountsAndVersion() {
+  // Use memory_order_release for doc_count_ and cached_memory_size_ so that
+  // SizeApprox() and MemoryUsageApprox() (which read with acquire) form proper
+  // release-acquire pairs, ensuring visibility on weakly-ordered architectures
+  // (e.g., ARM). The version_ increment provides additional ordering for
+  // callers that check version_ first.
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-    doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
+    doc_count_.store(delta_compressed_.size(), std::memory_order_release);
     cached_memory_size_.store(delta_compressed_.capacity() * sizeof(uint32_t) + sizeof(std::vector<uint32_t>),
-                              std::memory_order_relaxed);
+                              std::memory_order_release);
   } else {
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_release);
     cached_memory_size_.store(roaring_bitmap_ != nullptr ? roaring_bitmap_portable_size_in_bytes(roaring_bitmap_) : 0,
-                              std::memory_order_relaxed);
+                              std::memory_order_release);
   }
   version_.fetch_add(1, std::memory_order_release);
 }

@@ -167,7 +167,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     flag_guard.Release();
 
     // Return immediately with started message (async mode)
-    return "OK DUMP_STARTED " + filepath + "\r\nUse DUMP STATUS to monitor progress";
+    // Do NOT embed \r\n in the response -- the TCP protocol uses \r\n as the
+    // frame terminator, so the client would truncate at the first \r\n.
+    return "OK DUMP_STARTED " + filepath;
   }
 
   // Fallback: run synchronously if no progress tracking available (e.g., in tests)
@@ -299,8 +301,9 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     }
   }
 
-  // Clear the in-progress flag
-  ctx_.dump_save_in_progress = false;
+  // Use explicit store with release semantics for consistency with
+  // the corresponding load(memory_order_acquire) in HandleDumpSave.
+  ctx_.dump_save_in_progress.store(false, std::memory_order_release);
   return success;
 }
 

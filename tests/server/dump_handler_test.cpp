@@ -1611,10 +1611,10 @@ TEST_F(DumpHandlerAsyncTest, AsyncDumpSaveReturnsStartedMessage) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Should return DUMP_STARTED immediately (async mode)
+  // Should return DUMP_STARTED immediately (async mode).
+  // Response is a single line without embedded \r\n (the TCP frame terminator).
   EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0) << "Response: " << response;
   EXPECT_TRUE(response.find(test_filepath_) != std::string::npos);
-  EXPECT_TRUE(response.find("DUMP STATUS") != std::string::npos);
 
   // Wait for worker to complete
   dump_progress_->JoinWorker();

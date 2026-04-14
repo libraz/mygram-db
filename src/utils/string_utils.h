@@ -179,7 +179,7 @@ std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ng
  * @param text UTF-8 encoded text
  * @return Number of Unicode code points
  */
-uint32_t CountCodePoints(std::string_view text);
+size_t CountCodePoints(std::string_view text);
 
 /**
  * @brief Check if a Unicode whitespace character starts at the given position

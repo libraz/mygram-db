@@ -167,8 +167,9 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     summary << ")";
   }
   summary << "\r\n";
-  summary << "  MySQL: " << test_config.mysql.user << "@" << test_config.mysql.host << ":" << test_config.mysql.port
-          << "\r\n";
+  // Intentionally omit mysql.user to prevent credential disclosure via TCP.
+  // CONFIG VERIFY is accessible to all authenticated clients.
+  summary << "  MySQL: " << test_config.mysql.host << ":" << test_config.mysql.port << "\r\n";
 
   return "+OK\r\n" + summary.str();
 }

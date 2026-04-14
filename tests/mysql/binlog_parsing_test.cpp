@@ -1480,4 +1480,45 @@ TEST(BinlogParsingTest, MariaDBGtidEventWithValidChecksum) {
   EXPECT_EQ(computed_crc, stored_crc) << "CRC32 should be valid for builder-generated MariaDB GTID event";
 }
 
+// ============================================================================
+// RENAME TABLE multi-pair regression tests
+// ============================================================================
+
+/**
+ * @brief Regression test: RENAME TABLE with multiple pairs finds target in later pair
+ *
+ * Verifies that IsTableAffectingDDL correctly finds the target table
+ * when it appears as the destination in a multi-pair RENAME statement.
+ * Previously, a broken skip loop (while-break no-op) could fail to
+ * advance past non-matching table names.
+ */
+TEST(BinlogParsingTest, RenameTableMultiplePairsTargetInDestination) {
+  // Target table appears only as destination in the second pair
+  EXPECT_TRUE(
+      BinlogEventParser::IsTableAffectingDDL("RENAME TABLE users TO users_old, new_articles TO articles", "articles"));
+
+  // Target table appears only as source in the second pair
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE users TO users_old, articles TO articles_archive",
+                                                     "articles"));
+
+  // Target table is not in any pair
+  EXPECT_FALSE(
+      BinlogEventParser::IsTableAffectingDDL("RENAME TABLE users TO users_old, posts TO posts_old", "articles"));
+
+  // Three pairs, target in the last pair
+  EXPECT_TRUE(
+      BinlogEventParser::IsTableAffectingDDL("RENAME TABLE a TO b, c TO d, articles TO articles_v2", "articles"));
+
+  // Three pairs, target in the last pair as destination
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("RENAME TABLE a TO b, c TO d, old_tbl TO articles", "articles"));
+
+  // With backticks in multi-pair
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL(
+      "RENAME TABLE `users` TO `users_old`, `articles` TO `articles_new`", "articles"));
+
+  // Case insensitive multi-pair
+  EXPECT_TRUE(
+      BinlogEventParser::IsTableAffectingDDL("rename table users to users_old, ARTICLES to articles_new", "articles"));
+}
+
 #endif  // USE_MYSQL

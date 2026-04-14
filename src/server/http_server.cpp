@@ -93,11 +93,38 @@ json FilterValueToJson(const storage::FilterValue& value) {
   return serialized;
 }
 /**
+ * @brief Convert a JSON filter value to its string representation.
+ *
+ * Handles string, integer, float, and boolean types with appropriate coercion.
+ * Returns std::nullopt if the value type is unsupported.
+ */
+std::optional<std::string> JsonFilterValueToString(const json& val) {
+  if (val.is_string()) {
+    return val.get<std::string>();
+  }
+  if (val.is_number_integer()) {
+    return std::to_string(val.get<int64_t>());
+  }
+  if (val.is_number_float()) {
+    return std::to_string(val.get<double>());
+  }
+  if (val.is_boolean()) {
+    return val.get<bool>() ? "1" : "0";
+  }
+  return std::nullopt;
+}
+
+/**
  * @brief Parse filter conditions from a JSON "filters" object into a query
  *
  * Supports two formats:
  * - Format 1: {"col": "value"} or {"col": 123} - defaults to EQ operator
  * - Format 2: {"col": {"op": "GT", "value": "10"}} - full operator support
+ *
+ * NOTE: A similar ParseFiltersFromJson exists in http_server_handlers.cpp
+ * with a slightly different signature (takes body vs filters_json, returns
+ * error string vs bool). Both share the same parsing logic via
+ * JsonFilterValueToString. If modifying filter parsing, update both.
  *
  * @param filters_json The JSON object containing filter definitions
  * @param query The query to populate with parsed filter conditions
@@ -110,7 +137,6 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
     query::FilterCondition filter;
     filter.column = key;
 
-    // Check if value is an object with operator specification
     if (val.is_object() && val.contains("value")) {
       // Format 2: full operator support
       std::string op_str = val.value("op", "EQ");
@@ -121,35 +147,21 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
       }
       filter.op = parsed_op.value();
 
-      // Get the value
-      const json& value_field = val["value"];
-      if (value_field.is_string()) {
-        filter.value = value_field.get<std::string>();
-      } else if (value_field.is_number_integer()) {
-        filter.value = std::to_string(value_field.get<int64_t>());
-      } else if (value_field.is_number_float()) {
-        filter.value = std::to_string(value_field.get<double>());
-      } else if (value_field.is_boolean()) {
-        filter.value = value_field.get<bool>() ? "1" : "0";
-      } else {
+      auto str_val = JsonFilterValueToString(val["value"]);
+      if (!str_val.has_value()) {
         error_message = "Invalid filter value type for column: " + key;
         return false;
       }
+      filter.value = std::move(str_val.value());
     } else {
       // Format 1: backward compatible (defaults to EQ)
       filter.op = query::FilterOp::EQ;
-      if (val.is_string()) {
-        filter.value = val.get<std::string>();
-      } else if (val.is_number_integer()) {
-        filter.value = std::to_string(val.get<int64_t>());
-      } else if (val.is_number_float()) {
-        filter.value = std::to_string(val.get<double>());
-      } else if (val.is_boolean()) {
-        filter.value = val.get<bool>() ? "1" : "0";
-      } else {
+      auto str_val = JsonFilterValueToString(val);
+      if (!str_val.has_value()) {
         error_message = "Invalid filter value type for column: " + key;
         return false;
       }
+      filter.value = std::move(str_val.value());
     }
 
     query.filters.push_back(std::move(filter));
@@ -393,12 +405,14 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 }
 
 void HttpServer::Stop() {
-  if (!running_) {
+  // Use compare_exchange to prevent concurrent double-stop, matching the
+  // pattern in ConnectionAcceptor::Stop() and SnapshotScheduler::Stop().
+  bool expected = true;
+  if (!running_.compare_exchange_strong(expected, false)) {
     return;
   }
 
   mygram::utils::StructuredLog().Event("http_server_stopping").Info();
-  running_ = false;
 
   if (server_) {
     server_->stop();

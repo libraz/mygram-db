@@ -585,7 +585,12 @@ std::pair<std::string, std::string> SplitOnFirst(std::string_view str, std::stri
 std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ngram_size, int kanji_ngram_size,
                                              bool cross_boundary_ngrams) {
   if (kanji_ngram_size > 0) {
-    return GenerateHybridNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+    // When kanji_ngram_size is explicitly set but ngram_size is 0 (meaning
+    // "use default"), substitute the default ASCII n-gram size (2, matching
+    // GenerateHybridNgrams default parameter) to avoid returning empty results
+    // due to its ascii_ngram_size <= 0 guard.
+    int effective_ngram_size = (ngram_size > 0) ? ngram_size : 2;
+    return GenerateHybridNgrams(normalized, effective_ngram_size, kanji_ngram_size, cross_boundary_ngrams);
   }
   if (ngram_size == 0) {
     return GenerateHybridNgrams(normalized);
@@ -593,8 +598,8 @@ std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ng
   return GenerateNgrams(normalized, ngram_size);
 }
 
-uint32_t CountCodePoints(std::string_view text) {
-  uint32_t count = 0;
+size_t CountCodePoints(std::string_view text) {
+  size_t count = 0;
   for (size_t i = 0; i < text.size();) {
     auto byte = static_cast<unsigned char>(text[i]);
     if (byte < 0x80) {

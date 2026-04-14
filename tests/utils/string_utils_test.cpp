@@ -1288,3 +1288,39 @@ TEST(StringUtilsTest, IsUnicodeWhitespace_TruncatedSequence) {
   size_t len = 0;
   EXPECT_FALSE(IsUnicodeWhitespace(truncated, 0, len));
 }
+
+// ============================================================================
+// Bug fix regression tests
+// ============================================================================
+
+/**
+ * @brief Regression test: ngram_size=0 with kanji_ngram_size>0 must not return empty
+ *
+ * Previously, GenerateQueryNgrams(text, 0, 1, true) called GenerateHybridNgrams
+ * with ascii_ngram_size=0, which hit an early-return guard and produced zero
+ * n-grams for all input. The fix substitutes the default ASCII n-gram size (2).
+ */
+TEST(StringUtilsBugFixTest, GenerateQueryNgramsZeroNgramSizeWithKanjiSize) {
+  // Pure ASCII with kanji_ngram_size=1, ngram_size=0 (default) — must produce bigrams
+  auto ngrams = GenerateQueryNgrams("hello", 0, 1, true);
+  EXPECT_FALSE(ngrams.empty());
+  // Should behave like GenerateHybridNgrams("hello", 2, 1, true)
+  auto expected = GenerateHybridNgrams("hello", 2, 1, true);
+  EXPECT_EQ(ngrams, expected);
+
+  // Mixed CJK + ASCII
+  auto mixed = GenerateQueryNgrams("漢字test", 0, 1, true);
+  EXPECT_FALSE(mixed.empty());
+  auto mixed_expected = GenerateHybridNgrams("漢字test", 2, 1, true);
+  EXPECT_EQ(mixed, mixed_expected);
+
+  // Pure CJK
+  auto cjk = GenerateQueryNgrams("東京都", 0, 1, false);
+  EXPECT_FALSE(cjk.empty());
+
+  // With kanji_ngram_size=2, ngram_size=0
+  auto kanji2 = GenerateQueryNgrams("漢字ABC", 0, 2, true);
+  EXPECT_FALSE(kanji2.empty());
+  auto kanji2_expected = GenerateHybridNgrams("漢字ABC", 2, 2, true);
+  EXPECT_EQ(kanji2, kanji2_expected);
+}

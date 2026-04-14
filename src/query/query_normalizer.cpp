@@ -184,6 +184,10 @@ std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::Orde
   return result;
 }
 
+// NOTE: A separate FilterOpToString exists in search_pipeline.cpp for runtime
+// filter comparison, returning string_view with "" as default. This version
+// returns "=" as default for cache-key normalization. Intentionally separate.
+// [AUDIT:FilterOpToString-separation]
 std::string QueryNormalizer::FilterOpToString(query::FilterOp filter_op) {
   switch (filter_op) {
     case query::FilterOp::EQ:
