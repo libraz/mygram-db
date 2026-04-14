@@ -74,6 +74,11 @@ enum class ErrorCode : std::uint16_t {
   kMySQLUnsupportedType = 2015,         ///< Unsupported MySQL column type
   kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
 
+  // MariaDB-specific errors (2020-2029)
+  kMariaDBInvalidGTID = 2020,        ///< Invalid MariaDB GTID format (expected domain-server-seq)
+  kMariaDBProtocolError = 2021,      ///< MariaDB binlog protocol error
+  kMariaDBUnsupportedVersion = 2022, ///< MariaDB version not supported
+
   // ===== Query Parsing Errors (3000-3999) =====
   kQuerySyntaxError = 3000,           ///< Query syntax error
   kQueryInvalidToken = 3001,          ///< Invalid token in query
@@ -246,6 +251,14 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Invalid field metadata";
     case ErrorCode::kMySQLUnsupportedType:
       return "Unsupported column type";
+    case ErrorCode::kMySQLBinlogChecksumMismatch:
+      return "Binlog checksum mismatch";
+    case ErrorCode::kMariaDBInvalidGTID:
+      return "Invalid MariaDB GTID";
+    case ErrorCode::kMariaDBProtocolError:
+      return "MariaDB protocol error";
+    case ErrorCode::kMariaDBUnsupportedVersion:
+      return "MariaDB version not supported";
 
     // Query
     case ErrorCode::kQuerySyntaxError:

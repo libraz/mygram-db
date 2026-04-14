@@ -379,6 +379,87 @@ class BinlogEventBuilder {
     FixEventSizeWithChecksum(buf);
     return buf;
   }
+  // =========================================================================
+  // MariaDB-specific event builders
+  // =========================================================================
+
+  /**
+   * @brief Build a MARIADB_GTID_EVENT (type 162).
+   *
+   * Post-header: [seq_no(8B LE)][domain_id(4B LE)][flags(1B)]
+   * Tail: [CRC32 checksum placeholder(4B)]
+   *
+   * The server_id is stored in the standard event header.
+   */
+  static inline std::vector<uint8_t> BuildMariaDBGtidEvent(uint32_t domain_id, uint32_t server_id, uint64_t seq_no,
+                                                            uint8_t flags = 0) {
+    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_EVENT, server_id);
+
+    // Post-header
+    AppendLittleEndian64(buf, seq_no);
+    AppendLittleEndian32(buf, domain_id);
+    buf.push_back(flags);
+
+    // CRC32 checksum placeholder
+    AppendLittleEndian32(buf, 0);
+
+    FixEventSizeWithChecksum(buf);
+    FixChecksum(buf);
+    return buf;
+  }
+
+  /**
+   * @brief Build a MARIADB_GTID_LIST_EVENT (type 163).
+   *
+   * Post-header: [count_and_flags(4B LE)]
+   * Body: [entries: domain_id(4B) + server_id(4B) + seq_no(8B)] * count
+   * Tail: [CRC32 checksum placeholder(4B)]
+   */
+  struct MariaDBGtidEntry {
+    uint32_t domain_id;
+    uint32_t server_id;
+    uint64_t seq_no;
+  };
+
+  static inline std::vector<uint8_t> BuildMariaDBGtidListEvent(const std::vector<MariaDBGtidEntry>& entries,
+                                                                uint32_t flags = 0) {
+    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT);
+
+    uint32_t count_and_flags = (flags << 28) | (static_cast<uint32_t>(entries.size()) & 0x0FFFFFFFu);
+    AppendLittleEndian32(buf, count_and_flags);
+
+    for (const auto& entry : entries) {
+      AppendLittleEndian32(buf, entry.domain_id);
+      AppendLittleEndian32(buf, entry.server_id);
+      AppendLittleEndian64(buf, entry.seq_no);
+    }
+
+    // CRC32 checksum placeholder
+    AppendLittleEndian32(buf, 0);
+
+    FixEventSizeWithChecksum(buf);
+    FixChecksum(buf);
+    return buf;
+  }
+
+  /**
+   * @brief Build a MARIADB_ANNOTATE_ROWS_EVENT (type 160).
+   *
+   * Body: SQL text
+   * Tail: [CRC32 checksum placeholder(4B)]
+   */
+  static inline std::vector<uint8_t> BuildMariaDBAnnotateRowsEvent(const std::string& sql) {
+    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT);
+
+    buf.insert(buf.end(), sql.begin(), sql.end());
+
+    // CRC32 checksum placeholder
+    AppendLittleEndian32(buf, 0);
+
+    FixEventSizeWithChecksum(buf);
+    FixChecksum(buf);
+    return buf;
+  }
 };
 
 }  // namespace mygramdb::mysql::test

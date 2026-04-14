@@ -15,7 +15,6 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cassert>
 #include <cstring>
 #include <utility>
 
@@ -23,6 +22,7 @@
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/connection_validator.h"
 #include "mysql/gtid_encoder.h"
+#include "mysql/mariadb_gtid.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
@@ -262,20 +262,14 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   return true;
 }
 
-void BinlogReader::FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set) {
-  // Copy pre-encoded GTID data into the packet buffer
-  // Invariant: rpl->gtid_set_encoded_size == encoded_data->size()
-  // This is guaranteed because we set rpl->gtid_set_encoded_size from the same
-  // vector before calling mysql_binlog_open(), which allocates packet_gtid_set
-  // with exactly that size.
-  auto* encoded_data = static_cast<std::vector<uint8_t>*>(rpl->gtid_set_arg);
-  assert(rpl->gtid_set_encoded_size ==
-         encoded_data->size());  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-  std::memcpy(packet_gtid_set, encoded_data->data(), encoded_data->size());
-}
-
 std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
   if (gtid.empty()) {
+    return gtid;
+  }
+
+  // MariaDB GTIDs (domain-server-seq) don't need range conversion.
+  // MariaDB uses @slave_connect_state which takes the GTID as-is.
+  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
     return gtid;
   }
 

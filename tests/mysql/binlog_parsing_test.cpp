@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstring>
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
@@ -13,6 +14,7 @@
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
+#include "utils/crc32.h"
 
 #ifdef USE_MYSQL
 
@@ -1399,6 +1401,83 @@ TEST(BinlogParsingTest, PartialUpdateRowsEventReturnsEmpty) {
                                                     nullptr, false);
 
   EXPECT_TRUE(events.empty()) << "PARTIAL_UPDATE_ROWS_EVENT should return empty vector";
+}
+
+// ===========================================================================
+// MariaDB event type handling tests
+// ===========================================================================
+
+TEST(BinlogParsingTest, MariaDBGtidEventReturnsEmpty) {
+  // MARIADB_GTID_EVENT (162) is handled by ReaderThreadFunc, not ParseBinlogEvent
+  auto buffer = test::BinlogEventBuilder::BuildMariaDBGtidEvent(0, 1, 42);
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  EXPECT_TRUE(events.empty()) << "MARIADB_GTID_EVENT should return empty (handled by reader thread)";
+}
+
+TEST(BinlogParsingTest, MariaDBGtidListEventReturnsEmpty) {
+  auto buffer = test::BinlogEventBuilder::BuildMariaDBGtidListEvent({{0, 1, 42}, {1, 2, 100}});
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  EXPECT_TRUE(events.empty()) << "MARIADB_GTID_LIST_EVENT should return empty";
+}
+
+TEST(BinlogParsingTest, MariaDBAnnotateRowsEventReturnsEmpty) {
+  auto buffer = test::BinlogEventBuilder::BuildMariaDBAnnotateRowsEvent("INSERT INTO t1 VALUES (1, 'test')");
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  EXPECT_TRUE(events.empty()) << "MARIADB_ANNOTATE_ROWS_EVENT should return empty";
+}
+
+TEST(BinlogParsingTest, MariaDBBinlogCheckpointEventReturnsEmpty) {
+  // Build a minimal event with type 161 (MARIADB_BINLOG_CHECKPOINT_EVENT)
+  auto buffer = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT);
+  // Add some payload + CRC32
+  test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // checkpoint data
+  test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // CRC32 placeholder
+  test::BinlogEventBuilder::FixEventSizeWithChecksum(buffer);
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  EXPECT_TRUE(events.empty()) << "MARIADB_BINLOG_CHECKPOINT_EVENT should return empty";
+}
+
+TEST(BinlogParsingTest, MariaDBStartEncryptionEventReturnsEmpty) {
+  // Build a minimal event with type 164 (MARIADB_START_ENCRYPTION_EVENT)
+  auto buffer = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT);
+  test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // CRC32 placeholder
+  test::BinlogEventBuilder::FixEventSizeWithChecksum(buffer);
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "0-1-42", cache, table_contexts, nullptr, false);
+  EXPECT_TRUE(events.empty()) << "MARIADB_START_ENCRYPTION_EVENT should return empty";
+}
+
+// Verify CRC32 validation works with MariaDB events built via BinlogEventBuilder
+TEST(BinlogParsingTest, MariaDBGtidEventWithValidChecksum) {
+  auto buffer = test::BinlogEventBuilder::BuildMariaDBGtidEvent(5, 10, 12345);
+
+  // Verify CRC32 is valid (builder calls FixChecksum)
+  size_t data_len = buffer.size() - 4;
+  uint32_t computed_crc = mygram::utils::ComputeCRC32(buffer.data(), data_len);
+  uint32_t stored_crc = 0;
+  std::memcpy(&stored_crc, buffer.data() + data_len, sizeof(stored_crc));
+  EXPECT_EQ(computed_crc, stored_crc) << "CRC32 should be valid for builder-generated MariaDB GTID event";
 }
 
 #endif  // USE_MYSQL

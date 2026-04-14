@@ -15,6 +15,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     rows_parser_field_decoder.cpp
     rows_parser_filter.cpp
     gtid_encoder.cpp
+    mariadb_gtid.cpp
+    mysql_binlog_stream.cpp
+    mariadb_binlog_stream.cpp
+    mariadb_event_parser.cpp
   )
 
   target_link_libraries(mygramdb_mysql

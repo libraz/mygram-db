@@ -61,6 +61,21 @@ gtest_discover_tests(null_binlog_reader_test
 )
 
 if(USE_MYSQL AND MYSQL_FOUND)
+  # MariaDB GTID parsing tests (no MySQL connection required)
+  add_executable(mariadb_gtid_test
+    mariadb_gtid_test.cpp
+  )
+
+  target_link_libraries(mariadb_gtid_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(mariadb_gtid_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # ENUM/SET field decoder tests
   add_executable(rows_parser_enum_set_test
     rows_parser_enum_set_test.cpp
@@ -283,6 +298,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(binlog_reader_resource_unit_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
+  # MariaDB event parser tests (no MySQL connection required)
+  add_executable(mariadb_event_parser_test
+    mariadb_event_parser_test.cpp
+  )
+
+  target_link_libraries(mariadb_event_parser_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(mariadb_event_parser_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
   )

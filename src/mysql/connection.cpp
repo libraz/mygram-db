@@ -75,7 +75,11 @@ Connection::~Connection() {
 }
 
 Connection::Connection(Connection&& other) noexcept
-    : config_(std::move(other.config_)), mysql_(other.mysql_), last_error_(std::move(other.last_error_)) {
+    : config_(std::move(other.config_)),
+      mysql_(other.mysql_),
+      flavor_(other.flavor_),
+      server_version_(std::move(other.server_version_)),
+      last_error_(std::move(other.last_error_)) {
   other.mysql_ = nullptr;
 }
 
@@ -84,6 +88,8 @@ Connection& Connection::operator=(Connection&& other) noexcept {
     Close();
     config_ = std::move(other.config_);
     mysql_ = other.mysql_;
+    flavor_ = other.flavor_;
+    server_version_ = std::move(other.server_version_);
     last_error_ = std::move(other.last_error_);
     other.mysql_ = nullptr;
   }
@@ -244,6 +250,15 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         .Debug();
   }
 
+  // Detect server flavor (MySQL vs MariaDB) from version string
+  {
+    const char* server_info = mysql_get_server_info(mysql_);
+    if (server_info != nullptr) {
+      server_version_ = server_info;
+      flavor_ = DetectServerFlavor(server_version_);
+    }
+  }
+
   std::string context_prefix = context.empty() ? "" : "[" + context + "] ";
   std::string db_info = config_.database.empty() ? "" : "/" + config_.database;
   std::string ssl_info = config_.ssl_enable ? " (SSL/TLS)" : "";
@@ -255,6 +270,8 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
       .Field("port", static_cast<uint64_t>(config_.port))
       .Field("database", config_.database)
       .Field("ssl", config_.ssl_enable)
+      .Field("flavor", GetServerFlavorName(flavor_))
+      .Field("version", server_version_)
       .Debug();
   return {};
 }
@@ -393,7 +410,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
 }
 
 std::optional<std::string> Connection::GetExecutedGTID() {
-  auto result = Execute("SELECT @@GLOBAL.gtid_executed");
+  const char* query =
+      (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.gtid_current_pos" : "SELECT @@GLOBAL.gtid_executed";
+  auto result = Execute(query);
   if (!result) {
     return std::nullopt;
   }
@@ -413,6 +432,10 @@ std::optional<std::string> Connection::GetExecutedGTID() {
 }
 
 std::optional<std::string> Connection::GetPurgedGTID() {
+  if (flavor_ == ServerFlavor::kMariaDB) {
+    return std::nullopt;
+  }
+
   auto result = Execute("SELECT @@GLOBAL.gtid_purged");
   if (!result) {
     return std::nullopt;
@@ -462,7 +485,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
 }
 
 std::optional<std::string> Connection::GetServerUUID() {
-  auto result = Execute("SELECT @@GLOBAL.server_uuid");
+  const char* query =
+      (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.server_id" : "SELECT @@GLOBAL.server_uuid";
+  auto result = Execute(query);
   if (!result) {
     return std::nullopt;
   }
@@ -480,6 +505,16 @@ std::optional<std::string> Connection::GetServerUUID() {
 }
 
 bool Connection::IsGTIDModeEnabled() {
+  if (flavor_ == ServerFlavor::kMariaDB) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_debug")
+        .Field("action", "get_gtid_mode")
+        .Field("mode", "always_on")
+        .Field("flavor", "MariaDB")
+        .Debug();
+    return true;
+  }
+
   auto result = Execute("SELECT @@GLOBAL.gtid_mode");
   if (!result) {
     mygram::utils::StructuredLog()
@@ -506,7 +541,36 @@ bool Connection::IsGTIDModeEnabled() {
 }
 
 std::optional<std::string> Connection::GetLatestGTID() {
-  // Try new syntax first (MySQL 8.0.23+)
+  if (flavor_ == ServerFlavor::kMariaDB) {
+    auto result = Execute("SELECT @@GLOBAL.gtid_binlog_pos");
+    if (!result) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_error")
+          .Field("operation", "get_latest_gtid")
+          .Field("flavor", "MariaDB")
+          .Field("error", "Failed to query @@gtid_binlog_pos")
+          .Error();
+      return std::nullopt;
+    }
+    MYSQL_ROW row = mysql_fetch_row(result->get());
+    if ((row == nullptr) || (row[0] == nullptr)) {
+      return std::nullopt;
+    }
+    std::string gtid_set(row[0]);
+    if (gtid_set.empty()) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_warning")
+          .Field("operation", "get_latest_gtid")
+          .Field("flavor", "MariaDB")
+          .Field("error", "gtid_binlog_pos is empty")
+          .Warn();
+      return std::nullopt;
+    }
+    mygram::utils::StructuredLog().Event("mysql_latest_gtid").Field("gtid_set", gtid_set).Info();
+    return gtid_set;
+  }
+
+  // MySQL: Try new syntax first (MySQL 8.0.23+)
   auto result_exp = Execute("SHOW BINARY LOG STATUS");
 
   // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23

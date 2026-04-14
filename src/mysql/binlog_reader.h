@@ -18,6 +18,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
+#include "mysql/binlog_stream.h"
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
 #include "mysql/rows_parser.h"
@@ -354,8 +355,8 @@ class BinlogReader final : public IBinlogReader {
   std::unordered_map<std::string, std::vector<std::string>> column_names_cache_;
   mutable std::mutex column_names_cache_mutex_;
 
-  // GTID encoding data (must persist during mysql_binlog_open call)
-  std::vector<uint8_t> gtid_encoded_data_;
+  // Binlog stream protocol handler (MySQL or MariaDB)
+  std::unique_ptr<IBinlogStream> binlog_stream_;
 
   /**
    * @brief Set last error message (thread-safe)
@@ -365,13 +366,6 @@ class BinlogReader final : public IBinlogReader {
     std::lock_guard<std::mutex> lock(last_error_mutex_);
     last_error_ = error;
   }
-
-  /**
-   * @brief Static callback for MySQL binlog API to encode GTID set
-   * @param rpl MYSQL_RPL structure
-   * @param packet_gtid_set Buffer to write encoded GTID data
-   */
-  static void FixGtidSetCallback(MYSQL_RPL* rpl, unsigned char* packet_gtid_set);
 
   /**
    * @brief Convert a single GTID "uuid:N" to range "uuid:1-N"

@@ -13,6 +13,7 @@
 #include <cctype>
 
 #include "mysql/connection.h"
+#include "mysql/server_flavor.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
@@ -49,12 +50,13 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
   }
   result.server_uuid = actual_uuid;
 
-  // Detect failover (server UUID changed)
+  // Detect failover (server UUID/ID changed)
   if (expected_uuid && *expected_uuid != actual_uuid) {
     result.failover_detected = true;
 
     // Verify current GTID position is valid on the new server
-    if (last_gtid && !last_gtid->empty()) {
+    // GTID_SUBSET is MySQL-specific; MariaDB doesn't have this function
+    if (conn.GetFlavor() != ServerFlavor::kMariaDB && last_gtid && !last_gtid->empty()) {
       // Validate GTID format before using in SQL
       const std::string& gtid_str = *last_gtid;
       bool valid_format = true;
@@ -261,7 +263,19 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
     return false;
   }
 
-  // Get purged GTID set
+  // MariaDB doesn't have gtid_purged or GTID_SUBSET function.
+  // Skip purge check for MariaDB; the binlog stream will report an error
+  // if the requested position has been purged.
+  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
+    mygram::utils::StructuredLog()
+        .Event("gtid_consistency_check")
+        .Field("executed_gtid", *executed_gtid)
+        .Field("flavor", "MariaDB")
+        .Debug();
+    return true;
+  }
+
+  // Get purged GTID set (MySQL only)
   auto purged_gtid = conn.GetPurgedGTID();
   if (!purged_gtid) {
     error = "Failed to retrieve purged GTID set";
@@ -310,6 +324,11 @@ bool ConnectionValidator::CheckGTIDConsistency(Connection& conn, const std::opti
 }
 
 bool ConnectionValidator::CheckBinlogCompression(Connection& conn, std::string& error) {
+  // MariaDB doesn't support binlog_transaction_compression
+  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
+    return true;
+  }
+
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
   if (!result) {
     // Variable doesn't exist (MySQL < 8.0.20) - OK
@@ -393,6 +412,11 @@ bool ConnectionValidator::CheckBinlogFormat(Connection& conn, std::string& error
 }
 
 bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings) {
+  // MariaDB doesn't have binlog_row_value_options
+  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
+    return true;
+  }
+
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_value_options'");
   if (!result) {
     return true;
@@ -421,6 +445,11 @@ bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std
 }
 
 bool ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings) {
+  // Tagged GTIDs are a MySQL 8.4+ feature, not applicable to MariaDB
+  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
+    return true;
+  }
+
   auto executed = conn.GetExecutedGTID();
   if (!executed) {
     return true;

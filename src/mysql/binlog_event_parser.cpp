@@ -472,6 +472,14 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       // MySQL 8.4+ tagged GTIDs - handled by caller (binlog_reader) like GTID_LOG_EVENT
       return {};
 
+    // MariaDB-specific events: handled by caller (binlog_reader_threads) or informational only
+    case MySQLBinlogEventType::MARIADB_GTID_EVENT:
+    case MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT:
+    case MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT:
+    case MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT:
+    case MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT:
+      return {};
+
     default:
       // Ignore other event types
       return {};

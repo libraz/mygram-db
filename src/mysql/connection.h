@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 
+#include "mysql/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -214,6 +215,9 @@ class Connection {
   /**
    * @brief Get last error message
    */
+  [[nodiscard]] ServerFlavor GetFlavor() const { return flavor_; }
+  [[nodiscard]] const std::string& GetServerVersion() const { return server_version_; }
+
   [[nodiscard]] const std::string& GetLastError() const { return last_error_; }
 
   /**
@@ -229,6 +233,8 @@ class Connection {
  private:
   Config config_;
   MYSQL* mysql_ = nullptr;
+  ServerFlavor flavor_ = ServerFlavor::kMySQL;
+  std::string server_version_;
   std::string last_error_;
 
   /**

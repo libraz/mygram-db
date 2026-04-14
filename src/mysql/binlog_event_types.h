@@ -70,6 +70,14 @@ enum class MySQLBinlogEventType : uint8_t {
   HEARTBEAT_LOG_EVENT_V2 = 41,
   GTID_TAGGED_LOG_EVENT = 42,
 
+  // MariaDB-specific event types (160+)
+  // These IDs are assigned by MariaDB and do not overlap with MySQL event types.
+  MARIADB_ANNOTATE_ROWS_EVENT = 160,     ///< Original SQL query for row events (debug)
+  MARIADB_BINLOG_CHECKPOINT_EVENT = 161,  ///< XA crash recovery checkpoint
+  MARIADB_GTID_EVENT = 162,              ///< MariaDB GTID (domain-server-seq)
+  MARIADB_GTID_LIST_EVENT = 163,         ///< List of GTIDs at binlog start
+  MARIADB_START_ENCRYPTION_EVENT = 164,  ///< Binlog encryption marker
+
   ENUM_END_EVENT = 255  // End marker
 };
 
@@ -122,6 +130,16 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
       return "PARTIAL_UPDATE_ROWS_EVENT";
     case MySQLBinlogEventType::ANONYMOUS_GTID_LOG_EVENT:
       return "ANONYMOUS_GTID_LOG_EVENT";
+    case MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT:
+      return "MARIADB_ANNOTATE_ROWS_EVENT";
+    case MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT:
+      return "MARIADB_BINLOG_CHECKPOINT_EVENT";
+    case MySQLBinlogEventType::MARIADB_GTID_EVENT:
+      return "MARIADB_GTID_EVENT";
+    case MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT:
+      return "MARIADB_GTID_LIST_EVENT";
+    case MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT:
+      return "MARIADB_START_ENCRYPTION_EVENT";
     default:
       return "UNKNOWN";
   }

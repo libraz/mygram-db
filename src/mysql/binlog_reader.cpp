@@ -21,6 +21,9 @@
 #include <utility>
 
 #include "mysql/binlog_reader_internal.h"
+#include "mysql/mariadb_binlog_stream.h"
+#include "mysql/mysql_binlog_stream.h"
+#include "mysql/server_flavor.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
@@ -88,6 +91,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       worker_thread_->join();
       worker_thread_.reset();
     }
+    binlog_stream_.reset();
     binlog_connection_.reset();
     metadata_connection_.reset();
     should_stop_ = false;
@@ -109,16 +113,19 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     std::unique_ptr<std::thread>& reader_thread;
     std::unique_ptr<Connection>& binlog_conn;
     std::unique_ptr<Connection>& metadata_conn;
+    std::unique_ptr<IBinlogStream>& stream;
     std::atomic<bool>& should_stop;
     bool success = false;
 
     StartupGuard(std::atomic<bool>& running, std::unique_ptr<std::thread>& worker, std::unique_ptr<std::thread>& reader,
-                 std::unique_ptr<Connection>& conn, std::unique_ptr<Connection>& meta_conn, std::atomic<bool>& stop)
+                 std::unique_ptr<Connection>& conn, std::unique_ptr<Connection>& meta_conn,
+                 std::unique_ptr<IBinlogStream>& binlog_stream, std::atomic<bool>& stop)
         : running_flag(running),
           worker_thread(worker),
           reader_thread(reader),
           binlog_conn(conn),
           metadata_conn(meta_conn),
+          stream(binlog_stream),
           should_stop(stop) {}
 
     ~StartupGuard() {
@@ -141,7 +148,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       worker_thread.reset();
       reader_thread.reset();
 
-      // Reset connections
+      // Reset connections and stream
+      stream.reset();
       binlog_conn.reset();
       metadata_conn.reset();
 
@@ -157,7 +165,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     StartupGuard& operator=(StartupGuard&&) = delete;
   };
 
-  StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_, should_stop_);
+  StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_, binlog_stream_,
+                     should_stop_);
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
@@ -269,6 +278,15 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   }
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
 
+  // Create binlog stream protocol handler based on server flavor
+  if (binlog_connection_->GetFlavor() == ServerFlavor::kMariaDB) {
+    binlog_stream_ = std::make_unique<MariaDBBinlogStream>();
+    mygram::utils::StructuredLog().Event("binlog_stream_flavor").Field("flavor", "MariaDB").Info();
+  } else {
+    binlog_stream_ = std::make_unique<MySQLBinlogStream>();
+    mygram::utils::StructuredLog().Event("binlog_stream_flavor").Field("flavor", "MySQL").Info();
+  }
+
   should_stop_ = false;
   // Note: running_ is already set to true by compare_exchange_strong above
 
@@ -345,7 +363,8 @@ void BinlogReader::Stop() {
     worker_thread_.reset();
   }
 
-  // Now it's safe to destroy connections (all threads have exited)
+  // Now it's safe to destroy connections and stream (all threads have exited)
+  binlog_stream_.reset();
   binlog_connection_.reset();
   metadata_connection_.reset();
 

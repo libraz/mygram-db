@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "mysql/mariadb_gtid.h"
 #include "utils/error.h"
 
 using namespace mygramdb::mysql;
@@ -620,6 +621,41 @@ TEST_F(GtidEncoderTest, DuplicateUuidsWithOverlappingIntervalsMerged) {
 
   EXPECT_EQ(ReadInt64LE(*result, 32), 1);
   EXPECT_EQ(ReadInt64LE(*result, 40), 151);
+}
+
+// ===========================================================================
+// MariaDB GTID passthrough tests for ConvertSingleGtidToRange
+// ===========================================================================
+
+// NOTE: ConvertSingleGtidToRange is a private static method of BinlogReader,
+// but MariaDBGTID::IsMariaDBGtidFormat (used by it) is public and testable.
+// These tests verify the format detection that drives the passthrough logic.
+
+TEST(MariaDBGtidPassthroughTest, IsMariaDBGtidFormatBasic) {
+  EXPECT_TRUE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("0-1-42"));
+  EXPECT_TRUE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("100-200-999999999"));
+  EXPECT_TRUE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("0-0-0"));
+}
+
+TEST(MariaDBGtidPassthroughTest, IsNotMariaDBGtidForMySQLFormat) {
+  // MySQL GTID has 4 dashes (UUID format)
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("3e11fa47-71ca-11e1-9e33-c80aa9429562:42"));
+  // Range format
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("3e11fa47-71ca-11e1-9e33-c80aa9429562:1-42"));
+  // Multi-UUID
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat(
+      "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-42,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10"));
+}
+
+TEST(MariaDBGtidPassthroughTest, IsNotMariaDBGtidForEmpty) {
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat(""));
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("   "));
+}
+
+TEST(MariaDBGtidPassthroughTest, IsNotMariaDBGtidForMalformed) {
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("abc-def-ghi"));  // non-numeric
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("0-1"));          // only 1 dash
+  EXPECT_FALSE(mygramdb::mysql::MariaDBGTID::IsMariaDBGtidFormat("0-1-2-3"));      // too many dashes
 }
 
 TEST_F(GtidEncoderTest, MixedDuplicateAndUniqueUuids) {
