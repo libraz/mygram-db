@@ -330,7 +330,7 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
     // Lambda to check if token is a known keyword
     auto is_known_keyword = [&peek_token]() -> bool {
       return peek_token == "LIMIT" || peek_token == "OFFSET" || peek_token == "FILTER" || peek_token == "AND" ||
-             peek_token == "NOT" || peek_token == "HIGHLIGHT";
+             peek_token == "NOT" || peek_token == "HIGHLIGHT" || peek_token == "FUZZY";
     };
 
     // If next token is not a known keyword, it might be a second column name
@@ -408,6 +408,31 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
   }
 
   query.highlight = opts;
+  return true;
+}
+
+bool QueryParser::ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
+  // FUZZY [distance]
+  // pos is at the token AFTER "FUZZY"
+  uint32_t max_distance = 1;  // Default
+
+  // Check if next token is a number (optional distance parameter)
+  if (pos < tokens.size() && !internal::IsClauseKeyword(tokens[pos])) {
+    try {
+      int val = std::stoi(tokens[pos]);
+      if (val < 1 || val > 2) {
+        SetError("FUZZY distance must be 1 or 2, got: " + tokens[pos]);
+        return false;
+      }
+      max_distance = static_cast<uint32_t>(val);
+      ++pos;
+    } catch (...) {
+      SetError("Invalid FUZZY distance: " + tokens[pos]);
+      return false;
+    }
+  }
+
+  query.fuzzy_max_distance = max_distance;
   return true;
 }
 

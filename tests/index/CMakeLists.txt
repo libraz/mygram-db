@@ -257,3 +257,18 @@ gtest_discover_tests(index_empty_doc_and_search_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# SearchByThreshold tests
+add_executable(search_by_threshold_test
+  search_by_threshold_test.cpp
+)
+
+target_link_libraries(search_by_threshold_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_by_threshold_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

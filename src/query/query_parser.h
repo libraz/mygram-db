@@ -81,6 +81,8 @@ enum class QueryType : uint8_t {
   SET,             // SET variable = value [, variable2 = value2 ...]
   SHOW_VARIABLES,  // SHOW VARIABLES [LIKE 'pattern'] [WHERE condition]
 
+  FACET,  // FACET <table> <column> [search_text] [clauses...]
+
   UNKNOWN
 };
 
@@ -205,8 +207,14 @@ struct Query {
   std::vector<std::pair<std::string, std::string>> variable_assignments;  // For SET: [(name, value), ...]
   std::string variable_like_pattern;                                      // For SHOW VARIABLES LIKE 'pattern'
 
+  // Facet column (set when FACET command is used)
+  std::string facet_column;
+
   // Highlight options (set when HIGHLIGHT keyword is present)
   std::optional<HighlightOptions> highlight;
+
+  // Fuzzy search options (set when FUZZY keyword is present)
+  std::optional<uint32_t> fuzzy_max_distance;
 
   // Cache optimization: precomputed cache key (set by QueryParser)
   // This avoids recomputing normalization and MD5 hash on every cache lookup
@@ -343,6 +351,17 @@ class QueryParser {
    * @brief Parse HIGHLIGHT clause
    */
   bool ParseHighlight(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+
+  /**
+   * @brief Parse FUZZY clause
+   */
+  bool ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+
+  /**
+   * @brief Parse FACET command
+   */
+  [[nodiscard]] mygram::utils::Expected<Query, mygram::utils::Error> ParseFacet(
+      const std::vector<std::string>& tokens, size_t& pos);
 
   /**
    * @brief Tokenize query string

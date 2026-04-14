@@ -2534,3 +2534,172 @@ TEST(QueryParserHighlightTest, HighlightTagMissingArgs) {
   auto result = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <b>");
   EXPECT_FALSE(result.has_value());
 }
+
+// ============================================================
+// FUZZY clause tests
+// ============================================================
+
+TEST(QueryParserFuzzyTest, FuzzyBasic) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 1);
+}
+
+TEST(QueryParserFuzzyTest, FuzzyWithDistance1) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY 1");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 1);
+}
+
+TEST(QueryParserFuzzyTest, FuzzyWithDistance2) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY 2");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 2);
+}
+
+TEST(QueryParserFuzzyTest, FuzzyInvalidDistance3) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY 3");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserFuzzyTest, FuzzyInvalidDistance0) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY 0");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserFuzzyTest, NoFuzzyByDefault) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\"");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->fuzzy_max_distance.has_value());
+}
+
+TEST(QueryParserFuzzyTest, FuzzyWithOtherClauses) {
+  QueryParser parser;
+  auto result =
+      parser.Parse("SEARCH t \"term\" FUZZY 1 FILTER status = active LIMIT 10");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 1);
+  EXPECT_FALSE(result->filters.empty());
+  EXPECT_EQ(result->limit, 10);
+}
+
+TEST(QueryParserFuzzyTest, FuzzyWithHighlight) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY 2 HIGHLIGHT");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 2);
+  EXPECT_TRUE(result->highlight.has_value());
+}
+
+TEST(QueryParserFuzzyTest, FuzzyAfterAnd) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" AND \"other\" FUZZY 1");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 1);
+  EXPECT_EQ(result->and_terms.size(), 1);
+  EXPECT_EQ(result->and_terms[0], "other");
+}
+
+TEST(QueryParserFuzzyTest, FuzzyInvalidNonNumeric) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t \"term\" FUZZY abc");
+  EXPECT_FALSE(result.has_value());
+}
+
+// ============================================================
+// FACET command tests
+// ============================================================
+
+TEST(QueryParserFacetTest, FacetBasic) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->table, "t");
+  EXPECT_EQ(result->facet_column, "column");
+  EXPECT_TRUE(result->search_text.empty());
+}
+
+TEST(QueryParserFacetTest, FacetWithSearch) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column \"hello\"");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->table, "t");
+  EXPECT_EQ(result->facet_column, "column");
+  EXPECT_EQ(result->search_text, "hello");
+}
+
+TEST(QueryParserFacetTest, FacetWithFilter) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column FILTER status = active");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->facet_column, "column");
+  EXPECT_EQ(result->filters.size(), 1);
+  EXPECT_EQ(result->filters[0].column, "status");
+  EXPECT_EQ(result->filters[0].op, FilterOp::EQ);
+  EXPECT_EQ(result->filters[0].value, "active");
+}
+
+TEST(QueryParserFacetTest, FacetWithLimit) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column LIMIT 5");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->limit, 5);
+  EXPECT_TRUE(result->limit_explicit);
+}
+
+TEST(QueryParserFacetTest, FacetMissingColumn) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserFacetTest, FacetMissingTable) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET");
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(QueryParserFacetTest, FacetWithSearchAndFilter) {
+  QueryParser parser;
+  auto result =
+      parser.Parse("FACET t column \"hello\" FILTER status = active LIMIT 10");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->table, "t");
+  EXPECT_EQ(result->facet_column, "column");
+  EXPECT_EQ(result->search_text, "hello");
+  EXPECT_EQ(result->filters.size(), 1);
+  EXPECT_EQ(result->filters[0].column, "status");
+  EXPECT_EQ(result->filters[0].value, "active");
+  EXPECT_EQ(result->limit, 10);
+  EXPECT_TRUE(result->limit_explicit);
+}
+
+TEST(QueryParserFacetTest, FacetWithAndNot) {
+  QueryParser parser;
+  auto result =
+      parser.Parse("FACET t column \"hello\" AND \"world\" NOT \"bad\"");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->search_text, "hello");
+  EXPECT_EQ(result->and_terms.size(), 1);
+  EXPECT_EQ(result->and_terms[0], "world");
+  EXPECT_EQ(result->not_terms.size(), 1);
+  EXPECT_EQ(result->not_terms[0], "bad");
+}

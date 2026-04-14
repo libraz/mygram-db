@@ -141,6 +141,12 @@ bool Query::IsValid() const {
     }
   }
 
+  if (type == QueryType::FACET) {
+    if (facet_column.empty()) {
+      return false;
+    }
+  }
+
   if (type == QueryType::GET) {
     if (primary_key.empty()) {
       return false;
@@ -531,6 +537,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     SetError("SHOW: Unknown subcommand: " + subcommand);
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
+  if (EqualsIgnoreCase(command, "FACET")) {
+    size_t pos = 1;  // Start after FACET command token
+    return ParseFacet(tokens, pos);
   }
 
   SetError("Unknown command: " + std::string(command));

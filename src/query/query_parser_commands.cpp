@@ -187,6 +187,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
+    } else if (keyword == "FUZZY") {
+      ++pos;
+      if (!ParseFuzzy(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
     } else {
       SetError("Unknown keyword: " + keyword);
       query.type = QueryType::UNKNOWN;
@@ -430,6 +436,91 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseGet(const
 
   query.table = tokens[1];
   query.primary_key = tokens[2];
+
+  return query;
+}
+
+mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(const std::vector<std::string>& tokens,
+                                                                             size_t& pos) {
+  Query query;
+  query.type = QueryType::FACET;
+
+  // Require table name
+  if (pos >= tokens.size()) {
+    SetError("FACET requires table name");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  query.table = tokens[pos++];
+
+  // Require column name
+  if (pos >= tokens.size()) {
+    SetError("FACET requires column name");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  query.facet_column = tokens[pos++];
+
+  // Optional: search text (next token that is not a clause keyword)
+  if (pos < tokens.size()) {
+    std::string upper = ToUpper(tokens[pos]);
+    if (!IsClauseKeyword(upper)) {
+      query.search_text = tokens[pos++];
+    }
+  }
+
+  // Parse optional clauses (AND, NOT, FILTER, LIMIT, OFFSET)
+  while (pos < tokens.size()) {
+    std::string keyword = ToUpper(tokens[pos]);
+
+    if (keyword == "AND") {
+      if (!ParseAnd(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+    } else if (keyword == "NOT") {
+      if (!ParseNot(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+    } else if (keyword == "FILTER") {
+      if (!ParseFilters(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+    } else if (keyword == "LIMIT") {
+      if (!ParseLimit(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+    } else if (keyword == "OFFSET") {
+      if (!ParseOffset(tokens, pos, query)) {
+        query.type = QueryType::UNKNOWN;
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+    } else {
+      SetError("FACET: Unknown clause: " + tokens[pos]);
+      query.type = QueryType::UNKNOWN;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    }
+  }
+
+  // Validate term counts
+  if (query.and_terms.size() > kMaxTermCount) {
+    SetError("Too many AND terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.not_terms.size() > kMaxTermCount) {
+    SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+  if (query.filters.size() > kMaxTermCount) {
+    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
+  if (!ValidateQueryLength(query)) {
+    query.type = QueryType::UNKNOWN;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
 
   return query;
 }

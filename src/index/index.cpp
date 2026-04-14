@@ -8,6 +8,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <queue>
+#include <tuple>
 
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -411,6 +413,88 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   std::vector<DocId> result;
   std::set_difference(all_docs.begin(), all_docs.end(), excluded_docs.begin(), excluded_docs.end(),
                       std::back_inserter(result));
+
+  return result;
+}
+
+std::vector<DocId> Index::SearchByThreshold(const std::vector<std::string>& terms, size_t threshold) const {
+  if (terms.empty() || threshold == 0) {
+    return {};
+  }
+
+  // Delegate to SearchAnd when threshold equals term count
+  if (threshold >= terms.size()) {
+    return SearchAnd(terms);
+  }
+
+  // RCU pattern: Take snapshot of posting lists under short lock
+  auto snapshots = TakePostingSnapshots(terms);
+
+  // Collect non-null snapshots (missing n-grams don't count toward threshold)
+  std::vector<std::shared_ptr<PostingList>> valid_snapshots;
+  valid_snapshots.reserve(snapshots.size());
+  for (auto& snapshot : snapshots) {
+    if (snapshot != nullptr) {
+      valid_snapshots.push_back(std::move(snapshot));
+    }
+  }
+
+  // If fewer valid posting lists than threshold, no document can meet it
+  if (valid_snapshots.size() < threshold) {
+    return {};
+  }
+
+  // Get all posting lists as sorted vectors
+  std::vector<std::vector<DocId>> all_docs;
+  all_docs.reserve(valid_snapshots.size());
+  for (const auto& snapshot : valid_snapshots) {
+    all_docs.push_back(snapshot->GetAll());
+  }
+
+  // K-way merge with counting using min-heap
+  // Heap element: (doc_id, list_index, position_in_list)
+  using HeapEntry = std::tuple<DocId, size_t, size_t>;
+  std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
+
+  // Initialize heap with first element of each list
+  for (size_t i = 0; i < all_docs.size(); ++i) {
+    if (!all_docs[i].empty()) {
+      heap.emplace(all_docs[i][0], i, 0);
+    }
+  }
+
+  std::vector<DocId> result;
+  DocId current_doc = 0;
+  size_t current_count = 0;
+  bool has_current = false;
+
+  while (!heap.empty()) {
+    auto [doc_id, list_idx, pos] = heap.top();
+    heap.pop();
+
+    if (!has_current || doc_id != current_doc) {
+      // Emit previous document if it met threshold
+      if (has_current && current_count >= threshold) {
+        result.push_back(current_doc);
+      }
+      current_doc = doc_id;
+      current_count = 1;
+      has_current = true;
+    } else {
+      ++current_count;
+    }
+
+    // Advance in this list
+    size_t next_pos = pos + 1;
+    if (next_pos < all_docs[list_idx].size()) {
+      heap.emplace(all_docs[list_idx][next_pos], list_idx, next_pos);
+    }
+  }
+
+  // Don't forget the last document
+  if (has_current && current_count >= threshold) {
+    result.push_back(current_doc);
+  }
 
   return result;
 }

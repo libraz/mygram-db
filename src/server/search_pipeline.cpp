@@ -19,6 +19,7 @@
 #include "storage/filter_index.h"
 #include "utils/comparison_utils.h"
 #include "utils/constants.h"
+#include "utils/edit_distance.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::server::search_pipeline {
@@ -695,6 +696,134 @@ std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<stora
     }
 
     if (all_groups_match) {
+      verified.push_back(doc_id);
+    }
+  }
+
+  return verified;
+}
+
+SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vector<SearchTermInfo>& term_infos,
+                                      const std::vector<std::string>& all_search_terms, uint32_t max_distance,
+                                      index::Index* current_index, storage::DocumentStore* current_doc_store,
+                                      const config::Config* full_config, int ngram_size, int kanji_ngram_size,
+                                      bool cross_boundary, size_t filter_threshold) {
+  (void)filter_threshold;  // Reserved for future optimization
+  SearchPipelineResult result;
+
+  if (term_infos.empty()) {
+    result.empty_term_detected = true;
+    return result;
+  }
+
+  // Determine effective n-gram size for threshold calculation
+  int effective_ngram_size = ngram_size > 0 ? ngram_size : 2;  // Default bigram in hybrid mode
+
+  bool first_term = true;
+  for (const auto& ti : term_infos) {
+    if (ti.ngrams.empty()) {
+      continue;
+    }
+
+    // Compute threshold: max(1, |ngrams| - max_distance * ngram_size)
+    size_t ngram_count = ti.ngrams.size();
+    size_t drop = static_cast<size_t>(max_distance) * static_cast<size_t>(effective_ngram_size);
+    size_t threshold = (ngram_count > drop) ? (ngram_count - drop) : 1;
+
+    auto term_results = current_index->SearchByThreshold(ti.ngrams, threshold);
+
+    if (first_term) {
+      result.results = std::move(term_results);
+      first_term = false;
+    } else if (!result.results.empty() && !term_results.empty()) {
+      // AND across terms
+      std::vector<storage::DocId> intersection;
+      intersection.reserve(std::min(result.results.size(), term_results.size()));
+      std::set_intersection(result.results.begin(), result.results.end(), term_results.begin(), term_results.end(),
+                            std::back_inserter(intersection));
+      result.results = std::move(intersection);
+    } else {
+      result.results.clear();
+    }
+  }
+
+  if (first_term) {
+    result.empty_term_detected = true;
+    return result;
+  }
+
+  // Apply NOT filter (NOT terms NOT fuzzified)
+  if (!query.not_terms.empty()) {
+    result.results =
+        ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary);
+  }
+
+  // Apply column filters
+  if (!query.filters.empty()) {
+    result.results = ApplyFiltersWithBitmap(result.results, query.filters, current_doc_store);
+  }
+
+  // Apply fuzzy verify_text post-filter
+  if (!result.results.empty() && full_config != nullptr) {
+    const auto& verify_mode = full_config->memory.verify_text;
+    if (verify_mode != "off") {
+      bool should_verify = (verify_mode == "all");
+      if (verify_mode == "ascii") {
+        should_verify = true;
+        for (const auto& term : all_search_terms) {
+          for (unsigned char ch : term) {
+            if (ch >= mygram::constants::kFirstNonAsciiByte) {
+              should_verify = false;
+              break;
+            }
+          }
+          if (!should_verify) {
+            break;
+          }
+        }
+      }
+      if (should_verify) {
+        std::vector<std::string> normalized_terms;
+        normalized_terms.reserve(all_search_terms.size());
+        for (const auto& term : all_search_terms) {
+          normalized_terms.push_back(current_index->NormalizeText(term));
+        }
+        result.results = PostFilterByFuzzyText(result.results, normalized_terms, max_distance, current_doc_store);
+      }
+    }
+  }
+
+  return result;
+}
+
+std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
+                                                   const std::vector<std::string>& normalized_terms,
+                                                   uint32_t max_distance, storage::DocumentStore* doc_store) {
+  std::vector<storage::DocId> verified;
+  verified.reserve(candidates.size());
+
+  for (auto doc_id : candidates) {
+    auto text = doc_store->GetNormalizedText(doc_id);
+    if (!text.has_value()) {
+      // Text unavailable -- include to avoid false negatives
+      verified.push_back(doc_id);
+      continue;
+    }
+
+    bool all_terms_match = true;
+    for (const auto& term : normalized_terms) {
+      // First try exact substring match (faster than edit distance)
+      if (text->find(term) != std::string::npos) {
+        continue;
+      }
+      // Fall back to fuzzy word-level matching
+      if (!mygram::utils::ContainsFuzzyMatch(*text, term, max_distance)) {
+        all_terms_match = false;
+        break;
+      }
+    }
+
+    if (all_terms_match) {
       verified.push_back(doc_id);
     }
   }

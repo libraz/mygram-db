@@ -113,6 +113,72 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     }
   }
 
+  // Fuzzy search path (takes precedence over synonyms)
+  if (query.fuzzy_max_distance.has_value()) {
+    // Generate n-grams for each term (same as normal path)
+    output.term_infos =
+        search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
+                                           output.current_kanji_ngram_size, output.current_cross_boundary);
+
+    if (conn_ctx.debug_mode) {
+      for (const auto& ti : output.term_infos) {
+        for (const auto& ngram : ti.ngrams) {
+          output.debug_info.ngrams_used.push_back(ngram);
+        }
+        output.debug_info.posting_list_sizes.push_back(ti.estimated_size);
+      }
+    }
+
+    auto pipeline_result = search_pipeline::ExecuteWithFuzzy(
+        query, output.term_infos, output.all_search_terms, *query.fuzzy_max_distance, output.current_index,
+        output.current_doc_store, ctx_.full_config, output.current_ngram_size, output.current_kanji_ngram_size,
+        output.current_cross_boundary, filter_threshold_);
+
+    if (pipeline_result.empty_term_detected) {
+      output.results.clear();
+      auto end_time = std::chrono::high_resolution_clock::now();
+      output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+      if (conn_ctx.debug_mode) {
+        output.debug_info.optimization_used = "fuzzy-search (empty posting list)";
+        output.debug_info.final_results = 0;
+        output.debug_info.query_time_ms = output.query_time_ms;
+        output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+      }
+      return "";
+    }
+
+    output.results = std::move(pipeline_result.results);
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.total_candidates = output.results.size();
+      output.debug_info.after_intersection = output.results.size();
+      output.debug_info.optimization_used =
+          "fuzzy-search (distance=" + std::to_string(*query.fuzzy_max_distance) + ")";
+      output.debug_info.after_not = output.results.size();
+      output.debug_info.after_filters = output.results.size();
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+    search_pipeline::InsertToCache(ctx_.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                                   output.current_ngram_size, output.current_kanji_ngram_size,
+                                   output.current_cross_boundary);
+
+    if (conn_ctx.debug_mode) {
+      output.debug_info.query_time_ms = output.query_time_ms;
+      output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
+      if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
+        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+        output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      } else {
+        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+      }
+    }
+
+    return "";  // Success
+  }
+
   if (synonym_dict != nullptr) {
     // Synonym-aware search path
     auto synonym_groups = search_pipeline::ExpandTermsWithSynonyms(

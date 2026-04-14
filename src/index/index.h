@@ -149,6 +149,22 @@ class Index {
                                              const std::vector<std::string>& terms) const;
 
   /**
+   * @brief Search for documents appearing in at least threshold posting lists
+   *
+   * Relaxed version of SearchAnd: instead of requiring ALL n-gram posting lists
+   * to contain a document, requires at least `threshold` of them.
+   * When threshold == terms.size(), equivalent to SearchAnd.
+   *
+   * Uses k-way sorted merge with counting for efficient threshold matching.
+   *
+   * @param terms N-gram terms to search
+   * @param threshold Minimum number of posting lists a document must appear in
+   * @return Sorted vector of document IDs appearing in >= threshold posting lists
+   */
+  [[nodiscard]] std::vector<DocId> SearchByThreshold(const std::vector<std::string>& terms,
+                                                      size_t threshold) const;
+
+  /**
    * @brief Count documents containing term
    *
    * @param term Search term

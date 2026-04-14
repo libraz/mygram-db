@@ -270,6 +270,20 @@ gtest_discover_tests(comparison_utils_test
   DISCOVERY_TIMEOUT 30
 )
 
+add_executable(edit_distance_test
+  edit_distance_test.cpp
+)
+
+target_link_libraries(edit_distance_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(edit_distance_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(atomic_file_writer_test
   atomic_file_writer_test.cpp
 )

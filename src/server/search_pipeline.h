@@ -210,5 +210,43 @@ std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<stora
                                                           storage::DocumentStore* doc_store,
                                                           const config::Config* full_config);
 
+/// @brief Execute fuzzy search pipeline: threshold-based n-gram matching + edit distance verification
+///
+/// For each search term, relaxes the n-gram AND requirement to a threshold:
+/// threshold = max(1, |ngrams| - max_distance * ngram_size)
+/// Then verifies candidates with word-level Levenshtein edit distance.
+///
+/// @param query Parsed query with NOT terms and filters
+/// @param term_infos Pre-generated term information
+/// @param all_search_terms All search terms (main + AND)
+/// @param max_distance Maximum edit distance (1 or 2)
+/// @param current_index Index for search operations
+/// @param current_doc_store Document store for filter evaluation
+/// @param full_config Application config (for verify_text setting)
+/// @param ngram_size N-gram size for ASCII characters
+/// @param kanji_ngram_size N-gram size for CJK characters
+/// @param cross_boundary Cross-boundary n-gram setting
+/// @param filter_threshold Candidate count threshold for FilterByNgrams optimization
+/// @return Pipeline result with matching DocIDs
+SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vector<SearchTermInfo>& term_infos,
+                                      const std::vector<std::string>& all_search_terms, uint32_t max_distance,
+                                      index::Index* current_index, storage::DocumentStore* current_doc_store,
+                                      const config::Config* full_config, int ngram_size, int kanji_ngram_size,
+                                      bool cross_boundary, size_t filter_threshold);
+
+/// @brief Post-filter candidates by edit distance (fuzzy verify_text)
+///
+/// For each candidate, checks if the stored normalized text contains
+/// a word within edit distance of each search term.
+///
+/// @param candidates Candidate DocIDs
+/// @param normalized_terms Normalized search terms
+/// @param max_distance Maximum edit distance
+/// @param doc_store Document store with normalized text
+/// @return Verified DocIDs where all terms have fuzzy matches
+std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
+                                                   const std::vector<std::string>& normalized_terms,
+                                                   uint32_t max_distance, storage::DocumentStore* doc_store);
+
 }  // namespace search_pipeline
 }  // namespace mygramdb::server

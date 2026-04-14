@@ -1,5 +1,6 @@
 add_library(mygramdb_utils STATIC
   atomic_file_writer.cpp
+  edit_distance.cpp
   string_utils.cpp
   network_utils.cpp
   memory_utils.cpp
