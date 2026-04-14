@@ -193,9 +193,9 @@ struct SynonymTermGroup {
 
 /// @brief Expand search terms with synonym dictionary
 std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::string>& search_terms,
-                                                       const query::SynonymDictionary* synonym_dict,
-                                                       index::Index* current_index, int ngram_size,
-                                                       int kanji_ngram_size, bool cross_boundary_ngrams);
+                                                      const query::SynonymDictionary* synonym_dict,
+                                                      index::Index* current_index, int ngram_size, int kanji_ngram_size,
+                                                      bool cross_boundary_ngrams);
 
 /// @brief Execute synonym-aware search pipeline with OR-within-group, AND-across-group semantics
 SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::vector<SynonymTermGroup>& synonym_groups,
@@ -205,10 +205,9 @@ SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::v
 
 /// @brief Synonym-aware post-filter: for each group, document must contain at least one synonym
 std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<storage::DocId>& candidates,
-                                                          const std::vector<SynonymTermGroup>& synonym_groups,
-                                                          index::Index* current_index,
-                                                          storage::DocumentStore* doc_store,
-                                                          const config::Config* full_config);
+                                                         const std::vector<SynonymTermGroup>& synonym_groups,
+                                                         index::Index* current_index, storage::DocumentStore* doc_store,
+                                                         const config::Config* full_config);
 
 /// @brief Execute fuzzy search pipeline: threshold-based n-gram matching + edit distance verification
 ///
@@ -245,8 +244,8 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
 /// @param doc_store Document store with normalized text
 /// @return Verified DocIDs where all terms have fuzzy matches
 std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
-                                                   const std::vector<std::string>& normalized_terms,
-                                                   uint32_t max_distance, storage::DocumentStore* doc_store);
+                                                  const std::vector<std::string>& normalized_terms,
+                                                  uint32_t max_distance, storage::DocumentStore* doc_store);
 
 }  // namespace search_pipeline
 }  // namespace mygramdb::server

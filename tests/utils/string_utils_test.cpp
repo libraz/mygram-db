@@ -999,6 +999,115 @@ TEST(StringUtilsTest, GenerateQueryNgramsCrossBoundaryIgnoredInDefaultPath) {
   }
 }
 
+// ============================================================================
+// Utf8ToCodepoints buffer overload tests
+// ============================================================================
+
+/**
+ * @brief Test buffer overload with ASCII text that fits
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferAscii) {
+  uint32_t buffer[16];
+  size_t count = Utf8ToCodepoints("abc", buffer, 16);
+  ASSERT_EQ(count, 3);
+  EXPECT_EQ(buffer[0], 0x61);  // 'a'
+  EXPECT_EQ(buffer[1], 0x62);  // 'b'
+  EXPECT_EQ(buffer[2], 0x63);  // 'c'
+}
+
+/**
+ * @brief Test buffer overload with exact-fit capacity
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferExactFit) {
+  uint32_t buffer[3];
+  size_t count = Utf8ToCodepoints("abc", buffer, 3);
+  ASSERT_EQ(count, 3);
+  EXPECT_EQ(buffer[0], 0x61);
+  EXPECT_EQ(buffer[1], 0x62);
+  EXPECT_EQ(buffer[2], 0x63);
+}
+
+/**
+ * @brief Test buffer overload returns 0 when text exceeds capacity
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferOverflow) {
+  uint32_t buffer[2];
+  size_t count = Utf8ToCodepoints("abc", buffer, 2);
+  EXPECT_EQ(count, 0);  // Buffer too small, should return 0
+}
+
+/**
+ * @brief Test buffer overload with empty string
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferEmpty) {
+  uint32_t buffer[4];
+  size_t count = Utf8ToCodepoints("", buffer, 4);
+  EXPECT_EQ(count, 0);  // Empty string, 0 codepoints
+}
+
+/**
+ * @brief Test buffer overload with multi-byte UTF-8 characters (Japanese)
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferMultiByte) {
+  uint32_t buffer[8];
+  size_t count = Utf8ToCodepoints("あいう", buffer, 8);
+  ASSERT_EQ(count, 3);
+  EXPECT_EQ(buffer[0], 0x3042);  // 'あ'
+  EXPECT_EQ(buffer[1], 0x3044);  // 'い'
+  EXPECT_EQ(buffer[2], 0x3046);  // 'う'
+}
+
+/**
+ * @brief Test buffer overload with 4-byte UTF-8 characters (emoji)
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferEmoji) {
+  uint32_t buffer[4];
+  // Two emojis: 2 codepoints
+  size_t count = Utf8ToCodepoints("😀🎉", buffer, 4);
+  ASSERT_EQ(count, 2);
+  EXPECT_EQ(buffer[0], 0x1F600);  // 😀
+  EXPECT_EQ(buffer[1], 0x1F389);  // 🎉
+}
+
+/**
+ * @brief Test buffer overload with mixed ASCII and multi-byte
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferMixed) {
+  uint32_t buffer[8];
+  size_t count = Utf8ToCodepoints("aあb", buffer, 8);
+  ASSERT_EQ(count, 3);
+  EXPECT_EQ(buffer[0], 0x61);    // 'a'
+  EXPECT_EQ(buffer[1], 0x3042);  // 'あ'
+  EXPECT_EQ(buffer[2], 0x62);    // 'b'
+}
+
+/**
+ * @brief Test buffer overload overflow with multi-byte characters
+ *
+ * 3 codepoints but buffer capacity is 2 -- should return 0.
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferMultiByteOverflow) {
+  uint32_t buffer[2];
+  size_t count = Utf8ToCodepoints("あいう", buffer, 2);
+  EXPECT_EQ(count, 0);  // 3 codepoints > capacity 2
+}
+
+/**
+ * @brief Test buffer overload matches vector overload results
+ */
+TEST(StringUtilsTest, Utf8ToCodepointsBufferMatchesVectorOverload) {
+  std::string text = "Hello世界🎉test";
+  auto vec = Utf8ToCodepoints(text);
+
+  uint32_t buffer[64];
+  size_t count = Utf8ToCodepoints(text, buffer, 64);
+
+  ASSERT_EQ(count, vec.size());
+  for (size_t i = 0; i < count; ++i) {
+    EXPECT_EQ(buffer[i], vec[i]) << "Mismatch at index " << i;
+  }
+}
+
 // BUG-14 fix: GenerateHybridNgrams zero/negative guard
 TEST(StringUtilsBugFixTest, GenerateHybridNgramsZeroSizeReturnsEmpty) {
   EXPECT_TRUE(GenerateHybridNgrams("hello", 0, 1).empty());

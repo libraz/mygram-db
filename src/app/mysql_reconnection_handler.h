@@ -59,7 +59,7 @@ class MysqlReconnectionHandler {
                            std::atomic<bool>* reconnecting_flag = nullptr,
                            std::vector<std::string> required_tables = {});
 #else
-  MysqlReconnectionHandler(void* mysql_connection, void* binlog_reader);
+  MysqlReconnectionHandler() = default;
 #endif
 
   ~MysqlReconnectionHandler() = default;
@@ -96,9 +96,6 @@ class MysqlReconnectionHandler {
   mysql::BinlogReader* binlog_reader_;
   std::atomic<bool>* reconnecting_flag_;      // Flag to set during reconnection (non-owning)
   std::vector<std::string> required_tables_;  // Tables to validate after reconnection
-#else
-  void* mysql_connection_;
-  void* binlog_reader_;
 #endif
 
   /**
@@ -111,13 +108,9 @@ class MysqlReconnectionHandler {
    * - binlog_format is ROW
    * - binlog_row_image is FULL
    */
-  mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(
 #ifdef USE_MYSQL
-      mysql::Connection* connection
-#else
-      void* connection
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(mysql::Connection* connection) const;
 #endif
-  ) const;
 };
 
 }  // namespace mygramdb::app

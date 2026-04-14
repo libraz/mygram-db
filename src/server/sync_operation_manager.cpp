@@ -15,7 +15,7 @@
 
 #include "cache/cache_manager.h"
 #include "loader/initial_loader.h"
-#include "mysql/binlog_reader.h"
+#include "mysql/binlog_reader_interface.h"
 #include "mysql/connection.h"
 #include "server/response_formatter.h"
 #include "utils/memory_utils.h"
@@ -29,7 +29,7 @@ constexpr int kSyncPollIntervalMs = 100;
 }  // namespace
 
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                                           const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                                           const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                                            cache::CacheManager* cache_manager)
     : table_contexts_(table_contexts),
       full_config_(full_config),
@@ -473,7 +473,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Stop replication BEFORE clearing data to prevent the reader/worker
     // threads from re-adding documents into the cleared index/doc_store.
-    mysql::BinlogReader* reader = binlog_reader_;
+    mysql::IBinlogReader* reader = binlog_reader_;
     bool replication_was_running = false;
     if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {
       mygram::utils::StructuredLog()
@@ -500,8 +500,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     RegisterLoader(table_name, &loader);
 
-    // Capture reference to SyncState to avoid map lookup in hot path
-    auto& state = sync_states_[table_name];  // Safe: key was created under sync_mutex_ in StartSync
+    // Capture reference to SyncState to avoid map lookup in hot path.
+    // Safe: the key is created under sync_mutex_ in StartSync and never erased
+    // while the background thread runs, so the reference remains valid.
+    // total_rows and processed_rows are std::atomic, so concurrent reads are safe.
+    auto& state = sync_states_[table_name];
     auto result = loader.Load([&state](const auto& progress) {
       // Update progress atomically without mutex (these fields are std::atomic)
       state.total_rows.store(progress.total_rows, std::memory_order_relaxed);
@@ -559,6 +562,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.status = "COMPLETED";
         state.gtid = gtid;
         state.processed_rows = processed;
+        state.is_running = false;
       });
 
       // Clear search cache for this table after SYNC replaces the index
@@ -672,6 +676,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
         state.error_message = error_msg;
+        state.is_running = false;
       });
       mygram::utils::StructuredLog()
           .Event("server_error")
@@ -708,6 +713,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     update_state([&error_msg](SyncState& state) {
       state.status = "FAILED";
       state.error_message = error_msg;
+      state.is_running = false;
     });
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -717,6 +723,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         .Error();
   }
 
+  // Safety net: should already be false from terminal branch above
   update_state([](SyncState& state) { state.is_running = false; });
 }
 

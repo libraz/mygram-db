@@ -137,10 +137,10 @@ struct OrderByClause {
  * @brief Highlight options for SEARCH results
  */
 struct HighlightOptions {
-  std::string open_tag = "<em>";     ///< Tag inserted before highlighted term
-  std::string close_tag = "</em>";   ///< Tag inserted after highlighted term
-  uint32_t snippet_length = 100;     ///< Max code points per snippet fragment
-  uint32_t max_fragments = 3;        ///< Max snippet fragments joined by ellipsis
+  std::string open_tag = "<em>";    ///< Tag inserted before highlighted term
+  std::string close_tag = "</em>";  ///< Tag inserted after highlighted term
+  uint32_t snippet_length = 100;    ///< Max code points per snippet fragment
+  uint32_t max_fragments = 3;       ///< Max snippet fragments joined by ellipsis
 };
 
 /**
@@ -360,8 +360,8 @@ class QueryParser {
   /**
    * @brief Parse FACET command
    */
-  [[nodiscard]] mygram::utils::Expected<Query, mygram::utils::Error> ParseFacet(
-      const std::vector<std::string>& tokens, size_t& pos);
+  [[nodiscard]] mygram::utils::Expected<Query, mygram::utils::Error> ParseFacet(const std::vector<std::string>& tokens,
+                                                                                size_t& pos);
 
   /**
    * @brief Tokenize query string

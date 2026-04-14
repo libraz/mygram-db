@@ -6,12 +6,10 @@
 #include "cache/cache_manager.h"
 
 #include "query/cache_key.h"
-#include "server/server_types.h"
 
 namespace mygramdb::cache {
 
-CacheManager::CacheManager(const config::CacheConfig& cache_config,
-                           const std::unordered_map<std::string, server::TableContext*>& table_contexts)
+CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs)
     : enabled_(cache_config.enabled), ttl_seconds_(cache_config.ttl_seconds) {
   if (enabled_) {
     // Create query cache with TTL support
@@ -28,9 +26,9 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config,
       }
     });
 
-    // Create invalidation queue with table_contexts for per-table ngram settings
+    // Create invalidation queue with per-table ngram settings
     invalidation_queue_ =
-        std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), table_contexts);
+        std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), std::move(ngram_configs));
     invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
     invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
     invalidation_queue_->Start();

@@ -9,13 +9,12 @@
 
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
-#include "server/server_types.h"
 
 namespace mygramdb::cache {
 
 InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
-                                     const std::unordered_map<std::string, server::TableContext*>& table_contexts)
-    : cache_(cache), invalidation_mgr_(invalidation_mgr), table_contexts_(table_contexts) {}
+                                     NgramConfigMap ngram_configs)
+    : cache_(cache), invalidation_mgr_(invalidation_mgr), ngram_configs_(std::move(ngram_configs)) {}
 
 InvalidationQueue::~InvalidationQueue() {
   Stop();
@@ -27,11 +26,11 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   int ngram_size = 2;                 // Default (match index::kDefaultNgramSize)
   int kanji_ngram_size = 1;           // Default (match index::kDefaultKanjiNgramSize)
   bool cross_boundary_ngrams = true;  // Default
-  auto table_iter = table_contexts_.find(table_name);
-  if (table_iter != table_contexts_.end()) {
-    ngram_size = table_iter->second->config.ngram_size;
-    kanji_ngram_size = table_iter->second->config.kanji_ngram_size;
-    cross_boundary_ngrams = table_iter->second->config.cross_boundary_ngrams;
+  auto config_iter = ngram_configs_.find(table_name);
+  if (config_iter != ngram_configs_.end()) {
+    ngram_size = config_iter->second.ngram_size;
+    kanji_ngram_size = config_iter->second.kanji_ngram_size;
+    cross_boundary_ngrams = config_iter->second.cross_boundary_ngrams;
   }
 
   // Phase 1: Immediate invalidation (mark entries)
@@ -125,7 +124,8 @@ void InvalidationQueue::Stop() {
     worker_thread_.join();
   }
 
-  // Process remaining items
+  // Process remaining items after worker thread has joined.
+  // Requires cache_ and invalidation_mgr_ to still be alive at this point.
   ProcessBatch();
 }
 

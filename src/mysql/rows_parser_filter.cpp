@@ -10,6 +10,7 @@
 
 #include "mysql/rows_parser.h"
 #include "utils/datetime_converter.h"
+#include "utils/numeric_parse.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -43,6 +44,22 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
     return &*cached_processor;
   };
 
+  // Helper lambda: parse numeric type and assign to filters, logging on failure
+  auto try_parse_numeric = [&](const auto& name, const std::string& value, auto tag) {
+    using T = decltype(tag);
+    auto parsed = mygram::utils::ParseNumeric<T>(value);
+    if (parsed) {
+      filters[name] = *parsed;
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "filter_parse_failed")
+          .Field("value", value)
+          .Field("column_name", name)
+          .Error();
+    }
+  };
+
   for (const auto& filter_config : filter_configs) {
     // Check if column exists in row data
     auto iterator = row_data.columns.find(filter_config.name);
@@ -62,89 +79,69 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
       continue;
     }
 
-    try {
-      // Convert string to appropriate type based on filter config
-      if (filter_config.type == "tinyint") {
-        filters[filter_config.name] = static_cast<int8_t>(std::stoi(value_str));
-      } else if (filter_config.type == "tinyint_unsigned") {
-        filters[filter_config.name] = static_cast<uint8_t>(std::stoul(value_str));
-      } else if (filter_config.type == "smallint") {
-        filters[filter_config.name] = static_cast<int16_t>(std::stoi(value_str));
-      } else if (filter_config.type == "smallint_unsigned") {
-        filters[filter_config.name] = static_cast<uint16_t>(std::stoul(value_str));
-      } else if (filter_config.type == "int" || filter_config.type == "mediumint") {
-        filters[filter_config.name] = static_cast<int32_t>(std::stoi(value_str));
-      } else if (filter_config.type == "int_unsigned" || filter_config.type == "mediumint_unsigned") {
-        filters[filter_config.name] = static_cast<uint32_t>(std::stoul(value_str));
-      } else if (filter_config.type == "bigint") {
-        filters[filter_config.name] = static_cast<int64_t>(std::stoll(value_str));
-      } else if (filter_config.type == "float" || filter_config.type == "double") {
-        filters[filter_config.name] = std::stod(value_str);
-      } else if (filter_config.type == "datetime" || filter_config.type == "date") {
-        // DATETIME/DATE: Convert to epoch seconds using timezone
-        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, datetime_timezone);
-        if (epoch_opt) {
-          filters[filter_config.name] = *epoch_opt;
-        } else {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "datetime_conversion_failed")
-              .Field("value", value_str)
-              .Field("column_name", filter_config.name)
-              .Field("timezone", datetime_timezone)
-              .Warn();
-        }
-      } else if (filter_config.type == "timestamp") {
-        // TIMESTAMP: Already in epoch seconds (UTC), no timezone conversion needed
-        try {
-          filters[filter_config.name] = static_cast<uint64_t>(std::stoull(value_str));
-        } catch (const std::exception& e) {
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_error")
-              .Field("type", "timestamp_conversion_failed")
-              .Field("value", value_str)
-              .Field("column_name", filter_config.name)
-              .Field("error", e.what())
-              .Error();
-        }
-      } else if (filter_config.type == "time") {
-        // TIME: Convert to seconds since midnight using cached DateTimeProcessor
-        auto* processor = get_processor();
-        if (processor != nullptr) {
-          auto seconds_result = processor->TimeToSeconds(value_str);
-          if (seconds_result) {
-            filters[filter_config.name] = storage::TimeValue{*seconds_result};
-          } else {
-            mygram::utils::StructuredLog()
-                .Event("mysql_binlog_warning")
-                .Field("type", "time_conversion_failed")
-                .Field("value", value_str)
-                .Field("column_name", filter_config.name)
-                .Field("error", seconds_result.error().message())
-                .Warn();
-          }
-        }
-      } else if (filter_config.type == "string" || filter_config.type == "varchar" || filter_config.type == "text") {
-        filters[filter_config.name] = value_str;
-      } else if (filter_config.type == "boolean") {
-        // Boolean: "1"/"true" = true, "0"/"false" = false
-        filters[filter_config.name] = (value_str == "1" || value_str == "true");
+    // Convert string to appropriate type based on filter config
+    if (filter_config.type == "tinyint") {
+      try_parse_numeric(filter_config.name, value_str, int8_t{});
+    } else if (filter_config.type == "tinyint_unsigned") {
+      try_parse_numeric(filter_config.name, value_str, uint8_t{});
+    } else if (filter_config.type == "smallint") {
+      try_parse_numeric(filter_config.name, value_str, int16_t{});
+    } else if (filter_config.type == "smallint_unsigned") {
+      try_parse_numeric(filter_config.name, value_str, uint16_t{});
+    } else if (filter_config.type == "int" || filter_config.type == "mediumint") {
+      try_parse_numeric(filter_config.name, value_str, int32_t{});
+    } else if (filter_config.type == "int_unsigned" || filter_config.type == "mediumint_unsigned") {
+      try_parse_numeric(filter_config.name, value_str, uint32_t{});
+    } else if (filter_config.type == "bigint") {
+      try_parse_numeric(filter_config.name, value_str, int64_t{});
+    } else if (filter_config.type == "float" || filter_config.type == "double") {
+      try_parse_numeric(filter_config.name, value_str, double{});
+    } else if (filter_config.type == "datetime" || filter_config.type == "date") {
+      // DATETIME/DATE: Convert to epoch seconds using timezone
+      auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, datetime_timezone);
+      if (epoch_opt) {
+        filters[filter_config.name] = *epoch_opt;
       } else {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_warning")
-            .Field("type", "unknown_filter_type")
-            .Field("filter_type", filter_config.type)
+            .Field("type", "datetime_conversion_failed")
+            .Field("value", value_str)
             .Field("column_name", filter_config.name)
+            .Field("timezone", datetime_timezone)
             .Warn();
       }
-    } catch (const std::exception& e) {
+    } else if (filter_config.type == "timestamp") {
+      // TIMESTAMP: Already in epoch seconds (UTC), no timezone conversion needed
+      try_parse_numeric(filter_config.name, value_str, uint64_t{});
+    } else if (filter_config.type == "time") {
+      // TIME: Convert to seconds since midnight using cached DateTimeProcessor
+      auto* processor = get_processor();
+      if (processor != nullptr) {
+        auto seconds_result = processor->TimeToSeconds(value_str);
+        if (seconds_result) {
+          filters[filter_config.name] = storage::TimeValue{*seconds_result};
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_warning")
+              .Field("type", "time_conversion_failed")
+              .Field("value", value_str)
+              .Field("column_name", filter_config.name)
+              .Field("error", seconds_result.error().message())
+              .Warn();
+        }
+      }
+    } else if (filter_config.type == "string" || filter_config.type == "varchar" || filter_config.type == "text") {
+      filters[filter_config.name] = value_str;
+    } else if (filter_config.type == "boolean") {
+      // Boolean: "1"/"true" = true, "0"/"false" = false
+      filters[filter_config.name] = (value_str == "1" || value_str == "true");
+    } else {
       mygram::utils::StructuredLog()
-          .Event("mysql_binlog_error")
-          .Field("type", "filter_conversion_failed")
-          .Field("value", value_str)
+          .Event("mysql_binlog_warning")
+          .Field("type", "unknown_filter_type")
+          .Field("filter_type", filter_config.type)
           .Field("column_name", filter_config.name)
-          .Field("error", e.what())
-          .Error();
+          .Warn();
     }
   }
 

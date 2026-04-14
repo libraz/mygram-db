@@ -13,7 +13,6 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 
 #include "config_schema_embedded.h"  // Auto-generated embedded schema
 #include "utils/datetime_converter.h"
@@ -77,25 +76,34 @@ std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json
  * @brief Validate path for directory traversal attacks
  * @param path Path to validate
  * @param field_name Name of the field for error messages
- * @throws std::runtime_error if path contains traversal sequences
+ * @return Expected<void, Error> on success, or error if path contains traversal sequences
  */
-void ValidatePathNoTraversal(const std::string& path, const std::string& field_name) {
+mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
+                                                                            const std::string& field_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (path.empty()) {
-    return;  // Empty paths are allowed (will be validated elsewhere if required)
+    return {};  // Empty paths are allowed (will be validated elsewhere if required)
   }
 
   // Check for path traversal patterns
   if (path.find("..") != std::string::npos) {
-    throw std::runtime_error(
-        "Path traversal detected in '" + field_name +
-        "': path contains '..' which is not allowed for security reasons. "
-        "Use absolute paths or paths relative to the working directory without parent references.");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue,
+                  "Path traversal detected in '" + field_name +
+                      "': path contains '..' which is not allowed for security reasons. "
+                      "Use absolute paths or paths relative to the working directory without parent references."));
   }
 
   // Check for null bytes (could be used to truncate paths)
   if (path.find('\0') != std::string::npos) {
-    throw std::runtime_error("Invalid path in '" + field_name + "': path contains null bytes.");
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid path in '" + field_name + "': path contains null bytes."));
   }
+
+  return {};
 }
 
 /**
@@ -107,40 +115,51 @@ void ValidatePathNoTraversal(const std::string& path, const std::string& field_n
  *
  * @param address Bind address to validate
  * @param field_name Name of the field for error messages
- * @throws std::runtime_error if address is invalid
+ * @return Expected<void, Error> on success, or error if address is invalid
  */
-void ValidateBindAddress(const std::string& address, const std::string& field_name) {
+mygram::utils::Expected<void, mygram::utils::Error> ValidateBindAddress(const std::string& address,
+                                                                        const std::string& field_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (address.empty()) {
-    return;  // Empty addresses use defaults
+    return {};  // Empty addresses use defaults
   }
 
   // Check for null bytes
   if (address.find('\0') != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name + "': address contains null bytes.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name + "': address contains null bytes."));
   }
 
   // Check for path traversal patterns
   if (address.find("..") != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name +
-                             "': address contains '..' which is not allowed. "
-                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name +
+                                        "': address contains '..' which is not allowed. "
+                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
   }
 
   // Check for path separators (bind addresses should not contain slashes)
   if (address.find('/') != std::string::npos) {
-    throw std::runtime_error("Invalid bind address in '" + field_name +
-                             "': address contains '/' which is not allowed. "
-                             "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name +
+                                        "': address contains '/' which is not allowed. "
+                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
   }
 
   // Check for whitespace
   for (char character : address) {
     if (std::isspace(static_cast<unsigned char>(character)) != 0) {
-      throw std::runtime_error("Invalid bind address in '" + field_name +
-                               "': address contains whitespace. "
-                               "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname.");
+      return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                      "Invalid bind address in '" + field_name +
+                                          "': address contains whitespace. "
+                                          "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
     }
   }
+
+  return {};
 }
 
 /**
@@ -187,7 +206,7 @@ json YamlToJson(const YAML::Node& node) {
  *   - MYGRAM_MYSQL_PORT: MySQL port (takes precedence over config file)
  *   - MYGRAM_MYSQL_DATABASE: MySQL database (takes precedence over config file)
  */
-MysqlConfig ParseMysqlConfig(const json& json_obj) {
+mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(const json& json_obj) {
   MysqlConfig config;
 
   // Host: environment variable takes precedence
@@ -265,15 +284,21 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
   }
   if (json_obj.contains("ssl_ca")) {
     config.ssl_ca = json_obj["ssl_ca"].get<std::string>();
-    ValidatePathNoTraversal(config.ssl_ca, "mysql.ssl_ca");
+    if (auto v = ValidatePathNoTraversal(config.ssl_ca, "mysql.ssl_ca"); !v) {
+      return mygram::utils::MakeUnexpected(v.error());
+    }
   }
   if (json_obj.contains("ssl_cert")) {
     config.ssl_cert = json_obj["ssl_cert"].get<std::string>();
-    ValidatePathNoTraversal(config.ssl_cert, "mysql.ssl_cert");
+    if (auto v = ValidatePathNoTraversal(config.ssl_cert, "mysql.ssl_cert"); !v) {
+      return mygram::utils::MakeUnexpected(v.error());
+    }
   }
   if (json_obj.contains("ssl_key")) {
     config.ssl_key = json_obj["ssl_key"].get<std::string>();
-    ValidatePathNoTraversal(config.ssl_key, "mysql.ssl_key");
+    if (auto v = ValidatePathNoTraversal(config.ssl_key, "mysql.ssl_key"); !v) {
+      return mygram::utils::MakeUnexpected(v.error());
+    }
   }
   if (json_obj.contains("ssl_verify_server_cert")) {
     config.ssl_verify_server_cert = json_obj["ssl_verify_server_cert"].get<bool>();
@@ -288,32 +313,37 @@ MysqlConfig ParseMysqlConfig(const json& json_obj) {
 /**
  * @brief Parse required filter configuration from JSON
  */
-RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
+mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequiredFilterConfig(const json& json_obj) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   RequiredFilterConfig config;
 
   // Validate required fields: name and type are mandatory
   if (!json_obj.contains("name") || json_obj["name"].get<std::string>().empty()) {
-    throw std::runtime_error(
-        "Required filter error: 'name' field is required\n"
-        "  Example:\n"
-        "    required_filters:\n"
-        "      - name: status\n"
-        "        type: int\n"
-        "        op: \"=\"\n"
-        "        value: 1");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired,
+                                    "Required filter error: 'name' field is required\n"
+                                    "  Example:\n"
+                                    "    required_filters:\n"
+                                    "      - name: status\n"
+                                    "        type: int\n"
+                                    "        op: \"=\"\n"
+                                    "        value: 1"));
   }
   config.name = json_obj["name"].get<std::string>();
 
   if (!json_obj.contains("type") || json_obj["type"].get<std::string>().empty()) {
-    throw std::runtime_error("Required filter error: 'type' field is required for filter '" + config.name +
-                             "'\n"
-                             "  Valid types: int, string, datetime, bool, float\n"
-                             "  Example:\n"
-                             "    required_filters:\n"
-                             "      - name: status\n"
-                             "        type: int\n"
-                             "        op: \"=\"\n"
-                             "        value: 1");
+    return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired,
+                                    "Required filter error: 'type' field is required for filter '" + config.name +
+                                        "'\n"
+                                        "  Valid types: int, string, datetime, bool, float\n"
+                                        "  Example:\n"
+                                        "    required_filters:\n"
+                                        "      - name: status\n"
+                                        "        type: int\n"
+                                        "        op: \"=\"\n"
+                                        "        value: 1"));
   }
   config.type = json_obj["type"].get<std::string>();
 
@@ -351,7 +381,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
     err_msg << "        type: int\n";
     err_msg << "        op: \"=\"\n";
     err_msg << "        value: 1";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
   }
 
   // Validate: IS NULL/IS NOT NULL should not have a value
@@ -364,7 +394,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
     err_msg << "      - name: deleted_at\n";
     err_msg << "        type: datetime\n";
     err_msg << "        op: \"IS NULL\"";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
   }
 
   // Validate: Other operators should have a value
@@ -380,7 +410,7 @@ RequiredFilterConfig ParseRequiredFilterConfig(const json& json_obj) {
     err_msg << "        type: int\n";
     err_msg << "        op: \"" << config.op << "\"\n";
     err_msg << "        value: 1";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
   }
 
   return config;
@@ -414,7 +444,11 @@ FilterConfig ParseFilterConfig(const json& json_obj) {
 /**
  * @brief Parse table configuration from JSON
  */
-TableConfig ParseTableConfig(const json& json_obj) {
+mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(const json& json_obj) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   TableConfig config;
 
   if (!json_obj.contains("name")) {
@@ -427,7 +461,7 @@ TableConfig ParseTableConfig(const json& json_obj) {
     err_msg << "        primary_key: id\n";
     err_msg << "        text_source:\n";
     err_msg << "          column: content";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired, err_msg.str()));
   }
   config.name = json_obj["name"].get<std::string>();
 
@@ -440,9 +474,10 @@ TableConfig ParseTableConfig(const json& json_obj) {
   if (json_obj.contains("kanji_ngram_size")) {
     config.kanji_ngram_size = json_obj["kanji_ngram_size"].get<int>();
     if (config.kanji_ngram_size < 0 || config.kanji_ngram_size > 10) {
-      throw std::runtime_error("Configuration error in table '" + config.name +
-                               "': kanji_ngram_size must be between 0 and 10 (got " +
-                               std::to_string(config.kanji_ngram_size) + ")");
+      return MakeUnexpected(
+          MakeError(ErrorCode::kConfigInvalidValue, "Configuration error in table '" + config.name +
+                                                        "': kanji_ngram_size must be between 0 and 10 (got " +
+                                                        std::to_string(config.kanji_ngram_size) + ")"));
     }
   }
   // If kanji_ngram_size is 0 or not specified, use ngram_size
@@ -466,7 +501,7 @@ TableConfig ParseTableConfig(const json& json_obj) {
     err_msg << "          type: int\n";
     err_msg << "          op: \"=\"\n";
     err_msg << "          value: 1";
-    throw std::runtime_error(err_msg.str());
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
   }
 
   // Parse text_source
@@ -486,7 +521,11 @@ TableConfig ParseTableConfig(const json& json_obj) {
   // Parse required_filters
   if (json_obj.contains("required_filters")) {
     for (const auto& filter_json : json_obj["required_filters"]) {
-      config.required_filters.push_back(ParseRequiredFilterConfig(filter_json));
+      auto filter_result = ParseRequiredFilterConfig(filter_json);
+      if (!filter_result) {
+        return MakeUnexpected(filter_result.error());
+      }
+      config.required_filters.push_back(std::move(*filter_result));
     }
   }
 
@@ -528,12 +567,20 @@ TableConfig ParseTableConfig(const json& json_obj) {
 /**
  * @brief Parse configuration from JSON object
  */
-Config ParseConfigFromJson(const json& root) {
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const json& root) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   Config config;
 
   // Parse MySQL config
   if (root.contains("mysql")) {
-    config.mysql = ParseMysqlConfig(root["mysql"]);
+    auto mysql_result = ParseMysqlConfig(root["mysql"]);
+    if (!mysql_result) {
+      return MakeUnexpected(mysql_result.error());
+    }
+    config.mysql = std::move(*mysql_result);
   }
 
   // Parse global index config (legacy format)
@@ -545,12 +592,16 @@ Config ParseConfigFromJson(const json& root) {
   // Parse tables
   if (root.contains("tables")) {
     for (const auto& table_json : root["tables"]) {
-      TableConfig table = ParseTableConfig(table_json);
+      auto table_result = ParseTableConfig(table_json);
+      if (!table_result) {
+        return MakeUnexpected(table_result.error());
+      }
+      auto& table = *table_result;
       // Apply global ngram_size if not set per-table
       if (!table_json.contains("ngram_size")) {
         table.ngram_size = global_ngram_size;
       }
-      config.tables.push_back(table);
+      config.tables.push_back(std::move(table));
     }
   }
 
@@ -605,7 +656,7 @@ Config ParseConfigFromJson(const json& root) {
       err_msg << "    replication:\n";
       err_msg << "      enable: true\n";
       err_msg << "      server_id: 100";
-      throw std::runtime_error(err_msg.str());
+      return MakeUnexpected(MakeError(ErrorCode::kConfigValidationError, err_msg.str()));
     }
 
     // Validate start_from
@@ -627,7 +678,7 @@ Config ParseConfigFromJson(const json& root) {
         err_msg << "  Example:\n";
         err_msg << "    replication:\n";
         err_msg << "      start_from: snapshot";
-        throw std::runtime_error(err_msg.str());
+        return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
       }
 
       // If gtid= format, validate the GTID format
@@ -640,7 +691,7 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
           err_msg << "  Expected format: gtid=UUID:transaction_id\n";
           err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1";
-          throw std::runtime_error(err_msg.str());
+          return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
         }
       }
     }
@@ -687,7 +738,9 @@ Config ParseConfigFromJson(const json& root) {
     const auto& dmp = root["dump"];
     if (dmp.contains("dir")) {
       config.dump.dir = dmp["dir"].get<std::string>();
-      ValidatePathNoTraversal(config.dump.dir, "dump.dir");
+      if (auto v = ValidatePathNoTraversal(config.dump.dir, "dump.dir"); !v) {
+        return MakeUnexpected(v.error());
+      }
     }
     if (dmp.contains("interval_sec")) {
       config.dump.interval_sec = dmp["interval_sec"].get<int>();
@@ -703,7 +756,9 @@ Config ParseConfigFromJson(const json& root) {
     const auto& server = root["server"];
     if (server.contains("host")) {
       config.api.tcp.bind = server["host"].get<std::string>();
-      ValidateBindAddress(config.api.tcp.bind, "server.host");
+      if (auto v = ValidateBindAddress(config.api.tcp.bind, "server.host"); !v) {
+        return MakeUnexpected(v.error());
+      }
     }
     if (server.contains("port")) {
       config.api.tcp.port = server["port"].get<int>();
@@ -715,7 +770,9 @@ Config ParseConfigFromJson(const json& root) {
       const auto& tcp = api["tcp"];
       if (tcp.contains("bind")) {
         config.api.tcp.bind = tcp["bind"].get<std::string>();
-        ValidateBindAddress(config.api.tcp.bind, "api.tcp.bind");
+        if (auto v = ValidateBindAddress(config.api.tcp.bind, "api.tcp.bind"); !v) {
+          return MakeUnexpected(v.error());
+        }
       }
       if (tcp.contains("port")) {
         config.api.tcp.port = tcp["port"].get<int>();
@@ -758,7 +815,9 @@ Config ParseConfigFromJson(const json& root) {
       }
       if (http.contains("bind")) {
         config.api.http.bind = http["bind"].get<std::string>();
-        ValidateBindAddress(config.api.http.bind, "api.http.bind");
+        if (auto v = ValidateBindAddress(config.api.http.bind, "api.http.bind"); !v) {
+          return MakeUnexpected(v.error());
+        }
       }
       if (http.contains("port")) {
         config.api.http.port = http["port"].get<int>();
@@ -818,7 +877,9 @@ Config ParseConfigFromJson(const json& root) {
     }
     if (log.contains("file")) {
       config.logging.file = log["file"].get<std::string>();
-      ValidatePathNoTraversal(config.logging.file, "logging.file");
+      if (auto v = ValidatePathNoTraversal(config.logging.file, "logging.file"); !v) {
+        return MakeUnexpected(v.error());
+      }
     }
   }
 
@@ -835,12 +896,15 @@ Config ParseConfigFromJson(const json& root) {
 
       // Validate to prevent integer overflow
       if (max_memory_mb < 0) {
-        throw std::runtime_error("Configuration error: cache.max_memory_mb cannot be negative (got " +
-                                 std::to_string(max_memory_mb) + ")");
+        return MakeUnexpected(MakeError(
+            ErrorCode::kConfigInvalidValue,
+            "Configuration error: cache.max_memory_mb cannot be negative (got " + std::to_string(max_memory_mb) + ")"));
       }
       if (max_memory_mb > kMaxMemoryMB) {
-        throw std::runtime_error("Configuration error: cache.max_memory_mb exceeds maximum allowed value (" +
-                                 std::to_string(kMaxMemoryMB) + " MB). Got: " + std::to_string(max_memory_mb) + " MB");
+        return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                        "Configuration error: cache.max_memory_mb exceeds maximum allowed value (" +
+                                            std::to_string(kMaxMemoryMB) +
+                                            " MB). Got: " + std::to_string(max_memory_mb) + " MB"));
       }
 
       config.cache.max_memory_bytes = static_cast<size_t>(max_memory_mb) * kBytesPerMB;
@@ -892,7 +956,7 @@ Config ParseConfigFromJson(const json& root) {
           err_msg << "  Example:\n";
           err_msg << "    cache:\n";
           err_msg << "      max_memory_mb: " << (max_allowed_cache / kBytesPerMB);
-          throw std::runtime_error(err_msg.str());
+          return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
         }
       } else {
         mygram::utils::StructuredLog()
@@ -1086,8 +1150,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
       return MakeUnexpected(validation_result.error());
     }
 
-    // Parse config (this may throw std::runtime_error from helper functions)
-    Config config = ParseConfigFromJson(config_json);
+    // Parse config from JSON object
+    auto config_result = ParseConfigFromJson(config_json);
+    if (!config_result) {
+      return MakeUnexpected(config_result.error());
+    }
+    auto& config = *config_result;
 
     // Apply log format immediately so subsequent logs use the configured format
     mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
@@ -1117,8 +1185,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
     YAML::Node yaml_root = YAML::LoadFile(path);
     json json_root = YamlToJson(yaml_root);
 
-    // Parse config (this may throw std::runtime_error from helper functions)
-    Config config = ParseConfigFromJson(json_root);
+    // Parse config from JSON object
+    auto config_result = ParseConfigFromJson(json_root);
+    if (!config_result) {
+      return MakeUnexpected(config_result.error());
+    }
+    auto& config = *config_result;
 
     // Apply log format immediately so subsequent logs use the configured format
     mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));

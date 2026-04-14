@@ -40,7 +40,6 @@ class ReplicationHandlerTest : public ::testing::Test {
         optimization_in_progress_(false),
         replication_paused_for_dump_(false),
         handler_ctx_{.table_catalog = nullptr,
-                     .table_contexts = table_contexts_,
                      .stats = stats_,
                      .full_config = nullptr,
                      .dump_dir = "",
@@ -49,7 +48,6 @@ class ReplicationHandlerTest : public ::testing::Test {
                      .optimization_in_progress = optimization_in_progress_,
                      .replication_paused_for_dump = replication_paused_for_dump_,
                      .mysql_reconnecting = mysql_reconnecting_,
-                     .binlog_reader = nullptr,
                      .sync_manager = nullptr,
                      .cache_manager = nullptr,
                      .variable_manager = nullptr} {}

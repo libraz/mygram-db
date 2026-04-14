@@ -39,8 +39,7 @@ class SearchByThresholdTest : public ::testing::Test {
  * Doc 3 has none of these bigrams.
  */
 TEST_F(SearchByThresholdTest, ThresholdEqualsTermCount) {
-  auto results =
-      index_.SearchByThreshold({"he", "el", "ll", "lo"}, 4);
+  auto results = index_.SearchByThreshold({"he", "el", "ll", "lo"}, 4);
   ASSERT_EQ(results.size(), 1);
   EXPECT_EQ(results[0], 1);
 }
@@ -53,8 +52,7 @@ TEST_F(SearchByThresholdTest, ThresholdEqualsTermCount) {
  * Doc 3 has none (0 of 4 -> does not meet threshold).
  */
 TEST_F(SearchByThresholdTest, ThresholdBelowTermCount) {
-  auto results =
-      index_.SearchByThreshold({"he", "el", "ll", "lo"}, 2);
+  auto results = index_.SearchByThreshold({"he", "el", "ll", "lo"}, 2);
   ASSERT_EQ(results.size(), 2);
   EXPECT_EQ(results[0], 1);
   EXPECT_EQ(results[1], 2);
@@ -150,8 +148,7 @@ TEST_F(SearchByThresholdTest, ResultsAreSorted) {
  */
 TEST_F(SearchByThresholdTest, DelegatesToSearchAndWhenThresholdEqualsSize) {
   std::vector<std::string> terms = {"he", "el"};
-  auto threshold_results =
-      index_.SearchByThreshold(terms, terms.size());
+  auto threshold_results = index_.SearchByThreshold(terms, terms.size());
   auto and_results = index_.SearchAnd(terms);
   EXPECT_EQ(threshold_results, and_results);
 }

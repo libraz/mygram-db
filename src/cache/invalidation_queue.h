@@ -15,11 +15,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "cache/cache_types.h"
 #include "query/cache_key.h"
-
-namespace mygramdb::server {
-struct TableContext;
-}  // namespace mygramdb::server
 
 namespace mygramdb::cache {
 
@@ -65,8 +62,7 @@ class InvalidationQueue {
    * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
    * @note table_contexts must remain valid for the lifetime of this InvalidationQueue instance
    */
-  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
-                    const std::unordered_map<std::string, server::TableContext*>& table_contexts);
+  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, NgramConfigMap ngram_configs);
 
   /**
    * @brief Destructor
@@ -100,6 +96,10 @@ class InvalidationQueue {
 
   /**
    * @brief Stop worker thread gracefully
+   *
+   * Caller must ensure that the CacheManager (cache_) and InvalidationManager
+   * (invalidation_mgr_) outlive this object, as Stop() processes remaining
+   * items after the worker thread joins.
    */
   void Stop();
 
@@ -134,8 +134,7 @@ class InvalidationQueue {
  private:
   QueryCache* cache_;                      ///< Pointer to query cache
   InvalidationManager* invalidation_mgr_;  ///< Pointer to invalidation manager
-  const std::unordered_map<std::string, server::TableContext*>&
-      table_contexts_;  ///< Reference to table contexts for per-table ngram settings
+  NgramConfigMap ngram_configs_;           ///< Per-table N-gram settings for invalidation
 
   // Pending invalidations: (table, cache_key_hex) -> first seen timestamp
   // Using map to automatically deduplicate

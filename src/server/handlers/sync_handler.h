@@ -7,7 +7,11 @@
 
 #ifdef USE_MYSQL
 
+#include <memory>
+
 #include "server/handlers/command_handler.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::server {
 
@@ -27,23 +31,31 @@ class SyncOperationManager;
 class SyncHandler : public CommandHandler {
  public:
   /**
-   * @brief Construct SyncHandler with dependencies
+   * @brief Create SyncHandler with dependencies
    *
    * @param ctx Handler context with shared server state
    * @param sync_manager SyncOperationManager for SYNC operations (non-owning pointer, MUST be non-null)
    *
-   * @throws std::invalid_argument if sync_manager is nullptr
+   * @return Expected with unique_ptr to SyncHandler, or Error if sync_manager is nullptr
    */
-  SyncHandler(HandlerContext& ctx, SyncOperationManager* sync_manager)
-      : CommandHandler(ctx), sync_manager_(sync_manager) {
-    if (sync_manager_ == nullptr) {
-      throw std::invalid_argument("SyncHandler: sync_manager must be non-null");
+  static mygram::utils::Expected<std::unique_ptr<SyncHandler>, mygram::utils::Error> Create(
+      HandlerContext& ctx, SyncOperationManager* sync_manager) {
+    if (sync_manager == nullptr) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kNetworkNullDependency,
+                                                                    "SyncHandler: sync_manager must be non-null"));
     }
+    return std::unique_ptr<SyncHandler>(new SyncHandler(ctx, sync_manager));
   }
 
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
 
  private:
+  /**
+   * @brief Private constructor - use Create() factory method instead
+   */
+  SyncHandler(HandlerContext& ctx, SyncOperationManager* sync_manager)
+      : CommandHandler(ctx), sync_manager_(sync_manager) {}
+
   /**
    * @brief Handle SYNC command (trigger snapshot build)
    */

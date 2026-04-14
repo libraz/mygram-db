@@ -84,7 +84,8 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   }
 
   // Check stream after writing header section
-  if (!out.good()) return false;
+  if (!out.good())
+    return false;
 
   // Write document count
   auto doc_count = static_cast<uint64_t>(doc_id_to_pk_.size());
@@ -151,7 +152,8 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
     }
 
     // Periodic check to detect write failures early (e.g., disk full)
-    if (!out.good()) return false;
+    if (!out.good())
+      return false;
   }
 
   return out.good();
@@ -225,11 +227,11 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
   }
 
   // Load into new maps to minimize lock time
-  std::unordered_map<DocId, std::string> new_doc_id_to_pk;
+  absl::flat_hash_map<DocId, std::string> new_doc_id_to_pk;
   absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       new_pk_to_doc_id;
-  std::unordered_map<DocId, FilterMap> new_doc_filters;
-  std::unordered_map<DocId, std::string> new_doc_texts;
+  absl::flat_hash_map<DocId, FilterMap> new_doc_filters;
+  absl::flat_hash_map<DocId, std::string> new_doc_texts;
 
   // Reserve capacity to avoid rehashing during bulk insertion
   new_doc_id_to_pk.reserve(static_cast<size_t>(doc_count));

@@ -4,8 +4,6 @@
  *        GetColumnValueCountsFiltered, DeserializeToDisplayString)
  */
 
-#include "storage/filter_index.h"
-
 #include <gtest/gtest.h>
 #include <roaring/roaring.h>
 
@@ -14,6 +12,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include "storage/filter_index.h"
 
 using namespace mygramdb::storage;
 
@@ -83,8 +83,8 @@ TEST_F(FilterIndexFacetTest, GetColumnValueCounts_SortedByCountDescending) {
   // First entry should have the highest count
   for (size_t i = 1; i < counts.size(); ++i) {
     EXPECT_GE(counts[i - 1].second, counts[i].second)
-        << "Entry at index " << (i - 1) << " (count=" << counts[i - 1].second
-        << ") should be >= entry at index " << i << " (count=" << counts[i].second << ")";
+        << "Entry at index " << (i - 1) << " (count=" << counts[i - 1].second << ") should be >= entry at index " << i
+        << " (count=" << counts[i].second << ")";
   }
 }
 
@@ -173,8 +173,7 @@ TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_Uint64Type) {
 TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_DoubleType) {
   std::string serialized = FilterIndex::SerializeFilterValue(FilterValue{double(3.14)});
   std::string display = FilterIndex::DeserializeToDisplayString(serialized);
-  EXPECT_TRUE(display.find("3.14") == 0)
-      << "Expected display to start with '3.14', got: " << display;
+  EXPECT_TRUE(display.find("3.14") == 0) << "Expected display to start with '3.14', got: " << display;
 }
 
 TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_NullType) {

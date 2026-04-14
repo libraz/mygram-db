@@ -65,6 +65,75 @@ class SyncHandlerTest : public ::testing::Test {
 };
 
 // ============================================================================
+// SyncHandler::Create() Factory Tests
+// ============================================================================
+
+TEST_F(SyncHandlerTest, CreateWithValidArgs_Succeeds) {
+  // Create SyncOperationManager (required dependency)
+  SyncOperationManager sync_mgr(table_contexts_, config_.get(), nullptr);
+
+  // Create a HandlerContext
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = nullptr,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = &sync_mgr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto result = SyncHandler::Create(ctx, &sync_mgr);
+  ASSERT_TRUE(result) << "Create failed: " << result.error().to_string();
+  EXPECT_NE(*result, nullptr);
+}
+
+TEST_F(SyncHandlerTest, CreateWithNullSyncManager_ReturnsError) {
+  // Create a HandlerContext
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = nullptr,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = nullptr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto result = SyncHandler::Create(ctx, nullptr);
+  ASSERT_FALSE(result);
+  auto error_msg = result.error().to_string();
+  EXPECT_TRUE(error_msg.find("sync_manager") != std::string::npos)
+      << "Error should mention sync_manager, got: " << error_msg;
+}
+
+// ============================================================================
 // Query Parser Tests
 // ============================================================================
 

@@ -26,7 +26,7 @@ class CacheManager;
 }
 
 namespace mygramdb::mysql {
-class BinlogReader;
+class IBinlogReader;
 }
 
 namespace mygramdb::loader {
@@ -88,7 +88,7 @@ class SyncOperationManager {
    * @param cache_manager Pointer to cache manager (must outlive this instance, can be nullptr)
    */
   SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
-                       const config::Config* full_config, mysql::BinlogReader* binlog_reader,
+                       const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                        cache::CacheManager* cache_manager = nullptr);
 
   ~SyncOperationManager();
@@ -158,7 +158,7 @@ class SyncOperationManager {
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
-  mysql::BinlogReader* binlog_reader_;
+  mysql::IBinlogReader* binlog_reader_;
   cache::CacheManager* cache_manager_ = nullptr;
 
   // State tracking

@@ -15,6 +15,7 @@
 
 #include "cache/cache_manager.h"
 #include "server/sync_operation_manager.h"
+#include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
 #include "utils/fd_guard.h"
@@ -148,12 +149,12 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
         .Event("dump_save_started")
         .Field("filepath", filepath)
         .Field("mode", "async")
-        .Field("tables", static_cast<uint64_t>(ctx_.table_contexts.size()))
+        .Field("tables", static_cast<uint64_t>(ctx_.table_catalog->GetTables().size()))
         .Info();
 
     // Join any previous worker thread
     ctx_.dump_progress->JoinWorker();
-    ctx_.dump_progress->Reset(DumpStatus::SAVING, filepath, ctx_.table_contexts.size());
+    ctx_.dump_progress->Reset(DumpStatus::SAVING, filepath, ctx_.table_catalog->GetTables().size());
 
     // Start background worker thread
     ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
@@ -171,7 +172,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
       .Event("dump_save_started")
       .Field("filepath", filepath)
       .Field("mode", "sync")
-      .Field("tables", static_cast<uint64_t>(ctx_.table_contexts.size()))
+      .Field("tables", static_cast<uint64_t>(ctx_.table_catalog->GetTables().size()))
       .Info();
 
   // DumpSaveWorker resets the flag at the end, so release the guard
@@ -221,17 +222,16 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   std::string gtid;
 #endif
 
-  // Convert table_contexts to format expected by dump API
-  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
-  size_t table_index = 0;
-  for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
-    converted_contexts[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};
-
-    // Update progress
-    if (ctx_.dump_progress != nullptr) {
-      ctx_.dump_progress->UpdateTable(table_name, table_index);
+  // Convert table contexts to format expected by dump API
+  auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
+  {
+    size_t table_index = 0;
+    for (const auto& [table_name, ctx_pair] : converted_contexts) {
+      if (ctx_.dump_progress != nullptr) {
+        ctx_.dump_progress->UpdateTable(table_name, table_index);
+      }
+      ++table_index;
     }
-    ++table_index;
   }
 
   // Call dump API (writes V2 format)
@@ -383,11 +383,8 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Set loading mode (RAII guard ensures it's cleared even on exceptions)
   mygram::utils::AtomicFlagGuard loading_guard(ctx_.dump_load_in_progress);
 
-  // Convert table_contexts to format expected by dump API
-  std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> converted_contexts;
-  for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
-    converted_contexts[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};
-  }
+  // Convert table contexts to format expected by dump API
+  auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
 
   // Variables to receive loaded data
   std::string gtid;
@@ -442,7 +439,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     }
 
     // Rebuild BM25 corpus statistics from loaded documents
-    for (const auto& [table_name, table_ctx] : ctx_.table_contexts) {
+    for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
       if (table_ctx->doc_store) {
         auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
         uint64_t total_length = 0;

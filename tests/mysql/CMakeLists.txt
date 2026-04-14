@@ -45,6 +45,21 @@ gtest_discover_tests(binlog_crc32_test
   DISCOVERY_TIMEOUT 30
 )
 
+# NullBinlogReader tests (no MySQL dependency)
+add_executable(null_binlog_reader_test
+  null_binlog_reader_test.cpp
+)
+
+target_link_libraries(null_binlog_reader_test
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(null_binlog_reader_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 if(USE_MYSQL AND MYSQL_FOUND)
   # ENUM/SET field decoder tests
   add_executable(rows_parser_enum_set_test

@@ -202,10 +202,16 @@ TEST(IndexConcurrentTest, LoadFromFile) {
 
   Index index2(1);
 
-  // Add some initial documents
+  // Add initial documents whose text does NOT contain the search character 'a'.
+  // "xyz" produces unigrams {"x","y","z"} -- no overlap with search term "a".
+  // This ensures SearchAnd({"a"}) returns exactly 0 before LoadFromFile, and
+  // exactly 100 after (from the "abc" docs in the snapshot).
   for (DocId i = 1; i <= 50; i++) {
     index2.AddDocument(i, "xyz");
   }
+
+  // Verify initial state: searching for "a" returns 0 results
+  EXPECT_EQ(index2.SearchAnd({"a"}).size(), 0);
 
   std::vector<std::thread> threads;
   std::atomic<bool> load_done{false};
@@ -217,16 +223,17 @@ TEST(IndexConcurrentTest, LoadFromFile) {
     load_done = true;
   });
 
-  // Reader threads (will see either old or new data, but always consistent)
+  // Reader threads: must see either 0 (before load, "xyz" docs have no "a")
+  // or 100 (after load, "abc" docs all contain "a"), never a partial result.
   for (int i = 0; i < 3; i++) {
     threads.emplace_back([&index2, &load_done]() {
       for (int j = 0; j < 100; j++) {
         if (load_done)
           break;
         auto results = index2.SearchAnd({"a"});
-        // Should be either 0 (before load - "xyz" docs) or 100 (after load - "abc" docs), never
-        // partial
-        EXPECT_TRUE(results.size() == 0 || results.size() == 100);
+        EXPECT_TRUE(results.size() == 0 || results.size() == 100)
+            << "Got partial result: " << results.size()
+            << " (expected 0 before load or 100 after load)";
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
     });
@@ -239,7 +246,7 @@ TEST(IndexConcurrentTest, LoadFromFile) {
   // Cleanup
   std::remove((test_file + ".index").c_str());
 
-  // Verify final state
+  // Verify final state: all 100 "abc" docs should be searchable
   auto results = index2.SearchAnd({"a"});
   EXPECT_EQ(results.size(), 100);
 }

@@ -94,7 +94,6 @@ struct DispatcherHarness {
     catalog = std::make_unique<TableCatalog>(table_contexts);
     hctx = std::make_unique<HandlerContext>(HandlerContext{
         .table_catalog = catalog.get(),
-        .table_contexts = table_contexts,
         .stats = *stats,
         .full_config = nullptr,
         .dump_dir = "",
@@ -104,10 +103,7 @@ struct DispatcherHarness {
         .replication_paused_for_dump = repl_paused,
         .mysql_reconnecting = mysql_reconnecting,
 #ifdef USE_MYSQL
-        .binlog_reader = nullptr,
         .sync_manager = nullptr,
-#else
-        .binlog_reader = nullptr,
 #endif
         .cache_manager = nullptr,
     });

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "cache/cache_manager.h"
+#include "cache/cache_types.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "server/server_stats.h"
@@ -69,7 +70,12 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
   cache_config.max_memory_bytes = 100 * 1024 * 1024;
   cache_config.min_query_cost_ms = 1.0;
 
-  cache::CacheManager cache_manager(cache_config, table_contexts_);
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] =
+        cache::NgramConfig{ctx->config.ngram_size, ctx->config.kanji_ngram_size, ctx->config.cross_boundary_ngrams};
+  }
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
 
   // Aggregate metrics
   auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
@@ -111,7 +117,12 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManagerDisabled) {
   cache_config.enabled = false;
   cache_config.max_memory_bytes = 100 * 1024 * 1024;
 
-  cache::CacheManager cache_manager(cache_config, table_contexts_);
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] =
+        cache::NgramConfig{ctx->config.ngram_size, ctx->config.kanji_ngram_size, ctx->config.cross_boundary_ngrams};
+  }
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
   cache_manager.Disable();
 
   // Aggregate metrics
@@ -352,7 +363,12 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   config::CacheConfig cache_config;
   cache_config.enabled = true;
   cache_config.max_memory_bytes = 100 * 1024 * 1024;
-  cache::CacheManager cache_manager(cache_config, table_contexts_);
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] =
+        cache::NgramConfig{ctx->config.ngram_size, ctx->config.kanji_ngram_size, ctx->config.cross_boundary_ngrams};
+  }
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
 
   // Aggregate metrics
   auto metrics = StatisticsService::AggregateMetrics(table_contexts_);

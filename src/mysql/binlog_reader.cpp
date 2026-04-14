@@ -39,8 +39,9 @@ BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage:
       table_config_(std::move(table_config)),
       mysql_config_(std::move(mysql_config)),
       config_(config),
-      current_gtid_(config.start_gtid),
-      server_stats_(stats) {}
+      current_gtid_(config.start_gtid) {
+  server_stats_.store(stats, std::memory_order_relaxed);
+}
 
 // Multi-table mode constructor
 BinlogReader::BinlogReader(Connection& connection,
@@ -51,8 +52,9 @@ BinlogReader::BinlogReader(Connection& connection,
       multi_table_mode_(true),
       mysql_config_(std::move(mysql_config)),
       config_(config),
-      current_gtid_(config.start_gtid),
-      server_stats_(stats) {}
+      current_gtid_(config.start_gtid) {
+  server_stats_.store(stats, std::memory_order_relaxed);
+}
 
 BinlogReader::~BinlogReader() {
   Stop();

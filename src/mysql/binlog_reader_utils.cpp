@@ -51,8 +51,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
             .Field("skip_count", static_cast<uint64_t>(current_count + 1))
             .Info();
       }
-      if (server_stats_ != nullptr) {
-        server_stats_->IncrementReplEventsSkippedOtherTables();
+      auto* stats = server_stats_.load(std::memory_order_acquire);
+      if (stats != nullptr) {
+        stats->IncrementReplEventsSkippedOtherTables();
       }
       return true;
     }
@@ -72,8 +73,9 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   } else {
     // Single-table mode: skip events for other tables
     if (event.table_name != table_config_.name) {
-      if (server_stats_ != nullptr) {
-        server_stats_->IncrementReplEventsSkippedOtherTables();
+      auto* stats = server_stats_.load(std::memory_order_acquire);
+      if (stats != nullptr) {
+        stats->IncrementReplEventsSkippedOtherTables();
       }
       return true;
     }
@@ -117,7 +119,8 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
 
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
-                                            server_stats_, cache_manager_, bm25_stats);
+                                            server_stats_.load(std::memory_order_acquire),
+                                            cache_manager_.load(std::memory_order_acquire), bm25_stats);
 }
 
 bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {

@@ -429,19 +429,17 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
       const auto& str_lhs = pk_lhs.value();
       const auto& str_rhs = pk_rhs.value();
 
-      // Fast path: both are pure numeric strings
-      if (!str_lhs.empty() && !str_rhs.empty() &&
-          std::all_of(str_lhs.begin(), str_lhs.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; }) &&
-          std::all_of(str_rhs.begin(), str_rhs.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-        try {
-          uint64_t num_lhs = std::stoull(str_lhs);
-          uint64_t num_rhs = std::stoull(str_rhs);
+      // Fast path: both are pure numeric strings — use std::from_chars (locale-independent, lock-free)
+      if (!str_lhs.empty() && !str_rhs.empty()) {
+        uint64_t num_lhs = 0;
+        uint64_t num_rhs = 0;
+        auto [ptr_lhs, ec_lhs] = std::from_chars(str_lhs.data(), str_lhs.data() + str_lhs.size(), num_lhs);
+        auto [ptr_rhs, ec_rhs] = std::from_chars(str_rhs.data(), str_rhs.data() + str_rhs.size(), num_rhs);
+        if (ec_lhs == std::errc{} && ptr_lhs == str_lhs.data() + str_lhs.size() && ec_rhs == std::errc{} &&
+            ptr_rhs == str_rhs.data() + str_rhs.size()) {
           return ascending_ ? (num_lhs < num_rhs) : (num_lhs > num_rhs);
-        } catch (const std::out_of_range&) {
-          // Overflow, fall through to string comparison
-        } catch (const std::invalid_argument&) {
-          // Should not happen since we check isdigit, but be safe
         }
+        // Parse failure (non-numeric or overflow): fall through to string comparison
       }
 
       // String comparison for non-numeric primary keys

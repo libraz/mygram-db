@@ -18,9 +18,9 @@ namespace mygramdb::query {
  * @brief A highlighted snippet fragment with metadata
  */
 struct SnippetFragment {
-  std::string text;    ///< Fragment text with highlight tags inserted
-  uint32_t start_cp;   ///< Start position in code points (for merging)
-  uint32_t end_cp;     ///< End position in code points (for merging)
+  std::string text;   ///< Fragment text with highlight tags inserted
+  uint32_t start_cp;  ///< Start position in code points (for merging)
+  uint32_t end_cp;    ///< End position in code points (for merging)
 };
 
 /**
@@ -61,7 +61,7 @@ class Highlighter {
    * @return Vector of (start_cp, end_cp) pairs sorted by start position
    */
   static std::vector<std::pair<uint32_t, uint32_t>> FindMatchPositions(std::string_view normalized_text,
-                                                                        const std::vector<std::string>& search_terms);
+                                                                       const std::vector<std::string>& search_terms);
 };
 
 }  // namespace mygramdb::query

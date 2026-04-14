@@ -22,12 +22,12 @@
 #include "storage/document_store.h"
 #include "utils/network_utils.h"
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
 class IBinlogReader;
+#ifdef USE_MYSQL
 class BinlogReader;
-}  // namespace mygramdb::mysql
 #endif
+}  // namespace mygramdb::mysql
 
 namespace mygramdb::cache {
 class CacheManager;
@@ -80,6 +80,35 @@ struct ServerConfig {
   std::vector<std::string> allow_cidrs;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs;
   std::string unix_socket_path;  // Empty = TCP mode, non-empty = UDS mode
+
+  /**
+   * @brief Create ServerConfig from application Config
+   *
+   * Copies TCP server settings, API defaults, network ACLs, and unix socket path
+   * from the unified config::Config structure.
+   *
+   * @param cfg Application configuration
+   * @return Populated ServerConfig
+   */
+  static ServerConfig FromConfig(const config::Config& cfg) {
+    ServerConfig sc;
+    sc.host = cfg.api.tcp.bind;
+    sc.port = cfg.api.tcp.port;
+    sc.max_connections = cfg.api.tcp.max_connections;
+    sc.worker_threads = cfg.api.tcp.worker_threads;
+    sc.recv_timeout_sec = cfg.api.tcp.recv_timeout_sec;
+    sc.thread_pool_queue_size = cfg.api.tcp.thread_pool_queue_size;
+    sc.keepalive.enabled = cfg.api.tcp.keepalive.enabled;
+    sc.keepalive.idle_sec = cfg.api.tcp.keepalive.idle_sec;
+    sc.keepalive.interval_sec = cfg.api.tcp.keepalive.interval_sec;
+    sc.keepalive.probe_count = cfg.api.tcp.keepalive.probe_count;
+    sc.max_write_queue_bytes = cfg.api.tcp.max_write_queue_bytes;
+    sc.default_limit = cfg.api.default_limit;
+    sc.max_query_length = cfg.api.max_query_length;
+    sc.allow_cidrs = cfg.network.allow_cidrs;
+    sc.unix_socket_path = cfg.api.unix_socket.path;
+    return sc;
+  }
 };
 
 /**
@@ -276,9 +305,6 @@ struct HandlerContext {
   // Service-based access
   TableCatalog* table_catalog = nullptr;
 
-  // Direct table access (maintained for backward compatibility)
-  const std::unordered_map<std::string, TableContext*>& table_contexts;
-
   ServerStats& stats;
   const config::Config* full_config;
   std::string dump_dir;
@@ -288,11 +314,9 @@ struct HandlerContext {
   std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
   std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
+  mysql::IBinlogReader* binlog_reader = nullptr;
 #ifdef USE_MYSQL
-  mysql::IBinlogReader* binlog_reader;
   SyncOperationManager* sync_manager;  // Manages sync operations and state
-#else
-  void* binlog_reader;
 #endif
   cache::CacheManager* cache_manager = nullptr;
   config::RuntimeVariableManager* variable_manager = nullptr;

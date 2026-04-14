@@ -189,6 +189,14 @@ Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_for
   return {};
 }
 
+Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_format::SectionType type,
+                                           std::ostringstream& data_stream) {
+  // Delegate to the string overload. std::ostringstream's internal stringbuf
+  // is opened in output-only mode, so its get area is not configured for
+  // reading. Using .str() is the safe way to extract the written data.
+  return WriteSectionEnvelope(output_stream, type, data_stream.str());
+}
+
 Expected<void, Error> ReadSectionEnvelope(std::istream& input_stream, dump_format::SectionEnvelope& envelope) {
   uint32_t type_val = 0;
   if (!ReadBinary(input_stream, type_val)) {
@@ -337,7 +345,7 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_config", temp_filepath, result.error().message());
         return result;
       }
-      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kConfig, config_stream.str()); !result) {
+      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kConfig, config_stream); !result) {
         LogStorageError("write_config_section", temp_filepath, result.error().message());
         return result;
       }
@@ -351,7 +359,7 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_statistics", temp_filepath, result.error().message());
         return result;
       }
-      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kStatistics, stats_stream.str()); !result) {
+      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kStatistics, stats_stream); !result) {
         LogStorageError("write_stats_section", temp_filepath, result.error().message());
         return result;
       }
@@ -382,7 +390,7 @@ Expected<void, Error> WriteDumpV2(
         if (!WriteBinary(table_stream, ts_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
-        table_stream.write(ts_data.data(), static_cast<std::streamsize>(ts_len));
+        table_stream.write(ts_data.data(), static_cast<std::streamsize>(ts_data.size()));
       } else {
         uint32_t ts_len = 0;
         if (!WriteBinary(table_stream, ts_len)) {
@@ -391,43 +399,47 @@ Expected<void, Error> WriteDumpV2(
       }
 
       // Index data
-      std::ostringstream index_stream;
-      if (!index->SaveToStream(index_stream)) {
-        StructuredLog()
-            .Event("storage_error")
-            .Field("operation", "save_index")
-            .Field("filepath", temp_filepath)
-            .Field("table", table_name)
-            .Error();
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+      {
+        std::ostringstream index_stream;
+        if (!index->SaveToStream(index_stream)) {
+          StructuredLog()
+              .Event("storage_error")
+              .Field("operation", "save_index")
+              .Field("filepath", temp_filepath)
+              .Field("table", table_name)
+              .Error();
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+        }
+        std::string index_data = index_stream.str();
+        auto index_len = static_cast<uint64_t>(index_data.size());
+        if (!WriteBinary(table_stream, index_len)) {
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+        }
+        table_stream.write(index_data.data(), static_cast<std::streamsize>(index_data.size()));
       }
-      std::string index_data = index_stream.str();
-      auto index_len = static_cast<uint64_t>(index_data.size());
-      if (!WriteBinary(table_stream, index_len)) {
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-      table_stream.write(index_data.data(), static_cast<std::streamsize>(index_len));
 
       // DocStore data
-      std::ostringstream doc_stream;
-      if (auto result = doc_store->SaveToStream(doc_stream, ""); !result) {
-        StructuredLog()
-            .Event("storage_error")
-            .Field("operation", "save_documents")
-            .Field("filepath", temp_filepath)
-            .Field("table", table_name)
-            .Error();
-        return result;
+      {
+        std::ostringstream doc_stream;
+        if (auto result = doc_store->SaveToStream(doc_stream, ""); !result) {
+          StructuredLog()
+              .Event("storage_error")
+              .Field("operation", "save_documents")
+              .Field("filepath", temp_filepath)
+              .Field("table", table_name)
+              .Error();
+          return result;
+        }
+        std::string doc_data = doc_stream.str();
+        auto doc_len = static_cast<uint64_t>(doc_data.size());
+        if (!WriteBinary(table_stream, doc_len)) {
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+        }
+        table_stream.write(doc_data.data(), static_cast<std::streamsize>(doc_data.size()));
       }
-      std::string doc_data = doc_stream.str();
-      auto doc_len = static_cast<uint64_t>(doc_data.size());
-      if (!WriteBinary(table_stream, doc_len)) {
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-      table_stream.write(doc_data.data(), static_cast<std::streamsize>(doc_len));
 
-      // Write entire table as one section envelope
-      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kTableData, table_stream.str()); !result) {
+      // Write entire table as one section envelope (streaming, no .str() copy)
+      if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kTableData, table_stream); !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;
       }
@@ -646,7 +658,8 @@ Expected<void, Error> ReadDumpV2(
 
       // Read section data
       if (envelope.data_length > kMaxTableDataSectionLength) {
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds physical memory"));
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds physical memory"));
       }
 
       std::string section_data(envelope.data_length, '\0');
@@ -795,9 +808,9 @@ Expected<void, Error> ReadDumpV2(
           .Field("expected", static_cast<uint64_t>(header.section_count))
           .Field("actual", static_cast<uint64_t>(sections_read))
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
-                                      "Expected " + std::to_string(header.section_count) + " sections but found " +
-                                          std::to_string(sections_read)));
+      return MakeUnexpected(MakeError(
+          ErrorCode::kStorageDumpReadError,
+          "Expected " + std::to_string(header.section_count) + " sections but found " + std::to_string(sections_read)));
     }
 
     // Validate required sections

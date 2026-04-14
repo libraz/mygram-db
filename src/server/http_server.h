@@ -30,11 +30,9 @@
 #include "utils/expected.h"
 #include "utils/network_utils.h"
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
-class BinlogReader;
+class IBinlogReader;
 }  // namespace mygramdb::mysql
-#endif
 
 namespace mygramdb::cache {
 class CacheManager;
@@ -59,6 +57,22 @@ struct HttpServerConfig {
   bool enable_cors = false;
   std::string cors_allow_origin;
   std::vector<std::string> allow_cidrs;
+
+  /**
+   * @brief Create HttpServerConfig from application Config
+   *
+   * @param cfg Application configuration
+   * @return Populated HttpServerConfig
+   */
+  static HttpServerConfig FromConfig(const config::Config& cfg) {
+    HttpServerConfig hc;
+    hc.bind = cfg.api.http.bind;
+    hc.port = cfg.api.http.port;
+    hc.enable_cors = cfg.api.http.enable_cors;
+    hc.cors_allow_origin = cfg.api.http.cors_allow_origin;
+    hc.allow_cidrs = cfg.network.allow_cidrs;
+    return hc;
+  }
 };
 
 // Forward declaration for TableContext
@@ -86,12 +100,7 @@ class HttpServer {
    * @param tcp_stats Optional pointer to TCP server's ServerStats (for /info and /metrics)
    */
   HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-             const config::Config* full_config = nullptr,
-#ifdef USE_MYSQL
-             mysql::BinlogReader* binlog_reader = nullptr,
-#else
-             void* binlog_reader = nullptr,
-#endif
+             const config::Config* full_config = nullptr, mysql::IBinlogReader* binlog_reader = nullptr,
              cache::CacheManager* cache_manager = nullptr, std::atomic<bool>* loading = nullptr,
              ServerStats* tcp_stats = nullptr);
 
@@ -149,11 +158,7 @@ class HttpServer {
 
   const config::Config* full_config_;
 
-#ifdef USE_MYSQL
-  mysql::BinlogReader* binlog_reader_;
-#else
-  void* binlog_reader_;
-#endif
+  mysql::IBinlogReader* binlog_reader_;
 
   cache::CacheManager* cache_manager_;
   std::unique_ptr<RateLimiter> rate_limiter_;

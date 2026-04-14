@@ -284,7 +284,7 @@ class BinlogReader final : public IBinlogReader {
    *        Caller must ensure the pointed-to object outlives this BinlogReader,
    *        or call Stop() before destroying it.
    */
-  void SetServerStats(server::ServerStats* stats) { server_stats_ = stats; }
+  void SetServerStats(server::ServerStats* stats) { server_stats_.store(stats, std::memory_order_release); }
 
   /**
    * @brief Set cache manager for invalidation during binlog processing
@@ -292,7 +292,9 @@ class BinlogReader final : public IBinlogReader {
    *        Caller must ensure the pointed-to object outlives this BinlogReader,
    *        or call Stop() before destroying it.
    */
-  void SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
+  void SetCacheManager(cache::CacheManager* cache_manager) {
+    cache_manager_.store(cache_manager, std::memory_order_release);
+  }
 
  private:
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
@@ -331,8 +333,8 @@ class BinlogReader final : public IBinlogReader {
   std::string current_gtid_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
-  server::ServerStats* server_stats_ = nullptr;   // Optional server statistics tracker
-  cache::CacheManager* cache_manager_ = nullptr;  // Optional cache manager for invalidation
+  std::atomic<server::ServerStats*> server_stats_{nullptr};   // Optional server statistics tracker
+  std::atomic<cache::CacheManager*> cache_manager_{nullptr};  // Optional cache manager for invalidation
 
   // Debug log counters (instance-scoped, reset on Start())
   std::atomic<int> no_data_log_count_{0};

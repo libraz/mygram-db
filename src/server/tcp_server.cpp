@@ -67,13 +67,7 @@ constexpr int kDefaultConnectionRecvTimeoutSec = 60;
 }  // namespace
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-                     std::string dump_dir, const config::Config* full_config,
-#ifdef USE_MYSQL
-                     mysql::BinlogReader* binlog_reader
-#else
-                     void* binlog_reader
-#endif
-                     )
+                     std::string dump_dir, const config::Config* full_config, mysql::IBinlogReader* binlog_reader)
     : config_(std::move(config)),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
@@ -127,17 +121,19 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Initialize all server components via ServerLifecycleManager
   // This centralizes component creation and dependency ordering
-  ServerLifecycleManager lifecycle_manager(config_, table_contexts_, dump_dir_, full_config_, stats_,
-                                           dump_load_in_progress_, dump_save_in_progress_, optimization_in_progress_,
-                                           replication_paused_for_dump_, mysql_reconnecting_,
+  auto lifecycle_manager_result = ServerLifecycleManager::Create(
+      config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, binlog_reader_
 #ifdef USE_MYSQL
-                                           binlog_reader_, sync_manager_.get()
-#else
-                                           binlog_reader_
+      ,
+      sync_manager_.get()
 #endif
   );
+  if (!lifecycle_manager_result) {
+    return MakeUnexpected(lifecycle_manager_result.error());
+  }
 
-  auto components_result = lifecycle_manager.Initialize();
+  auto components_result = (*lifecycle_manager_result)->Initialize();
   if (!components_result) {
     return MakeUnexpected(components_result.error());
   }

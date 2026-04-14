@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -30,6 +29,7 @@
 #include <vector>
 
 #include "utils/datetime_converter.h"
+#include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -689,10 +689,13 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fie
     std::string value_str(row[idx]);
     const std::string& type = filter_config.type;
 
-    // Helper lambda for integer parsing via std::from_chars
-    auto parse_integer = [&](auto& out_val) -> bool {
-      auto [ptr, ec] = std::from_chars(value_str.data(), value_str.data() + value_str.size(), out_val);
-      if (ec != std::errc()) {
+    // Helper lambda: parse numeric type and assign to filters, logging on failure
+    auto try_parse_numeric = [&](auto tag) {
+      using T = decltype(tag);
+      auto parsed = mygram::utils::ParseNumeric<T>(value_str);
+      if (parsed) {
+        filters[filter_config.name] = *parsed;
+      } else {
         mygram::utils::StructuredLog()
             .Event("loader_warning")
             .Field("operation", "extract_filters")
@@ -701,61 +704,37 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fie
             .Field("field", filter_config.name)
             .Field("value", value_str)
             .Warn();
-        return false;
       }
-      return true;
     };
 
     {
-      // Integer types (using std::from_chars)
+      // Integer types
       if (type == "tinyint") {
-        int8_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
+        try_parse_numeric(int8_t{});
       } else if (type == "tinyint_unsigned") {
-        uint8_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
+        try_parse_numeric(uint8_t{});
       } else if (type == "smallint") {
-        int16_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
+        try_parse_numeric(int16_t{});
       } else if (type == "smallint_unsigned") {
-        uint16_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
-      } else if (type == "int") {
-        int32_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
-      } else if (type == "int_unsigned") {
-        uint32_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
+        try_parse_numeric(uint16_t{});
+      } else if (type == "int" || type == "mediumint") {
+        try_parse_numeric(int32_t{});
+      } else if (type == "int_unsigned" || type == "mediumint_unsigned") {
+        try_parse_numeric(uint32_t{});
       } else if (type == "bigint") {
-        int64_t val = 0;
-        if (parse_integer(val))
-          filters[filter_config.name] = val;
+        try_parse_numeric(int64_t{});
       }
-      // Float types (std::stod — from_chars for double not reliably available in C++17)
+      // Float types
       else if (type == "float" || type == "double") {
-        try {
-          filters[filter_config.name] = std::stod(value_str);
-        } catch (const std::exception& e) {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "extract_filters")
-              .Field("type", "filter_parse_failed")
-              .Field("filter_type", type)
-              .Field("field", filter_config.name)
-              .Field("value", value_str)
-              .Field("error", e.what())
-              .Warn();
-        }
+        try_parse_numeric(double{});
       }
       // String types
       else if (type == "string" || type == "varchar" || type == "text") {
         filters[filter_config.name] = value_str;
+      }
+      // Boolean type
+      else if (type == "boolean") {
+        filters[filter_config.name] = (value_str == "1" || value_str == "true");
       }
       // Date/time types (convert to epoch seconds)
       else if (type == "datetime" || type == "date") {
@@ -775,18 +754,7 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fie
         }
       } else if (type == "timestamp") {
         // TIMESTAMP: Already in epoch seconds (UTC)
-        uint64_t val = 0;
-        if (parse_integer(val)) {
-          filters[filter_config.name] = val;
-        } else {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "extract_filters")
-              .Field("type", "timestamp_conversion_failed")
-              .Field("value", value_str)
-              .Field("field", filter_config.name)
-              .Warn();
-        }
+        try_parse_numeric(uint64_t{});
       } else if (type == "time") {
         // TIME: Convert to seconds since midnight using DateTimeProcessor
         auto processor_result = mysql_config_.CreateDateTimeProcessor();

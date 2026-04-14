@@ -471,22 +471,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   }
 
   // Initialize TCP server
-  server::ServerConfig server_config;
-  server_config.host = deps_.config.api.tcp.bind;
-  server_config.port = deps_.config.api.tcp.port;
-  server_config.max_connections = deps_.config.api.tcp.max_connections;
-  server_config.worker_threads = deps_.config.api.tcp.worker_threads;
-  server_config.recv_timeout_sec = deps_.config.api.tcp.recv_timeout_sec;
-  server_config.thread_pool_queue_size = deps_.config.api.tcp.thread_pool_queue_size;
-  server_config.keepalive.enabled = deps_.config.api.tcp.keepalive.enabled;
-  server_config.keepalive.idle_sec = deps_.config.api.tcp.keepalive.idle_sec;
-  server_config.keepalive.interval_sec = deps_.config.api.tcp.keepalive.interval_sec;
-  server_config.keepalive.probe_count = deps_.config.api.tcp.keepalive.probe_count;
-  server_config.max_write_queue_bytes = deps_.config.api.tcp.max_write_queue_bytes;
-  server_config.default_limit = deps_.config.api.default_limit;
-  server_config.max_query_length = deps_.config.api.max_query_length;
-  server_config.allow_cidrs = deps_.config.network.allow_cidrs;
-  server_config.unix_socket_path = deps_.config.api.unix_socket.path;
+  auto server_config = server::ServerConfig::FromConfig(deps_.config);
 
 #ifdef USE_MYSQL
   tcp_server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config,
@@ -540,12 +525,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   // Initialize HTTP server (if enabled)
   if (deps_.config.api.http.enable) {
-    server::HttpServerConfig http_config;
-    http_config.bind = deps_.config.api.http.bind;
-    http_config.port = deps_.config.api.http.port;
-    http_config.enable_cors = deps_.config.api.http.enable_cors;
-    http_config.cors_allow_origin = deps_.config.api.http.cors_allow_origin;
-    http_config.allow_cidrs = deps_.config.network.allow_cidrs;
+    auto http_config = server::HttpServerConfig::FromConfig(deps_.config);
 
 #ifdef USE_MYSQL
     http_server_ = std::make_unique<server::HttpServer>(

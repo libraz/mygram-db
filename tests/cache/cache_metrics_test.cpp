@@ -11,34 +11,16 @@
 #include <thread>
 
 #include "cache/cache_manager.h"
+#include "cache/cache_types.h"
 #include "cache/query_cache.h"
 #include "config/config.h"
-#include "index/index.h"
-#include "server/server_types.h"
-#include "storage/document_store.h"
 
 namespace mygramdb::cache {
 
 class CacheMetricsTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Create minimal table context
-    auto index = std::make_unique<index::Index>(2, 1);
-    auto doc_store = std::make_unique<storage::DocumentStore>();
-
-    config::TableConfig table_config;
-    table_config.name = "test_table";
-    table_config.ngram_size = 2;
-    table_config.kanji_ngram_size = 1;
-
-    table_context_ = std::make_unique<server::TableContext>(server::TableContext{
-        .name = "test_table",
-        .config = table_config,
-        .index = std::move(index),
-        .doc_store = std::move(doc_store),
-    });
-
-    table_contexts_["test_table"] = table_context_.get();
+    ngram_configs_["test_table"] = NgramConfig{.ngram_size = 2, .kanji_ngram_size = 1, .cross_boundary_ngrams = true};
 
     // Create cache config
     cache_config_.enabled = true;
@@ -46,19 +28,13 @@ class CacheMetricsTest : public ::testing::Test {
     cache_config_.min_query_cost_ms = 0.0;         // Cache everything for testing
   }
 
-  void TearDown() override {
-    table_contexts_.clear();
-    table_context_.reset();
-  }
-
-  std::unique_ptr<server::TableContext> table_context_;
-  std::unordered_map<std::string, server::TableContext*> table_contexts_;
+  NgramConfigMap ngram_configs_;
   config::CacheConfig cache_config_;
 };
 
 // Test: Cache statistics are initialized to zero
 TEST_F(CacheMetricsTest, InitialStatistics) {
-  CacheManager manager(cache_config_, table_contexts_);
+  CacheManager manager(cache_config_, ngram_configs_);
   auto stats = manager.GetStatistics();
 
   EXPECT_EQ(stats.total_queries, 0);
@@ -76,7 +52,7 @@ TEST_F(CacheMetricsTest, InitialStatistics) {
 
 // Test: Hit rate calculation
 TEST_F(CacheMetricsTest, HitRateCalculation) {
-  CacheManager manager(cache_config_, table_contexts_);
+  CacheManager manager(cache_config_, ngram_configs_);
 
   // Initially hit rate should be 0
   auto stats = manager.GetStatistics();
@@ -121,7 +97,7 @@ TEST_F(CacheMetricsTest, TimeSavedCalculation) {
 
 // Test: Metrics are thread-safe (basic concurrency test)
 TEST_F(CacheMetricsTest, ThreadSafety) {
-  CacheManager manager(cache_config_, table_contexts_);
+  CacheManager manager(cache_config_, ngram_configs_);
 
   // Launch multiple threads to get statistics concurrently
   std::vector<std::thread> threads;
@@ -203,7 +179,7 @@ TEST_F(CacheMetricsTest, HitRateEdgeCases) {
 
 // Test: InvalidationManager memory is reflected in statistics
 TEST_F(CacheMetricsTest, InvalidationIndexMemoryInStatistics) {
-  CacheManager manager(cache_config_, table_contexts_);
+  CacheManager manager(cache_config_, ngram_configs_);
 
   // Insert a cache entry to generate invalidation tracking data
   query::Query query;

@@ -87,7 +87,7 @@ RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column, const std::
   return RoaringBitmapPtr(roaring_bitmap_copy(val_it->second), roaring_bitmap_free);
 }
 
-bool FilterIndex::HasColumn(const std::string& column) const {
+bool FilterIndex::HasColumn(std::string_view column) const {
   std::shared_lock lock(mutex_);
   return eq_bitmaps_.count(column) > 0;
 }
@@ -198,8 +198,7 @@ std::string FilterIndex::SerializeFilterValue(const FilterValue& value) {
       value);
 }
 
-std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCounts(
-    const std::string& column) const {
+std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCounts(const std::string& column) const {
   std::vector<std::pair<std::string, uint64_t>> result;
   {
     std::shared_lock lock(mutex_);
@@ -219,8 +218,7 @@ std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCounts(
   }  // Lock released
 
   // Sort by count descending
-  std::sort(result.begin(), result.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
   return result;
 }
@@ -250,8 +248,7 @@ std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCountsF
   }
 
   // Sort by count descending
-  std::sort(result.begin(), result.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
   return result;
 }
@@ -273,51 +270,60 @@ std::string FilterIndex::DeserializeToDisplayString(const std::string& serialize
     case internal::kTypeIndexBool:  // bool
       return (data_len > 0 && data[0] != '\0') ? "true" : "false";
     case internal::kTypeIndexInt8: {  // int8_t
-      if (data_len < sizeof(int8_t)) return "";
+      if (data_len < sizeof(int8_t))
+        return "";
       return std::to_string(static_cast<int8_t>(data[0]));
     }
     case internal::kTypeIndexUInt8: {  // uint8_t
-      if (data_len < sizeof(uint8_t)) return "";
+      if (data_len < sizeof(uint8_t))
+        return "";
       return std::to_string(static_cast<uint8_t>(data[0]));
     }
     case internal::kTypeIndexInt16: {  // int16_t
-      if (data_len < sizeof(int16_t)) return "";
+      if (data_len < sizeof(int16_t))
+        return "";
       int16_t val = 0;
       std::memcpy(&val, data, sizeof(int16_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexUInt16: {  // uint16_t
-      if (data_len < sizeof(uint16_t)) return "";
+      if (data_len < sizeof(uint16_t))
+        return "";
       uint16_t val = 0;
       std::memcpy(&val, data, sizeof(uint16_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexInt32: {  // int32_t
-      if (data_len < sizeof(int32_t)) return "";
+      if (data_len < sizeof(int32_t))
+        return "";
       int32_t val = 0;
       std::memcpy(&val, data, sizeof(int32_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexUInt32: {  // uint32_t
-      if (data_len < sizeof(uint32_t)) return "";
+      if (data_len < sizeof(uint32_t))
+        return "";
       uint32_t val = 0;
       std::memcpy(&val, data, sizeof(uint32_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexInt64: {  // int64_t
-      if (data_len < sizeof(int64_t)) return "";
+      if (data_len < sizeof(int64_t))
+        return "";
       int64_t val = 0;
       std::memcpy(&val, data, sizeof(int64_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexUInt64: {  // uint64_t
-      if (data_len < sizeof(uint64_t)) return "";
+      if (data_len < sizeof(uint64_t))
+        return "";
       uint64_t val = 0;
       std::memcpy(&val, data, sizeof(uint64_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
     }
     case internal::kTypeIndexTimeValue: {  // TimeValue (int64_t seconds)
-      if (data_len < sizeof(int64_t)) return "";
+      if (data_len < sizeof(int64_t))
+        return "";
       int64_t val = 0;
       std::memcpy(&val, data, sizeof(int64_t));
       return std::to_string(mygram::utils::FromLittleEndian(val));
@@ -325,7 +331,8 @@ std::string FilterIndex::DeserializeToDisplayString(const std::string& serialize
     case internal::kTypeIndexString:  // string
       return std::string(data, data_len);
     case internal::kTypeIndexDouble: {  // double
-      if (data_len < sizeof(double)) return "";
+      if (data_len < sizeof(double))
+        return "";
       double val = 0.0;
       std::memcpy(&val, data, sizeof(double));
       val = mygram::utils::FromLittleEndianDouble(val);
@@ -333,7 +340,8 @@ std::string FilterIndex::DeserializeToDisplayString(const std::string& serialize
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays)
       char buf[32];
       auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-      if (ec != std::errc()) return "";
+      if (ec != std::errc())
+        return "";
       return std::string(buf, ptr);
     }
     default:

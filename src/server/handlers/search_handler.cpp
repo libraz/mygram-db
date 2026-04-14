@@ -14,6 +14,7 @@
 #include "query/result_sorter.h"
 #include "query/synonym_dictionary.h"
 #include "server/search_pipeline.h"
+#include "server/table_catalog.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::server {
@@ -61,8 +62,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
           if (!query.search_text.empty()) {
             output.all_search_terms.push_back(query.search_text);
           }
-          output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(),
-                                         query.and_terms.end());
+          output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
           if (conn_ctx.debug_mode) {
             output.debug_info.query_time_ms = cache_lookup_time_ms;
@@ -114,10 +114,9 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.current_cross_boundary = output.current_index->GetCrossBoundaryNgrams();
   query::SynonymDictionary* synonym_dict = nullptr;
   {
-    auto table_it2 = ctx_.table_contexts.find(query.table);
-    if (table_it2 != ctx_.table_contexts.end() && table_it2->second->synonym_dict &&
-        !table_it2->second->synonym_dict->IsEmpty()) {
-      synonym_dict = table_it2->second->synonym_dict.get();
+    auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+    if (table_ctx != nullptr && table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
+      synonym_dict = table_ctx->synonym_dict.get();
     }
   }
 
@@ -160,8 +159,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     if (conn_ctx.debug_mode) {
       output.debug_info.total_candidates = output.results.size();
       output.debug_info.after_intersection = output.results.size();
-      output.debug_info.optimization_used =
-          "fuzzy-search (distance=" + std::to_string(*query.fuzzy_max_distance) + ")";
+      output.debug_info.optimization_used = "fuzzy-search (distance=" + std::to_string(*query.fuzzy_max_distance) + ")";
       output.debug_info.after_not = output.results.size();
       output.debug_info.after_filters = output.results.size();
     }
@@ -352,9 +350,11 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   // Get primary key column name from table config
   std::string primary_key_column = "id";  // default
-  auto table_it = ctx_.table_contexts.find(query.table);
-  if (table_it != ctx_.table_contexts.end()) {
-    primary_key_column = table_it->second->config.primary_key;
+  {
+    auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+    if (table_ctx != nullptr) {
+      primary_key_column = table_ctx->config.primary_key;
+    }
   }
 
   // For cache hits, skip the SEARCH-specific optimization path
@@ -456,10 +456,9 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     }
 
     // Check for synonym expansion: include synonym variants as highlight targets
-    auto table_it3 = ctx_.table_contexts.find(query.table);
-    if (table_it3 != ctx_.table_contexts.end() && table_it3->second->synonym_dict &&
-        !table_it3->second->synonym_dict->IsEmpty()) {
-      auto* syn_dict = table_it3->second->synonym_dict.get();
+    auto* table_ctx3 = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+    if (table_ctx3 != nullptr && table_ctx3->synonym_dict && !table_ctx3->synonym_dict->IsEmpty()) {
+      auto* syn_dict = table_ctx3->synonym_dict.get();
       std::vector<std::string> expanded;
       for (const auto& nt : normalized_terms) {
         auto synonyms = syn_dict->Expand(nt);
@@ -471,10 +470,10 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       normalized_terms = std::move(expanded);
     }
 
+    auto batch_texts = output.current_doc_store->GetNormalizedTextBatch(paginated_results);
     std::vector<std::string> snippets;
     snippets.reserve(paginated_results.size());
-    for (const auto& doc_id : paginated_results) {
-      auto text_opt = output.current_doc_store->GetNormalizedText(static_cast<storage::DocId>(doc_id));
+    for (const auto& text_opt : batch_texts) {
       if (text_opt.has_value()) {
         auto hl_result = query::Highlighter::Generate(text_opt.value(), normalized_terms, hl_opts);
         snippets.push_back(std::move(hl_result.snippet));
@@ -501,34 +500,25 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     }
 
     const auto& bm25_config = ctx_.full_config->bm25;
-    auto table_it2 = ctx_.table_contexts.find(query.table);
-    if (table_it2 == ctx_.table_contexts.end()) {
+    auto* bm25_table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+    if (bm25_table_ctx == nullptr) {
       return ResponseFormatter::FormatError("table not found");
     }
-    const auto& bm25_stats = table_it2->second->bm25_stats;
+    const auto& bm25_stats = bm25_table_ctx->bm25_stats;
 
     index::BM25Params params{bm25_config.k1, bm25_config.b};
 
-    // Compute document frequency for each search term
+    // Reuse pre-computed term_infos (already normalized and ngram-generated)
     std::vector<std::string> normalized_terms;
     std::vector<uint64_t> term_dfs;
+    normalized_terms.reserve(output.all_search_terms.size());
+    term_dfs.reserve(output.term_infos.size());
     for (const auto& term : output.all_search_terms) {
-      std::string normalized = output.current_index->NormalizeText(term);
-      normalized_terms.push_back(normalized);
-
-      auto ngrams = mygram::utils::GenerateQueryNgrams(normalized, output.current_ngram_size,
-                                                       output.current_kanji_ngram_size, output.current_cross_boundary);
-      mygram::utils::DeduplicateSorted(ngrams);
-
-      uint64_t min_size = std::numeric_limits<uint64_t>::max();
-      for (const auto& ngram : ngrams) {
-        uint64_t posting_size = output.current_index->EstimatePostingSize(ngram);
-        min_size = std::min(min_size, posting_size);
-        if (min_size == 0) {
-          break;
-        }
-      }
-      term_dfs.push_back(min_size == std::numeric_limits<uint64_t>::max() ? 0 : min_size);
+      normalized_terms.push_back(output.current_index->NormalizeText(term));
+    }
+    for (const auto& ti : output.term_infos) {
+      uint64_t df = (ti.estimated_size == std::numeric_limits<size_t>::max()) ? 0 : ti.estimated_size;
+      term_dfs.push_back(df);
     }
 
     auto scored = index::BM25Scorer::ScoreDocuments(
@@ -551,9 +541,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       auto snippets = generate_snippets(sorted_results);
       if (conn_ctx.debug_mode) {
         output.debug_info.final_results = sorted_results.size();
-        return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, score_total,
-                                                                     output.current_doc_store, snippets,
-                                                                     &output.debug_info);
+        return ResponseFormatter::FormatSearchResponseWithHighlights(
+            sorted_results, score_total, output.current_doc_store, snippets, &output.debug_info);
       }
       return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, score_total,
                                                                    output.current_doc_store, snippets);
@@ -581,9 +570,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     auto snippets = generate_snippets(sorted_results);
     if (conn_ctx.debug_mode) {
       output.debug_info.final_results = sorted_results.size();
-      return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, total_results,
-                                                                   output.current_doc_store, snippets,
-                                                                   &output.debug_info);
+      return ResponseFormatter::FormatSearchResponseWithHighlights(
+          sorted_results, total_results, output.current_doc_store, snippets, &output.debug_info);
     }
     return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, total_results,
                                                                  output.current_doc_store, snippets);

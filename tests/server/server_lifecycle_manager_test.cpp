@@ -61,16 +61,17 @@ class ServerLifecycleManagerTest : public ::testing::Test {
 
   // Helper: Create lifecycle manager with current config
   std::unique_ptr<ServerLifecycleManager> CreateManager() {
-    return std::make_unique<ServerLifecycleManager>(
+    auto result = ServerLifecycleManager::Create(
         server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
         dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
-#ifdef USE_MYSQL
-        nullptr,  // binlog_reader
-        sync_manager_.get()
-#else
         nullptr  // binlog_reader
+#ifdef USE_MYSQL
+        ,
+        sync_manager_.get()
 #endif
     );
+    EXPECT_TRUE(result) << "Create failed: " << result.error().to_string();
+    return std::move(*result);
   }
 
   // Test data
@@ -211,7 +212,6 @@ TEST_F(ServerLifecycleManagerTest, Initialize_HandlerContextHasCorrectDependenci
 
   // Verify non-null pointers
   EXPECT_NE(handler_context->table_catalog, nullptr);
-  EXPECT_EQ(&handler_context->table_contexts, &table_contexts_);
   EXPECT_EQ(&handler_context->stats, &stats_);
   EXPECT_EQ(handler_context->full_config, &full_config_);
 
@@ -320,17 +320,19 @@ TEST_F(ServerLifecycleManagerTest, Initialize_SyncHandlerReceivesSyncManager) {
  * @brief Test that null full_config properly skips optional components
  */
 TEST_F(ServerLifecycleManagerTest, Constructor_NullFullConfig_SkipsOptionalComponents) {
-  auto manager = std::make_unique<ServerLifecycleManager>(server_config_, table_contexts_, dump_dir_,
-                                                          nullptr,  // full_config = nullptr
-                                                          stats_, dump_load_in_progress_, dump_save_in_progress_,
-                                                          optimization_in_progress_, replication_paused_for_dump_,
-                                                          mysql_reconnecting_,
+  auto manager_result =
+      ServerLifecycleManager::Create(server_config_, table_contexts_, dump_dir_,
+                                     nullptr,  // full_config = nullptr
+                                     stats_, dump_load_in_progress_, dump_save_in_progress_, optimization_in_progress_,
+                                     replication_paused_for_dump_, mysql_reconnecting_,
+                                     nullptr  // binlog_reader
 #ifdef USE_MYSQL
-                                                          nullptr, sync_manager_.get()
-#else
-                                                          nullptr
+                                     ,
+                                     sync_manager_.get()
 #endif
-  );
+      );
+  ASSERT_TRUE(manager_result) << "Create failed: " << manager_result.error().to_string();
+  auto manager = std::move(*manager_result);
 
   auto result = manager->Initialize();
   ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
@@ -367,6 +369,46 @@ TEST_F(ServerLifecycleManagerTest, Initialize_StopsAtFirstError) {
 }
 
 // ===== P2 Tests (Nice-to-Have) =====
+
+/**
+ * @test Create_ValidArgs_ReturnsValidObject
+ * @brief Test that Create() with valid arguments returns a valid manager
+ */
+TEST_F(ServerLifecycleManagerTest, Create_ValidArgs_ReturnsValidObject) {
+  auto result = ServerLifecycleManager::Create(
+      server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
+      dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
+      nullptr  // binlog_reader
+#ifdef USE_MYSQL
+      ,
+      sync_manager_.get()
+#endif
+  );
+
+  ASSERT_TRUE(result) << "Create failed: " << result.error().to_string();
+  EXPECT_NE(*result, nullptr);
+}
+
+#ifdef USE_MYSQL
+/**
+ * @test Create_NullSyncManager_ReturnsError
+ * @brief Test that Create() with null sync_manager returns an error (not throws)
+ */
+TEST_F(ServerLifecycleManagerTest, Create_NullSyncManager_ReturnsError) {
+  auto result = ServerLifecycleManager::Create(server_config_, table_contexts_, dump_dir_, &full_config_, stats_,
+                                               dump_load_in_progress_, dump_save_in_progress_,
+                                               optimization_in_progress_, replication_paused_for_dump_,
+                                               mysql_reconnecting_,
+                                               nullptr,  // binlog_reader
+                                               nullptr   // sync_manager = null
+  );
+
+  ASSERT_FALSE(result);
+  auto error_msg = result.error().to_string();
+  EXPECT_TRUE(error_msg.find("sync_manager") != std::string::npos)
+      << "Error should mention sync_manager, got: " << error_msg;
+}
+#endif
 
 /**
  * @test Initialize_EmptyTableContexts_Succeeds

@@ -112,6 +112,37 @@ std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(cons
   return results;
 }
 
+std::vector<std::vector<std::optional<FilterValue>>> DocumentStore::GetFilterValuesBatchMultiColumn(
+    const std::vector<DocId>& doc_ids, const std::vector<std::string>& columns) const {
+  std::shared_lock lock(mutex_);
+
+  std::vector<std::vector<std::optional<FilterValue>>> all_results;
+  all_results.reserve(columns.size());
+
+  for (const auto& column : columns) {
+    std::vector<std::optional<FilterValue>> col_results;
+    col_results.reserve(doc_ids.size());
+
+    for (const auto& doc_id : doc_ids) {
+      auto doc_it = doc_filters_.find(doc_id);
+      if (doc_it == doc_filters_.end()) {
+        col_results.emplace_back(std::nullopt);
+        continue;
+      }
+      auto filter_it = doc_it->second.find(column);
+      if (filter_it == doc_it->second.end()) {
+        col_results.emplace_back(std::nullopt);
+      } else {
+        col_results.emplace_back(filter_it->second);
+      }
+    }
+
+    all_results.push_back(std::move(col_results));
+  }
+
+  return all_results;
+}
+
 std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, const FilterValue& value) const {
   std::shared_lock lock(mutex_);
 
@@ -143,7 +174,7 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
 bool DocumentStore::HasFilterColumn(std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
   if (filter_index_) {
-    return filter_index_->HasColumn(std::string(filter_name));
+    return filter_index_->HasColumn(filter_name);
   }
   return false;
 }
@@ -180,8 +211,7 @@ std::optional<std::string> DocumentStore::GetNormalizedText(DocId doc_id) const 
   return it->second;
 }
 
-std::vector<std::optional<std::string>> DocumentStore::GetNormalizedTextBatch(
-    const std::vector<DocId>& doc_ids) const {
+std::vector<std::optional<std::string>> DocumentStore::GetNormalizedTextBatch(const std::vector<DocId>& doc_ids) const {
   std::shared_lock lock(mutex_);
   std::vector<std::optional<std::string>> results;
   results.reserve(doc_ids.size());

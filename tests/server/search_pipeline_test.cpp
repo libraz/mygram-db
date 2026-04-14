@@ -299,11 +299,10 @@ TEST_F(SearchPipelineFuzzyTest, EmptyNgramsSetEmptyTermDetected) {
   query::Query query;
   std::vector<std::string> all_terms = {"x"};
 
-  auto result =
-      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
-                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
-                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
-                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+  auto result = ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1, index_.get(), doc_store_.get(),
+                                 /* full_config= */ nullptr,
+                                 /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                 /* cross_boundary= */ true, /* filter_threshold= */ 100);
 
   EXPECT_TRUE(result.empty_term_detected);
   EXPECT_TRUE(result.results.empty());
@@ -313,17 +312,16 @@ TEST_F(SearchPipelineFuzzyTest, EmptyNgramsAmongMultipleTermsSetsEmptyTermDetect
   // If one of multiple terms has empty n-grams, the whole query should
   // report empty_term_detected
   std::vector<SearchTermInfo> term_infos;
-  term_infos.push_back({{"he", "el", "ll", "lo"}, 2});  // valid term
+  term_infos.push_back({{"he", "el", "ll", "lo"}, 2});                // valid term
   term_infos.push_back({/* ngrams= */ {}, /* estimated_size= */ 0});  // empty
 
   query::Query query;
   std::vector<std::string> all_terms = {"hello", "x"};
 
-  auto result =
-      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
-                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
-                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
-                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+  auto result = ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1, index_.get(), doc_store_.get(),
+                                 /* full_config= */ nullptr,
+                                 /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                 /* cross_boundary= */ true, /* filter_threshold= */ 100);
 
   EXPECT_TRUE(result.empty_term_detected);
   EXPECT_TRUE(result.results.empty());
@@ -335,11 +333,10 @@ TEST_F(SearchPipelineFuzzyTest, EmptyTermInfosSetEmptyTermDetected) {
   query::Query query;
   std::vector<std::string> all_terms;
 
-  auto result =
-      ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1,
-                       index_.get(), doc_store_.get(), /* full_config= */ nullptr,
-                       /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
-                       /* cross_boundary= */ true, /* filter_threshold= */ 100);
+  auto result = ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1, index_.get(), doc_store_.get(),
+                                 /* full_config= */ nullptr,
+                                 /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                 /* cross_boundary= */ true, /* filter_threshold= */ 100);
 
   EXPECT_TRUE(result.empty_term_detected);
   EXPECT_TRUE(result.results.empty());
@@ -356,25 +353,20 @@ TEST_F(SearchPipelineFuzzyTest, EmptyTermInfosSetEmptyTermDetected) {
 
 TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
   // Add a document that will be excluded by NOT
-  auto d2 = doc_store_->AddDocument("pk2",
-                                    {{"status", storage::FilterValue{int64_t{1}}}},
-                                    "excluded hello world");
+  auto d2 = doc_store_->AddDocument("pk2", {{"status", storage::FilterValue{int64_t{1}}}}, "excluded hello world");
   ASSERT_TRUE(d2.has_value());
   index_->AddDocument(d2.value(), "excluded hello world");
 
   // Search for "hello" NOT "excluded"
   auto term_infos = GenerateTermInfos({"hello"}, index_.get(), 2, 1, true);
   std::sort(term_infos.begin(), term_infos.end(),
-            [](const SearchTermInfo& a, const SearchTermInfo& b) {
-              return a.estimated_size < b.estimated_size;
-            });
+            [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
 
   query::Query query;
   query.not_terms = {"excluded"};
   std::vector<std::string> all_terms = {"hello"};
 
-  auto result = Execute(query, term_infos, all_terms, index_.get(),
-                        doc_store_.get(), /* full_config= */ nullptr,
+  auto result = Execute(query, term_infos, all_terms, index_.get(), doc_store_.get(), /* full_config= */ nullptr,
                         /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
                         /* cross_boundary= */ true, /* filter_threshold= */ 100);
 
@@ -384,8 +376,7 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
 
   // Verify the NOT filter was applied inside Execute -- applying it again
   // should not change the results (no double-filtering)
-  auto double_filtered = ApplyNotFilter(result.results, query.not_terms,
-                                        index_.get(), 2, 1, true);
+  auto double_filtered = ApplyNotFilter(result.results, query.not_terms, index_.get(), 2, 1, true);
   EXPECT_EQ(double_filtered.size(), result.results.size())
       << "NOT filter was not applied inside Execute(); applying it again "
          "changed the result set (double-filter bug)";
@@ -393,31 +384,24 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
 
 TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesColumnFiltersInternally) {
   // Add documents with filter values
-  auto d2 = doc_store_->AddDocument("pk2",
-                                    {{"status", storage::FilterValue{int64_t{1}}}},
-                                    "status one hello");
+  auto d2 = doc_store_->AddDocument("pk2", {{"status", storage::FilterValue{int64_t{1}}}}, "status one hello");
   ASSERT_TRUE(d2.has_value());
   index_->AddDocument(d2.value(), "status one hello");
 
-  auto d3 = doc_store_->AddDocument("pk3",
-                                    {{"status", storage::FilterValue{int64_t{2}}}},
-                                    "status two hello");
+  auto d3 = doc_store_->AddDocument("pk3", {{"status", storage::FilterValue{int64_t{2}}}}, "status two hello");
   ASSERT_TRUE(d3.has_value());
   index_->AddDocument(d3.value(), "status two hello");
 
   // Search for "hello" with FILTER status=1
   auto term_infos = GenerateTermInfos({"hello"}, index_.get(), 2, 1, true);
   std::sort(term_infos.begin(), term_infos.end(),
-            [](const SearchTermInfo& a, const SearchTermInfo& b) {
-              return a.estimated_size < b.estimated_size;
-            });
+            [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
 
   query::Query query;
   query.filters = {{"status", query::FilterOp::EQ, "1"}};
   std::vector<std::string> all_terms = {"hello"};
 
-  auto result = Execute(query, term_infos, all_terms, index_.get(),
-                        doc_store_.get(), /* full_config= */ nullptr,
+  auto result = Execute(query, term_infos, all_terms, index_.get(), doc_store_.get(), /* full_config= */ nullptr,
                         /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
                         /* cross_boundary= */ true, /* filter_threshold= */ 100);
 
@@ -428,6 +412,187 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesColumnFiltersInternally) {
   EXPECT_EQ(double_filtered.size(), result.results.size())
       << "Column filters were not applied inside Execute(); applying them again "
          "changed the result set (double-filter bug)";
+}
+
+// =============================================================================
+// ApplyFiltersWithBitmap vs ApplyFilters parity test
+// =============================================================================
+// Both code paths (bitmap fast path for EQ/NE, per-document fallback for range
+// operators) should produce identical results when given the same inputs.
+// =============================================================================
+
+class SearchPipelineFilterParityTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+
+    // Add documents with filter columns that exercise various value patterns
+    // Doc 0: status=1, category="tech", score=85.5
+    auto d0 = doc_store_->AddDocument("pk0",
+                                      {{"status", storage::FilterValue{int64_t{1}}},
+                                       {"category", storage::FilterValue{std::string("tech")}},
+                                       {"score", storage::FilterValue{85.5}}},
+                                      "text zero");
+    ASSERT_TRUE(d0.has_value());
+    doc_ids_.push_back(d0.value());
+
+    // Doc 1: status=2, category="sports", score=92.0
+    auto d1 = doc_store_->AddDocument("pk1",
+                                      {{"status", storage::FilterValue{int64_t{2}}},
+                                       {"category", storage::FilterValue{std::string("sports")}},
+                                       {"score", storage::FilterValue{92.0}}},
+                                      "text one");
+    ASSERT_TRUE(d1.has_value());
+    doc_ids_.push_back(d1.value());
+
+    // Doc 2: status=1, category="tech", score=78.0
+    auto d2 = doc_store_->AddDocument("pk2",
+                                      {{"status", storage::FilterValue{int64_t{1}}},
+                                       {"category", storage::FilterValue{std::string("tech")}},
+                                       {"score", storage::FilterValue{78.0}}},
+                                      "text two");
+    ASSERT_TRUE(d2.has_value());
+    doc_ids_.push_back(d2.value());
+
+    // Doc 3: status=3, category="music", score=60.0
+    auto d3 = doc_store_->AddDocument("pk3",
+                                      {{"status", storage::FilterValue{int64_t{3}}},
+                                       {"category", storage::FilterValue{std::string("music")}},
+                                       {"score", storage::FilterValue{60.0}}},
+                                      "text three");
+    ASSERT_TRUE(d3.has_value());
+    doc_ids_.push_back(d3.value());
+
+    // Doc 4: no filters (NULL values)
+    auto d4 = doc_store_->AddDocument("pk4", {}, "text four");
+    ASSERT_TRUE(d4.has_value());
+    doc_ids_.push_back(d4.value());
+  }
+
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+};
+
+TEST_F(SearchPipelineFilterParityTest, EqFilterBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::EQ, "1"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  for (size_t i = 0; i < bitmap_result.size(); ++i) {
+    EXPECT_EQ(bitmap_result[i], fallback_result[i]);
+  }
+  // Both should find docs 0 and 2
+  EXPECT_EQ(bitmap_result.size(), 2);
+}
+
+TEST_F(SearchPipelineFilterParityTest, NeFilterBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::NE, "1"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  for (size_t i = 0; i < bitmap_result.size(); ++i) {
+    EXPECT_EQ(bitmap_result[i], fallback_result[i]);
+  }
+}
+
+TEST_F(SearchPipelineFilterParityTest, EqStringFilterBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {{"category", query::FilterOp::EQ, "tech"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  for (size_t i = 0; i < bitmap_result.size(); ++i) {
+    EXPECT_EQ(bitmap_result[i], fallback_result[i]);
+  }
+  // Both should find docs 0 and 2
+  EXPECT_EQ(bitmap_result.size(), 2);
+}
+
+TEST_F(SearchPipelineFilterParityTest, MultipleEqFiltersBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {
+      {"status", query::FilterOp::EQ, "1"},
+      {"category", query::FilterOp::EQ, "tech"},
+  };
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  for (size_t i = 0; i < bitmap_result.size(); ++i) {
+    EXPECT_EQ(bitmap_result[i], fallback_result[i]);
+  }
+}
+
+TEST_F(SearchPipelineFilterParityTest, NoMatchFilterBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::EQ, "999"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  EXPECT_TRUE(bitmap_result.empty());
+  EXPECT_TRUE(fallback_result.empty());
+}
+
+TEST_F(SearchPipelineFilterParityTest, EmptyInputBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::EQ, "1"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap({}, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters({}, filters, doc_store_.get());
+
+  EXPECT_TRUE(bitmap_result.empty());
+  EXPECT_TRUE(fallback_result.empty());
+}
+
+TEST_F(SearchPipelineFilterParityTest, NoFiltersBitmapMatchesFallback) {
+  std::vector<query::FilterCondition> filters;
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  EXPECT_EQ(bitmap_result.size(), doc_ids_.size());
+}
+
+TEST_F(SearchPipelineFilterParityTest, NullDocFilterBitmapMatchesFallback) {
+  // Filter on doc with NULL values (doc 4 has no filters)
+  std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::EQ, "1"}};
+
+  // Test with only the NULL-value doc
+  std::vector<storage::DocId> null_doc = {doc_ids_[4]};
+  auto bitmap_result = ApplyFiltersWithBitmap(null_doc, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(null_doc, filters, doc_store_.get());
+
+  EXPECT_TRUE(bitmap_result.empty());
+  EXPECT_TRUE(fallback_result.empty());
+}
+
+// =============================================================================
+// ApplyFiltersWithBitmap falls back to per-document for range operators
+// =============================================================================
+
+TEST_F(SearchPipelineFilterParityTest, MixedEqAndRangeFiltersBitmapMatchesFallback) {
+  // ApplyFiltersWithBitmap uses bitmap for EQ, falls back for GT
+  // ApplyFilters uses per-document for everything
+  // Both should produce the same result
+  std::vector<query::FilterCondition> filters = {
+      {"status", query::FilterOp::EQ, "1"},
+      {"score", query::FilterOp::GT, "80.0"},
+  };
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  for (size_t i = 0; i < bitmap_result.size(); ++i) {
+    EXPECT_EQ(bitmap_result[i], fallback_result[i]);
+  }
+  // Only doc 0: status=1 AND score=85.5>80
+  EXPECT_EQ(bitmap_result.size(), 1);
 }
 
 }  // namespace mygramdb::server::search_pipeline

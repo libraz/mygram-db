@@ -12,11 +12,9 @@
 
 #include "config/config.h"
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
-class BinlogReader;
+class IBinlogReader;
 }  // namespace mygramdb::mysql
-#endif
 
 namespace mygramdb::server {
 
@@ -53,12 +51,7 @@ class SnapshotScheduler {
    * @param dump_save_in_progress Reference to DUMP SAVE flag for mutual exclusion with manual DUMP SAVE
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
-                    std::string dump_dir,
-#ifdef USE_MYSQL
-                    mysql::BinlogReader* binlog_reader,
-#else
-                    void* binlog_reader,
-#endif
+                    std::string dump_dir, mysql::IBinlogReader* binlog_reader,
                     std::atomic<bool>& dump_save_in_progress);
 
   // Disable copy and move
@@ -113,11 +106,7 @@ class SnapshotScheduler {
   std::atomic<bool> running_{false};
   std::unique_ptr<std::thread> scheduler_thread_;
 
-#ifdef USE_MYSQL
-  mysql::BinlogReader* binlog_reader_;
-#else
-  void* binlog_reader_;
-#endif
+  mysql::IBinlogReader* binlog_reader_;
 
   // Reference to dump_save_in_progress flag (shared with DumpHandler for mutual exclusion)
   std::atomic<bool>& dump_save_in_progress_;

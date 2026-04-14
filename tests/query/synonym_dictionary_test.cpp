@@ -31,7 +31,9 @@ void CleanupTempDir() {
 }
 
 // Identity normalizer for testing
-std::string IdentityNormalizer(std::string_view text) { return std::string(text); }
+std::string IdentityNormalizer(std::string_view text) {
+  return std::string(text);
+}
 
 // Lowercase normalizer
 std::string LowerNormalizer(std::string_view text) {

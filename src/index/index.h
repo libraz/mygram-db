@@ -161,8 +161,7 @@ class Index {
    * @param threshold Minimum number of posting lists a document must appear in
    * @return Sorted vector of document IDs appearing in >= threshold posting lists
    */
-  [[nodiscard]] std::vector<DocId> SearchByThreshold(const std::vector<std::string>& terms,
-                                                      size_t threshold) const;
+  [[nodiscard]] std::vector<DocId> SearchByThreshold(const std::vector<std::string>& terms, size_t threshold) const;
 
   /**
    * @brief Count documents containing term

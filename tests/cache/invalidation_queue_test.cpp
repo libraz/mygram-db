@@ -9,37 +9,26 @@
 
 #include <thread>
 
+#include "cache/cache_types.h"
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
-#include "index/index.h"
 #include "query/cache_key.h"
-#include "server/server_types.h"
-#include "storage/document_store.h"
 
 namespace mygramdb::cache {
 
 /**
- * @brief Helper to create table contexts for testing
+ * @brief Helper to create NgramConfigMap for testing
  */
-std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
-    std::vector<std::unique_ptr<server::TableContext>>& owned_contexts, int ngram_size = 3, int kanji_ngram_size = 2) {
-  std::unordered_map<std::string, server::TableContext*> contexts;
-
-  // Create contexts for common test tables
+NgramConfigMap CreateTestNgramConfigs(int ngram_size = 3, int kanji_ngram_size = 2) {
+  NgramConfigMap configs;
   for (const auto& table_name : {"posts", "comments"}) {
-    auto ctx = std::make_unique<server::TableContext>();
-    ctx->name = table_name;
-    ctx->config.name = table_name;
-    ctx->config.ngram_size = ngram_size;
-    ctx->config.kanji_ngram_size = kanji_ngram_size;
-    ctx->index = std::make_unique<index::Index>(ngram_size, kanji_ngram_size);
-    ctx->doc_store = std::make_unique<storage::DocumentStore>();
-
-    contexts[table_name] = ctx.get();
-    owned_contexts.push_back(std::move(ctx));
+    configs[table_name] = NgramConfig{
+        .ngram_size = ngram_size,
+        .kanji_ngram_size = kanji_ngram_size,
+        .cross_boundary_ngrams = true,
+    };
   }
-
-  return contexts;
+  return configs;
 }
 
 /**
@@ -48,9 +37,8 @@ std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
 TEST(InvalidationQueueTest, BasicEnqueueProcess) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Register a cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -84,9 +72,8 @@ TEST(InvalidationQueueTest, BasicEnqueueProcess) {
 TEST(InvalidationQueueTest, BatchSizeThreshold) {
   QueryCache cache(10 * 1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Set small batch size
   queue.SetBatchSize(5);
@@ -129,9 +116,8 @@ TEST(InvalidationQueueTest, BatchSizeThreshold) {
 TEST(InvalidationQueueTest, MaxDelayThreshold) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Set large batch size but short delay
   queue.SetBatchSize(1000);
@@ -167,9 +153,8 @@ TEST(InvalidationQueueTest, MaxDelayThreshold) {
 TEST(InvalidationQueueTest, Deduplication) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Register cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -206,9 +191,8 @@ TEST(InvalidationQueueTest, Deduplication) {
 TEST(InvalidationQueueTest, UpdateInvalidation) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Query for "rust"
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -247,9 +231,8 @@ TEST(InvalidationQueueTest, UpdateInvalidation) {
 TEST(InvalidationQueueTest, TableIsolation) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Query for "posts" table
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -288,9 +271,8 @@ TEST(InvalidationQueueTest, TableIsolation) {
 TEST(InvalidationQueueTest, StopWithoutStart) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Should not crash
   queue.Stop();
@@ -304,9 +286,8 @@ TEST(InvalidationQueueTest, StopWithoutStart) {
 TEST(InvalidationQueueTest, MultipleStartStop) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Start and stop multiple times
   queue.Start();
@@ -328,9 +309,8 @@ TEST(InvalidationQueueTest, MultipleStartStop) {
 TEST(InvalidationQueueTest, EnqueueWhileStopped) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Register cache entry
   auto key = CacheKeyGenerator::Generate("query1");
@@ -361,9 +341,8 @@ TEST(InvalidationQueueTest, EnqueueWhileStopped) {
 TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
   QueryCache cache(10 * 1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Register many cache entries
   for (int i = 0; i < 100; ++i) {
@@ -403,9 +382,8 @@ TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
 TEST(InvalidationQueueTest, BatchStatisticsCount) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Set small batch size for predictable batching
   queue.SetBatchSize(3);
@@ -456,9 +434,8 @@ TEST(InvalidationQueueTest, BatchStatisticsCount) {
 TEST(InvalidationQueueTest, SingleBatchCount) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Set large batch size
   queue.SetBatchSize(100);
@@ -507,9 +484,8 @@ TEST(InvalidationQueueTest, SingleBatchCount) {
 TEST(InvalidationQueueTest, SynchronousInvalidationCleansUpMetadata) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // DO NOT start the worker - this forces synchronous invalidation path
   ASSERT_FALSE(queue.IsRunning());
@@ -558,9 +534,8 @@ TEST(InvalidationQueueTest, SynchronousInvalidationCleansUpMetadata) {
 TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // DO NOT start worker - use synchronous path
   ASSERT_FALSE(queue.IsRunning());
@@ -594,8 +569,8 @@ TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
 TEST(InvalidationQueueTest, SpuriousWakeupHandling) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  NgramConfigMap empty_configs;
+  InvalidationQueue queue(&cache, &mgr, std::move(empty_configs));
 
   // Set very long delay to ensure we can stop before timeout
   queue.SetMaxDelay(60000);  // 60 seconds in milliseconds
@@ -630,8 +605,8 @@ TEST(InvalidationQueueTest, SpuriousWakeupHandling) {
 TEST(InvalidationQueueTest, RapidStartStopNoRunawayThread) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  NgramConfigMap empty_configs;
+  InvalidationQueue queue(&cache, &mgr, std::move(empty_configs));
 
   queue.SetMaxDelay(100);  // 100 milliseconds
 
@@ -658,9 +633,8 @@ TEST(InvalidationQueueTest, RapidStartStopNoRunawayThread) {
 TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   queue.SetMaxDelay(3600000);  // 1 hour in milliseconds - very long delay
   queue.SetBatchSize(10000);   // Very high threshold
@@ -697,9 +671,8 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
 TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Start with empty queue - should not crash or cause undefined behavior
   queue.Start();
@@ -726,9 +699,8 @@ TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
 TEST(InvalidationQueueTest, ResourceCleanupOrder) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Insert some data into cache and register with invalidation manager
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -768,9 +740,8 @@ TEST(InvalidationQueueTest, ResourceCleanupOrder) {
 TEST(InvalidationQueueTest, ConcurrentStartCallsThreadSafe) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Attempt to start the queue from multiple threads concurrently
   constexpr int num_threads = 10;
@@ -802,9 +773,8 @@ TEST(InvalidationQueueTest, ConcurrentStartCallsThreadSafe) {
 TEST(InvalidationQueueTest, ConcurrentStopCallsThreadSafe) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Start the queue first
   queue.Start();
@@ -835,9 +805,8 @@ TEST(InvalidationQueueTest, ConcurrentStopCallsThreadSafe) {
 TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Start the queue from multiple threads
   constexpr int num_threads = 5;
@@ -888,8 +857,8 @@ TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
 TEST(InvalidationQueueTest, TOCTOURaceConditionFix) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager invalidation_mgr(&cache);
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  InvalidationQueue queue(&cache, &invalidation_mgr, table_contexts);
+  NgramConfigMap empty_configs;
+  InvalidationQueue queue(&cache, &invalidation_mgr, std::move(empty_configs));
 
   // Insert initial cache entry
   auto key = CacheKeyGenerator::Generate("test query");
@@ -943,8 +912,8 @@ TEST(InvalidationQueueTest, TOCTOURaceConditionFix) {
 TEST(InvalidationQueueTest, EnqueueWhenNotRunning) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager invalidation_mgr(&cache);
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  InvalidationQueue queue(&cache, &invalidation_mgr, table_contexts);
+  NgramConfigMap empty_configs;
+  InvalidationQueue queue(&cache, &invalidation_mgr, std::move(empty_configs));
 
   // Insert cache entries
   auto key1 = CacheKeyGenerator::Generate("query1");
@@ -987,8 +956,8 @@ TEST(InvalidationQueueTest, EnqueueWhenNotRunning) {
 TEST(InvalidationQueueTest, ConcurrentEnqueueStop) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager invalidation_mgr(&cache);
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  InvalidationQueue queue(&cache, &invalidation_mgr, table_contexts);
+  NgramConfigMap empty_configs;
+  InvalidationQueue queue(&cache, &invalidation_mgr, std::move(empty_configs));
 
   // Insert cache entries
   for (int i = 0; i < 10; ++i) {
@@ -1046,22 +1015,15 @@ TEST(InvalidationQueueTest, ConcurrentEnqueueStop) {
 TEST(InvalidationQueueTest, TableNameWithColonInvalidatesCorrectly) {
   QueryCache cache(1024 * 1024, 10.0);
   InvalidationManager mgr(&cache);
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
+  // Create ngram config for a table with a colon in the name
+  NgramConfigMap ngram_configs;
+  ngram_configs["my:table"] = NgramConfig{
+      .ngram_size = 3,
+      .kanji_ngram_size = 2,
+      .cross_boundary_ngrams = true,
+  };
 
-  // Create a table context with a colon in the name
-  auto ctx = std::make_unique<server::TableContext>();
-  ctx->name = "my:table";
-  ctx->config.name = "my:table";
-  ctx->config.ngram_size = 3;
-  ctx->config.kanji_ngram_size = 2;
-  ctx->index = std::make_unique<index::Index>(3, 2);
-  ctx->doc_store = std::make_unique<storage::DocumentStore>();
-
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-  table_contexts["my:table"] = ctx.get();
-  owned_contexts.push_back(std::move(ctx));
-
-  InvalidationQueue queue(&cache, &mgr, table_contexts);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Register a cache entry for the "my:table" table
   auto key = CacheKeyGenerator::Generate("colon_query");

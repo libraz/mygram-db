@@ -153,8 +153,7 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Check for empty term (early exit)
   if (!term_infos.empty() &&
-      (term_infos[0].estimated_size == 0 ||
-       term_infos[0].estimated_size == std::numeric_limits<size_t>::max())) {
+      (term_infos[0].estimated_size == 0 || term_infos[0].estimated_size == std::numeric_limits<size_t>::max())) {
     result.empty_term_detected = true;
     return result;
   }
@@ -397,13 +396,14 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
     parsed_values.push_back(ParseFilterValue(filter_cond.value));
   }
 
-  // Pre-fetch all filter values in batch (one lock acquisition per filter column)
-  // instead of per-doc * per-filter individual GetFilterValue calls
-  std::vector<std::vector<std::optional<storage::FilterValue>>> batch_filter_values;
-  batch_filter_values.reserve(filters.size());
+  // Pre-fetch all filter values in a single lock acquisition (one shared lock
+  // for all columns) instead of per-column locking
+  std::vector<std::string> columns;
+  columns.reserve(filters.size());
   for (const auto& filter_cond : filters) {
-    batch_filter_values.push_back(doc_store->GetFilterValuesBatch(results, filter_cond.column));
+    columns.push_back(filter_cond.column);
   }
+  auto batch_filter_values = doc_store->GetFilterValuesBatchMultiColumn(results, columns);
 
   for (size_t doc_idx = 0; doc_idx < results.size(); ++doc_idx) {
     bool matches_all_filters = true;

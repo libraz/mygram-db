@@ -11,16 +11,13 @@
 #include <string>
 #include <vector>
 
+#include "cache/cache_types.h"
 #include "cache/invalidation_manager.h"
 #include "cache/invalidation_queue.h"
 #include "cache/query_cache.h"
 #include "config/config.h"
 #include "query/query_normalizer.h"
 #include "query/query_parser.h"
-
-namespace mygramdb::server {
-struct TableContext;
-}  // namespace mygramdb::server
 
 namespace mygramdb::cache {
 
@@ -44,10 +41,9 @@ class CacheManager {
   /**
    * @brief Constructor
    * @param cache_config Cache configuration
-   * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
+   * @param ngram_configs Per-table N-gram configuration for cache invalidation
    */
-  CacheManager(const config::CacheConfig& cache_config,
-               const std::unordered_map<std::string, server::TableContext*>& table_contexts);
+  CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs);
 
   /**
    * @brief Destructor

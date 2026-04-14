@@ -47,17 +47,8 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
 
   // For queries that require a table, validate table exists
   if (!query->table.empty()) {
-    // Use TableCatalog if available (new path)
-    if (ctx_.table_catalog != nullptr) {
-      if (!ctx_.table_catalog->TableExists(query->table)) {
-        return ResponseFormatter::FormatError("Table not found: " + query->table);
-      }
-    } else {
-      // Fallback to legacy path
-      auto table_iter = ctx_.table_contexts.find(query->table);
-      if (table_iter == ctx_.table_contexts.end()) {
-        return ResponseFormatter::FormatError("Table not found: " + query->table);
-      }
+    if (ctx_.table_catalog == nullptr || !ctx_.table_catalog->TableExists(query->table)) {
+      return ResponseFormatter::FormatError("Table not found: " + query->table);
     }
   }
 

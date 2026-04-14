@@ -17,11 +17,11 @@
 
 using namespace mygramdb::storage;
 using namespace mygramdb::storage::dump_v2;
+using mygram::utils::ReadBinary;
+using mygram::utils::WriteBinary;
 using mygramdb::config::Config;
 using mygramdb::config::TableConfig;
 using mygramdb::index::Index;
-using mygram::utils::ReadBinary;
-using mygram::utils::WriteBinary;
 
 namespace {
 
@@ -99,7 +99,9 @@ std::string TempFilePath(const std::string& suffix) {
 }
 
 /// Helper: cleanup temp file
-void CleanupFile(const std::string& path) { std::filesystem::remove(path); }
+void CleanupFile(const std::string& path) {
+  std::filesystem::remove(path);
+}
 
 /// RAII guard that cleans up a temp file on construction and destruction.
 /// Ensures cleanup even if the test fails mid-way.
@@ -186,8 +188,8 @@ TEST(DumpFormatV2Test, SectionEnvelopeRoundTrip) {
 
   // Verify CRC
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  uint32_t expected_crc = static_cast<uint32_t>(
-      crc32(0, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
+  uint32_t expected_crc =
+      static_cast<uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
   EXPECT_EQ(envelope.crc32, expected_crc);
 }
 
@@ -530,8 +532,8 @@ TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {
     std::memset(&file_data[file_crc_offset], 0, 4);
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    uint32_t new_file_crc = static_cast<uint32_t>(
-        crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_size)));
+    uint32_t new_file_crc =
+        static_cast<uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_size)));
 
     // Write new file CRC
     std::fstream fs2(filepath, std::ios::in | std::ios::out | std::ios::binary);
@@ -696,7 +698,8 @@ TEST(DumpFormatV2Test, UnknownSectionSkipped) {
 
   // Insert fake section after first section
   std::vector<char> new_file_data;
-  new_file_data.insert(new_file_data.end(), file_data.begin(), file_data.begin() + static_cast<long>(first_section_end));
+  new_file_data.insert(new_file_data.end(), file_data.begin(),
+                       file_data.begin() + static_cast<long>(first_section_end));
   new_file_data.insert(new_file_data.end(), fake_section.begin(), fake_section.end());
   new_file_data.insert(new_file_data.end(), file_data.begin() + static_cast<long>(first_section_end), file_data.end());
 

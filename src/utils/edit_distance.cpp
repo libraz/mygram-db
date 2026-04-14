@@ -29,16 +29,14 @@ std::string NormalizeUnicodeWhitespace(std::string_view text) {
   while (i < text.size()) {
     auto byte = static_cast<unsigned char>(text[i]);
     // U+3000 ideographic space: 0xE3 0x80 0x80
-    if (byte == 0xE3 && i + 2 < text.size() &&
-        static_cast<unsigned char>(text[i + 1]) == 0x80 &&
+    if (byte == 0xE3 && i + 2 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x80 &&
         static_cast<unsigned char>(text[i + 2]) == 0x80) {
       result += ' ';
       i += 3;
       continue;
     }
     // U+00A0 no-break space: 0xC2 0xA0
-    if (byte == 0xC2 && i + 1 < text.size() &&
-        static_cast<unsigned char>(text[i + 1]) == 0xA0) {
+    if (byte == 0xC2 && i + 1 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0xA0) {
       result += ' ';
       i += 2;
       continue;
@@ -72,8 +70,7 @@ bool IsAscii(std::string_view s) {
 /// @param max_distance Early termination threshold
 /// @return Edit distance, or max_distance+1 if exceeded
 template <typename CharT>
-uint32_t ComputeDistanceImpl(const CharT* a_data, uint32_t a_len,
-                             const CharT* b_data, uint32_t b_len,
+uint32_t ComputeDistanceImpl(const CharT* a_data, uint32_t a_len, const CharT* b_data, uint32_t b_len,
                              uint32_t max_distance) {
   // Ensure a is the shorter string for O(min(m,n)) space
   if (a_len > b_len) {
@@ -131,8 +128,7 @@ uint32_t ComputeDistanceImpl(const CharT* a_data, uint32_t a_len,
 
 }  // namespace
 
-uint32_t LevenshteinDistance(std::string_view a, std::string_view b,
-                             uint32_t max_distance) {
+uint32_t LevenshteinDistance(std::string_view a, std::string_view b, uint32_t max_distance) {
   // Fast path for identical strings
   if (a == b) {
     return 0;
@@ -140,13 +136,11 @@ uint32_t LevenshteinDistance(std::string_view a, std::string_view b,
 
   // Fast path for empty strings
   if (a.empty()) {
-    uint32_t b_len =
-        IsAscii(b) ? static_cast<uint32_t>(b.size()) : CountCodePoints(b);
+    uint32_t b_len = IsAscii(b) ? static_cast<uint32_t>(b.size()) : CountCodePoints(b);
     return b_len <= max_distance ? b_len : max_distance + 1;
   }
   if (b.empty()) {
-    uint32_t a_len =
-        IsAscii(a) ? static_cast<uint32_t>(a.size()) : CountCodePoints(a);
+    uint32_t a_len = IsAscii(a) ? static_cast<uint32_t>(a.size()) : CountCodePoints(a);
     return a_len <= max_distance ? a_len : max_distance + 1;
   }
 
@@ -155,21 +149,18 @@ uint32_t LevenshteinDistance(std::string_view a, std::string_view b,
   if (IsAscii(a) && IsAscii(b)) {
     const auto* a_bytes = reinterpret_cast<const unsigned char*>(a.data());
     const auto* b_bytes = reinterpret_cast<const unsigned char*>(b.data());
-    return ComputeDistanceImpl(a_bytes, static_cast<uint32_t>(a.size()),
-                               b_bytes, static_cast<uint32_t>(b.size()),
+    return ComputeDistanceImpl(a_bytes, static_cast<uint32_t>(a.size()), b_bytes, static_cast<uint32_t>(b.size()),
                                max_distance);
   }
 
   // General Unicode path
   std::vector<uint32_t> a_cp = Utf8ToCodepoints(a);
   std::vector<uint32_t> b_cp = Utf8ToCodepoints(b);
-  return ComputeDistanceImpl(a_cp.data(), static_cast<uint32_t>(a_cp.size()),
-                             b_cp.data(), static_cast<uint32_t>(b_cp.size()),
-                             max_distance);
+  return ComputeDistanceImpl(a_cp.data(), static_cast<uint32_t>(a_cp.size()), b_cp.data(),
+                             static_cast<uint32_t>(b_cp.size()), max_distance);
 }
 
-bool ContainsFuzzyMatch(std::string_view text, std::string_view term,
-                        uint32_t max_distance) {
+bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t max_distance) {
   if (term.empty()) {
     return true;
   }
@@ -187,9 +178,8 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term,
   if (!term_is_ascii) {
     term_codepoints = Utf8ToCodepoints(term);
   }
-  uint32_t term_len = term_is_ascii
-                          ? static_cast<uint32_t>(term.size())
-                          : static_cast<uint32_t>(term_codepoints.size());
+  uint32_t term_len =
+      term_is_ascii ? static_cast<uint32_t>(term.size()) : static_cast<uint32_t>(term_codepoints.size());
 
   // Iterate through whitespace-delimited words in text
   size_t pos = 0;
@@ -214,15 +204,11 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term,
     if (term_is_ascii && word_is_ascii) {
       // Both ASCII: operate directly on bytes, no allocation
       uint32_t word_len = static_cast<uint32_t>(word.size());
-      uint32_t len_diff =
-          (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
+      uint32_t len_diff = (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
       if (len_diff <= max_distance) {
-        const auto* w_bytes =
-            reinterpret_cast<const unsigned char*>(word.data());
-        const auto* t_bytes =
-            reinterpret_cast<const unsigned char*>(term.data());
-        uint32_t distance = ComputeDistanceImpl(w_bytes, word_len, t_bytes,
-                                                term_len, max_distance);
+        const auto* w_bytes = reinterpret_cast<const unsigned char*>(word.data());
+        const auto* t_bytes = reinterpret_cast<const unsigned char*>(term.data());
+        uint32_t distance = ComputeDistanceImpl(w_bytes, word_len, t_bytes, term_len, max_distance);
         if (distance <= max_distance) {
           return true;
         }
@@ -253,11 +239,9 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term,
         term_data = term_codepoints.data();
       }
 
-      uint32_t len_diff =
-          (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
+      uint32_t len_diff = (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
       if (len_diff <= max_distance) {
-        uint32_t distance = ComputeDistanceImpl(word_data, word_len, term_data,
-                                                term_len, max_distance);
+        uint32_t distance = ComputeDistanceImpl(word_data, word_len, term_data, term_len, max_distance);
         if (distance <= max_distance) {
           return true;
         }

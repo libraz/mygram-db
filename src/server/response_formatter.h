@@ -20,11 +20,9 @@
 #include "server/server_types.h"
 #include "storage/document_store.h"
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
 class IBinlogReader;
 }  // namespace mygramdb::mysql
-#endif
 
 namespace mygramdb::cache {
 class CacheManager;
@@ -91,7 +89,7 @@ class ResponseFormatter {
    * @return Formatted response
    */
   static std::string FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
-                                          const query::DebugInfo* debug_info = nullptr);
+                                         const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response
@@ -111,11 +109,7 @@ class ResponseFormatter {
    */
   static std::string FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                         const std::unordered_map<std::string, TableContext*>& table_contexts,
-#ifdef USE_MYSQL
                                         mysql::IBinlogReader* binlog_reader = nullptr,
-#else
-                                        void* binlog_reader = nullptr,
-#endif
                                         cache::CacheManager* cache_manager = nullptr);
 
   /**
@@ -137,13 +131,7 @@ class ResponseFormatter {
    * @param binlog_reader Binlog reader for status information
    * @return Formatted response
    */
-  static std::string FormatReplicationStatusResponse(
-#ifdef USE_MYSQL
-      mysql::IBinlogReader* binlog_reader
-#else
-      void* binlog_reader
-#endif
-  );
+  static std::string FormatReplicationStatusResponse(mysql::IBinlogReader* binlog_reader);
 
   /**
    * @brief Format REPLICATION STOP response
@@ -179,11 +167,7 @@ class ResponseFormatter {
    */
   static std::string FormatPrometheusMetrics(const AggregatedMetrics& metrics, const ServerStats& stats,
                                              const std::unordered_map<std::string, TableContext*>& table_contexts,
-#ifdef USE_MYSQL
                                              mysql::IBinlogReader* binlog_reader = nullptr,
-#else
-                                             void* binlog_reader = nullptr,
-#endif
                                              cache::CacheManager* cache_manager = nullptr);
 
   /**

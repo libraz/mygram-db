@@ -91,11 +91,11 @@ constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (alw
  */
 // NOLINTNEXTLINE(performance-enum-size) - Must match file format uint32_t
 enum class SectionType : uint32_t {
-  kConfig = 1,          // Configuration section
-  kStatistics = 2,      // Global dump statistics
-  kTableData = 3,       // Table data (index + docstore)
-  kTableBM25 = 5,       // BM25 term frequency data (Phase 1A, reserved)
-  kTableSynonyms = 7,   // Synonym dictionary (Phase 1B, reserved)
+  kConfig = 1,         // Configuration section
+  kStatistics = 2,     // Global dump statistics
+  kTableData = 3,      // Table data (index + docstore)
+  kTableBM25 = 5,      // BM25 term frequency data (Phase 1A, reserved)
+  kTableSynonyms = 7,  // Synonym dictionary (Phase 1B, reserved)
   // 8-15: Reserved for future expansion
 };
 
@@ -107,7 +107,7 @@ enum class SectionType : uint32_t {
  * Readers that encounter an unknown SectionType skip data_length bytes.
  */
 struct SectionEnvelope {
-  SectionType type{};         // Section type identifier
+  SectionType type{};        // Section type identifier
   uint32_t crc32 = 0;        // CRC32 of the section data (after this envelope)
   uint64_t data_length = 0;  // Byte count of the section data following this envelope
 };

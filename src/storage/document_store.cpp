@@ -236,10 +236,10 @@ void DocumentStore::Clear() {
   std::unique_lock lock(mutex_);
 
   // Swap with empty maps to release memory (clear() doesn't shrink capacity)
-  std::unordered_map<DocId, std::string>().swap(doc_id_to_pk_);
-  decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);  // absl::flat_hash_map
-  std::unordered_map<DocId, FilterMap>().swap(doc_filters_);
-  std::unordered_map<DocId, std::string>().swap(doc_texts_);
+  decltype(doc_id_to_pk_)().swap(doc_id_to_pk_);
+  decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);
+  decltype(doc_filters_)().swap(doc_filters_);
+  decltype(doc_texts_)().swap(doc_texts_);
   filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
@@ -249,16 +249,29 @@ void DocumentStore::Clear() {
 void DocumentStore::Compact() {
   std::unique_lock lock(mutex_);
 
-  // Rehash maps to reduce bucket count to match current size
-  // This releases excess memory from previous larger sizes
-  doc_id_to_pk_.rehash(doc_id_to_pk_.size());
-  pk_to_doc_id_.rehash(pk_to_doc_id_.size());
-  doc_filters_.rehash(doc_filters_.size());
-  doc_texts_.rehash(doc_texts_.size());
+  // For absl::flat_hash_map, rehash() does not shrink capacity.
+  // Use copy-and-swap to force reallocation at the current size.
+  {
+    decltype(doc_id_to_pk_) tmp(doc_id_to_pk_.begin(), doc_id_to_pk_.end());
+    doc_id_to_pk_.swap(tmp);
+  }
+  {
+    decltype(pk_to_doc_id_) tmp(pk_to_doc_id_.begin(), pk_to_doc_id_.end());
+    pk_to_doc_id_.swap(tmp);
+  }
+  {
+    decltype(doc_filters_) tmp(doc_filters_.begin(), doc_filters_.end());
+    doc_filters_.swap(tmp);
+  }
+  {
+    decltype(doc_texts_) tmp(doc_texts_.begin(), doc_texts_.end());
+    doc_texts_.swap(tmp);
+  }
 
   // Also compact inner filter maps
   for (auto& [doc_id, filters] : doc_filters_) {
-    filters.rehash(filters.size());
+    decltype(filters) tmp(filters.begin(), filters.end());
+    filters.swap(tmp);
   }
 
   mygram::utils::StructuredLog()
@@ -273,11 +286,12 @@ size_t DocumentStore::MemoryUsage() const {
   std::shared_lock lock(mutex_);
   size_t total = 0;
 
-  // Include bucket overhead (each bucket is typically a pointer)
-  constexpr size_t kPointerSize = sizeof(void*);
-  total += doc_id_to_pk_.bucket_count() * kPointerSize;
-  total += pk_to_doc_id_.bucket_count() * kPointerSize;
-  total += doc_filters_.bucket_count() * kPointerSize;
+  // Include slot overhead for flat hash maps (each slot has 1 byte control metadata)
+  // plus the slot data itself (key + value + padding)
+  constexpr size_t kControlByteSize = 1;
+  total += doc_id_to_pk_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
+  total += pk_to_doc_id_.capacity() * (sizeof(std::pair<std::string, DocId>) + kControlByteSize);
+  total += doc_filters_.capacity() * (sizeof(std::pair<DocId, FilterMap>) + kControlByteSize);
 
   // doc_id_to_pk_ - data size
   // sizeof(std::string) for the object itself, capacity() for heap allocation
@@ -293,8 +307,8 @@ size_t DocumentStore::MemoryUsage() const {
   // doc_filters_ (approximate)
   for (const auto& [doc_id, filters] : doc_filters_) {
     total += sizeof(DocId);
-    // Include inner map bucket overhead
-    total += filters.bucket_count() * kPointerSize;
+    // Include inner map slot overhead
+    total += filters.capacity() * (sizeof(std::pair<std::string, FilterValue>) + kControlByteSize);
     for (const auto& [name, value] : filters) {
       total += sizeof(std::string) + name.capacity();
       total += std::visit(
@@ -311,7 +325,7 @@ size_t DocumentStore::MemoryUsage() const {
   }
 
   // doc_texts_ (normalized text for n-gram verification)
-  total += doc_texts_.bucket_count() * kPointerSize;
+  total += doc_texts_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
   for (const auto& [doc_id, text] : doc_texts_) {
     total += sizeof(DocId) + text.size() + text.capacity();
   }

@@ -17,7 +17,6 @@ class ConfigHandlerTest : public ::testing::Test {
   ConfigHandlerTest()
       : ctx_{
             .table_catalog = nullptr,
-            .table_contexts = table_contexts_,
             .stats = stats_,
             .full_config = &test_config_,
             .dump_dir = "/tmp",
@@ -27,11 +26,7 @@ class ConfigHandlerTest : public ::testing::Test {
             .replication_paused_for_dump = replication_paused_for_dump_,
             .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-            .binlog_reader = nullptr,
             .sync_manager = nullptr,
-
-#else
-            .binlog_reader = nullptr,
 #endif
             .cache_manager = nullptr,
         } {

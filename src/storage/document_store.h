@@ -13,7 +13,6 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -127,10 +126,11 @@ class DocumentStore {
   };
 
   /**
-   * @brief Add document (upsert semantic)
+   * @brief Add document (insert-or-ignore semantic)
    *
    * If a document with the same primary key already exists, the existing DocId
-   * is returned without modifying the document. No error is raised for duplicates.
+   * is returned without modifying the document. The existing document's text
+   * and filters are NOT updated. No error is raised for duplicates.
    *
    * @param primary_key Primary key from MySQL
    * @param filters Filter column values
@@ -141,7 +141,7 @@ class DocumentStore {
                                                    std::string_view normalized_text = "");
 
   /**
-   * @brief Add multiple documents (batch operation, thread-safe, upsert semantic)
+   * @brief Add multiple documents (batch operation, thread-safe, insert-or-ignore semantic)
    *
    * This method is optimized for bulk insertions during snapshot builds.
    * It processes documents in a single lock acquisition for better performance.
@@ -267,6 +267,20 @@ class DocumentStore {
                                                                              const std::string& column) const;
 
   /**
+   * @brief Get filter values for multiple columns in a single lock acquisition
+   *
+   * More efficient than calling GetFilterValuesBatch once per column when
+   * multiple filter columns are needed for the same set of documents.
+   *
+   * @param doc_ids Vector of document IDs
+   * @param columns Vector of filter column names
+   * @return Vector of per-column results; outer index = column, inner index = doc_id.
+   *         Each element is nullopt if doc_id or column not found for that document.
+   */
+  [[nodiscard]] std::vector<std::vector<std::optional<FilterValue>>> GetFilterValuesBatchMultiColumn(
+      const std::vector<DocId>& doc_ids, const std::vector<std::string>& columns) const;
+
+  /**
    * @brief Enable or disable storing normalized text for documents
    *
    * When disabled, AddDocument and AddDocumentBatch skip populating doc_texts_,
@@ -306,8 +320,7 @@ class DocumentStore {
    * @param doc_ids Vector of document IDs
    * @return Vector of optional normalized texts (nullopt if doc_id not found or text not stored)
    */
-  [[nodiscard]] std::vector<std::optional<std::string>> GetNormalizedTextBatch(
-      const std::vector<DocId>& doc_ids) const;
+  [[nodiscard]] std::vector<std::optional<std::string>> GetNormalizedTextBatch(const std::vector<DocId>& doc_ids) const;
 
   /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
@@ -379,7 +392,7 @@ class DocumentStore {
 
  private:
   // DocID -> Primary Key mapping
-  std::unordered_map<DocId, std::string> doc_id_to_pk_;
+  absl::flat_hash_map<DocId, std::string> doc_id_to_pk_;
 
   // Primary Key -> DocID mapping (reverse index)
   // Uses absl::flat_hash_map with transparent hash for heterogeneous lookup (BUG-0081)
@@ -388,12 +401,15 @@ class DocumentStore {
       pk_to_doc_id_;
 
   // DocID -> Filter values (inner map uses transparent hash for string_view lookup)
-  std::unordered_map<DocId, FilterMap> doc_filters_;
+  absl::flat_hash_map<DocId, FilterMap> doc_filters_;
 
   // DocID -> Normalized text (for n-gram post-filter verification)
-  std::unordered_map<DocId, std::string> doc_texts_;
+  absl::flat_hash_map<DocId, std::string> doc_texts_;
 
-  // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off)
+  // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off).
+  // memory_order_relaxed is correct here because this flag is set during initialization
+  // before worker threads start. If runtime toggling is ever needed, upgrade to
+  // memory_order_release/acquire.
   std::atomic<bool> store_texts_{true};
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation

@@ -10,36 +10,25 @@
 #include <iostream>
 #include <thread>
 
+#include "cache/cache_types.h"
 #include "config/config.h"
-#include "index/index.h"
 #include "query/query_parser.h"
-#include "server/server_types.h"
-#include "storage/document_store.h"
 
 namespace mygramdb::cache {
 
 /**
- * @brief Helper to create table contexts for testing
+ * @brief Helper to create NgramConfigMap for testing
  */
-std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
-    std::vector<std::unique_ptr<server::TableContext>>& owned_contexts, int ngram_size = 3, int kanji_ngram_size = 2) {
-  std::unordered_map<std::string, server::TableContext*> contexts;
-
-  // Create contexts for common test tables
+NgramConfigMap CreateTestNgramConfigs(int ngram_size = 3, int kanji_ngram_size = 2) {
+  NgramConfigMap configs;
   for (const auto& table_name : {"posts", "comments"}) {
-    auto ctx = std::make_unique<server::TableContext>();
-    ctx->name = table_name;
-    ctx->config.name = table_name;
-    ctx->config.ngram_size = ngram_size;
-    ctx->config.kanji_ngram_size = kanji_ngram_size;
-    ctx->index = std::make_unique<index::Index>(ngram_size, kanji_ngram_size);
-    ctx->doc_store = std::make_unique<storage::DocumentStore>();
-
-    contexts[table_name] = ctx.get();
-    owned_contexts.push_back(std::move(ctx));
+    configs[table_name] = NgramConfig{
+        .ngram_size = ngram_size,
+        .kanji_ngram_size = kanji_ngram_size,
+        .cross_boundary_ngrams = true,
+    };
   }
-
-  return contexts;
+  return configs;
 }
 
 /**
@@ -63,10 +52,9 @@ TEST(CacheManagerTest, BasicWorkflow) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   auto query = CreateQuery("posts", "golang");
   std::vector<DocId> result = {1, 2, 3, 4, 5};
@@ -96,10 +84,9 @@ TEST(CacheManagerTest, PreciseInvalidation) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Query 1: "golang"
   auto query1 = CreateQuery("posts", "golang");
@@ -131,10 +118,9 @@ TEST(CacheManagerTest, UpdateInvalidation) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Query for "rust"
   auto query1 = CreateQuery("posts", "rust");
@@ -164,10 +150,9 @@ TEST(CacheManagerTest, DeleteInvalidation) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Query for "docker"
   auto query1 = CreateQuery("posts", "docker");
@@ -197,10 +182,9 @@ TEST(CacheManagerTest, TableIsolation) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Query for "posts" table
   auto query1 = CreateQuery("posts", "golang");
@@ -229,10 +213,9 @@ TEST(CacheManagerTest, ClearTable) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   std::vector<std::string> ngrams = {"est", "tes"};
 
@@ -261,10 +244,9 @@ TEST(CacheManagerTest, ClearAll) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   std::vector<std::string> ngrams = {"est", "tes"};
 
@@ -290,10 +272,9 @@ TEST(CacheManagerTest, EnableDisable) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   auto query = CreateQuery("posts", "test");
   std::vector<std::string> ngrams = {"est", "tes"};
@@ -332,10 +313,9 @@ TEST(CacheManagerTest, Statistics) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   auto query = CreateQuery("posts", "test");
   std::vector<std::string> ngrams = {"est", "tes"};
@@ -366,10 +346,9 @@ TEST(CacheManagerTest, MinQueryCostThreshold) {
   config.max_memory_bytes = 10 * 1024 * 1024;
   config.min_query_cost_ms = 20.0;  // Only cache queries > 20ms
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   auto query = CreateQuery("posts", "test");
   std::vector<std::string> ngrams = {"est", "tes"};
@@ -389,10 +368,9 @@ TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
   config.enabled = false;  // Start with cache disabled
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Initially disabled
   EXPECT_FALSE(mgr.IsEnabled());
@@ -420,36 +398,11 @@ TEST(CacheManagerTest, PerTableNgramSettings) {
   config.max_memory_bytes = 10 * 1024 * 1024;
 
   // Create two tables with DIFFERENT ngram settings
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  NgramConfigMap ngram_configs;
+  ngram_configs["posts"] = NgramConfig{.ngram_size = 3, .kanji_ngram_size = 2, .cross_boundary_ngrams = true};
+  ngram_configs["comments"] = NgramConfig{.ngram_size = 2, .kanji_ngram_size = 1, .cross_boundary_ngrams = true};
 
-  // Table 1: posts with ngram_size=3, kanji_ngram_size=2
-  {
-    auto ctx = std::make_unique<server::TableContext>();
-    ctx->name = "posts";
-    ctx->config.name = "posts";
-    ctx->config.ngram_size = 3;
-    ctx->config.kanji_ngram_size = 2;
-    ctx->index = std::make_unique<index::Index>(3, 2);
-    ctx->doc_store = std::make_unique<storage::DocumentStore>();
-    table_contexts["posts"] = ctx.get();
-    owned_contexts.push_back(std::move(ctx));
-  }
-
-  // Table 2: comments with ngram_size=2, kanji_ngram_size=1 (DIFFERENT!)
-  {
-    auto ctx = std::make_unique<server::TableContext>();
-    ctx->name = "comments";
-    ctx->config.name = "comments";
-    ctx->config.ngram_size = 2;
-    ctx->config.kanji_ngram_size = 1;
-    ctx->index = std::make_unique<index::Index>(2, 1);
-    ctx->doc_store = std::make_unique<storage::DocumentStore>();
-    table_contexts["comments"] = ctx.get();
-    owned_contexts.push_back(std::move(ctx));
-  }
-
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Cache query for "posts" table (ngram_size=3)
   auto query1 = CreateQuery("posts", "test");
@@ -505,10 +458,9 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024;  // 10KB to trigger evictions
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager cache_mgr(config, table_contexts);
+  CacheManager cache_mgr(config, std::move(ngram_configs));
 
   // Insert 50 entries to trigger evictions (each ~1KB, 10KB cache can fit ~10)
   constexpr int kNumEntries = 50;
@@ -590,11 +542,10 @@ TEST(CacheManagerTest, DestructorSafeWithShortTTLEntries) {
   config.max_memory_bytes = 10 * 1024 * 1024;
   config.ttl_seconds = 1;  // Short TTL to increase eviction probability
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
   {
-    CacheManager mgr(config, table_contexts);
+    CacheManager mgr(config, std::move(ngram_configs));
 
     // Insert many entries with short TTL
     for (int i = 0; i < 100; ++i) {
@@ -629,11 +580,10 @@ TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
   config.max_memory_bytes = 5 * 1024;  // Very small cache to trigger evictions
   config.ttl_seconds = 1;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
   {
-    CacheManager mgr(config, table_contexts);
+    CacheManager mgr(config, std::move(ngram_configs));
 
     // Flood the cache to ensure constant evictions
     for (int i = 0; i < 200; ++i) {
@@ -665,10 +615,9 @@ TEST(CacheManagerTest, InsertUsesPrecomputedCacheKey) {
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts, 3, 2);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Create a query with a precomputed cache_key
   auto query = CreateQuery("posts", "test");

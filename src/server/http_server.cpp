@@ -34,9 +34,7 @@
 #define NI_MAXHOST 1025
 #endif
 
-#ifdef USE_MYSQL
-#include "mysql/binlog_reader.h"
-#endif
+#include "mysql/binlog_reader_interface.h"
 
 using json = nlohmann::json;
 
@@ -98,12 +96,7 @@ json FilterValueToJson(const storage::FilterValue& value) {
 using storage::DocId;
 
 HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-                       const config::Config* full_config,
-#ifdef USE_MYSQL
-                       mysql::BinlogReader* binlog_reader,
-#else
-                       void* binlog_reader,
-#endif
+                       const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                        cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),

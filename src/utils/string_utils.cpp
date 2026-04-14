@@ -285,6 +285,81 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text) {
   return codepoints;
 }
 
+size_t Utf8ToCodepoints(std::string_view text, uint32_t* buffer, size_t buffer_capacity) {
+  size_t count = 0;
+
+  for (size_t i = 0; i < text.size();) {
+    auto first_byte = static_cast<unsigned char>(text[i]);
+    int char_len = Utf8CharLength(first_byte);
+
+    if (i + char_len > text.size()) {
+      ++i;
+      continue;
+    }
+
+    uint32_t codepoint = 0;
+    bool valid = true;
+
+    if (char_len == 1) {
+      codepoint = first_byte;
+    } else if (char_len == 2) {
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      if (!IsValidContinuationByte(byte1)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8TwoByteDatMask) << kUtf8Shift6) | (byte1 & kUtf8ContinuationMask);
+        if (codepoint < kMinTwoByteCodepoint) {
+          valid = false;
+        }
+      }
+    } else if (char_len == 3) {
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      auto byte2 = static_cast<unsigned char>(text[i + 2]);
+      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8ThreeByteDatMask) << kUtf8Shift12) |
+                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte2 & kUtf8ContinuationMask);
+        if (codepoint < kMinThreeByteCodepoint) {
+          valid = false;
+        }
+        if (IsSurrogateCodepoint(codepoint)) {
+          valid = false;
+        }
+      }
+    } else if (char_len == 4) {
+      auto byte1 = static_cast<unsigned char>(text[i + 1]);
+      auto byte2 = static_cast<unsigned char>(text[i + 2]);
+      auto byte3 = static_cast<unsigned char>(text[i + 3]);
+      if (!IsValidContinuationByte(byte1) || !IsValidContinuationByte(byte2) || !IsValidContinuationByte(byte3)) {
+        valid = false;
+      } else {
+        codepoint = ((first_byte & kUtf8FourByteDatMask) << kUtf8Shift18) |
+                    ((byte1 & kUtf8ContinuationMask) << kUtf8Shift12) |
+                    ((byte2 & kUtf8ContinuationMask) << kUtf8Shift6) | (byte3 & kUtf8ContinuationMask);
+        if (codepoint < kMinFourByteCodepoint) {
+          valid = false;
+        }
+        if (codepoint > kUnicodeMaxCodepoint) {
+          valid = false;
+        }
+      }
+    }
+
+    if (valid) {
+      if (count >= buffer_capacity) {
+        return 0;  // Buffer too small, caller should fall back to vector version
+      }
+      buffer[count++] = codepoint;
+      i += char_len;
+    } else {
+      ++i;
+    }
+  }
+
+  return count;
+}
+
 std::string CodepointsToUtf8(const uint32_t* begin, const uint32_t* end) {
   std::string result;
   result.reserve(static_cast<size_t>(end - begin) * 3);  // Estimate
@@ -388,29 +463,41 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
   std::vector<std::string> ngrams;
 
   // Convert to codepoints for proper character-level n-grams
-  std::vector<uint32_t> codepoints = Utf8ToCodepoints(text);
+  // Use stack buffer for short strings to avoid heap allocation
+  constexpr size_t kStackBufSize = 128;
+  std::array<uint32_t, kStackBufSize> stack_buf{};
+  size_t cp_count = Utf8ToCodepoints(text, stack_buf.data(), kStackBufSize);
+  const uint32_t* cp_data = stack_buf.data();
 
-  if (codepoints.empty() || n <= 0) {
+  // Fall back to heap for long strings
+  std::vector<uint32_t> heap_buf;
+  if (cp_count == 0 && !text.empty()) {
+    heap_buf = Utf8ToCodepoints(text);
+    cp_count = heap_buf.size();
+    cp_data = heap_buf.data();
+  }
+
+  if (cp_count == 0 || n <= 0) {
     return ngrams;
   }
 
   // For n=1 (unigrams), just return each character
   if (n == 1) {
-    ngrams.reserve(codepoints.size());
-    for (uint32_t codepoint : codepoints) {
-      ngrams.push_back(CodepointsToUtf8({codepoint}));
+    ngrams.reserve(cp_count);
+    for (size_t i = 0; i < cp_count; ++i) {
+      ngrams.push_back(CodepointsToUtf8(cp_data + i, cp_data + i + 1));
     }
     return ngrams;
   }
 
   // For n > 1
-  if (codepoints.size() < static_cast<size_t>(n)) {
+  if (cp_count < static_cast<size_t>(n)) {
     return ngrams;
   }
 
-  ngrams.reserve(codepoints.size() - n + 1);
-  for (size_t i = 0; i <= codepoints.size() - n; ++i) {
-    ngrams.push_back(CodepointsToUtf8(codepoints.data() + i, codepoints.data() + i + n));
+  ngrams.reserve(cp_count - n + 1);
+  for (size_t i = 0; i <= cp_count - n; ++i) {
+    ngrams.push_back(CodepointsToUtf8(cp_data + i, cp_data + i + n));
   }
 
   return ngrams;
@@ -452,22 +539,34 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
   }
 
   // Convert to codepoints for proper character-level processing
-  std::vector<uint32_t> codepoints = Utf8ToCodepoints(text);
+  // Use stack buffer for short strings to avoid heap allocation
+  constexpr size_t kStackBufSize = 128;
+  std::array<uint32_t, kStackBufSize> stack_buf{};
+  size_t cp_count = Utf8ToCodepoints(text, stack_buf.data(), kStackBufSize);
+  const uint32_t* cp_data = stack_buf.data();
 
-  if (codepoints.empty()) {
+  // Fall back to heap for long strings
+  std::vector<uint32_t> heap_buf;
+  if (cp_count == 0 && !text.empty()) {
+    heap_buf = Utf8ToCodepoints(text);
+    cp_count = heap_buf.size();
+    cp_data = heap_buf.data();
+  }
+
+  if (cp_count == 0) {
     return ngrams;
   }
 
-  ngrams.reserve(codepoints.size());  // Estimate
+  ngrams.reserve(cp_count);  // Estimate
 
-  for (size_t i = 0; i < codepoints.size(); ++i) {
-    uint32_t codepoint = codepoints[i];
+  for (size_t i = 0; i < cp_count; ++i) {
+    uint32_t codepoint = cp_data[i];
 
     // Determine n-gram size based on the starting character type
     bool start_is_cjk = IsCJKIdeograph(codepoint);
     int ngram_size = start_is_cjk ? kanji_ngram_size : ascii_ngram_size;
 
-    if (i + ngram_size > codepoints.size()) {
+    if (i + ngram_size > cp_count) {
       continue;
     }
 
@@ -475,7 +574,7 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
       // Legacy behavior: reject N-grams that span CJK/non-CJK boundaries
       bool boundary_crossed = false;
       for (int j = 1; j < ngram_size; ++j) {
-        if (IsCJKIdeograph(codepoints[i + j]) != start_is_cjk) {
+        if (IsCJKIdeograph(cp_data[i + j]) != start_is_cjk) {
           boundary_crossed = true;
           break;
         }
@@ -485,7 +584,7 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
       }
     }
 
-    ngrams.push_back(CodepointsToUtf8(codepoints.data() + i, codepoints.data() + i + ngram_size));
+    ngrams.push_back(CodepointsToUtf8(cp_data + i, cp_data + i + ngram_size));
   }
 
   return ngrams;

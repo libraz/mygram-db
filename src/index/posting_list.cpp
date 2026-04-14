@@ -137,7 +137,8 @@ PostingList& PostingList::operator=(PostingList&& other) noexcept {
 
 void PostingList::Add(DocId doc_id) {
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  auto strategy = strategy_.load(std::memory_order_relaxed);
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     if (delta_compressed_.empty()) {
       // First entry: store doc_id as-is (delta encoding stores first value raw)
       delta_compressed_.push_back(doc_id);
@@ -163,7 +164,7 @@ void PostingList::Add(DocId doc_id) {
   } else {
     roaring_bitmap_add(roaring_bitmap_, doc_id);
   }
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
@@ -179,7 +180,8 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   assert(std::is_sorted(doc_ids.begin(), doc_ids.end()));
 
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  auto strategy = strategy_.load(std::memory_order_relaxed);
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     // Merge sorted arrays
     auto existing = DecodeDelta(delta_compressed_);
     std::vector<DocId> merged;
@@ -192,7 +194,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
   } else {
     roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
   }
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
@@ -202,7 +204,8 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 
 void PostingList::Remove(DocId doc_id) {
   std::unique_lock lock(mutex_);  // Exclusive access for write
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  auto strategy = strategy_.load(std::memory_order_relaxed);
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     // For delta-compressed strategy, decode, modify, and re-encode
     // This is simpler and more maintainable than in-place delta manipulation
     auto docs = DecodeDelta(delta_compressed_);
@@ -215,7 +218,7 @@ void PostingList::Remove(DocId doc_id) {
   } else {
     roaring_bitmap_remove(roaring_bitmap_, doc_id);
   }
-  if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+  if (strategy == PostingStrategy::kDeltaCompressed) {
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);
   } else {
     doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);

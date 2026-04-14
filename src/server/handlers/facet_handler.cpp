@@ -31,8 +31,7 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   storage::DocumentStore* current_doc_store = nullptr;
   int ngram_size = 0;
   int kanji_ngram_size = 0;
-  std::string error =
-      GetTableContext(query.table, &current_index, &current_doc_store, &ngram_size, &kanji_ngram_size);
+  std::string error = GetTableContext(query.table, &current_index, &current_doc_store, &ngram_size, &kanji_ngram_size);
   if (!error.empty()) {
     return error;
   }
@@ -74,19 +73,16 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
       }
       all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
-      auto term_infos =
-          search_pipeline::GenerateTermInfos(all_search_terms, current_index, ngram_size, kanji_ngram_size,
-                                             cross_boundary);
+      auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, ngram_size,
+                                                           kanji_ngram_size, cross_boundary);
 
       // Sort by estimated size for faster intersection
-      std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& a, const SearchTermInfo& b) {
-        return a.estimated_size < b.estimated_size;
-      });
+      std::sort(term_infos.begin(), term_infos.end(),
+                [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
 
-      auto pipeline_result =
-          search_pipeline::Execute(query, term_infos, all_search_terms, current_index, current_doc_store,
-                                   ctx_.full_config, ngram_size, kanji_ngram_size, cross_boundary,
-                                   SearchHandler::GetFilterThreshold());
+      auto pipeline_result = search_pipeline::Execute(query, term_infos, all_search_terms, current_index,
+                                                      current_doc_store, ctx_.full_config, ngram_size, kanji_ngram_size,
+                                                      cross_boundary, SearchHandler::GetFilterThreshold());
       results = std::move(pipeline_result.results);
     } else {
       // No search text and no and_terms — start with all docs
@@ -94,8 +90,8 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
 
       // Apply NOT filter (only for non-search path; Execute already handles it)
       if (has_not) {
-        results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, ngram_size,
-                                                  kanji_ngram_size, cross_boundary);
+        results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, ngram_size, kanji_ngram_size,
+                                                  cross_boundary);
       }
 
       // Apply column filters (only for non-search path; Execute already handles it)
@@ -109,8 +105,8 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     } else {
       // Convert results to Roaring bitmap for efficient facet counting
       // Use unique_ptr with custom deleter for RAII
-      std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)> result_bitmap(
-          roaring_bitmap_create(), roaring_bitmap_free);
+      std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)> result_bitmap(roaring_bitmap_create(),
+                                                                                      roaring_bitmap_free);
       roaring_bitmap_add_many(result_bitmap.get(), results.size(), results.data());
 
       // Free the results vector before bitmap operations (reduce peak memory)

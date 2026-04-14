@@ -604,6 +604,22 @@ gtest_discover_tests(connection_acceptor_unix_test
 )
 
 
+# ServerTypes tests (ServerConfig::FromConfig)
+
+add_executable(server_types_test
+  server_types_test.cpp
+)
+
+target_link_libraries(server_types_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(server_types_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # SearchPipeline tests (filter evaluation, text verification, cache staleness)
 
 add_executable(search_pipeline_test

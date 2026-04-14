@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -137,6 +138,20 @@ Expected<void, Error> ReadHeaderV2(std::istream& input_stream, HeaderV2& header)
  */
 Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_format::SectionType type,
                                            const std::string& data);
+
+/**
+ * @brief Write a section envelope from an ostringstream without copying its buffer
+ *
+ * Streams CRC32 computation and data writing directly from the ostringstream's
+ * internal buffer, avoiding the memory overhead of calling .str() on large sections.
+ *
+ * @param output_stream Output stream
+ * @param type Section type
+ * @param data_stream Stream containing section data (will be seeked to beginning)
+ * @return Expected<void, Error>
+ */
+Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_format::SectionType type,
+                                           std::ostringstream& data_stream);
 
 /**
  * @brief Read a section envelope from stream (does not read the data)

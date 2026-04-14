@@ -24,10 +24,10 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
-class BinlogReader;
+class IBinlogReader;
 }
+#ifdef USE_MYSQL
 namespace mygramdb::server {
 class SyncOperationManager;
 }
@@ -90,7 +90,7 @@ struct InitializedComponents {
 class ServerLifecycleManager {
  public:
   /**
-   * @brief Construct lifecycle manager with all required dependencies
+   * @brief Create a ServerLifecycleManager with all required dependencies
    *
    * @param config Server configuration
    * @param table_contexts Map of table name to TableContext pointer (non-const for HandlerContext)
@@ -106,17 +106,18 @@ class ServerLifecycleManager {
    * @param sync_manager SyncOperationManager for SYNC operations (MySQL only, MUST be non-null when USE_MYSQL is
    * defined)
    *
-   * @throws std::invalid_argument if sync_manager is nullptr when USE_MYSQL is defined
+   * @return Expected with unique_ptr to ServerLifecycleManager, or Error if sync_manager is nullptr when USE_MYSQL is
+   * defined
    */
-  ServerLifecycleManager(const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
-                         const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
-                         std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
-                         std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
-                         std::atomic<bool>& mysql_reconnecting,
+  static mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::Error> Create(
+      const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
+      const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
+      std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
+      std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
+      std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
-                         mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
-#else
-                         void* binlog_reader
+      ,
+      SyncOperationManager* sync_manager
 #endif
   );
 
@@ -146,6 +147,20 @@ class ServerLifecycleManager {
   mygram::utils::Expected<InitializedComponents, mygram::utils::Error> Initialize();
 
  private:
+  /**
+   * @brief Private constructor - use Create() factory method instead
+   */
+  ServerLifecycleManager(const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
+                         const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
+                         std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
+                         std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
+                         std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
+#ifdef USE_MYSQL
+                         ,
+                         SyncOperationManager* sync_manager
+#endif
+  );
+
   // Configuration (const references)
   const ServerConfig& config_;
   std::unordered_map<std::string, TableContext*>& table_contexts_;  // Non-const: HandlerContext requires non-const ref
@@ -160,11 +175,9 @@ class ServerLifecycleManager {
   std::atomic<bool>& replication_paused_for_dump_;
   std::atomic<bool>& mysql_reconnecting_;
 
+  mysql::IBinlogReader* binlog_reader_;
 #ifdef USE_MYSQL
-  mysql::BinlogReader* binlog_reader_;
   SyncOperationManager* sync_manager_;  // Non-owning pointer for passing to SyncHandler
-#else
-  void* binlog_reader_;
 #endif
 
   // Initialization steps (each returns Expected<unique_ptr<T>, Error>)

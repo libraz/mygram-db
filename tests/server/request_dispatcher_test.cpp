@@ -61,7 +61,6 @@ class RequestDispatcherTest : public ::testing::Test {
     // Initialize HandlerContext with references
     ctx_ = std::make_unique<HandlerContext>(HandlerContext{
         .table_catalog = table_catalog_.get(),
-        .table_contexts = table_contexts_,
         .stats = *stats_,
         .full_config = nullptr,
         .dump_dir = "",
@@ -71,10 +70,7 @@ class RequestDispatcherTest : public ::testing::Test {
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-        .binlog_reader = nullptr,
         .sync_manager = nullptr,
-#else
-        .binlog_reader = nullptr,
 #endif
         .cache_manager = nullptr,
     });

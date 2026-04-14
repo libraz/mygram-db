@@ -1099,10 +1099,9 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
 
   // Bug #20: Compact() should rehash maps and reduce bucket overhead.
   // After compaction, memory should be less than before compaction.
-  EXPECT_LT(memory_after_compact, memory_before_compact)
-      << "Bug #20: Compact() should reduce memory usage. "
-      << "Before compact: " << memory_before_compact << " bytes, "
-      << "After compact: " << memory_after_compact << " bytes";
+  EXPECT_LT(memory_after_compact, memory_before_compact) << "Bug #20: Compact() should reduce memory usage. "
+                                                         << "Before compact: " << memory_before_compact << " bytes, "
+                                                         << "After compact: " << memory_after_compact << " bytes";
 
   // After removing 99% of documents and compacting, memory should be
   // significantly less than the peak with all 10000 documents.
@@ -1581,4 +1580,90 @@ TEST(DocumentStoreTest, SetStoreTextsFalseBatchSkipsText) {
   // No text should be stored
   EXPECT_FALSE(store.GetNormalizedText((*result)[0]).has_value());
   EXPECT_FALSE(store.GetNormalizedText((*result)[1]).has_value());
+}
+
+/**
+ * @brief Test GetFilterValuesBatchMultiColumn retrieves multiple columns in one call
+ */
+TEST(DocumentStoreTest, GetFilterValuesBatchMultiColumn) {
+  DocumentStore store;
+
+  FilterMap filters1;
+  filters1["status"] = int32_t{1};
+  filters1["score"] = double{3.14};
+  filters1["name"] = std::string("alice");
+
+  FilterMap filters2;
+  filters2["status"] = int32_t{2};
+  filters2["score"] = double{2.71};
+  // name deliberately missing for doc2
+
+  auto id1 = store.AddDocument("pk1", filters1);
+  auto id2 = store.AddDocument("pk2", filters2);
+  ASSERT_TRUE(id1.has_value());
+  ASSERT_TRUE(id2.has_value());
+
+  std::vector<DocId> doc_ids = {*id1, *id2};
+  std::vector<std::string> columns = {"status", "score", "name"};
+
+  auto results = store.GetFilterValuesBatchMultiColumn(doc_ids, columns);
+  ASSERT_EQ(results.size(), 3);  // 3 columns
+
+  // Column 0: "status"
+  ASSERT_EQ(results[0].size(), 2);
+  ASSERT_TRUE(results[0][0].has_value());
+  EXPECT_EQ(std::get<int32_t>(*results[0][0]), 1);
+  ASSERT_TRUE(results[0][1].has_value());
+  EXPECT_EQ(std::get<int32_t>(*results[0][1]), 2);
+
+  // Column 1: "score"
+  ASSERT_EQ(results[1].size(), 2);
+  ASSERT_TRUE(results[1][0].has_value());
+  EXPECT_DOUBLE_EQ(std::get<double>(*results[1][0]), 3.14);
+  ASSERT_TRUE(results[1][1].has_value());
+  EXPECT_DOUBLE_EQ(std::get<double>(*results[1][1]), 2.71);
+
+  // Column 2: "name" (missing for doc2)
+  ASSERT_EQ(results[2].size(), 2);
+  ASSERT_TRUE(results[2][0].has_value());
+  EXPECT_EQ(std::get<std::string>(*results[2][0]), "alice");
+  EXPECT_FALSE(results[2][1].has_value());  // doc2 has no "name" filter
+}
+
+/**
+ * @brief Test GetFilterValuesBatchMultiColumn with empty inputs
+ */
+TEST(DocumentStoreTest, GetFilterValuesBatchMultiColumnEmpty) {
+  DocumentStore store;
+
+  // Empty doc_ids
+  auto result1 = store.GetFilterValuesBatchMultiColumn({}, {"col1"});
+  ASSERT_EQ(result1.size(), 1);
+  EXPECT_TRUE(result1[0].empty());
+
+  // Empty columns
+  auto result2 = store.GetFilterValuesBatchMultiColumn({1, 2}, {});
+  EXPECT_TRUE(result2.empty());
+}
+
+/**
+ * @brief Test GetFilterValuesBatchMultiColumn with non-existent doc_ids
+ */
+TEST(DocumentStoreTest, GetFilterValuesBatchMultiColumnMissingDocs) {
+  DocumentStore store;
+
+  FilterMap filters;
+  filters["x"] = int32_t{10};
+  auto id1 = store.AddDocument("pk1", filters);
+  ASSERT_TRUE(id1.has_value());
+
+  std::vector<DocId> doc_ids = {*id1, 999};  // 999 does not exist
+  std::vector<std::string> columns = {"x"};
+
+  auto results = store.GetFilterValuesBatchMultiColumn(doc_ids, columns);
+  ASSERT_EQ(results.size(), 1);
+  ASSERT_EQ(results[0].size(), 2);
+  ASSERT_TRUE(results[0][0].has_value());
+  EXPECT_EQ(std::get<int32_t>(*results[0][0]), 10);
+  EXPECT_FALSE(results[0][1].has_value());  // doc 999 does not exist
 }

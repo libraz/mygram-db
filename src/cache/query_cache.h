@@ -274,12 +274,14 @@ class QueryCache {
    * Queries with cost less than this threshold will not be cached.
    * Changes apply to future Insert() calls.
    */
-  void SetMinQueryCost(double min_query_cost_ms) { min_query_cost_ms_ = min_query_cost_ms; }
+  void SetMinQueryCost(double min_query_cost_ms) {
+    min_query_cost_ms_.store(min_query_cost_ms, std::memory_order_relaxed);
+  }
 
   /**
    * @brief Get current minimum query cost threshold
    */
-  [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_; }
+  [[nodiscard]] double GetMinQueryCost() const { return min_query_cost_ms_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Set TTL for cache entries
@@ -287,12 +289,12 @@ class QueryCache {
    *
    * Changes apply immediately to TTL expiration checks.
    */
-  void SetTtl(int ttl_seconds) { ttl_seconds_ = ttl_seconds; }
+  void SetTtl(int ttl_seconds) { ttl_seconds_.store(ttl_seconds, std::memory_order_relaxed); }
 
   /**
    * @brief Get current TTL setting
    */
-  [[nodiscard]] int GetTtl() const { return ttl_seconds_; }
+  [[nodiscard]] int GetTtl() const { return ttl_seconds_.load(std::memory_order_relaxed); }
 
   /**
    * @brief Check if compression is enabled for cached results
@@ -308,9 +310,9 @@ class QueryCache {
 
   // Configuration
   size_t max_memory_bytes_;
-  double min_query_cost_ms_;
-  int ttl_seconds_;           ///< Time-to-live in seconds (0 = no expiration)
-  bool compression_enabled_;  ///< Enable LZ4 compression for cached results
+  std::atomic<double> min_query_cost_ms_;
+  std::atomic<int> ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
+  bool compression_enabled_;      ///< Enable LZ4 compression for cached results
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;

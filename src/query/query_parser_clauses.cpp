@@ -13,12 +13,11 @@
 
 #include "query/query_parser.h"
 #include "query/query_parser_internal.h"
-#include "utils/string_utils.h"
 
 namespace mygramdb::query {
 
+using internal::EqualsIgnoreCase;
 using internal::ToLower;
-using mygram::utils::ToUpper;
 
 bool QueryParser::ParseAnd(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // AND <term>
@@ -287,13 +286,13 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   }
 
   OrderByClause order_by;
-  std::string next_token = ToUpper(tokens[pos]);
+  const auto& next_token = tokens[pos];
 
   // Check for shorthand: SORT ASC/DESC (primary key ordering)
-  if (next_token == "ASC" || next_token == "DESC") {
+  if (EqualsIgnoreCase(next_token, "ASC") || EqualsIgnoreCase(next_token, "DESC")) {
     // Shorthand for primary key ordering
     order_by.column = "";  // Empty = primary key
-    order_by.order = (next_token == "ASC") ? SortOrder::ASC : SortOrder::DESC;
+    order_by.order = EqualsIgnoreCase(next_token, "ASC") ? SortOrder::ASC : SortOrder::DESC;
     pos++;
     query.order_by = order_by;
     return true;
@@ -311,11 +310,10 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
 
   // Check for ASC/DESC (optional, default is DESC)
   if (pos < tokens.size()) {
-    std::string order_str = ToUpper(tokens[pos]);
-    if (order_str == "ASC") {
+    if (EqualsIgnoreCase(tokens[pos], "ASC")) {
       order_by.order = SortOrder::ASC;
       pos++;
-    } else if (order_str == "DESC") {
+    } else if (EqualsIgnoreCase(tokens[pos], "DESC")) {
       order_by.order = SortOrder::DESC;
       pos++;
     }
@@ -326,12 +324,14 @@ bool QueryParser::ParseSort(const std::vector<std::string>& tokens, size_t& pos,
   // After consuming column and optional ASC/DESC, if next token looks like a column name
   // (not a known keyword), it's likely a multi-column sort attempt
   if (pos < tokens.size()) {
-    std::string peek_token = ToUpper(tokens[pos]);
+    const auto& peek_token = tokens[pos];
 
     // Lambda to check if token is a known keyword
     auto is_known_keyword = [&peek_token]() -> bool {
-      return peek_token == "LIMIT" || peek_token == "OFFSET" || peek_token == "FILTER" || peek_token == "AND" ||
-             peek_token == "NOT" || peek_token == "HIGHLIGHT" || peek_token == "FUZZY";
+      return EqualsIgnoreCase(peek_token, "LIMIT") || EqualsIgnoreCase(peek_token, "OFFSET") ||
+             EqualsIgnoreCase(peek_token, "FILTER") || EqualsIgnoreCase(peek_token, "AND") ||
+             EqualsIgnoreCase(peek_token, "NOT") || EqualsIgnoreCase(peek_token, "HIGHLIGHT") ||
+             EqualsIgnoreCase(peek_token, "FUZZY");
     };
 
     // If next token is not a known keyword, it might be a second column name
@@ -354,9 +354,9 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
   query::HighlightOptions opts;
 
   while (pos < tokens.size()) {
-    std::string keyword = ToUpper(tokens[pos]);
+    const auto& keyword = tokens[pos];
 
-    if (keyword == "TAG") {
+    if (EqualsIgnoreCase(keyword, "TAG")) {
       // TAG <open> <close>
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       if (pos + 2 >= tokens.size()) {
@@ -366,7 +366,7 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
       pos++;
       opts.open_tag = tokens[pos++];
       opts.close_tag = tokens[pos++];
-    } else if (keyword == "SNIPPET_LEN") {
+    } else if (EqualsIgnoreCase(keyword, "SNIPPET_LEN")) {
       // SNIPPET_LEN <n>
       if (pos + 1 >= tokens.size()) {
         SetError("HIGHLIGHT SNIPPET_LEN requires a number");
@@ -384,7 +384,7 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
         SetError("Invalid HIGHLIGHT SNIPPET_LEN value");
         return false;
       }
-    } else if (keyword == "MAX_FRAGMENTS") {
+    } else if (EqualsIgnoreCase(keyword, "MAX_FRAGMENTS")) {
       // MAX_FRAGMENTS <n>
       if (pos + 1 >= tokens.size()) {
         SetError("HIGHLIGHT MAX_FRAGMENTS requires a number");
@@ -414,7 +414,7 @@ bool QueryParser::ParseHighlight(const std::vector<std::string>& tokens, size_t&
 
 bool QueryParser::ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos, Query& query) {
   // FUZZY [distance]
-  pos++;  // Skip "FUZZY" (consistent with other ParseX methods)
+  pos++;                      // Skip "FUZZY" (consistent with other ParseX methods)
   uint32_t max_distance = 1;  // Default
 
   // Check if next token is a number (optional distance parameter)
@@ -440,26 +440,24 @@ bool QueryParser::ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos
 }
 
 std::optional<FilterOp> QueryParser::ParseFilterOp(std::string_view op_str) {
-  std::string normalized_op = ToUpper(op_str);
-
-  if (normalized_op == "=" || normalized_op == "==" || normalized_op == "EQ") {
+  if (op_str == "=" || op_str == "==" || EqualsIgnoreCase(op_str, "EQ")) {
     return FilterOp::EQ;
   }
-  if (normalized_op == "!=" || normalized_op == "<>" || normalized_op == "NE") {
+  if (op_str == "!=" || op_str == "<>" || EqualsIgnoreCase(op_str, "NE")) {
     return FilterOp::NE;
   }
-  if (normalized_op == ">" || normalized_op == "GT") {
+  if (op_str == ">" || EqualsIgnoreCase(op_str, "GT")) {
     return FilterOp::GT;
   }
   // UTF-8 ≥ (U+2265): \xe2\x89\xa5
-  if (normalized_op == ">=" || normalized_op == "\xe2\x89\xa5" || normalized_op == "GTE") {
+  if (op_str == ">=" || op_str == "\xe2\x89\xa5" || EqualsIgnoreCase(op_str, "GTE")) {
     return FilterOp::GTE;
   }
-  if (normalized_op == "<" || normalized_op == "LT") {
+  if (op_str == "<" || EqualsIgnoreCase(op_str, "LT")) {
     return FilterOp::LT;
   }
   // UTF-8 ≤ (U+2264): \xe2\x89\xa4
-  if (normalized_op == "<=" || normalized_op == "\xe2\x89\xa4" || normalized_op == "LTE") {
+  if (op_str == "<=" || op_str == "\xe2\x89\xa4" || EqualsIgnoreCase(op_str, "LTE")) {
     return FilterOp::LTE;
   }
 

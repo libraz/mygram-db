@@ -13,12 +13,14 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "storage/document_store.h"
 #include "types/doc_id.h"
+#include "utils/hash_utils.h"
 
 namespace mygramdb::storage {
 
@@ -58,7 +60,7 @@ class FilterIndex {
   [[nodiscard]] RoaringBitmapPtr GetEqBitmap(const std::string& column, const std::string& serialized_value) const;
 
   /// @brief Check if a column exists in the filter index
-  bool HasColumn(const std::string& column) const;
+  bool HasColumn(std::string_view column) const;
 
   /// Clear all bitmaps
   void Clear();
@@ -71,8 +73,7 @@ class FilterIndex {
 
   /// Get all (serialized_value, doc_count) pairs for a column, sorted by count DESC.
   /// Returns empty vector if column not found.
-  [[nodiscard]] std::vector<std::pair<std::string, uint64_t>> GetColumnValueCounts(
-      const std::string& column) const;
+  [[nodiscard]] std::vector<std::pair<std::string, uint64_t>> GetColumnValueCounts(const std::string& column) const;
 
   /// Get (serialized_value, doc_count) pairs for a column, filtered by a result bitmap.
   /// Only includes values with non-zero count after filtering. Sorted by count DESC.
@@ -98,7 +99,12 @@ class FilterIndex {
   mutable std::shared_mutex mutex_;
 
   /// column_name -> { serialized_value -> roaring_bitmap_t* }
-  std::unordered_map<std::string, std::unordered_map<std::string, roaring_bitmap_t*>> eq_bitmaps_;
+  /// Uses transparent hash for heterogeneous lookup (string_view without allocation)
+  using ValueBitmapMap = absl::flat_hash_map<std::string, roaring_bitmap_t*, mygram::utils::TransparentStringHash,
+                                             mygram::utils::TransparentStringEqual>;
+  absl::flat_hash_map<std::string, ValueBitmapMap, mygram::utils::TransparentStringHash,
+                      mygram::utils::TransparentStringEqual>
+      eq_bitmaps_;
 };
 
 }  // namespace mygramdb::storage

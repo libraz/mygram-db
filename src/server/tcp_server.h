@@ -34,11 +34,12 @@
 #include "server/sync_operation_manager.h"
 #endif
 
-#ifdef USE_MYSQL
 namespace mygramdb::mysql {
+class IBinlogReader;
+#ifdef USE_MYSQL
 class BinlogReader;
-}  // namespace mygramdb::mysql
 #endif
+}  // namespace mygramdb::mysql
 
 namespace mygramdb::server {
 
@@ -77,12 +78,7 @@ class TcpServer {
    */
   TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
             std::string dump_dir = "./dumps", const config::Config* full_config = nullptr,
-#ifdef USE_MYSQL
-            mysql::BinlogReader* binlog_reader = nullptr
-#else
-            void* binlog_reader = nullptr
-#endif
-  );
+            mysql::IBinlogReader* binlog_reader = nullptr);
 
   ~TcpServer();
 
@@ -212,11 +208,7 @@ class TcpServer {
   // Legacy fields (for backward compatibility during migration)
   std::unordered_map<std::string, TableContext*> table_contexts_;
 
-#ifdef USE_MYSQL
-  mysql::BinlogReader* binlog_reader_;
-#else
-  void* binlog_reader_;
-#endif
+  mysql::IBinlogReader* binlog_reader_;
 
   // Command handler context (must outlive handlers)
   std::unique_ptr<HandlerContext> handler_context_;

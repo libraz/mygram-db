@@ -407,8 +407,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
       query.search_text = search_tokens[0];
       for (size_t i = 1; i < search_tokens.size(); ++i) {
         const std::string& token = search_tokens[i];
-        bool prev_ends_with_open_paren =
-            !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
+        bool prev_ends_with_open_paren = !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
         bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
         if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
           query.search_text += " ";

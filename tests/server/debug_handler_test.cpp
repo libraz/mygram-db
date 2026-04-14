@@ -11,6 +11,7 @@
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
+#include "server/table_catalog.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::server {
@@ -39,8 +40,10 @@ class DebugHandlerTest : public ::testing::Test {
 
     stats_ = std::make_unique<ServerStats>();
 
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
-        .table_contexts = table_contexts_,
+        .table_catalog = table_catalog_.get(),
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = "/tmp",
@@ -50,10 +53,7 @@ class DebugHandlerTest : public ::testing::Test {
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-        .binlog_reader = nullptr,
         .sync_manager = nullptr,
-#else
-        .binlog_reader = nullptr,
 #endif
     });
 
@@ -85,6 +85,7 @@ class DebugHandlerTest : public ::testing::Test {
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
   std::atomic<bool> dump_load_in_progress_{false};

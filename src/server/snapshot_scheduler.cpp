@@ -14,15 +14,12 @@
 #include <iomanip>
 #include <sstream>
 
+#include "mysql/binlog_reader_interface.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
-
-#ifdef USE_MYSQL
-#include "mysql/binlog_reader.h"
-#endif
 
 namespace mygramdb::server {
 
@@ -30,12 +27,7 @@ constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every se
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
-#ifdef USE_MYSQL
-                                     mysql::BinlogReader* binlog_reader,
-#else
-                                     void* binlog_reader,
-#endif
-                                     std::atomic<bool>& dump_save_in_progress)
+                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -157,12 +149,9 @@ void SnapshotScheduler::TakeSnapshot() {
 
     // Get current GTID
     std::string gtid;
-#ifdef USE_MYSQL
     if (binlog_reader_ != nullptr) {
-      auto* reader = static_cast<mysql::BinlogReader*>(binlog_reader_);
-      gtid = reader->GetCurrentGTID();
+      gtid = binlog_reader_->GetCurrentGTID();
     }
-#endif
 
     // Get dumpable contexts from catalog
     auto dumpable = catalog_->GetDumpableContexts();

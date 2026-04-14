@@ -22,8 +22,7 @@ namespace mygram::utils {
  * exceeded)
  * @return Edit distance, or max_distance+1 if distance exceeds max_distance
  */
-uint32_t LevenshteinDistance(std::string_view a, std::string_view b,
-                             uint32_t max_distance);
+uint32_t LevenshteinDistance(std::string_view a, std::string_view b, uint32_t max_distance);
 
 /**
  * @brief Check if any whitespace-delimited word in text is within edit distance
@@ -38,7 +37,6 @@ uint32_t LevenshteinDistance(std::string_view a, std::string_view b,
  * @param max_distance Maximum edit distance for a match
  * @return true if any word in text is within max_distance of term
  */
-bool ContainsFuzzyMatch(std::string_view text, std::string_view term,
-                        uint32_t max_distance);
+bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t max_distance);
 
 }  // namespace mygram::utils

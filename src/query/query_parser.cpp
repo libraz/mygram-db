@@ -12,7 +12,6 @@
 #include <sstream>
 
 #include "query/query_parser_internal.h"
-#include "utils/string_utils.h"
 
 namespace mygramdb::query {
 
@@ -43,7 +42,6 @@ size_t CalculateQueryExpressionLength(const Query& query) {
 }
 
 using internal::EqualsIgnoreCase;
-using mygram::utils::ToUpper;
 
 }  // namespace
 
@@ -227,11 +225,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
-    std::string subcommand = ToUpper(tokens[1]);
+    const auto& subcommand = tokens[1];
     Query query;
     query.table = "";  // DUMP doesn't need a table
 
-    if (subcommand == "SAVE") {
+    if (EqualsIgnoreCase(subcommand, "SAVE")) {
       query.type = QueryType::DUMP_SAVE;
       // DUMP SAVE [filepath] [--with-stats]
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -250,7 +248,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
           return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
         }
       }
-    } else if (subcommand == "LOAD") {
+    } else if (EqualsIgnoreCase(subcommand, "LOAD")) {
       query.type = QueryType::DUMP_LOAD;
       // DUMP LOAD filepath
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -260,7 +258,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
         SetError("DUMP LOAD requires a filepath");
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
-    } else if (subcommand == "VERIFY") {
+    } else if (EqualsIgnoreCase(subcommand, "VERIFY")) {
       query.type = QueryType::DUMP_VERIFY;
       // DUMP VERIFY filepath
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -270,7 +268,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
         SetError("DUMP VERIFY requires a filepath");
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
-    } else if (subcommand == "INFO") {
+    } else if (EqualsIgnoreCase(subcommand, "INFO")) {
       query.type = QueryType::DUMP_INFO;
       // DUMP INFO filepath
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -280,7 +278,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
         SetError("DUMP INFO requires a filepath");
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
       }
-    } else if (subcommand == "STATUS") {
+    } else if (EqualsIgnoreCase(subcommand, "STATUS")) {
       query.type = QueryType::DUMP_STATUS;
       // DUMP STATUS - no arguments required
     } else {
@@ -297,22 +295,22 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     // CONFIG HELP [path] | CONFIG SHOW [path] | CONFIG VERIFY <filepath>
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() > 1) {  // 1: CONFIG + subcommand
-      std::string subcommand = ToUpper(tokens[1]);
-      if (subcommand == "HELP") {
+      const auto& subcommand = tokens[1];
+      if (EqualsIgnoreCase(subcommand, "HELP")) {
         query.type = QueryType::CONFIG_HELP;
         // Optional path argument
         // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
         if (tokens.size() > 2) {  // 2: CONFIG HELP + path
           query.filepath = tokens[2];
         }
-      } else if (subcommand == "SHOW") {
+      } else if (EqualsIgnoreCase(subcommand, "SHOW")) {
         query.type = QueryType::CONFIG_SHOW;
         // Optional path argument
         // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
         if (tokens.size() > 2) {  // 2: CONFIG SHOW + path
           query.filepath = tokens[2];
         }
-      } else if (subcommand == "VERIFY") {
+      } else if (EqualsIgnoreCase(subcommand, "VERIFY")) {
         query.type = QueryType::CONFIG_VERIFY;
         // Required filepath argument
         // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -341,15 +339,15 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
-    std::string subcommand = ToUpper(tokens[1]);
+    const auto& subcommand = tokens[1];
     Query query;
     query.table = "";  // REPLICATION doesn't need a table
 
-    if (subcommand == "STATUS") {
+    if (EqualsIgnoreCase(subcommand, "STATUS")) {
       query.type = QueryType::REPLICATION_STATUS;
-    } else if (subcommand == "STOP") {
+    } else if (EqualsIgnoreCase(subcommand, "STOP")) {
       query.type = QueryType::REPLICATION_STOP;
-    } else if (subcommand == "START") {
+    } else if (EqualsIgnoreCase(subcommand, "START")) {
       query.type = QueryType::REPLICATION_START;
     } else {
       SetError("Unknown REPLICATION subcommand: " + subcommand);
@@ -364,11 +362,11 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     if (tokens.size() > 1) {  // 1: SYNC + subcommand or table
-      std::string second_token = ToUpper(tokens[1]);
-      if (second_token == "STATUS") {
+      const auto& second_token = tokens[1];
+      if (EqualsIgnoreCase(second_token, "STATUS")) {
         query.type = QueryType::SYNC_STATUS;
         query.table = "";  // SYNC STATUS doesn't need a table
-      } else if (second_token == "STOP") {
+      } else if (EqualsIgnoreCase(second_token, "STOP")) {
         query.type = QueryType::SYNC_STOP;
         // SYNC STOP [table] - optional table name
         // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
@@ -432,22 +430,22 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
-    std::string subcommand = ToUpper(tokens[1]);
+    const auto& subcommand = tokens[1];
     Query query;
     query.table = "";  // CACHE doesn't need a table by default
 
-    if (subcommand == "CLEAR") {
+    if (EqualsIgnoreCase(subcommand, "CLEAR")) {
       query.type = QueryType::CACHE_CLEAR;
       // CACHE CLEAR [table] - optional table name
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       if (tokens.size() > 2) {  // 2: CACHE CLEAR + table
         query.table = tokens[2];
       }
-    } else if (subcommand == "STATS") {
+    } else if (EqualsIgnoreCase(subcommand, "STATS")) {
       query.type = QueryType::CACHE_STATS;
-    } else if (subcommand == "ENABLE") {
+    } else if (EqualsIgnoreCase(subcommand, "ENABLE")) {
       query.type = QueryType::CACHE_ENABLE;
-    } else if (subcommand == "DISABLE") {
+    } else if (EqualsIgnoreCase(subcommand, "DISABLE")) {
       query.type = QueryType::CACHE_DISABLE;
     } else {
       SetError("Unknown CACHE subcommand: " + subcommand);
@@ -522,13 +520,13 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     }
 
-    std::string subcommand = ToUpper(tokens[1]);
-    if (subcommand == "VARIABLES") {
+    const auto& subcommand = tokens[1];
+    if (EqualsIgnoreCase(subcommand, "VARIABLES")) {
       Query query;
       query.type = QueryType::SHOW_VARIABLES;
 
       // Check for LIKE clause
-      if (tokens.size() >= 4 && ToUpper(tokens[2]) == "LIKE") {
+      if (tokens.size() >= 4 && EqualsIgnoreCase(tokens[2], "LIKE")) {
         query.variable_like_pattern = tokens[3];
       }
 

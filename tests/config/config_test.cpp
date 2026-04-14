@@ -10,6 +10,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "utils/error.h"
 #include "utils/memory_utils.h"
 
 using namespace mygramdb::config;
@@ -986,6 +987,91 @@ TEST(ConfigTest, ToFilterConfigsEmptyInput) {
   std::vector<FilterConfig> result = ToFilterConfigs(empty_required);
 
   EXPECT_TRUE(result.empty());
+}
+
+// =============================================================================
+// Expected<Config, Error> contract tests
+// =============================================================================
+
+/**
+ * @brief Test that loading an invalid config returns an Error via Expected
+ *        (not via exception)
+ */
+TEST(ConfigTest, InvalidConfigReturnsExpectedError) {
+  // Create a config with a semantic error (invalid replication with server_id=0)
+  std::ofstream f("expected_error_test.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  start_from: snapshot\n";
+  // Missing server_id with replication enabled - should cause an error
+  f.close();
+
+  auto result = LoadConfig("expected_error_test.yaml");
+
+  // Must return an error through Expected, not throw
+  EXPECT_FALSE(result);
+  if (!result) {
+    // Error should have a meaningful message
+    EXPECT_FALSE(result.error().message().empty());
+    // Error code should be set
+    EXPECT_NE(result.error().code(), mygram::utils::ErrorCode::kSuccess);
+  }
+
+  std::remove("expected_error_test.yaml");
+}
+
+/**
+ * @brief Test that a valid minimal config returns Expected with value
+ */
+TEST(ConfigTest, ValidConfigReturnsExpectedValue) {
+  std::ofstream f("expected_value_test.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f.close();
+
+  auto result = LoadConfig("expected_value_test.yaml");
+
+  // Must succeed
+  ASSERT_TRUE(result) << "Expected success, got error: " << result.error().to_string();
+
+  // Access the value without exceptions
+  const Config& config = *result;
+  EXPECT_EQ(config.mysql.host, "localhost");
+  EXPECT_EQ(config.mysql.user, "root");
+  ASSERT_EQ(config.tables.size(), 1);
+  EXPECT_EQ(config.tables[0].name, "test");
+
+  std::remove("expected_value_test.yaml");
+}
+
+/**
+ * @brief Test that a completely empty file returns Error (not throws)
+ */
+TEST(ConfigTest, EmptyFileReturnsExpectedError) {
+  std::ofstream f("empty_config_test.yaml");
+  f << "";
+  f.close();
+
+  auto result = LoadConfig("empty_config_test.yaml");
+  EXPECT_FALSE(result);
+
+  std::remove("empty_config_test.yaml");
 }
 
 /**

@@ -479,16 +479,16 @@ TEST_F(EndToEndTest, FacetWithFilter) {
   TcpClient client("127.0.0.1", port_);
 
   // Add documents with two filter columns
-  auto doc_id1 = table_context_.doc_store->AddDocument("ff1",
-      {{"category", std::string("news")}, {"priority", static_cast<int64_t>(1)}});
+  auto doc_id1 = table_context_.doc_store->AddDocument(
+      "ff1", {{"category", std::string("news")}, {"priority", static_cast<int64_t>(1)}});
   table_context_.index->AddDocument(*doc_id1, "important news");
 
-  auto doc_id2 = table_context_.doc_store->AddDocument("ff2",
-      {{"category", std::string("news")}, {"priority", static_cast<int64_t>(2)}});
+  auto doc_id2 = table_context_.doc_store->AddDocument(
+      "ff2", {{"category", std::string("news")}, {"priority", static_cast<int64_t>(2)}});
   table_context_.index->AddDocument(*doc_id2, "regular news");
 
-  auto doc_id3 = table_context_.doc_store->AddDocument("ff3",
-      {{"category", std::string("sports")}, {"priority", static_cast<int64_t>(1)}});
+  auto doc_id3 = table_context_.doc_store->AddDocument(
+      "ff3", {{"category", std::string("sports")}, {"priority", static_cast<int64_t>(1)}});
   table_context_.index->AddDocument(*doc_id3, "important sports");
 
   // Facet category with filter on priority=1

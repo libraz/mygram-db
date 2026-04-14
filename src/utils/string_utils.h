@@ -76,6 +76,20 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
 std::vector<uint32_t> Utf8ToCodepoints(std::string_view text);
 
 /**
+ * @brief Convert UTF-8 string to codepoints, writing to a caller-provided buffer
+ *
+ * Avoids heap allocation when the buffer is large enough. If the text has more
+ * codepoints than buffer_capacity, returns 0 and the caller should fall back
+ * to the vector-returning overload.
+ *
+ * @param text UTF-8 encoded string
+ * @param buffer Output buffer for codepoints
+ * @param buffer_capacity Maximum number of codepoints the buffer can hold
+ * @return Number of codepoints written, or 0 if buffer was too small
+ */
+size_t Utf8ToCodepoints(std::string_view text, uint32_t* buffer, size_t buffer_capacity);
+
+/**
  * @brief Convert codepoint vector to UTF-8 string
  *
  * @param codepoints Vector of Unicode codepoints

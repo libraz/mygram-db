@@ -14,12 +14,10 @@
 #include <vector>
 
 #include "cache/cache_manager.h"
+#include "cache/cache_types.h"
 #include "cache/query_cache.h"
 #include "config/config.h"
-#include "index/index.h"
 #include "query/query_parser.h"
-#include "server/server_types.h"
-#include "storage/document_store.h"
 
 namespace mygramdb::cache {
 
@@ -31,24 +29,12 @@ constexpr int kIterationsPerThread = 1000;
 constexpr int kNumThreads = 4;
 
 /**
- * @brief Helper to create table contexts for testing
+ * @brief Helper to create NgramConfigMap for testing
  */
-std::unordered_map<std::string, server::TableContext*> CreateTestTableContexts(
-    std::vector<std::unique_ptr<server::TableContext>>& owned_contexts) {
-  std::unordered_map<std::string, server::TableContext*> contexts;
-
-  auto ctx = std::make_unique<server::TableContext>();
-  ctx->name = "posts";
-  ctx->config.name = "posts";
-  ctx->config.ngram_size = 3;
-  ctx->config.kanji_ngram_size = 2;
-  ctx->index = std::make_unique<index::Index>(3, 2);
-  ctx->doc_store = std::make_unique<storage::DocumentStore>();
-
-  contexts["posts"] = ctx.get();
-  owned_contexts.push_back(std::move(ctx));
-
-  return contexts;
+NgramConfigMap CreateTestNgramConfigs() {
+  NgramConfigMap configs;
+  configs["posts"] = NgramConfig{.ngram_size = 3, .kanji_ngram_size = 2, .cross_boundary_ngrams = true};
+  return configs;
 }
 
 /**
@@ -79,10 +65,9 @@ TEST(CacheThreadSafetyTest, CacheManagerEnableDisableConcurrent) {
   config.enabled = true;
   config.max_memory_bytes = 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts);
+  auto ngram_configs = CreateTestNgramConfigs();
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   std::atomic<bool> done{false};
   std::atomic<int> read_count{0};
@@ -126,10 +111,9 @@ TEST(CacheThreadSafetyTest, CacheManagerLookupWithEnableDisable) {
   config.enabled = true;
   config.max_memory_bytes = 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts);
+  auto ngram_configs = CreateTestNgramConfigs();
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   // Insert an entry so Lookup has something to find
   auto query = CreateQuery("posts", "thread safety test");
@@ -291,10 +275,9 @@ TEST(CacheThreadSafetyTest, CacheManagerSetTtlConcurrent) {
   config.enabled = true;
   config.max_memory_bytes = 1024 * 1024;
 
-  std::vector<std::unique_ptr<server::TableContext>> owned_contexts;
-  auto table_contexts = CreateTestTableContexts(owned_contexts);
+  auto ngram_configs = CreateTestNgramConfigs();
 
-  CacheManager mgr(config, table_contexts);
+  CacheManager mgr(config, std::move(ngram_configs));
 
   std::atomic<int> completed{0};
 

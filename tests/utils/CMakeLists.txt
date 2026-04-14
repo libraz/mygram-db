@@ -270,6 +270,20 @@ gtest_discover_tests(comparison_utils_test
   DISCOVERY_TIMEOUT 30
 )
 
+add_executable(numeric_parse_test
+  numeric_parse_test.cpp
+)
+
+target_link_libraries(numeric_parse_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(numeric_parse_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(edit_distance_test
   edit_distance_test.cpp
 )

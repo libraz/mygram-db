@@ -17,9 +17,11 @@
 #include <thread>
 
 #include "cache/cache_manager.h"
+#include "cache/cache_types.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
+#include "server/table_catalog.h"
 #include "storage/document_store.h"
 #include "storage/dump_format_v1.h"
 
@@ -58,8 +60,10 @@ class DumpHandlerTest : public ::testing::Test {
     test_dump_dir_ = std::filesystem::temp_directory_path() / ("dump_handler_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(test_dump_dir_);
 
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
-        .table_contexts = table_contexts_,
+        .table_catalog = table_catalog_.get(),
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = test_dump_dir_.string(),
@@ -69,11 +73,7 @@ class DumpHandlerTest : public ::testing::Test {
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-        .binlog_reader = nullptr,
         .sync_manager = nullptr,
-
-#else
-        .binlog_reader = nullptr,
 #endif
     });
 
@@ -112,6 +112,7 @@ class DumpHandlerTest : public ::testing::Test {
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
   std::atomic<bool> dump_load_in_progress_{false};
@@ -545,7 +546,7 @@ TEST_F(DumpHandlerTest, SaveLoadRoundTripPreservesAllData) {
 TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
   // Create handler context with null config
   HandlerContext null_config_ctx{
-      .table_contexts = table_contexts_,
+      .table_catalog = table_catalog_.get(),
       .stats = *stats_,
       .full_config = nullptr,  // Null config
       .dump_dir = "/tmp",
@@ -555,11 +556,7 @@ TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
       .replication_paused_for_dump = replication_paused_for_dump_,
       .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-      .binlog_reader = nullptr,
       .sync_manager = nullptr,
-
-#else
-      .binlog_reader = nullptr,
 #endif
   };
 
@@ -958,7 +955,12 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
   cache_config.ttl_seconds = 3600;
   cache_config.max_memory_bytes = 1024 * 1024;
 
-  auto cache_manager = std::make_unique<cache::CacheManager>(cache_config, table_contexts_);
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] =
+        cache::NgramConfig{ctx->config.ngram_size, ctx->config.kanji_ngram_size, ctx->config.cross_boundary_ngrams};
+  }
+  auto cache_manager = std::make_unique<cache::CacheManager>(cache_config, std::move(ngram_configs));
 
   // Set cache_manager in the handler context
   handler_ctx_->cache_manager = cache_manager.get();
@@ -1107,8 +1109,10 @@ class DumpHandlerGtidTest : public ::testing::Test {
     test_dump_dir_ = std::filesystem::temp_directory_path() / ("dump_gtid_test_" + std::to_string(getpid()));
     std::filesystem::create_directories(test_dump_dir_);
 
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
-        .table_contexts = table_contexts_,
+        .table_catalog = table_catalog_.get(),
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = test_dump_dir_.string(),
@@ -1135,6 +1139,7 @@ class DumpHandlerGtidTest : public ::testing::Test {
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
   std::unique_ptr<MockBinlogReader> mock_binlog_reader_;
@@ -1482,8 +1487,10 @@ class DumpHandlerAsyncTest : public ::testing::Test {
     // Create DumpProgress for async testing
     dump_progress_ = std::make_unique<DumpProgress>();
 
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
-        .table_contexts = table_contexts_,
+        .table_catalog = table_catalog_.get(),
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = test_dump_dir_.string(),
@@ -1493,10 +1500,7 @@ class DumpHandlerAsyncTest : public ::testing::Test {
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-        .binlog_reader = nullptr,
         .sync_manager = nullptr,
-#else
-        .binlog_reader = nullptr,
 #endif
         .dump_progress = dump_progress_.get(),  // Enable async behavior
     });
@@ -1525,6 +1529,7 @@ class DumpHandlerAsyncTest : public ::testing::Test {
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<ServerStats> stats_;
   std::unique_ptr<DumpProgress> dump_progress_;

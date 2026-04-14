@@ -70,11 +70,12 @@ std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
   }
 
   // Check TTL expiration (if TTL is enabled)
-  if (ttl_seconds_ > 0) {
+  int current_ttl = ttl_seconds_.load(std::memory_order_relaxed);
+  if (current_ttl > 0) {
     const auto& entry = iter->second.first;
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
-    if (age >= ttl_seconds_) {
+    if (age >= current_ttl) {
       // Entry expired - enqueue for cleanup by RefreshLRU
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
@@ -202,11 +203,12 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
   }
 
   // Check TTL expiration (if TTL is enabled)
-  if (ttl_seconds_ > 0) {
+  int current_ttl = ttl_seconds_.load(std::memory_order_relaxed);
+  if (current_ttl > 0) {
     const auto& entry = iter->second.first;
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
-    if (age >= ttl_seconds_) {
+    if (age >= current_ttl) {
       // Entry expired - enqueue for cleanup by RefreshLRU
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
@@ -296,7 +298,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey&
 bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, const CacheMetadata& metadata,
                         double query_cost_ms) {
   // Check if query cost meets threshold
-  if (query_cost_ms < min_query_cost_ms_) {
+  if (query_cost_ms < min_query_cost_ms_.load(std::memory_order_relaxed)) {
     return false;
   }
 
@@ -554,6 +556,7 @@ void QueryCache::RefreshLRU() {
   std::unique_lock lock(mutex_);
 
   auto now = std::chrono::steady_clock::now();
+  int current_ttl = ttl_seconds_.load(std::memory_order_relaxed);
 
   // Track keys detected as expired during Lookup (stats already counted)
   // Scan-detected expired keys will be collected separately
@@ -562,9 +565,9 @@ void QueryCache::RefreshLRU() {
   // Update LRU for entries that were accessed since last refresh
   for (auto& [key, entry_pair] : cache_map_) {
     // Check TTL expiration
-    if (ttl_seconds_ > 0) {
+    if (current_ttl > 0) {
       auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
-      if (age >= ttl_seconds_) {
+      if (age >= current_ttl) {
         // Only add to scan set if not already detected by Lookup
         if (lookup_expired_keys.find(key) == lookup_expired_keys.end()) {
           scan_expired_keys.insert(key);

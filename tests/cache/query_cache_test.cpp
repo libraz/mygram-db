@@ -1926,4 +1926,101 @@ TEST(QueryCacheTest, SharedPtrCompressedLookupCorrectness) {
   }
 }
 
+// =============================================================================
+// Concurrent SetMinQueryCost / SetTtl with Lookup / Insert
+// =============================================================================
+
+/**
+ * @brief Test SetMinQueryCost and SetTtl can be called concurrently with
+ *        Lookup and Insert without data races
+ *
+ * This is a smoke test: if TSan is enabled it would catch any race on
+ * the atomic fields (min_query_cost_ms_, ttl_seconds_).
+ */
+TEST(QueryCacheTest, ConcurrentSetMinQueryCostAndSetTtlWithLookupInsert) {
+  QueryCache cache(10 * 1024 * 1024, 10.0);  // 10MB
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  // Pre-populate some entries
+  for (int i = 0; i < 50; ++i) {
+    auto key = CacheKeyGenerator::Generate("preload_" + std::to_string(i));
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    cache.Insert(key, result, meta, 15.0);
+  }
+
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> threads;
+
+  // Thread group 1: SetMinQueryCost with different values
+  for (int t = 0; t < 2; ++t) {
+    threads.emplace_back([&cache, &stop, t]() {
+      int i = 0;
+      while (!stop.load()) {
+        double cost = 1.0 + static_cast<double>((i + t) % 50);
+        cache.SetMinQueryCost(cost);
+        // Read it back to exercise the load path
+        [[maybe_unused]] double current = cache.GetMinQueryCost();
+        ++i;
+        std::this_thread::yield();
+      }
+    });
+  }
+
+  // Thread group 2: SetTtl with different values
+  for (int t = 0; t < 2; ++t) {
+    threads.emplace_back([&cache, &stop, t]() {
+      int i = 0;
+      while (!stop.load()) {
+        int ttl = (i + t) % 10;
+        cache.SetTtl(ttl);
+        [[maybe_unused]] int current = cache.GetTtl();
+        ++i;
+        std::this_thread::yield();
+      }
+    });
+  }
+
+  // Thread group 3: Lookup
+  for (int t = 0; t < 3; ++t) {
+    threads.emplace_back([&cache, &stop, t]() {
+      int i = 0;
+      while (!stop.load()) {
+        auto key = CacheKeyGenerator::Generate("preload_" + std::to_string((i + t) % 50));
+        [[maybe_unused]] auto result = cache.Lookup(key);
+        ++i;
+        std::this_thread::yield();
+      }
+    });
+  }
+
+  // Thread group 4: Insert
+  for (int t = 0; t < 3; ++t) {
+    threads.emplace_back([&cache, &meta, &stop, t]() {
+      int i = 0;
+      while (!stop.load()) {
+        auto key = CacheKeyGenerator::Generate("insert_" + std::to_string(t) + "_" + std::to_string(i));
+        std::vector<DocId> result = {static_cast<DocId>(i)};
+        cache.Insert(key, result, meta, 15.0);
+        ++i;
+        std::this_thread::yield();
+      }
+    });
+  }
+
+  // Run for 200ms
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  stop = true;
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // If we reach here without crash or TSan report, the test passes
+  auto stats = cache.GetStatistics();
+  EXPECT_GT(stats.total_queries, 0);
+}
+
 }  // namespace mygramdb::cache

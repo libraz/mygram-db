@@ -179,10 +179,10 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
 }
 
 std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vector<index::DocId>& results,
-                                                                   size_t total_results,
-                                                                   storage::DocumentStore* doc_store,
-                                                                   const std::vector<std::string>& snippets,
-                                                                   const query::DebugInfo* debug_info) {
+                                                                  size_t total_results,
+                                                                  storage::DocumentStore* doc_store,
+                                                                  const std::vector<std::string>& snippets,
+                                                                  const query::DebugInfo* debug_info) {
   // Batch lookup for primary keys
   std::vector<storage::DocId> doc_ids;
   doc_ids.reserve(results.size());
@@ -262,8 +262,8 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
   return oss.str();
 }
 
-std::string ResponseFormatter::FormatFacetResponse(
-    const std::vector<std::pair<std::string, uint64_t>>& value_counts, const query::DebugInfo* debug_info) {
+std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
+                                                   const query::DebugInfo* debug_info) {
   std::string response = "OK FACET " + std::to_string(value_counts.size()) + "\r\n";
 
   for (const auto& [value, count] : value_counts) {
@@ -326,11 +326,7 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
 
 std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                                   const std::unordered_map<std::string, TableContext*>& table_contexts,
-#ifdef USE_MYSQL
                                                   mysql::IBinlogReader* binlog_reader,
-#else
-                                                  void* binlog_reader,
-#endif
                                                   cache::CacheManager* cache_manager) {
   std::ostringstream oss;
   oss << "OK INFO\r\n\r\n";
@@ -531,13 +527,7 @@ std::string ResponseFormatter::FormatLoadResponse(const std::string& filepath) {
   return "OK LOADED " + filepath;
 }
 
-std::string ResponseFormatter::FormatReplicationStatusResponse(
-#ifdef USE_MYSQL
-    mysql::IBinlogReader* binlog_reader
-#else
-    void* binlog_reader
-#endif
-) {
+std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogReader* binlog_reader) {
 #ifdef USE_MYSQL
   std::ostringstream oss;
   oss << "OK REPLICATION\r\n";
@@ -635,12 +625,7 @@ std::string ResponseFormatter::FormatConfigResponse(const config::Config* full_c
 
 std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
-    const std::unordered_map<std::string, TableContext*>& table_contexts,
-#ifdef USE_MYSQL
-    mysql::IBinlogReader* binlog_reader,
-#else
-    void* binlog_reader,
-#endif
+    const std::unordered_map<std::string, TableContext*>& table_contexts, mysql::IBinlogReader* binlog_reader,
     cache::CacheManager* cache_manager) {
   std::ostringstream oss;
 

@@ -12,9 +12,9 @@
 #include "server/handlers/admin_handler.h"
 #include "server/handlers/cache_handler.h"
 #include "server/handlers/debug_handler.h"
-#include "server/handlers/facet_handler.h"
 #include "server/handlers/document_handler.h"
 #include "server/handlers/dump_handler.h"
+#include "server/handlers/facet_handler.h"
 #include "server/handlers/replication_handler.h"
 #include "server/handlers/search_handler.h"
 #include "server/handlers/variable_handler.h"
@@ -35,20 +35,52 @@ namespace {
 constexpr size_t kDefaultThreadPoolQueueSize = 1000;
 }  // namespace
 
-ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
-                                               std::unordered_map<std::string, TableContext*>& table_contexts,
-                                               const std::string& dump_dir, const config::Config* full_config,
-                                               ServerStats& stats, std::atomic<bool>& dump_load_in_progress,
-                                               std::atomic<bool>& dump_save_in_progress,
-                                               std::atomic<bool>& optimization_in_progress,
-                                               std::atomic<bool>& replication_paused_for_dump,
-                                               std::atomic<bool>& mysql_reconnecting,
+mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::Error> ServerLifecycleManager::Create(
+    const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
+    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
+    std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
+    std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
+    std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
-                                               mysql::BinlogReader* binlog_reader, SyncOperationManager* sync_manager
-#else
-                                               void* binlog_reader
+    ,
+    SyncOperationManager* sync_manager
 #endif
-                                               )
+) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+#ifdef USE_MYSQL
+  // Contract: sync_manager must be non-null when USE_MYSQL is defined
+  if (sync_manager == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkNullDependency,
+                                    "ServerLifecycleManager: sync_manager must be non-null when USE_MYSQL is defined"));
+  }
+#endif
+
+  // Constructor is private, so we use unique_ptr with raw new
+  auto manager = std::unique_ptr<ServerLifecycleManager>(new ServerLifecycleManager(
+      config, table_contexts, dump_dir, full_config, stats, dump_load_in_progress, dump_save_in_progress,
+      optimization_in_progress, replication_paused_for_dump, mysql_reconnecting, binlog_reader
+#ifdef USE_MYSQL
+      ,
+      sync_manager
+#endif
+      ));
+  return manager;
+}
+
+ServerLifecycleManager::ServerLifecycleManager(
+    const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
+    const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
+    std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
+    std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
+    std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
+#ifdef USE_MYSQL
+    ,
+    SyncOperationManager* sync_manager
+#endif
+    )
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -59,21 +91,12 @@ ServerLifecycleManager::ServerLifecycleManager(const ServerConfig& config,
       optimization_in_progress_(optimization_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
       mysql_reconnecting_(mysql_reconnecting),
-#ifdef USE_MYSQL
-      binlog_reader_(binlog_reader),
-      sync_manager_(sync_manager)
-#else
       binlog_reader_(binlog_reader)
+#ifdef USE_MYSQL
+      ,
+      sync_manager_(sync_manager)
 #endif
 {
-#ifdef USE_MYSQL
-  // Contract: sync_manager must be non-null when USE_MYSQL is defined
-  // This is enforced because HandlerContext requires valid references to
-  // syncing_tables and syncing_tables_mutex, which are owned by SyncOperationManager
-  if (sync_manager_ == nullptr) {
-    throw std::invalid_argument("ServerLifecycleManager: sync_manager must be non-null when USE_MYSQL is defined");
-  }
-#endif
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -270,8 +293,16 @@ ServerLifecycleManager::InitCacheManager() {
   }
 
   try {
-    // Pass table_contexts to support per-table ngram settings
-    auto cache_manager = std::make_unique<cache::CacheManager>(full_config_->cache, table_contexts_);
+    // Build NgramConfigMap from table_contexts for cache invalidation
+    cache::NgramConfigMap ngram_configs;
+    for (const auto& [name, ctx] : table_contexts_) {
+      ngram_configs[name] = cache::NgramConfig{
+          .ngram_size = ctx->config.ngram_size,
+          .kanji_ngram_size = ctx->config.kanji_ngram_size,
+          .cross_boundary_ngrams = ctx->config.cross_boundary_ngrams,
+      };
+    }
+    auto cache_manager = std::make_unique<cache::CacheManager>(full_config_->cache, std::move(ngram_configs));
     return cache_manager;
   } catch (const std::exception& e) {
     auto error = MakeError(ErrorCode::kInternalError, "Failed to create cache manager: " + std::string(e.what()));
@@ -292,41 +323,23 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
   using mygram::utils::MakeUnexpected;
 
   try {
+    auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
+        .table_catalog = table_catalog,
+        .stats = stats_,
+        .full_config = full_config_,
+        .dump_dir = dump_dir_,
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
+        .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+        .mysql_reconnecting = mysql_reconnecting_,
+        .binlog_reader = binlog_reader_,
 #ifdef USE_MYSQL
-    // sync_manager_ is guaranteed to be non-null (enforced in constructor)
-    auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
-        .table_catalog = table_catalog,
-        .table_contexts = table_contexts_,
-        .stats = stats_,
-        .full_config = full_config_,
-        .dump_dir = dump_dir_,
-        .dump_load_in_progress = dump_load_in_progress_,
-        .dump_save_in_progress = dump_save_in_progress_,
-        .optimization_in_progress = optimization_in_progress_,
-        .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
-        .binlog_reader = binlog_reader_,
         .sync_manager = sync_manager_,
-        .cache_manager = cache_manager,
-        .variable_manager = variable_manager,
-    });
-#else
-    auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
-        .table_catalog = table_catalog,
-        .table_contexts = table_contexts_,
-        .stats = stats_,
-        .full_config = full_config_,
-        .dump_dir = dump_dir_,
-        .dump_load_in_progress = dump_load_in_progress_,
-        .dump_save_in_progress = dump_save_in_progress_,
-        .optimization_in_progress = optimization_in_progress_,
-        .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
-        .binlog_reader = binlog_reader_,
-        .cache_manager = cache_manager,
-        .variable_manager = variable_manager,
-    });
 #endif
+        .cache_manager = cache_manager,
+        .variable_manager = variable_manager,
+    });
     return handler_context;
   } catch (const std::exception& e) {
     auto error = MakeError(ErrorCode::kInternalError, "Failed to create handler context: " + std::string(e.what()));
@@ -360,8 +373,12 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 #ifdef USE_MYSQL
     // Note: SyncHandler now takes SyncOperationManager* instead of TcpServer&
     // This eliminates circular dependency
-    // sync_manager_ is guaranteed to be non-null (enforced in constructor)
-    handlers.sync_handler = std::make_unique<SyncHandler>(handler_context, sync_manager_);
+    // sync_manager_ is guaranteed to be non-null (enforced in Create())
+    auto sync_handler_result = SyncHandler::Create(handler_context, sync_manager_);
+    if (!sync_handler_result) {
+      return MakeUnexpected(sync_handler_result.error());
+    }
+    handlers.sync_handler = std::move(*sync_handler_result);
 #endif
 
     return handlers;
