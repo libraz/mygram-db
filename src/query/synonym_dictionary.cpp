@@ -47,30 +47,40 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
   term_to_group_.clear();
 
   std::string line;
+  size_t line_num = 0;
   while (std::getline(file, line)) {
+    ++line_num;
+
     // Skip empty lines and comments
     if (line.empty() || line[0] == '#') {
       continue;
     }
 
-    // Split by tabs
-    std::vector<std::string> terms;
-    std::istringstream iss(line);
-    std::string token;
-    while (std::getline(iss, token, '\t')) {
-      if (token.empty()) {
-        continue;
-      }
-      // Normalize the term
-      std::string normalized = normalizer(token);
-      if (!normalized.empty()) {
-        terms.push_back(std::move(normalized));
+    // Collect raw tokens first (preserve original text for diagnostic logging)
+    std::vector<std::string> raw_tokens;
+    {
+      std::istringstream iss(line);
+      std::string token;
+      while (std::getline(iss, token, '\t')) {
+        if (!token.empty()) {
+          raw_tokens.push_back(std::move(token));
+        }
       }
     }
 
-    // Need at least 2 terms for a synonym group
-    if (terms.size() < 2) {
+    // Single-token lines are legitimate (just a term with no synonyms) -- skip silently
+    if (raw_tokens.size() < 2) {
       continue;
+    }
+
+    // Normalize
+    std::vector<std::string> terms;
+    terms.reserve(raw_tokens.size());
+    for (const auto& raw : raw_tokens) {
+      std::string normalized = normalizer(raw);
+      if (!normalized.empty()) {
+        terms.push_back(std::move(normalized));
+      }
     }
 
     // Cap group size
@@ -78,23 +88,65 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
       terms.resize(kMaxGroupSize);
     }
 
-    // Deduplicate terms within the group
+    // Deduplicate
     std::sort(terms.begin(), terms.end());
     terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
 
     if (terms.size() < 2) {
-      continue;  // All terms normalized to the same value
+      // All raw tokens normalized to the same value -- the group is effectively
+      // a single term, so it's dropped. Warn so operators notice.
+      std::string raw_preview;
+      for (size_t i = 0; i < raw_tokens.size(); ++i) {
+        if (i > 0) {
+          raw_preview += " | ";
+        }
+        raw_preview += raw_tokens[i];
+        if (raw_preview.size() > 180) {
+          raw_preview += "...";
+          break;
+        }
+      }
+      mygram::utils::StructuredLog()
+          .Event("synonym_group_collapsed")
+          .Field("line_num", static_cast<uint64_t>(line_num))
+          .Field("reason", "terms_collapsed_to_single_value_after_normalization")
+          .Field("raw_terms", raw_preview)
+          .Warn();
+      continue;
     }
 
-    // For simplicity in Phase 1B, skip terms that already belong to a group
+    // First-wins: skip terms that already belong to an existing group
     std::vector<std::string> new_terms;
+    std::vector<std::string> conflicting_terms;
+    new_terms.reserve(terms.size());
     for (const auto& term : terms) {
       if (term_to_group_.find(term) == term_to_group_.end()) {
         new_terms.push_back(term);
+      } else {
+        conflicting_terms.push_back(term);
       }
     }
 
     if (new_terms.size() < 2) {
+      // Not enough non-conflicting terms to form a usable group.
+      std::string conflict_preview;
+      for (size_t i = 0; i < conflicting_terms.size(); ++i) {
+        if (i > 0) {
+          conflict_preview += " | ";
+        }
+        conflict_preview += conflicting_terms[i];
+        if (conflict_preview.size() > 180) {
+          conflict_preview += "...";
+          break;
+        }
+      }
+      mygram::utils::StructuredLog()
+          .Event("synonym_group_term_conflict")
+          .Field("line_num", static_cast<uint64_t>(line_num))
+          .Field("reason", "terms_already_belong_to_earlier_group")
+          .Field("conflicting_terms", conflict_preview)
+          .Field("usable_terms_count", static_cast<uint64_t>(new_terms.size()))
+          .Warn();
       continue;
     }
 
@@ -134,6 +186,15 @@ size_t SynonymDictionary::GroupCount() const {
 size_t SynonymDictionary::TermCount() const {
   std::shared_lock lock(mutex_);
   return term_to_group_.size();
+}
+
+void SynonymDictionary::ForEachTerm(const std::function<void(const std::string&)>& callback) const {
+  std::shared_lock lock(mutex_);
+  for (const auto& group : groups_) {
+    for (const auto& term : group) {
+      callback(term);
+    }
+  }
 }
 
 void SynonymDictionary::Clear() {

@@ -219,6 +219,26 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
             .Field("groups", static_cast<uint64_t>(ctx->synonym_dict->GroupCount()))
             .Field("terms", static_cast<uint64_t>(ctx->synonym_dict->TermCount()))
             .Info();
+
+        // Diagnostic: warn about terms that can't produce any n-grams given
+        // the configured ngram_size/kanji_ngram_size. Such terms are silently
+        // unreachable at search time, which is surprising for operators.
+        const int effective_kanji_size =
+            table_config.kanji_ngram_size > 0 ? table_config.kanji_ngram_size : table_config.ngram_size;
+        ctx->synonym_dict->ForEachTerm([&](const std::string& term) {
+          auto ngrams = mygram::utils::GenerateQueryNgrams(term, table_config.ngram_size, effective_kanji_size,
+                                                           table_config.cross_boundary_ngrams);
+          if (ngrams.empty()) {
+            mygram::utils::StructuredLog()
+                .Event("synonym_variant_unreachable")
+                .Field("table", table_config.name)
+                .Field("term", term)
+                .Field("ngram_size", static_cast<int64_t>(table_config.ngram_size))
+                .Field("kanji_ngram_size", static_cast<int64_t>(effective_kanji_size))
+                .Field("reason", "term_too_short_for_configured_ngram_sizes")
+                .Warn();
+          }
+        });
       }
     }
 

@@ -63,6 +63,12 @@ class SynonymDictionary {
   [[nodiscard]] bool IsEmpty() const;
   [[nodiscard]] size_t GroupCount() const;
   [[nodiscard]] size_t TermCount() const;
+
+  /// Iterate every normalized term. Callback is called once per term while
+  /// holding a shared lock. Used by callers (e.g., orchestrator) to validate
+  /// loaded terms against runtime N-gram configuration.
+  void ForEachTerm(const std::function<void(const std::string&)>& callback) const;
+
   void Clear();
 
   /// Serialize dictionary to stream (for dump persistence)

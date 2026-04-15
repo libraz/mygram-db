@@ -677,6 +677,21 @@ gtest_discover_tests(search_pipeline_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# SearchPipeline Japanese synonym E2E tests
+add_executable(search_pipeline_synonym_jp_test
+  search_pipeline_synonym_jp_test.cpp
+)
+
+target_link_libraries(search_pipeline_synonym_jp_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_synonym_jp_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # ConnectionAcceptor TCP socket tests
 
 add_executable(connection_acceptor_tcp_test
