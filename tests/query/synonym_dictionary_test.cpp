@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -16,11 +17,15 @@ using mygramdb::query::SynonymDictionary;
 
 namespace {
 
-// Helper to create a temp TSV file
+// Counter for unique temp file names (avoids race when ctest runs tests in parallel)
+std::atomic<int> g_temp_counter{0};
+
+// Helper to create a temp TSV file with a unique name per call
 std::string CreateTempTSV(const std::string& content) {
   auto dir = std::filesystem::temp_directory_path() / "mygramdb_synonym_test";
   std::filesystem::create_directories(dir);
-  auto path = dir / "synonyms.tsv";
+  auto filename = "synonyms_" + std::to_string(g_temp_counter.fetch_add(1)) + ".tsv";
+  auto path = dir / filename;
   std::ofstream ofs(path);
   ofs << content;
   return path.string();
