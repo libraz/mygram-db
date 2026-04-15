@@ -17,23 +17,8 @@ using mygramdb::query::SynonymDictionary;
 
 namespace {
 
-// Counter for unique temp file names (avoids race when ctest runs tests in parallel)
+// Counter for unique temp directories (avoids race when ctest runs tests in parallel)
 std::atomic<int> g_temp_counter{0};
-
-// Helper to create a temp TSV file with a unique name per call
-std::string CreateTempTSV(const std::string& content) {
-  auto dir = std::filesystem::temp_directory_path() / "mygramdb_synonym_test";
-  std::filesystem::create_directories(dir);
-  auto filename = "synonyms_" + std::to_string(g_temp_counter.fetch_add(1)) + ".tsv";
-  auto path = dir / filename;
-  std::ofstream ofs(path);
-  ofs << content;
-  return path.string();
-}
-
-void CleanupTempDir() {
-  std::filesystem::remove_all(std::filesystem::temp_directory_path() / "mygramdb_synonym_test");
-}
 
 // Identity normalizer for testing
 std::string IdentityNormalizer(std::string_view text) {
@@ -51,7 +36,22 @@ std::string LowerNormalizer(std::string_view text) {
 
 class SynonymDictionaryTest : public ::testing::Test {
  protected:
-  void TearDown() override { CleanupTempDir(); }
+  std::filesystem::path test_dir_;
+
+  void SetUp() override {
+    auto dir_name = "mygramdb_synonym_test_" + std::to_string(g_temp_counter.fetch_add(1));
+    test_dir_ = std::filesystem::temp_directory_path() / dir_name;
+    std::filesystem::create_directories(test_dir_);
+  }
+
+  void TearDown() override { std::filesystem::remove_all(test_dir_); }
+
+  std::string CreateTempTSV(const std::string& content) {
+    auto path = test_dir_ / "synonyms.tsv";
+    std::ofstream ofs(path);
+    ofs << content;
+    return path.string();
+  }
 };
 
 TEST_F(SynonymDictionaryTest, LoadFromFileBasic) {
