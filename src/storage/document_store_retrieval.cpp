@@ -34,6 +34,35 @@ std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
   return doc;
 }
 
+std::vector<std::optional<Document>> DocumentStore::GetDocumentsBatch(const std::vector<DocId>& doc_ids) const {
+  // Single lock acquisition for all lookups - much more efficient than N individual calls
+  std::shared_lock lock(mutex_);
+
+  std::vector<std::optional<Document>> results;
+  results.reserve(doc_ids.size());
+
+  for (const auto& doc_id : doc_ids) {
+    auto pk_it = doc_id_to_pk_.find(doc_id);
+    if (pk_it == doc_id_to_pk_.end()) {
+      results.emplace_back(std::nullopt);
+      continue;
+    }
+
+    Document doc;
+    doc.doc_id = doc_id;
+    doc.primary_key = pk_it->second;
+
+    auto filter_it = doc_filters_.find(doc_id);
+    if (filter_it != doc_filters_.end()) {
+      doc.filters = filter_it->second;
+    }
+
+    results.emplace_back(std::move(doc));
+  }
+
+  return results;
+}
+
 std::optional<DocId> DocumentStore::GetDocId(std::string_view primary_key) const {
   std::shared_lock lock(mutex_);
   // BUG-0081: absl::flat_hash_map with TransparentStringHash enables heterogeneous lookup
@@ -116,28 +145,26 @@ std::vector<std::vector<std::optional<FilterValue>>> DocumentStore::GetFilterVal
     const std::vector<DocId>& doc_ids, const std::vector<std::string>& columns) const {
   std::shared_lock lock(mutex_);
 
-  std::vector<std::vector<std::optional<FilterValue>>> all_results;
-  all_results.reserve(columns.size());
+  std::vector<std::vector<std::optional<FilterValue>>> all_results(columns.size());
+  for (auto& col_results : all_results) {
+    col_results.resize(doc_ids.size(), std::nullopt);
+  }
 
-  for (const auto& column : columns) {
-    std::vector<std::optional<FilterValue>> col_results;
-    col_results.reserve(doc_ids.size());
-
-    for (const auto& doc_id : doc_ids) {
-      auto doc_it = doc_filters_.find(doc_id);
-      if (doc_it == doc_filters_.end()) {
-        col_results.emplace_back(std::nullopt);
-        continue;
-      }
-      auto filter_it = doc_it->second.find(column);
-      if (filter_it == doc_it->second.end()) {
-        col_results.emplace_back(std::nullopt);
-      } else {
-        col_results.emplace_back(filter_it->second);
+  // Outer loop over doc_ids to avoid redundant doc_filters_ lookups per column.
+  // Each doc_id lookup is O(1) amortized for flat_hash_map, but doing it once
+  // per doc instead of once per (doc, column) pair saves M-1 lookups per doc
+  // (reviewed: result layout [column][doc_index] is preserved).
+  for (size_t di = 0; di < doc_ids.size(); ++di) {
+    auto doc_it = doc_filters_.find(doc_ids[di]);
+    if (doc_it == doc_filters_.end()) {
+      continue;  // all columns already nullopt
+    }
+    for (size_t ci = 0; ci < columns.size(); ++ci) {
+      auto filter_it = doc_it->second.find(columns[ci]);
+      if (filter_it != doc_it->second.end()) {
+        all_results[ci][di] = filter_it->second;
       }
     }
-
-    all_results.push_back(std::move(col_results));
   }
 
   return all_results;

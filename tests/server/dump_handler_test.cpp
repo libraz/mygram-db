@@ -1273,9 +1273,9 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidAndRestartsReplication) {
 }
 
 /**
- * @brief Test that empty GTID in dump does not call SetCurrentGTID
+ * @brief Test that DUMP SAVE without a valid GTID fails
  */
-TEST_F(DumpHandlerGtidTest, DumpLoadWithEmptyGtidDoesNotSetGtid) {
+TEST_F(DumpHandlerGtidTest, DumpSaveWithoutGtidFails) {
   // Save a dump WITHOUT a GTID (clear it first)
   mock_binlog_reader_->SetGtidForTest("");
   query::Query save_query;
@@ -1843,11 +1843,8 @@ TEST_F(DumpHandlerTest, DumpSaveEmptyExplicitFilepathGeneratesDefault) {
   query.filepath = "";  // Explicitly empty
 
   std::string response = handler_->Handle(query, conn_ctx_);
-  // Empty filepath should trigger default filename generation (OK) or
-  // return an error about the empty path - either is acceptable behavior
-  // as long as it doesn't crash
-  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0)
-      << "Should handle empty filepath gracefully. Response: " << response;
+  // Empty filepath should trigger default filename generation and succeed
+  EXPECT_EQ(response.find("OK"), 0u) << "Should succeed with auto-generated filepath. Response: " << response;
 }
 
 /**

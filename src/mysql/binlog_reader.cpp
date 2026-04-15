@@ -94,7 +94,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     binlog_stream_.reset();
     binlog_connection_.reset();
     metadata_connection_.reset();
-    should_stop_ = false;
+    should_stop_.store(false, std::memory_order_relaxed);
     running_ = false;
     mygram::utils::StructuredLog().Event("binlog_reader_stale_state_cleaned").Info();
   }
@@ -293,7 +293,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     mygram::utils::StructuredLog().Event("binlog_stream_flavor").Field("flavor", "MySQL").Info();
   }
 
-  should_stop_ = false;
+  should_stop_.store(false, std::memory_order_relaxed);
   // Note: running_ is already set to true by compare_exchange_strong above
 
   // Reset debug log counters for this run
@@ -344,7 +344,7 @@ void BinlogReader::Stop() {
   }
 
   mygram::utils::StructuredLog().Event("binlog_reader_stopping").Info();
-  should_stop_ = true;
+  should_stop_.store(true, std::memory_order_release);
 
   // Wake up worker thread
   queue_cv_.notify_all();
@@ -375,7 +375,7 @@ void BinlogReader::Stop() {
   metadata_connection_.reset();
 
   running_ = false;
-  should_stop_ = false;  // Reset for next Start()
+  should_stop_.store(false, std::memory_order_relaxed);  // Reset for next Start()
   mygram::utils::StructuredLog()
       .Event("binlog_reader_stopped")
       .Field("events_processed", static_cast<int64_t>(processed_events_.load()))

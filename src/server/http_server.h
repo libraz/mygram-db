@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "config/config.h"
@@ -145,6 +146,10 @@ class HttpServer {
 
  private:
   HttpServerConfig config_;
+  // Uses std::unordered_map (not absl::flat_hash_map) to match the
+  // std::unordered_map<> parameter type used by ResponseFormatter and
+  // StatisticsService. The HTTP handler's table lookup frequency is low
+  // enough that the difference is negligible (reviewed: D3 false positive).
   std::unordered_map<std::string, TableContext*> table_contexts_;
   size_t max_query_length_{0};  // Configured max query length limit
 

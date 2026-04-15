@@ -116,7 +116,9 @@ struct ServerConfig {
  */
 struct ConnectionContext {
   int client_fd = -1;
-  std::atomic<bool> debug_mode{false};  // Debug mode flag (atomic for cross-thread visibility)
+  // Atomic because the event-loop thread reads this flag while the drain-task
+  // thread (command handler) may write it concurrently (see ReactorConnection).
+  std::atomic<bool> debug_mode{false};
 };
 
 /**

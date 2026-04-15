@@ -122,11 +122,6 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
  * - Format 1: {"col": "value"} or {"col": 123} - defaults to EQ operator
  * - Format 2: {"col": {"op": "GT", "value": "10"}} - full operator support
  *
- * NOTE: A similar ParseFiltersFromJson exists in http_server_handlers.cpp
- * with a slightly different signature (takes body vs filters_json, returns
- * error string vs bool). Both share the same parsing logic via
- * JsonFilterValueToString. If modifying filter parsing, update both.
- *
  * @param filters_json The JSON object containing filter definitions
  * @param query The query to populate with parsed filter conditions
  * @param[out] error_message Set to error description on failure
@@ -387,7 +382,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
       server_thread_->join();
     }
     running_ = false;
-    auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server startup timed out");
+    auto error = MakeError(ErrorCode::kTimeout, "HTTP server startup timed out");
     return MakeUnexpected(error);
   }
 
@@ -467,6 +462,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Validate required field
     if (!body.contains("q")) {
       SendError(res, kHttpBadRequest, "Missing required field: q");
+      return;
+    }
+
+    // Validate field type before extraction
+    if (!body["q"].is_string()) {
+      SendError(res, kHttpBadRequest, "Field 'q' must be a string");
       return;
     }
 
@@ -591,17 +592,17 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     response["offset"] = query->offset;
 
     json results_array = json::array();
-    for (const auto& doc_id : sorted_results) {
-      auto doc = current_doc_store->GetDocument(doc_id);
-      if (doc) {
+    auto docs = current_doc_store->GetDocumentsBatch(sorted_results);
+    for (size_t i = 0; i < docs.size(); ++i) {
+      if (docs[i]) {
         json doc_obj;
-        doc_obj["doc_id"] = doc->doc_id;
-        doc_obj["primary_key"] = doc->primary_key;
+        doc_obj["doc_id"] = docs[i]->doc_id;
+        doc_obj["primary_key"] = docs[i]->primary_key;
 
         // Add filters
-        if (!doc->filters.empty()) {
+        if (!docs[i]->filters.empty()) {
           json filters_obj;
-          for (const auto& [key, val] : doc->filters) {
+          for (const auto& [key, val] : docs[i]->filters) {
             filters_obj[key] = FilterValueToJson(val);
           }
           doc_obj["filters"] = filters_obj;
@@ -661,6 +662,12 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Validate required field
     if (!body.contains("q")) {
       SendError(res, kHttpBadRequest, "Missing required field: q");
+      return;
+    }
+
+    // Validate field type before extraction
+    if (!body["q"].is_string()) {
+      SendError(res, kHttpBadRequest, "Field 'q' must be a string");
       return;
     }
 

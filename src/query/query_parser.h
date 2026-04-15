@@ -326,43 +326,52 @@ class QueryParser {
   /**
    * @brief Parse AND clause
    */
-  bool ParseAnd(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseAnd(const std::vector<std::string>& tokens, size_t& pos,
+                                                               Query& query);
 
   /**
    * @brief Parse NOT clause
    */
-  bool ParseNot(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseNot(const std::vector<std::string>& tokens, size_t& pos,
+                                                               Query& query);
 
   /**
    * @brief Parse filter conditions
    */
-  bool ParseFilters(const std::vector<std::string>& tokens, size_t& pos, Query& query);
-  bool ParseFilterArguments(const std::vector<std::string>& tokens, size_t& pos, FilterCondition& filter);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseFilters(const std::vector<std::string>& tokens, size_t& pos,
+                                                                   Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseFilterArguments(const std::vector<std::string>& tokens,
+                                                                           size_t& pos, FilterCondition& filter);
 
   /**
    * @brief Parse LIMIT clause
    */
-  bool ParseLimit(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseLimit(const std::vector<std::string>& tokens, size_t& pos,
+                                                                 Query& query);
 
   /**
    * @brief Parse OFFSET clause
    */
-  bool ParseOffset(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseOffset(const std::vector<std::string>& tokens, size_t& pos,
+                                                                  Query& query);
 
   /**
    * @brief Parse SORT clause
    */
-  bool ParseSort(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseSort(const std::vector<std::string>& tokens, size_t& pos,
+                                                                Query& query);
 
   /**
    * @brief Parse HIGHLIGHT clause
    */
-  bool ParseHighlight(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseHighlight(const std::vector<std::string>& tokens,
+                                                                     size_t& pos, Query& query);
 
   /**
    * @brief Parse FUZZY clause
    */
-  bool ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos, Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ParseFuzzy(const std::vector<std::string>& tokens, size_t& pos,
+                                                                 Query& query);
 
   /**
    * @brief Parse FACET command
@@ -383,7 +392,7 @@ class QueryParser {
   /**
    * @brief Validate query length against configured limit
    */
-  bool ValidateQueryLength(const Query& query);
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateQueryLength(const Query& query);
 };
 
 }  // namespace mygramdb::query

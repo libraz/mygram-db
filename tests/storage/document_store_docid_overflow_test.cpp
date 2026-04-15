@@ -16,10 +16,10 @@ using namespace mygramdb::storage;
 using mygram::utils::ErrorCode;
 
 /**
- * @brief Test-friendly DocumentStore with public next_doc_id_ access
+ * @brief Test-friendly DocumentStore using protected accessors
  *
- * This allows tests to directly set next_doc_id_ to test overflow conditions
- * without needing to add 4 billion documents.
+ * This allows tests to set next_doc_id_ via protected accessors to test
+ * overflow conditions without needing to add 4 billion documents.
  */
 class TestableDocumentStore : public DocumentStore {
  public:
@@ -29,12 +29,12 @@ class TestableDocumentStore : public DocumentStore {
    * WARNING: This bypasses normal document addition and should only be
    * used in tests to simulate overflow conditions.
    */
-  void SetNextDocIdForTest(DocId value) { next_doc_id_ = value; }
+  void SetNextDocIdForTest(DocId value) { SetNextDocId(value); }
 
   /**
    * @brief Get current next_doc_id_ value
    */
-  DocId GetNextDocIdForTest() const { return next_doc_id_; }
+  DocId GetNextDocIdForTest() const { return GetNextDocId(); }
 };
 
 /**

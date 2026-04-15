@@ -551,20 +551,21 @@ void QueryParser::SetMaxQueryLength(size_t max_length) {
   max_query_length_ = max_length;
 }
 
-bool QueryParser::ValidateQueryLength(const Query& query) {
+mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLength(const Query& query) {
   if (max_query_length_ == 0) {
-    return true;
+    return {};
   }
 
   const size_t expression_length = CalculateQueryExpressionLength(query);
   if (expression_length > max_query_length_) {
-    SetError("Query expression length (" + std::to_string(expression_length) + ") exceeds maximum allowed length of " +
-             std::to_string(max_query_length_) +
-             " characters. Increase api.max_query_length to permit longer queries.");
-    return false;
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kQuerySyntaxError,
+                                 "Query expression length (" + std::to_string(expression_length) +
+                                     ") exceeds maximum allowed length of " + std::to_string(max_query_length_) +
+                                     " characters. Increase api.max_query_length to permit longer queries."));
   }
 
-  return true;
+  return {};
 }
 
 std::vector<std::string> QueryParser::Tokenize(std::string_view str) {

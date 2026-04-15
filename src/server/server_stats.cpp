@@ -12,38 +12,41 @@ namespace mygramdb::server {
 ServerStats::ServerStats() : start_time_(static_cast<uint64_t>(std::time(nullptr))) {}
 
 void ServerStats::IncrementCommand(query::QueryType type) {
+  // These are independent counters with no happens-before relationship.
+  // relaxed ordering is sufficient (reviewed: no cross-counter invariant
+  // requires sequential consistency).
   switch (type) {
     case query::QueryType::SEARCH:
-      cmd_search_++;
+      cmd_search_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::COUNT:
-      cmd_count_++;
+      cmd_count_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::GET:
-      cmd_get_++;
+      cmd_get_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::INFO:
-      cmd_info_++;
+      cmd_info_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::SAVE:
-      cmd_save_++;
+      cmd_save_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::LOAD:
-      cmd_load_++;
+      cmd_load_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::REPLICATION_STATUS:
-      cmd_replication_status_++;
+      cmd_replication_status_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::REPLICATION_STOP:
-      cmd_replication_stop_++;
+      cmd_replication_stop_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::REPLICATION_START:
-      cmd_replication_start_++;
+      cmd_replication_start_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::CONFIG_HELP:
     case query::QueryType::CONFIG_SHOW:
     case query::QueryType::CONFIG_VERIFY:
-      cmd_config_++;
+      cmd_config_.fetch_add(1, std::memory_order_relaxed);
       break;
     case query::QueryType::OPTIMIZE:
       // Optimize doesn't need a counter
@@ -53,7 +56,7 @@ void ServerStats::IncrementCommand(query::QueryType type) {
       // Debug commands don't need counters
       break;
     case query::QueryType::UNKNOWN:
-      cmd_unknown_++;
+      cmd_unknown_.fetch_add(1, std::memory_order_relaxed);
       break;
   }
 }

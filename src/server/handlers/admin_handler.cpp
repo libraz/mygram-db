@@ -138,6 +138,15 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     }
   }
 
+  // Security: restrict CONFIG VERIFY to relative paths without directory traversal
+  // to prevent reading arbitrary filesystem paths via this command.
+  if (filepath.find("..") != std::string::npos) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
+  }
+  if (!filepath.empty() && filepath[0] == '/') {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: absolute paths not allowed");
+  }
+
   // Security: verify the file is a regular file (not a symlink or device)
   // to prevent reading arbitrary system files via CONFIG VERIFY.
   {

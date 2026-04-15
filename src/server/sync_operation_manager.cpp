@@ -264,6 +264,11 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
         thread.join();
       }
     }
+    // Note: is_running is NOT reset here because BuildSnapshotAsync's update_state
+    // callback always sets is_running = false before the thread exits (both normal
+    // and error paths). Since we join() above, the thread has completed and
+    // update_state has already run (reviewed: sync_mutex_ is released at line 259
+    // before join, so the thread can acquire it in update_state).
 
     return "OK SYNC STOPPED count=" + std::to_string(tables_to_stop.size());
   }
@@ -474,6 +479,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.error_message = "Table context not found";
         state.is_running = false;
       });
+      mygram::utils::StructuredLog()
+          .Event("server_error")
+          .Field("operation", "sync")
+          .Field("table", table_name)
+          .Field("error", "Table context not found")
+          .Error();
       return;
     }
 

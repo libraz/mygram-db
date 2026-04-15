@@ -309,7 +309,11 @@ void ReactorConnection::DrainTask() {
   }
   drain_scheduled_.store(false, std::memory_order_release);
   if (reschedule) {
-    (void)ScheduleDrainTask();
+    if (!ScheduleDrainTask()) {
+      // Scheduling failed (e.g., thread pool full) — close the connection
+      // to avoid silently abandoning pending frames.
+      closing_.store(true, std::memory_order_release);
+    }
     return;
   }
 

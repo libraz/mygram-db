@@ -267,9 +267,16 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
   std::string response = "OK FACET " + std::to_string(value_counts.size()) + "\r\n";
 
   for (const auto& [value, count] : value_counts) {
-    // Escape tabs in value to prevent protocol ambiguity (tab is the separator)
-    for (char ch : value) {
-      response += (ch == '\t') ? ' ' : ch;
+    // Escape tabs to prevent protocol ambiguity (tab is the field separator).
+    // Uses find+append to avoid per-character string::operator+= overhead
+    // (reviewed: this is more efficient than char-by-char when tabs are rare).
+    if (value.find('\t') == std::string::npos) {
+      response += value;
+    } else {
+      response.reserve(response.size() + value.size());
+      for (char ch : value) {
+        response += (ch == '\t') ? ' ' : ch;
+      }
     }
     response += '\t';
     response += std::to_string(count);
@@ -775,28 +782,33 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   }
   oss << "\n";
 
+  // Cache GetStatistics() per table to avoid repeated shared_lock acquisitions
+  // and posting list iterations (was called 5 times per table before).
+  std::unordered_map<std::string, index::Index::IndexStatistics> cached_stats;
+  cached_stats.reserve(table_contexts.size());
+  for (const auto& [table_name, ctx] : table_contexts) {
+    cached_stats.emplace(table_name, ctx->index->GetStatistics());
+  }
+
   oss << "# HELP mygramdb_index_terms_total Total number of unique terms\n";
   oss << "# TYPE mygramdb_index_terms_total gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    auto idx_stats = ctx->index->GetStatistics();
-    oss << "mygramdb_index_terms_total{table=\"" << table_name << "\"} " << idx_stats.total_terms << "\n";
+  for (const auto& [table_name, stats_entry] : cached_stats) {
+    oss << "mygramdb_index_terms_total{table=\"" << table_name << "\"} " << stats_entry.total_terms << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_postings_total Total number of postings\n";
   oss << "# TYPE mygramdb_index_postings_total gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    auto idx_stats = ctx->index->GetStatistics();
-    oss << "mygramdb_index_postings_total{table=\"" << table_name << "\"} " << idx_stats.total_postings << "\n";
+  for (const auto& [table_name, stats_entry] : cached_stats) {
+    oss << "mygramdb_index_postings_total{table=\"" << table_name << "\"} " << stats_entry.total_postings << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_postings_per_term_avg Average postings per term\n";
   oss << "# TYPE mygramdb_index_postings_per_term_avg gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    auto idx_stats = ctx->index->GetStatistics();
-    if (idx_stats.total_terms > 0) {
-      double avg = static_cast<double>(idx_stats.total_postings) / static_cast<double>(idx_stats.total_terms);
+  for (const auto& [table_name, stats_entry] : cached_stats) {
+    if (stats_entry.total_terms > 0) {
+      double avg = static_cast<double>(stats_entry.total_postings) / static_cast<double>(stats_entry.total_terms);
       oss << "mygramdb_index_postings_per_term_avg{table=\"" << table_name << "\"} " << std::fixed
           << std::setprecision(2) << avg << "\n";
     }
@@ -805,18 +817,16 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 
   oss << "# HELP mygramdb_index_delta_encoded_lists Delta-encoded posting lists count\n";
   oss << "# TYPE mygramdb_index_delta_encoded_lists gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    auto idx_stats = ctx->index->GetStatistics();
-    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_name << "\"} " << idx_stats.delta_encoded_lists
+  for (const auto& [table_name, stats_entry] : cached_stats) {
+    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_name << "\"} " << stats_entry.delta_encoded_lists
         << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_roaring_bitmap_lists Roaring bitmap posting lists count\n";
   oss << "# TYPE mygramdb_index_roaring_bitmap_lists gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    auto idx_stats = ctx->index->GetStatistics();
-    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_name << "\"} " << idx_stats.roaring_bitmap_lists
+  for (const auto& [table_name, stats_entry] : cached_stats) {
+    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_name << "\"} " << stats_entry.roaring_bitmap_lists
         << "\n";
   }
   oss << "\n";

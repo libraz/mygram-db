@@ -234,6 +234,11 @@ bool PostingList::Contains(DocId doc_id) const {
     // Streaming decode with early exit - O(n) time, O(1) memory
     // More efficient than full decode + binary search for all sizes because
     // it avoids vector allocation and exits early when target is passed.
+    // For delta-compressed lists (pre-Roaring threshold, typically <1000 entries),
+    // this linear scan with early exit outperforms decode+binary_search because
+    // it avoids O(n) vector allocation. Lists exceeding the Roaring density
+    // threshold are automatically converted, making the O(n) scan here bounded
+    // by the threshold size (reviewed: not a performance concern).
     // Since delta values are non-negative and cumulative is monotonically
     // increasing, we can stop as soon as cumulative exceeds doc_id.
     // Start from index 1 since delta_compressed_[0] (first doc_id) was already

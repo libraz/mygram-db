@@ -130,7 +130,7 @@ void BinlogReader::ReaderThreadFunc() {
       bool silent = (reconnect_attempt == 0);
       int rc = reconnect_with_backoff("session_setup_failed", silent);
       if (rc == -1) {
-        should_stop_ = true;
+        should_stop_.store(true, std::memory_order_release);
         break;
       }
       continue;
@@ -159,14 +159,14 @@ void BinlogReader::ReaderThreadFunc() {
             .Field("gtid", GetCurrentGTID())
             .Field("error", GetLastError())
             .Error();
-        should_stop_ = true;
+        should_stop_.store(true, std::memory_order_release);
         break;
       }
 
       mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt + 1);
       int rc = reconnect_with_backoff("stream_open_failed", false);
       if (rc == -1) {
-        should_stop_ = true;
+        should_stop_.store(true, std::memory_order_release);
         break;
       }
       continue;
@@ -248,7 +248,7 @@ void BinlogReader::ReaderThreadFunc() {
           binlog_stream_->Close(*binlog_connection_);
           int rc = reconnect_with_backoff("server_gone_away", false);
           if (rc == -1) {
-            should_stop_ = true;
+            should_stop_.store(true, std::memory_order_release);
           } else if (rc == 1) {
             mygram::utils::StructuredLog().Event("binlog_connection_restored").Info();
           }
@@ -266,7 +266,7 @@ void BinlogReader::ReaderThreadFunc() {
                      "Binlog position no longer available on server. "
                      "Manual intervention required: run SYNC command to establish new position.")
               .Error();
-          should_stop_ = true;
+          should_stop_.store(true, std::memory_order_release);
           break;
         }
 
@@ -279,7 +279,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("error", GetLastError())
               .Field("errno", static_cast<int64_t>(fetch.error_code))
               .Error();
-          should_stop_ = true;
+          should_stop_.store(true, std::memory_order_release);
           break;
         }
 
@@ -474,7 +474,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("type", "unsupported_runtime_event")
               .Field("event_type", "TRANSACTION_PAYLOAD_EVENT")
               .Error();
-          should_stop_ = true;
+          should_stop_.store(true, std::memory_order_release);
           break;
         }
 
@@ -488,7 +488,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("type", "unsupported_runtime_event")
               .Field("event_type", "PARTIAL_UPDATE_ROWS_EVENT")
               .Error();
-          should_stop_ = true;
+          should_stop_.store(true, std::memory_order_release);
           break;
         }
       }

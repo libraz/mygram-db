@@ -924,5 +924,99 @@ TEST_F(HttpServerTest, CountRejectsCRLFInQuery) {
   EXPECT_NE(body["error"].get<std::string>().find("control characters"), std::string::npos);
 }
 
+// ============================================================
+// q-field type validation tests
+// ============================================================
+
+TEST_F(HttpServerTest, SearchRejectsIntegerQField) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = 12345;  // integer, not string
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsArrayQField) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = json::array({"hello", "world"});  // array, not string
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsNullQField) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = nullptr;  // null, not string
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsBooleanQField) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = true;  // boolean, not string
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, CountRejectsIntegerQField) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = 42;  // integer, not string
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
 }  // namespace server
 }  // namespace mygramdb

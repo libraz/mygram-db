@@ -172,19 +172,22 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
   // Parse optional clauses
   while (pos < tokens.size()) {
     if (EqualsIgnoreCase(tokens[pos], "AND")) {
-      if (!ParseAnd(tokens, pos, query)) {
+      auto result = ParseAnd(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
-      if (!ParseNot(tokens, pos, query)) {
+      auto result = ParseNot(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
-      if (!ParseFilters(tokens, pos, query)) {
+      auto result = ParseFilters(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "ORDER")) {
       // ORDER BY is deprecated, guide users to use SORT
@@ -192,29 +195,34 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
     } else if (EqualsIgnoreCase(tokens[pos], "SORT")) {
-      if (!ParseSort(tokens, pos, query)) {
+      auto result = ParseSort(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "LIMIT")) {
-      if (!ParseLimit(tokens, pos, query)) {
+      auto result = ParseLimit(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "OFFSET")) {
-      if (!ParseOffset(tokens, pos, query)) {
+      auto result = ParseOffset(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "HIGHLIGHT")) {
-      if (!ParseHighlight(tokens, pos, query)) {
+      auto result = ParseHighlight(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "FUZZY")) {
-      if (!ParseFuzzy(tokens, pos, query)) {
+      auto result = ParseFuzzy(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else {
       SetError("Unknown keyword: " + tokens[pos]);
@@ -244,9 +252,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  if (!ValidateQueryLength(query)) {
-    query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  {
+    auto result = ValidateQueryLength(query);
+    if (!result) {
+      query.type = QueryType::UNKNOWN;
+      return MakeUnexpected(result.error());
+    }
   }
 
   // Precompute cache key for performance optimization
@@ -285,19 +296,22 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
   // Parse optional clauses
   while (pos < tokens.size()) {
     if (EqualsIgnoreCase(tokens[pos], "AND")) {
-      if (!ParseAnd(tokens, pos, query)) {
+      auto result = ParseAnd(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
-      if (!ParseNot(tokens, pos, query)) {
+      auto result = ParseNot(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
-      if (!ParseFilters(tokens, pos, query)) {
+      auto result = ParseFilters(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "ORDER")) {
       SetError("ORDER BY is not supported. Use SORT instead (note: COUNT does not support sorting).");
@@ -328,9 +342,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  if (!ValidateQueryLength(query)) {
-    query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  {
+    auto result = ValidateQueryLength(query);
+    if (!result) {
+      query.type = QueryType::UNKNOWN;
+      return MakeUnexpected(result.error());
+    }
   }
 
   // Precompute cache key for performance optimization
@@ -420,29 +437,34 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
   // Parse optional clauses (AND, NOT, FILTER, LIMIT, OFFSET)
   while (pos < tokens.size()) {
     if (EqualsIgnoreCase(tokens[pos], "AND")) {
-      if (!ParseAnd(tokens, pos, query)) {
+      auto result = ParseAnd(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
-      if (!ParseNot(tokens, pos, query)) {
+      auto result = ParseNot(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
-      if (!ParseFilters(tokens, pos, query)) {
+      auto result = ParseFilters(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "LIMIT")) {
-      if (!ParseLimit(tokens, pos, query)) {
+      auto result = ParseLimit(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else if (EqualsIgnoreCase(tokens[pos], "OFFSET")) {
-      if (!ParseOffset(tokens, pos, query)) {
+      auto result = ParseOffset(tokens, pos, query);
+      if (!result) {
         query.type = QueryType::UNKNOWN;
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        return MakeUnexpected(result.error());
       }
     } else {
       SetError("FACET: Unknown clause: " + tokens[pos]);
@@ -465,9 +487,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  if (!ValidateQueryLength(query)) {
-    query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  {
+    auto result = ValidateQueryLength(query);
+    if (!result) {
+      query.type = QueryType::UNKNOWN;
+      return MakeUnexpected(result.error());
+    }
   }
 
   return query;

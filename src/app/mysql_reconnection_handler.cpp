@@ -180,7 +180,7 @@ Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connec
 
 // Non-MySQL stub implementation
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& /*new_host*/, int /*new_port*/) {
-  return MakeUnexpected(MakeError(ErrorCode::kInternalError, "MySQL support not enabled"));
+  return MakeUnexpected(MakeError(ErrorCode::kNotImplemented, "MySQL support not enabled"));
 }
 
 #endif

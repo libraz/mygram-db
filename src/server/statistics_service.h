@@ -9,8 +9,10 @@
 #include <string>
 #include <unordered_map>
 
+#include "index/index.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
+#include "storage/document_store.h"
 
 namespace mygramdb::server {
 
@@ -65,7 +67,10 @@ class StatisticsService {
    * @param tables Map of table contexts
    * @return Aggregated metrics
    */
-  static AggregatedMetrics AggregateMetrics(const std::unordered_map<std::string, TableContext*>& tables);
+  /// Accepts any associative container mapping std::string → TableContext*
+  /// (std::unordered_map, absl::flat_hash_map, etc.).
+  template <typename MapT>
+  static AggregatedMetrics AggregateMetrics(const MapT& tables);
 
   /**
    * @brief Update server statistics with aggregated metrics
@@ -78,5 +83,29 @@ class StatisticsService {
    */
   static void UpdateServerStatistics(ServerStats& stats, const AggregatedMetrics& metrics);
 };
+
+template <typename MapT>
+AggregatedMetrics StatisticsService::AggregateMetrics(const MapT& tables) {
+  AggregatedMetrics metrics;
+
+  for (const auto& [table_name, ctx] : tables) {
+    metrics.total_index_memory += ctx->index->MemoryUsage();
+    metrics.total_doc_memory += ctx->doc_store->MemoryUsage();
+    metrics.total_documents += ctx->doc_store->Size();
+
+    auto idx_stats = ctx->index->GetStatistics();
+    metrics.total_terms += idx_stats.total_terms;
+    metrics.total_postings += idx_stats.total_postings;
+    metrics.total_delta_encoded += idx_stats.delta_encoded_lists;
+    metrics.total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
+
+    if (ctx->index->IsOptimizing()) {
+      metrics.any_table_optimizing = true;
+    }
+  }
+
+  metrics.total_memory = metrics.total_index_memory + metrics.total_doc_memory;
+  return metrics;
+}
 
 }  // namespace mygramdb::server

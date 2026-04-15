@@ -381,6 +381,12 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
   auto snapshots = TakePostingSnapshots(terms);
 
   // From here, no lock is held - search operates on immutable snapshots
+  // GetAll() + set_union is used here because PostingList::Union() operates
+  // on the internal bitmap in-place, which is not suitable for read-only
+  // snapshots. The snapshot-based approach ensures thread safety without
+  // modifying the original posting lists (reviewed: Roaring native OR
+  // would require creating a temporary bitmap, which isn't clearly faster
+  // for the typical number of OR terms).
   std::vector<DocId> result;
   std::vector<DocId> temp;
 
@@ -406,6 +412,12 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   auto snapshots = TakePostingSnapshots(terms);
 
   // From here, no lock is held - search operates on immutable snapshots
+  // GetAll() + set_union is used here because PostingList::Union() operates
+  // on the internal bitmap in-place, which is not suitable for read-only
+  // snapshots. The snapshot-based approach ensures thread safety without
+  // modifying the original posting lists (reviewed: Roaring native OR
+  // would require creating a temporary bitmap, which isn't clearly faster
+  // for the typical number of OR terms).
   // Get union of all documents containing any of the NOT terms
   std::vector<DocId> excluded_docs;
   std::vector<DocId> temp;

@@ -218,6 +218,12 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
 
     // Collect all n-grams for cache invalidation
     std::vector<SearchTermInfo> all_term_infos;
+    // Reserve capacity to avoid reallocation during synonym term collection
+    size_t total_variants = 0;
+    for (const auto& group : synonym_groups) {
+      total_variants += group.variants.size();
+    }
+    all_term_infos.reserve(total_variants);
     for (const auto& group : synonym_groups) {
       for (const auto& variant : group.variants) {
         all_term_infos.push_back(variant);

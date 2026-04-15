@@ -202,6 +202,14 @@ class DocumentStore {
   [[nodiscard]] std::optional<std::string> GetPrimaryKey(DocId doc_id) const;
 
   /**
+   * @brief Get documents by multiple IDs in a single lock acquisition
+   *
+   * @param doc_ids Vector of document IDs to retrieve
+   * @return Vector of optional documents (nullopt for non-existent IDs)
+   */
+  [[nodiscard]] std::vector<std::optional<Document>> GetDocumentsBatch(const std::vector<DocId>& doc_ids) const;
+
+  /**
    * @brief Get primary keys for multiple DocIDs (batch operation)
    *
    * Optimized for retrieving many primary keys in a single lock acquisition.
@@ -386,11 +394,15 @@ class DocumentStore {
                                                      std::string* replication_gtid = nullptr);
 
  protected:
-  // Next DocID to assign
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  DocId next_doc_id_ = 1;
+  /// @brief Get the next DocID value (for testing subclasses)
+  [[nodiscard]] DocId GetNextDocId() const { return next_doc_id_; }
+
+  /// @brief Set the next DocID value (for testing subclasses)
+  void SetNextDocId(DocId value) { next_doc_id_ = value; }
 
  private:
+  // Next DocID to assign
+  DocId next_doc_id_ = 1;
   // DocID -> Primary Key mapping
   absl::flat_hash_map<DocId, std::string> doc_id_to_pk_;
 

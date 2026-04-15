@@ -202,10 +202,12 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
                                            int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
   // Generate NOT term n-grams
   std::vector<std::string> not_ngrams;
+  // Reserve estimated capacity to avoid reallocation during NOT n-gram collection
+  not_ngrams.reserve(not_terms.size() * static_cast<size_t>(ngram_size));
   for (const auto& not_term : not_terms) {
     std::string norm_not = current_index->NormalizeText(not_term);
     auto ngrams = mygram::utils::GenerateQueryNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-    not_ngrams.insert(not_ngrams.end(), ngrams.begin(), ngrams.end());
+    not_ngrams.insert(not_ngrams.end(), std::make_move_iterator(ngrams.begin()), std::make_move_iterator(ngrams.end()));
   }
 
   // Deduplicate n-grams to avoid redundant PostingList lookups in SearchNot
@@ -574,16 +576,19 @@ std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache
     return std::nullopt;
   }
 
-  auto full_results = cached_lookup.value().results;
-  if (IsCacheStale(full_results, doc_store)) {
+  // Check staleness against a const-ref to avoid copying the results vector
+  // if the entry turns out to be stale (reviewed: not a dangling reference
+  // since cached_lookup owns the data until the function returns).
+  const auto& cached_entry = cached_lookup.value();
+  if (IsCacheStale(cached_entry.results, doc_store)) {
     return std::nullopt;
   }
 
   CacheLookupResult result;
-  result.results = std::move(full_results);
+  result.results = std::move(cached_lookup->results);
   auto now = std::chrono::steady_clock::now();
-  result.cache_age_ms = std::chrono::duration<double, std::milli>(now - cached_lookup.value().created_at).count();
-  result.cache_saved_ms = cached_lookup.value().query_cost_ms;
+  result.cache_age_ms = std::chrono::duration<double, std::milli>(now - cached_entry.created_at).count();
+  result.cache_saved_ms = cached_entry.query_cost_ms;
   return result;
 }
 
@@ -896,9 +901,11 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     return output;
   }
 
-  // Try cache lookup first
-  auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store);
-  if (cache_result) {
+  // Try cache lookup first (skip if caller already checked)
+  if (params.skip_cache_lookup) {
+    // Caller already performed cache lookup; skip to avoid redundant hash
+    // computation and lock acquisition on every cache miss.
+  } else if (auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store)) {
     output.results = std::move(cache_result->results);
     output.cache_hit = true;
     output.query_time_ms = 0.0;

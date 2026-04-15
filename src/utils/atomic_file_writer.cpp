@@ -46,7 +46,7 @@ Expected<void, Error> AtomicFileWriter::Commit() {
   }
 
   if (!std::filesystem::exists(temp_filepath_)) {
-    return MakeUnexpected(MakeError(ErrorCode::kIOError, "Temp file does not exist"));
+    return MakeUnexpected(MakeError(ErrorCode::kStorageFileNotFound, "Temp file does not exist"));
   }
 
 #ifndef _WIN32

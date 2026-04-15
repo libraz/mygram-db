@@ -12,7 +12,6 @@
 #ifdef USE_MYSQL
 
 #include <cstdint>
-#include <optional>
 #include <string>
 
 #include "mysql/binlog_event_types.h"
@@ -58,13 +57,12 @@ struct RowsEventHeader {
  * @param pk_column_name  Primary key column name to look up
  * @param text_column_name Text column name to look up
  * @param event_type_label Short label for log messages (e.g. "write_rows")
- * @return Parsed header on success, std::nullopt on any parse error
+ * @return Parsed header on success, Error on any parse error
  */
-std::optional<RowsEventHeader> ParseRowsEventHeader(const unsigned char* buffer, unsigned long length,
-                                                    MySQLBinlogEventType event_type,
-                                                    const TableMetadata* table_metadata,
-                                                    const std::string& pk_column_name,
-                                                    const std::string& text_column_name, const char* event_type_label);
+mygram::utils::Expected<RowsEventHeader, mygram::utils::Error> ParseRowsEventHeader(
+    const unsigned char* buffer, unsigned long length, MySQLBinlogEventType event_type,
+    const TableMetadata* table_metadata, const std::string& pk_column_name, const std::string& text_column_name,
+    const char* event_type_label);
 
 /**
  * @brief Convert fractional seconds to microseconds based on precision metadata.

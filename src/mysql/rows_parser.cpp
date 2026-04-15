@@ -60,10 +60,13 @@ bool IsV2Event(MySQLBinlogEventType event_type) {
 // ParseRowsEventHeader -- shared prologue for all three row-event parsers
 // ---------------------------------------------------------------------------
 
-std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
+mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> internal::ParseRowsEventHeader(
     const unsigned char* buffer, unsigned long length, MySQLBinlogEventType event_type,
     const TableMetadata* table_metadata, const std::string& pk_column_name, const std::string& text_column_name,
     const char* event_type_label) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
   // Event size is at bytes [9-12] of event data (little-endian)
   // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h: LOG_EVENT_HEADER_LEN)
   uint32_t event_size = static_cast<uint32_t>(buffer[9]) | (static_cast<uint32_t>(buffer[10]) << 8) |
@@ -71,7 +74,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
 
   // Validate event_size before computing end pointer to prevent underflow/OOB
   if (event_size < 4 || event_size > length) {
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event: invalid event_size"));
   }
 
   const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip standard header
@@ -87,7 +91,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
         .Field("type", std::string(event_type_label) + "_too_short")
         .Field("section", "post-header")
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event too short for post-header"));
   }
 
   ptr += 6;  // table_id (already known from TABLE_MAP)
@@ -103,7 +108,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
           .Field("type", std::string(event_type_label) + "_too_short")
           .Field("section", "var_header_len")
           .Error();
-      return std::nullopt;
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
+                                      std::string(event_type_label) + " event too short for var_header_len"));
     }
     uint16_t var_header_len = binlog_util::uint2korr(ptr);
     if (var_header_len < 2 || ptr + var_header_len > end) {
@@ -113,7 +119,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
           .Field("event_type", event_type_label)
           .Field("var_header_len", static_cast<uint64_t>(var_header_len))
           .Error();
-      return std::nullopt;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event: invalid var_header_len"));
     }
     ptr += var_header_len;  // Skip entire var_header (len field + extra data)
   }
@@ -125,7 +132,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
         .Field("type", std::string(event_type_label) + "_too_short")
         .Field("section", "width")
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event too short for column_count"));
   }
   uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
@@ -137,7 +145,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
         .Field("event_columns", column_count)
         .Field("table_columns", static_cast<uint64_t>(table_metadata->columns.size()))
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event: column_count mismatch"));
   }
 
   // columns_present bitmap (first bitmap -- "before image" for UPDATE, only bitmap for WRITE/DELETE)
@@ -148,7 +157,8 @@ std::optional<internal::RowsEventHeader> internal::ParseRowsEventHeader(
         .Field("type", std::string(event_type_label) + "_too_short")
         .Field("section", "columns_present bitmap")
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
+                                    std::string(event_type_label) + " event too short for columns_present bitmap"));
   }
   const unsigned char* columns_present = ptr;
   ptr += bitmap_size;
@@ -371,7 +381,7 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "write_rows");
     if (!header) {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse WRITE_ROWS event header"));
+      return MakeUnexpected(header.error());
     }
 
     const unsigned char* ptr = header->row_data_ptr;
@@ -441,7 +451,7 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "update_rows");
     if (!header) {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse UPDATE_ROWS event header"));
+      return MakeUnexpected(header.error());
     }
 
     const unsigned char* ptr = header->row_data_ptr;
@@ -571,7 +581,7 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
     auto header = internal::ParseRowsEventHeader(buffer, length, event_type, table_metadata, pk_column_name,
                                                  text_column_name, "delete_rows");
     if (!header) {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, "Failed to parse DELETE_ROWS event header"));
+      return MakeUnexpected(header.error());
     }
 
     const unsigned char* ptr = header->row_data_ptr;

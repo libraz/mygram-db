@@ -39,7 +39,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
 
   std::ifstream file(filepath);
   if (!file.is_open()) {
-    return MakeUnexpected(MakeError(ErrorCode::kIOError, "Cannot open synonym file: " + filepath));
+    return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Cannot open synonym file: " + filepath));
   }
 
   std::unique_lock lock(mutex_);

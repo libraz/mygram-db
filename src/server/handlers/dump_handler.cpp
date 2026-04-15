@@ -210,7 +210,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
     if (replication_was_running) {
       ctx_.binlog_reader->Stop();
-      ctx_.replication_paused_for_dump = true;
+      ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
     }
   }
 
@@ -264,7 +264,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 #ifdef USE_MYSQL
   // Auto-restart replication after DUMP SAVE (regardless of success/failure)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.replication_paused_for_dump = false;
+    ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
     if (ctx_.binlog_reader->Start()) {
       mygram::utils::StructuredLog()
@@ -359,7 +359,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Stop replication before DUMP LOAD (if running)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
     ctx_.binlog_reader->Stop();
-    ctx_.replication_paused_for_dump = true;
+    ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
     mygram::utils::StructuredLog()
         .Event("replication_paused")
         .Field("operation", "dump_load")
@@ -415,7 +415,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   // Auto-restart replication after DUMP LOAD (only if it was running before)
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.replication_paused_for_dump = false;
+    ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
     if (ctx_.binlog_reader->Start()) {
       mygram::utils::StructuredLog()

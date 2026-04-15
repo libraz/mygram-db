@@ -53,7 +53,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
 #ifdef USE_MYSQL
   // Contract: sync_manager must be non-null when USE_MYSQL is defined
   if (sync_manager == nullptr) {
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkNullDependency,
+    return MakeUnexpected(MakeError(ErrorCode::kInternalError,
                                     "ServerLifecycleManager: sync_manager must be non-null when USE_MYSQL is defined"));
   }
 #endif

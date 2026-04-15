@@ -283,6 +283,7 @@ struct FullPipelineParams {
   size_t filter_threshold = 1000;
   const BM25Stats* bm25_stats = nullptr;  ///< BM25 corpus stats (may be nullptr)
   std::string primary_key_column = "id";  ///< Primary key column name for this table
+  bool skip_cache_lookup = false;         ///< Skip cache lookup (caller already checked)
 };
 
 /// @brief Output from full pipeline execution

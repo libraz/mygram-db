@@ -1431,15 +1431,15 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
 // =============================================================================
 
 /**
- * @brief Test helper: DocumentStore subclass that exposes next_doc_id_ for testing
+ * @brief Test helper: DocumentStore subclass that uses protected accessors for testing
  *
- * The protected next_doc_id_ member allows subclasses to set the counter
- * to values near UINT32_MAX without adding 4 billion documents.
+ * The protected GetNextDocId()/SetNextDocId() accessors allow subclasses to set
+ * the counter to values near UINT32_MAX without adding 4 billion documents.
  */
 class TestableDocumentStore : public DocumentStore {
  public:
-  void SetNextDocId(DocId id) { next_doc_id_ = id; }
-  DocId GetNextDocId() const { return next_doc_id_; }
+  void SetNextDocIdForTest(DocId id) { SetNextDocId(id); }
+  DocId GetNextDocIdForTest() const { return GetNextDocId(); }
 };
 
 /**
@@ -1454,7 +1454,7 @@ TEST(DocumentStoreTest, AddDocument_Uint32MaxBoundary) {
   TestableDocumentStore store;
 
   // Position next_doc_id_ at UINT32_MAX
-  store.SetNextDocId(UINT32_MAX);
+  store.SetNextDocIdForTest(UINT32_MAX);
 
   // Should succeed and assign UINT32_MAX
   auto result = store.AddDocument("pk_max");
@@ -1462,7 +1462,7 @@ TEST(DocumentStoreTest, AddDocument_Uint32MaxBoundary) {
   EXPECT_EQ(*result, UINT32_MAX);
 
   // next_doc_id_ should now be 0 (sentinel)
-  EXPECT_EQ(store.GetNextDocId(), 0);
+  EXPECT_EQ(store.GetNextDocIdForTest(), 0);
 
   // Next call should fail with DocID exhaustion
   auto result2 = store.AddDocument("pk_overflow");
@@ -1476,7 +1476,7 @@ TEST(DocumentStoreTest, AddDocument_ZeroSentinelReturnsError) {
   TestableDocumentStore store;
 
   // Set sentinel value
-  store.SetNextDocId(0);
+  store.SetNextDocIdForTest(0);
 
   auto result = store.AddDocument("pk_fail");
   EXPECT_FALSE(result.has_value()) << "AddDocument should fail when next_doc_id_ == 0";
@@ -1494,7 +1494,7 @@ TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxBoundary) {
   TestableDocumentStore store;
 
   // Position next_doc_id_ at UINT32_MAX
-  store.SetNextDocId(UINT32_MAX);
+  store.SetNextDocIdForTest(UINT32_MAX);
 
   // Batch with two new documents - first should succeed, second should fail
   std::vector<DocumentStore::DocumentItem> batch;
@@ -1512,7 +1512,7 @@ TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxSingleDoc) {
   TestableDocumentStore store;
 
   // Position next_doc_id_ at UINT32_MAX
-  store.SetNextDocId(UINT32_MAX);
+  store.SetNextDocIdForTest(UINT32_MAX);
 
   // Single document batch should succeed
   std::vector<DocumentStore::DocumentItem> batch;
@@ -1524,7 +1524,7 @@ TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxSingleDoc) {
   EXPECT_EQ((*result)[0], UINT32_MAX);
 
   // Sentinel should be set
-  EXPECT_EQ(store.GetNextDocId(), 0);
+  EXPECT_EQ(store.GetNextDocIdForTest(), 0);
 
   // Next batch should fail
   std::vector<DocumentStore::DocumentItem> batch2;
@@ -1540,12 +1540,12 @@ TEST(DocumentStoreTest, AddDocumentBatch_DuplicateAtUint32Max) {
   TestableDocumentStore store;
 
   // Add a document first via normal path
-  store.SetNextDocId(1);
+  store.SetNextDocIdForTest(1);
   auto pre = store.AddDocument("pk_existing");
   ASSERT_TRUE(pre.has_value());
 
   // Position next_doc_id_ at UINT32_MAX
-  store.SetNextDocId(UINT32_MAX);
+  store.SetNextDocIdForTest(UINT32_MAX);
 
   // Batch: duplicate (should return existing ID) + new (should get UINT32_MAX)
   std::vector<DocumentStore::DocumentItem> batch;
@@ -1559,7 +1559,7 @@ TEST(DocumentStoreTest, AddDocumentBatch_DuplicateAtUint32Max) {
   EXPECT_EQ((*result)[1], UINT32_MAX);  // Last valid DocId for new document
 
   // Sentinel should be set after using UINT32_MAX
-  EXPECT_EQ(store.GetNextDocId(), 0);
+  EXPECT_EQ(store.GetNextDocIdForTest(), 0);
 }
 
 // ============================================================

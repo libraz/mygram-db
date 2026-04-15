@@ -2000,33 +2000,31 @@ TEST(QueryParserTest, OverflowLimitHandled) {
 }
 
 /**
- * @test LIMIT with floating point value truncates to integer
+ * @test LIMIT with floating point value is rejected
  *
- * std::stoi parses "10.5" as "10" (stops at non-digit character).
- * This is current behavior - floating point values are truncated.
+ * std::from_chars requires the entire string to be a valid integer.
+ * "10.5" is not a valid uint32_t, so it is rejected with an error.
+ * (Previously, std::stoul silently truncated "10.5" to 10.)
  */
-TEST(QueryParserTest, LimitFloatingPointTruncated) {
+TEST(QueryParserTest, LimitFloatingPointRejected) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello LIMIT 10.5");
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->limit, 10);  // Truncated to integer
-  EXPECT_TRUE(query->IsValid());
+  EXPECT_FALSE(query);  // Rejected: not a valid integer
 }
 
 /**
- * @test OFFSET with floating point value truncates to integer
+ * @test OFFSET with floating point value is rejected
  *
- * std::stoi parses "10.5" as "10" (stops at non-digit character).
- * This is current behavior - floating point values are truncated.
+ * std::from_chars requires the entire string to be a valid integer.
+ * "10.5" is not a valid uint32_t, so it is rejected with an error.
+ * (Previously, std::stoul silently truncated "10.5" to 10.)
  */
-TEST(QueryParserTest, OffsetFloatingPointTruncated) {
+TEST(QueryParserTest, OffsetFloatingPointRejected) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello OFFSET 10.5");
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->offset, 10);  // Truncated to integer
-  EXPECT_TRUE(query->IsValid());
+  EXPECT_FALSE(query);  // Rejected: not a valid integer
 }
 
 /**
@@ -2535,6 +2533,27 @@ TEST(QueryParserHighlightTest, HighlightInvalidMaxFragments) {
 TEST(QueryParserHighlightTest, HighlightTagMissingArgs) {
   QueryParser parser;
   auto result = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <b>");
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @test HIGHLIGHT SNIPPET_LEN with floating point value is rejected
+ *
+ * std::from_chars requires the entire string to be a valid integer.
+ * "10.5" is not a valid uint32_t, so it is rejected with an error.
+ */
+TEST(QueryParserHighlightTest, HighlightSnippetLenRejectsFloat) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT SNIPPET_LEN 10.5");
+  EXPECT_FALSE(result.has_value());
+}
+
+/**
+ * @test HIGHLIGHT MAX_FRAGMENTS with floating point value is rejected
+ */
+TEST(QueryParserHighlightTest, HighlightMaxFragmentsRejectsFloat) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH articles hello HIGHLIGHT MAX_FRAGMENTS 3.7");
   EXPECT_FALSE(result.has_value());
 }
 

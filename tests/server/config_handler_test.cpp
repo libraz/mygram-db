@@ -117,7 +117,7 @@ TEST_F(ConfigHandlerTest, ConfigHelpInvalidPath) {
   std::string response = handler_->Handle(query, conn_ctx_);
 
   // Should return error for invalid path
-  EXPECT_TRUE(response.find("ERR") != std::string::npos || response.find("not found") != std::string::npos);
+  EXPECT_NE(response.find("ERR"), std::string::npos) << "Should return error for invalid path. Response: " << response;
 }
 
 // CONFIG SHOW tests
@@ -201,15 +201,35 @@ TEST_F(ConfigHandlerTest, ConfigVerifyNoFilepath) {
 TEST_F(ConfigHandlerTest, ConfigVerifyNonExistentFile) {
   query::Query query;
   query.type = query::QueryType::CONFIG_VERIFY;
-  query.filepath = "/nonexistent/path/to/config.yaml";
+  query.filepath = "nonexistent_config.yaml";
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Should return error for non-existent file (security check rejects before YAML parse)
+  // Should return error for non-existent file
   EXPECT_TRUE(response.find("ERR") != std::string::npos);
-  EXPECT_TRUE(response.find("file not found") != std::string::npos ||
-              response.find("validation") != std::string::npos || response.find("failed") != std::string::npos ||
-              response.find("bad file") != std::string::npos);
+  EXPECT_TRUE(response.find("file not found") != std::string::npos || response.find("not found") != std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigVerifyRejectsAbsolutePaths) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_VERIFY;
+  query.filepath = "/etc/passwd.yaml";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERR") != std::string::npos);
+  EXPECT_TRUE(response.find("absolute paths not allowed") != std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigVerifyRejectsPathTraversal) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_VERIFY;
+  query.filepath = "../../etc/passwd.yaml";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERR") != std::string::npos);
+  EXPECT_TRUE(response.find("path traversal") != std::string::npos);
 }
 
 // Query Parser integration tests
@@ -295,6 +315,24 @@ TEST_F(ConfigHandlerTest, QueryParserConfigInvalidSubcommand) {
 
 // Line ending tests for TCP protocol compatibility
 
+namespace {
+void AssertCRLFLineEndings(const std::string& response) {
+  // Verify \r\n is present
+  EXPECT_NE(response.find("\r\n"), std::string::npos) << "Response should contain CRLF";
+
+  // Check no bare \n (every \n should be preceded by \r)
+  for (size_t i = 0; i < response.size(); ++i) {
+    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
+      FAIL() << "Found bare \\n at position " << i << " in response";
+    }
+  }
+
+  // Response should end with \r\n
+  ASSERT_GE(response.size(), 2u);
+  EXPECT_EQ(response.substr(response.size() - 2), "\r\n") << "Response should end with CRLF";
+}
+}  // namespace
+
 TEST_F(ConfigHandlerTest, ConfigHelpUsesCRLFLineEndings) {
   query::Query query;
   query.type = query::QueryType::CONFIG_HELP;
@@ -302,35 +340,7 @@ TEST_F(ConfigHandlerTest, ConfigHelpUsesCRLFLineEndings) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Verify response uses CRLF line endings
-  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
-
-  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
-  for (size_t i = 0; i < response.size(); ++i) {
-    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
-      size_t start = (i > 20) ? i - 20 : 0;
-      size_t end = std::min(i + 20, response.size());
-      std::string context;
-      for (size_t j = start; j < end; ++j) {
-        unsigned char c = response[j];
-        if (c == '\r') {
-          context += "\\r";
-        } else if (c == '\n') {
-          context += "\\n";
-        } else if (c >= 32 && c < 127) {
-          context += static_cast<char>(c);
-        } else {
-          context += "?";
-        }
-      }
-      FAIL() << "Found bare LF (not preceded by CR) at position " << i << ". Context: [" << context << "]";
-    }
-  }
-
-  // Response body should end with CRLF so that the server-appended CRLF
-  // produces the \r\n\r\n end-of-response marker for multi-line detection
-  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should end with CRLF for multi-line end-of-response detection";
+  AssertCRLFLineEndings(response);
 }
 
 TEST_F(ConfigHandlerTest, ConfigShowUsesCRLFLineEndings) {
@@ -340,20 +350,7 @@ TEST_F(ConfigHandlerTest, ConfigShowUsesCRLFLineEndings) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Verify response uses CRLF line endings
-  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
-
-  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
-  for (size_t i = 0; i < response.size(); ++i) {
-    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
-      FAIL() << "Found bare LF at position " << i;
-    }
-  }
-
-  // Response body should end with CRLF so that the server-appended CRLF
-  // produces the \r\n\r\n end-of-response marker for multi-line detection
-  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should end with CRLF for multi-line end-of-response detection";
+  AssertCRLFLineEndings(response);
 }
 
 TEST_F(ConfigHandlerTest, ConfigHelpSpecificPathUsesCRLFLineEndings) {
@@ -363,15 +360,7 @@ TEST_F(ConfigHandlerTest, ConfigHelpSpecificPathUsesCRLFLineEndings) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Verify response uses CRLF line endings
-  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
-
-  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
-  for (size_t i = 0; i < response.size(); ++i) {
-    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
-      FAIL() << "Found bare LF at position " << i;
-    }
-  }
+  AssertCRLFLineEndings(response);
 }
 
 TEST_F(ConfigHandlerTest, ConfigShowSpecificSectionUsesCRLFLineEndings) {
@@ -381,20 +370,7 @@ TEST_F(ConfigHandlerTest, ConfigShowSpecificSectionUsesCRLFLineEndings) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Verify response uses CRLF line endings
-  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
-
-  // Verify no bare LF (LF not preceded by CR) - the original bug had mixed line endings
-  for (size_t i = 0; i < response.size(); ++i) {
-    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
-      FAIL() << "Found bare LF at position " << i;
-    }
-  }
-
-  // Response body should end with CRLF so that the server-appended CRLF
-  // produces the \r\n\r\n end-of-response marker for multi-line detection
-  EXPECT_TRUE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should end with CRLF for multi-line end-of-response detection";
+  AssertCRLFLineEndings(response);
 }
 
 }  // namespace mygramdb::server

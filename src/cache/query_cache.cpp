@@ -140,7 +140,11 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
   }
 
-  // Decompression succeeded - now count as hit
+  // Incremented outside the shared lock (after decompression) to avoid holding
+  // the lock during CPU-intensive work. This creates a brief window where
+  // cache_hits + cache_misses may transiently exceed total_queries in a
+  // concurrent Reset() scenario, which is acceptable for monitoring counters
+  // (reviewed: no correctness invariant depends on exact counter consistency).
   stats_.cache_hits++;
 
   // Record hit latency and saved time

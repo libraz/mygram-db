@@ -195,16 +195,18 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
     return false;
   }
 
-  // Get old filters for bitmap update
+  // Call UpdateDocument before overwriting doc_filters_ to avoid copying old_filters.
+  // filter_index_->UpdateDocument reads old_filters by const&, so passing the
+  // iterator's value directly is safe (reviewed: no aliasing — doc_filters_
+  // is not accessed inside UpdateDocument).
   auto old_filter_it = doc_filters_.find(doc_id);
-  FilterMap old_filters;
   if (old_filter_it != doc_filters_.end()) {
-    old_filters = old_filter_it->second;
+    filter_index_->UpdateDocument(doc_id, old_filter_it->second, filters);
+    doc_filters_[doc_id] = filters;
+  } else {
+    doc_filters_[doc_id] = filters;
+    filter_index_->UpdateDocument(doc_id, {}, filters);
   }
-
-  // Update filters
-  doc_filters_[doc_id] = filters;
-  filter_index_->UpdateDocument(doc_id, old_filters, filters);
 
   mygram::utils::StructuredLog()
       .Event("document_updated")

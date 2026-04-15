@@ -154,7 +154,7 @@ TEST_F(AtomicFileWriterTest, CommitWithNoTempFileWritten) {
   auto result = writer.Commit();
   // Commit should fail because temp file does not exist
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(), ErrorCode::kIOError);
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageFileNotFound);
 }
 
 TEST_F(AtomicFileWriterTest, EmptyContentWrite) {
@@ -200,7 +200,7 @@ TEST_F(AtomicFileWriterTest, RollbackCleansUpTempAndLeavesCommittedFalse) {
   // Commit after rollback should fail (temp file no longer exists)
   auto result = writer.Commit();
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(), ErrorCode::kIOError);
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageFileNotFound);
 }
 
 TEST_F(AtomicFileWriterTest, DoubleRollbackIsSafe) {
