@@ -498,6 +498,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
     index::BM25Params params{bm25_config.k1, bm25_config.b};
 
+    // Regenerate term_infos if empty (e.g., cache hit path skips GenerateTermInfos)
+    if (output.term_infos.empty() && !output.all_search_terms.empty() && output.current_index != nullptr) {
+      output.term_infos =
+          search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
+                                             output.current_kanji_ngram_size, output.current_cross_boundary);
+    }
+
     // Reuse pre-computed term_infos (already normalized and ngram-generated)
     std::vector<std::string> normalized_terms;
     std::vector<uint64_t> term_dfs;

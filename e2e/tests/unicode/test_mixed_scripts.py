@@ -35,9 +35,14 @@ class TestMixedScripts:
             description="mixed script English search",
         )
 
-        # Japanese part should also be searchable
-        count = mygramdb.count("articles", "\u4e16\u754c")
-        assert count >= 1
+        # Japanese part should also be searchable (same document, already indexed)
+        wait_until_gte(
+            lambda: mygramdb.count("articles", "\u4e16\u754c"),
+            minimum=1,
+            timeout=10,
+            interval=0.5,
+            description="mixed script Japanese search",
+        )
 
     def test_emoji_content(self, mysql, mygramdb, seed_data):
         """Content with emoji should not crash search."""

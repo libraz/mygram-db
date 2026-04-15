@@ -394,11 +394,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   auto result =
       storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error);
 
-  // Clear the loading flag now that the dump data is loaded.
-  // This must happen BEFORE restarting replication and rebuilding caches,
-  // so that other handlers (Search, Document) can serve queries immediately
-  // rather than waiting for the replication restart to complete.
-  loading_guard.Release();
+  // The loading guard remains active through replication restart and cache
+  // rebuild. It is released only after the success path completes, ensuring
+  // dump_load_in_progress stays true if the load failed.
 
 #ifdef USE_MYSQL
   // Update GTID from loaded dump (if load was successful and GTID is available)
@@ -463,6 +461,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     }
 
     mygram::utils::StructuredLog().Event("dump_load_completed").Field("path", filepath).Field("gtid", gtid).Info();
+    loading_guard.Release();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }
 

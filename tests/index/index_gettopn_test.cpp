@@ -55,15 +55,15 @@ TEST_F(IndexGetTopNTest, SingleTermForwardNoOptimization) {
   }
 
   // Search without reverse (standard path, no GetTopN optimization)
-  // Note: Index layer does not apply limit/reverse - that's ResultSorter's job
+  // Standard path applies limit truncation: returns first 100 in ascending order
   auto results = index_->SearchAnd({"te"}, 100, false);
 
-  // Should return all 1000 results (limit not applied in Index layer)
-  EXPECT_EQ(results.size(), 1000);
+  // Should return 100 results (limit applied in standard path)
+  EXPECT_EQ(results.size(), 100);
 
-  // Should be in ascending order (natural order from posting list)
+  // Should be in ascending order (natural order from posting list, first 100)
   EXPECT_EQ(results[0], 1);
-  EXPECT_EQ(results[999], 1000);
+  EXPECT_EQ(results[99], 100);
 
   // Verify all results are in ascending order
   for (size_t i = 1; i < results.size(); i++) {
@@ -248,10 +248,11 @@ TEST_F(IndexGetTopNTest, BatchBlockSearchSmallDataset) {
   }
 
   auto results = index_->SearchAnd({"te", "st"}, 100, true);
-  // Falls back to standard path (min_size < 10000), returns all in ASC order
-  EXPECT_EQ(results.size(), 5000);
-  EXPECT_EQ(results[0], 1);
-  EXPECT_EQ(results[4999], 5000);
+  // Falls back to standard path (min_size < 10000), limit applied with reverse
+  EXPECT_EQ(results.size(), 100);
+  // Reverse takes last 100 elements (highest DocIDs: 4901-5000)
+  EXPECT_EQ(results[0], 4901);
+  EXPECT_EQ(results[99], 5000);
 }
 
 /**

@@ -516,6 +516,42 @@ END
 
 ---
 
+## FACET Command
+
+Aggregate distinct values of a filter column with document counts.
+
+### Syntax
+
+```
+FACET <table> <column> [search_text] [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>]
+```
+
+### Examples
+
+All values of status column:
+```
+FACET articles status
+```
+
+Values scoped to search results:
+```
+FACET articles category "machine learning" FILTER status = 1 LIMIT 10
+```
+
+### Response
+
+```
+OK FACET <column>
+<value1> <count1>
+<value2> <count2>
+...
+END
+```
+
+Results are sorted by count in descending order.
+
+---
+
 ## REPLICATION STATUS
 
 Get current replication status.

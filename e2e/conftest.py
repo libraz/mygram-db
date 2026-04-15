@@ -79,6 +79,22 @@ def mysql() -> MysqlClient:
     return client
 
 
+def _kill_stale_process_on_port(port: int) -> None:
+    """Kill any process listening on the given port (stale from a previous run)."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            for pid_str in result.stdout.strip().split("\n"):
+                pid = int(pid_str)
+                os.kill(pid, signal.SIGKILL)
+            time.sleep(1)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+
+
 @pytest.fixture(scope="session")
 def mygramdb_process() -> Generator[subprocess.Popen, None, None]:
     """Start MygramDB binary and yield the process. Teardown sends SIGTERM."""
@@ -89,6 +105,10 @@ def mygramdb_process() -> Generator[subprocess.Popen, None, None]:
         )
     if not MYGRAMDB_CONFIG.exists():
         pytest.fail(f"MygramDB config not found at {MYGRAMDB_CONFIG}")
+
+    # Kill stale processes from a previous run that may still hold our ports
+    _kill_stale_process_on_port(MYGRAMDB_TCP_PORT)
+    _kill_stale_process_on_port(MYGRAMDB_HTTP_PORT)
 
     MYGRAMDB_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 

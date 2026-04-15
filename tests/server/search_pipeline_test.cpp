@@ -344,6 +344,68 @@ TEST_F(SearchPipelineFuzzyTest, EmptyTermInfosSetEmptyTermDetected) {
 }
 
 // =============================================================================
+// Execute: max() sentinel triggers empty_term_detected
+// =============================================================================
+// When GenerateTermInfos produces a term with no n-grams (e.g., empty search
+// term after normalization), min_size stays at std::numeric_limits<size_t>::max().
+// Execute() must detect this sentinel and set empty_term_detected = true,
+// because the intersection result is guaranteed to be empty.
+// =============================================================================
+
+TEST_F(SearchPipelineFuzzyTest, ExecuteMaxSentinelTriggersEmptyTermDetected) {
+  // Simulate a term_info where no n-grams were generated (min_size stays at max())
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({/* ngrams= */ {}, std::numeric_limits<size_t>::max()});
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"x"};
+
+  auto result = Execute(query, term_infos, all_terms, index_.get(), doc_store_.get(),
+                        /* full_config= */ nullptr,
+                        /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                        /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+TEST_F(SearchPipelineFuzzyTest, ExecuteMaxSentinelAmongValidTermsTriggersEmptyTermDetected) {
+  // If one of multiple terms has max() sentinel, the entire query should
+  // report empty_term_detected (AND semantics: empty intersection)
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({{"he", "el", "ll", "lo"}, 2});                           // valid term
+  term_infos.push_back({/* ngrams= */ {}, std::numeric_limits<size_t>::max()});  // max sentinel
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"hello", "x"};
+
+  auto result = Execute(query, term_infos, all_terms, index_.get(), doc_store_.get(),
+                        /* full_config= */ nullptr,
+                        /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                        /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+TEST_F(SearchPipelineFuzzyTest, ExecuteZeroEstimatedSizeTriggersEmptyTermDetected) {
+  // estimated_size == 0 means no posting list found for an n-gram
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({{"zz"}, 0});
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"zz"};
+
+  auto result = Execute(query, term_infos, all_terms, index_.get(), doc_store_.get(),
+                        /* full_config= */ nullptr,
+                        /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                        /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_TRUE(result.empty_term_detected);
+  EXPECT_TRUE(result.results.empty());
+}
+
+// =============================================================================
 // Execute: NOT filter and column filters are applied within pipeline (m-16)
 // =============================================================================
 // This validates that Execute() applies NOT terms and column filters internally,

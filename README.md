@@ -94,7 +94,7 @@ docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"
 ```
 
-Includes MySQL 8.4 with sample data for instant testing. Also tested with MySQL 9.6.
+Includes MySQL 8.4 with sample data for instant testing. Also tested with MySQL 9.4 and MariaDB 10.11/11.4.
 
 ## Basic Usage
 
@@ -102,11 +102,17 @@ Includes MySQL 8.4 with sample data for instant testing. Also tested with MySQL 
 # Search with pagination
 SEARCH articles "hello world" SORT id LIMIT 100
 
-# Sort by custom column
-SEARCH articles "hello" SORT created_at DESC LIMIT 50
+# Sort by relevance (BM25)
+SEARCH articles "hello world" SORT _score DESC LIMIT 10
 
-# LIMIT with offset (MySQL-style)
-SEARCH articles "tech" LIMIT 10,100  # offset=10, count=100
+# Highlighted results
+SEARCH articles "hello" HIGHLIGHT TAG <b> </b> LIMIT 10
+
+# Fuzzy search (edit distance 1)
+SEARCH articles "machne" FUZZY LIMIT 10
+
+# Faceted aggregation
+FACET articles category "tech"
 
 # Count matches
 COUNT articles "hello world"
@@ -126,7 +132,12 @@ See [Protocol Reference](docs/en/protocol.md) for all commands.
 ## Features
 
 - **Fast**: Sub-millisecond search on million-row datasets
-- **MySQL Replication**: Real-time GTID-based binlog streaming
+- **BM25 Relevance**: `SORT _score` for TF-IDF based relevance ranking
+- **Highlighting**: `HIGHLIGHT` clause returns snippets with matched terms tagged
+- **Fuzzy Search**: `FUZZY` clause for Levenshtein edit distance matching
+- **Synonyms**: Automatic query expansion from TSV synonym dictionaries
+- **Faceted Search**: `FACET` command aggregates filter column values with counts
+- **MySQL/MariaDB Replication**: Real-time GTID-based binlog streaming (MySQL 8.4+, MariaDB 10.6+)
 - **Runtime Variables**: MySQL-style SET/SHOW VARIABLES for zero-downtime config changes
 - **MySQL Failover**: Switch MySQL servers at runtime with GTID position preservation
 - **Multiple Tables**: Index multiple tables in one instance
@@ -191,8 +202,9 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - OS: Linux or macOS
 
 **MySQL:**
-- Version: 8.4+ / 9.x (tested with 8.4 and 9.6)
-- GTID mode enabled (`gtid_mode=ON`)
+- MySQL 8.4+ / 9.x (tested with 8.4 and 9.4)
+- MariaDB 10.6+ / 11.x (tested with 10.11 and 11.4)
+- GTID mode enabled (`gtid_mode=ON` for MySQL, GTID enabled for MariaDB)
 - Binary log format: ROW (`binlog_format=ROW`)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 

@@ -12,6 +12,9 @@ MygramDBは、複雑なテキスト検索操作のための豊富なブール演
 - [フィルタ条件](#フィルタ条件)
 - [ソート (SORT句)](#ソート-sort句)
 - [ページネーション (LIMIT/OFFSET)](#ページネーション-limitoffset)
+- [BM25 関連度スコアリング (SORT _score)](#bm25-関連度スコアリング-sort-_score)
+- [ハイライト (HIGHLIGHT)](#ハイライト-highlight)
+- [あいまい検索 (FUZZY)](#あいまい検索-fuzzy)
 - [エラーハンドリング](#エラーハンドリング)
 - [パフォーマンスチップス](#パフォーマンスチップス)
 
@@ -439,6 +442,127 @@ SEARCH threads (golang OR python) AND tutorial
 - **OFFSETコスト**: O(N) ただし N = OFFSET（結果は生成されますが返されません）
 - **ベストプラクティス**: 一貫性のあるページネーションのため、SORTと共にLIMITを使用
 - **深いページネーション**: 大きなOFFSET値（例：10000+）は遅くなる可能性があります
+
+---
+
+## BM25 関連度スコアリング (SORT _score)
+
+BM25ランキング関数を使用して、関連度順に結果をソートします。
+
+### 構文
+
+```
+SEARCH <table> <query> SORT _score [ASC|DESC]
+```
+
+### 動作原理
+
+BM25は以下に基づいて各ドキュメントの関連度スコアを計算します：
+- **TF（語句頻度）**: ドキュメント内での検索語句の出現回数
+- **IDF（逆文書頻度）**: 全ドキュメント中での語句の希少性
+- **ドキュメント長正規化**: マッチする語句を含む短いドキュメントがより高スコア
+
+**パラメータ**（組み込み、設定変更不可）：
+- `k1 = 1.2` — 語句頻度の飽和度
+- `b = 0.75` — ドキュメント長正規化（0 = なし、1 = 完全）
+
+### 例
+
+```
+SEARCH articles "機械学習" SORT _score DESC LIMIT 10
+SEARCH articles golang AND tutorial SORT _score LIMIT 20
+```
+
+### 前提条件
+
+BM25スコアリングには、正規化テキストの保存が必要です。設定で `verify_text` を `"ascii"` または `"all"` に設定してください。
+
+```yaml
+memory:
+  verify_text: "all"  # または "ascii"
+```
+
+### フィルタとの組み合わせ
+
+```
+SEARCH articles "データベース" SORT _score DESC FILTER category = tech LIMIT 10
+```
+
+---
+
+## ハイライト (HIGHLIGHT)
+
+検索語句をタグで囲んだテキストスニペットを返します。
+
+### 構文
+
+```
+SEARCH <table> <query> HIGHLIGHT [TAG <open> <close>] [SNIPPET_LEN <n>] [MAX_FRAGMENTS <n>]
+```
+
+### オプション
+
+| オプション | デフォルト | 範囲 | 説明 |
+|-----------|-----------|------|------|
+| TAG | `<em>` / `</em>` | — | マッチした語句を囲むタグ |
+| SNIPPET_LEN | 100 | 1–10,000 | スニペットフラグメントあたりの最大コードポイント数 |
+| MAX_FRAGMENTS | 3 | 1–100 | 省略記号（...）で結合されるフラグメントの最大数 |
+
+### 例
+
+デフォルトのハイライト：
+```
+SEARCH articles "機械学習" HIGHLIGHT LIMIT 10
+```
+
+カスタムタグ：
+```
+SEARCH articles "golang" HIGHLIGHT TAG <strong> </strong> LIMIT 10
+```
+
+長いスニペットとより多くのフラグメント：
+```
+SEARCH articles "データベース" HIGHLIGHT SNIPPET_LEN 200 MAX_FRAGMENTS 5 LIMIT 10
+```
+
+### 前提条件
+
+ハイライトには、設定で `verify_text` を `"ascii"` または `"all"` に設定する必要があります。
+
+### 他の句との組み合わせ
+
+```
+SEARCH articles "技術" HIGHLIGHT TAG <b> </b> SORT _score DESC FILTER status = 1 LIMIT 10
+```
+
+---
+
+## あいまい検索 (FUZZY)
+
+レーベンシュタイン編集距離（挿入、削除、置換）内の語句をマッチします。
+
+### 構文
+
+```
+SEARCH <table> <query> FUZZY [distance]
+```
+
+### パラメータ
+
+- **distance** (オプション): `1`（デフォルト）または `2`
+  - `1`: 1回の編集操作内のマッチ
+  - `2`: 2回の編集操作内のマッチ
+
+### 例
+
+```
+SEARCH articles "まちがい" FUZZY LIMIT 10
+SEARCH articles "データベス" FUZZY 2 LIMIT 10
+```
+
+### パフォーマンス
+
+あいまい検索は、不要な距離計算を避けるため、長さの差でプリフィルタリングを行います。最高のパフォーマンスには `FUZZY 1`（デフォルト）を使用してください。
 
 ---
 

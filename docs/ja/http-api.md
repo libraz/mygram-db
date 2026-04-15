@@ -54,6 +54,9 @@ Content-Type: application/json
 | `filters` | object | いいえ | フィルタ条件（カラム: 値のペア） |
 | `limit` | integer | いいえ | 返す最大結果数（デフォルト: 100、最大: 1000） |
 | `offset` | integer | いいえ | スキップする結果数（デフォルト: 0） |
+| `sort` | object | いいえ | ソート設定（例: `{"column": "_score", "order": "DESC"}`） |
+| `highlight` | object | いいえ | ハイライト設定（下記参照） |
+| `fuzzy` | integer | いいえ | あいまい検索の編集距離（`1` または `2`） |
 
 **クエリ構文:**
 
@@ -104,6 +107,34 @@ Content-Type: application/json
 ```json
 {
   "error": "Internal error: database connection failed"
+}
+```
+
+**ハイライト設定:**
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|-----|-----------|------|
+| `open_tag` | string | `<em>` | ハイライトする語句の開始タグ |
+| `close_tag` | string | `</em>` | ハイライトする語句の終了タグ |
+| `snippet_length` | integer | 100 | スニペットあたりの最大コードポイント数（1-10,000） |
+| `max_fragments` | integer | 3 | スニペットフラグメントの最大数（1-100） |
+
+**ハイライト付き検索の例:**
+
+```http
+POST /articles/search HTTP/1.1
+Content-Type: application/json
+
+{
+  "q": "機械学習",
+  "highlight": {
+    "open_tag": "<strong>",
+    "close_tag": "</strong>",
+    "snippet_length": 150,
+    "max_fragments": 5
+  },
+  "sort": {"column": "_score", "order": "DESC"},
+  "limit": 10
 }
 ```
 

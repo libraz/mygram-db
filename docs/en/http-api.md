@@ -54,6 +54,9 @@ Content-Type: application/json
 | `filters` | object | No | Filter conditions (column: value pairs) |
 | `limit` | integer | No | Maximum results to return (default: 100, max: 1000) |
 | `offset` | integer | No | Number of results to skip (default: 0) |
+| `sort` | object | No | Sort configuration (e.g., `{"column": "_score", "order": "DESC"}`) |
+| `highlight` | object | No | Highlight configuration (see below) |
+| `fuzzy` | integer | No | Fuzzy search edit distance (`1` or `2`) |
 
 **Query Syntax:**
 
@@ -104,6 +107,34 @@ Content-Type: application/json
 ```json
 {
   "error": "Internal error: database connection failed"
+}
+```
+
+**Highlight Configuration:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `open_tag` | string | `<em>` | Opening tag for highlighted terms |
+| `close_tag` | string | `</em>` | Closing tag for highlighted terms |
+| `snippet_length` | integer | 100 | Max code points per snippet (1-10,000) |
+| `max_fragments` | integer | 3 | Max snippet fragments (1-100) |
+
+**Search with Highlighting Example:**
+
+```http
+POST /articles/search HTTP/1.1
+Content-Type: application/json
+
+{
+  "q": "machine learning",
+  "highlight": {
+    "open_tag": "<strong>",
+    "close_tag": "</strong>",
+    "snippet_length": 150,
+    "max_fragments": 5
+  },
+  "sort": {"column": "_score", "order": "DESC"},
+  "limit": 10
 }
 ```
 

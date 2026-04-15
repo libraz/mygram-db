@@ -12,6 +12,9 @@ MygramDB supports a rich boolean query syntax for complex text search operations
 - [Filter Conditions](#filter-conditions)
 - [Sorting (ORDER BY)](#sorting-order-by)
 - [Pagination (LIMIT/OFFSET)](#pagination-limitoffset)
+- [BM25 Relevance Scoring (SORT _score)](#bm25-relevance-scoring-sort-_score)
+- [Highlighting (HIGHLIGHT)](#highlighting-highlight)
+- [Fuzzy Search (FUZZY)](#fuzzy-search-fuzzy)
 - [Error Handling](#error-handling)
 - [Performance Tips](#performance-tips)
 
@@ -439,6 +442,127 @@ This query:
 - **OFFSET cost**: O(N) where N = OFFSET (results are still generated, just not returned)
 - **Best practice**: Use LIMIT with ORDER BY for consistent pagination
 - **Deep pagination**: Large OFFSET values (e.g., 10000+) can be slow
+
+---
+
+## BM25 Relevance Scoring (SORT _score)
+
+Sort results by relevance using the BM25 ranking function.
+
+### Syntax
+
+```
+SEARCH <table> <query> SORT _score [ASC|DESC]
+```
+
+### How It Works
+
+BM25 computes a relevance score for each document based on:
+- **TF (Term Frequency)**: How often the search term appears in the document
+- **IDF (Inverse Document Frequency)**: How rare the term is across all documents
+- **Document length normalization**: Shorter documents with matching terms score higher
+
+**Parameters** (built-in, not configurable):
+- `k1 = 1.2` — Term frequency saturation
+- `b = 0.75` — Document length normalization (0 = none, 1 = full)
+
+### Examples
+
+```
+SEARCH articles "machine learning" SORT _score DESC LIMIT 10
+SEARCH articles golang AND tutorial SORT _score LIMIT 20
+```
+
+### Requirements
+
+BM25 scoring requires `verify_text` to be set to `"ascii"` or `"all"` in configuration, since term frequency is counted from stored normalized text.
+
+```yaml
+memory:
+  verify_text: "all"  # or "ascii"
+```
+
+### Combining with Filters
+
+```
+SEARCH articles "database" SORT _score DESC FILTER category = tech LIMIT 10
+```
+
+---
+
+## Highlighting (HIGHLIGHT)
+
+Return text snippets with search terms highlighted using configurable tags.
+
+### Syntax
+
+```
+SEARCH <table> <query> HIGHLIGHT [TAG <open> <close>] [SNIPPET_LEN <n>] [MAX_FRAGMENTS <n>]
+```
+
+### Options
+
+| Option | Default | Range | Description |
+|--------|---------|-------|-------------|
+| TAG | `<em>` / `</em>` | — | Open and close tags wrapping matched terms |
+| SNIPPET_LEN | 100 | 1–10,000 | Max code points per snippet fragment |
+| MAX_FRAGMENTS | 3 | 1–100 | Max fragments joined by ellipsis (...) |
+
+### Examples
+
+Default highlighting:
+```
+SEARCH articles "machine learning" HIGHLIGHT LIMIT 10
+```
+
+Custom tags:
+```
+SEARCH articles "golang" HIGHLIGHT TAG <strong> </strong> LIMIT 10
+```
+
+Longer snippets with more fragments:
+```
+SEARCH articles "database" HIGHLIGHT SNIPPET_LEN 200 MAX_FRAGMENTS 5 LIMIT 10
+```
+
+### Requirements
+
+Highlighting requires `verify_text` to be set to `"ascii"` or `"all"` in configuration.
+
+### Combining with Other Clauses
+
+```
+SEARCH articles "tech" HIGHLIGHT TAG <b> </b> SORT _score DESC FILTER status = 1 LIMIT 10
+```
+
+---
+
+## Fuzzy Search (FUZZY)
+
+Match terms within a specified Levenshtein edit distance (insertions, deletions, substitutions).
+
+### Syntax
+
+```
+SEARCH <table> <query> FUZZY [distance]
+```
+
+### Parameters
+
+- **distance** (optional): `1` (default) or `2`
+  - `1`: Match terms within 1 edit operation
+  - `2`: Match terms within 2 edit operations
+
+### Examples
+
+```
+SEARCH articles "machne" FUZZY LIMIT 10
+SEARCH articles "databse" FUZZY 2 LIMIT 10
+```
+
+### Performance
+
+Fuzzy search pre-filters candidates by length difference to avoid unnecessary distance computations. Use `FUZZY 1` (default) for best performance.
 
 ---
 

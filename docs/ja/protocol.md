@@ -516,6 +516,42 @@ END
 
 ---
 
+## FACET コマンド
+
+フィルターカラムのユニーク値とドキュメント数を集計します。
+
+### 構文
+
+```
+FACET <table> <column> [search_text] [AND <term>] [NOT <term>] [FILTER <col> <op> <value>] [LIMIT <n>]
+```
+
+### 例
+
+statusカラムの全値：
+```
+FACET articles status
+```
+
+検索結果に限定した値：
+```
+FACET articles category "機械学習" FILTER status = 1 LIMIT 10
+```
+
+### レスポンス
+
+```
+OK FACET <column>
+<value1> <count1>
+<value2> <count2>
+...
+END
+```
+
+結果はカウントの降順でソートされます。
+
+---
+
 ## REPLICATION STATUS
 
 現在のレプリケーションステータスを取得します。

@@ -619,6 +619,36 @@ TEST_F(DumpHandlerTest, LoadingFlagResetOnException) {
   EXPECT_TRUE(error_response.find("ERROR") == 0 || error_response.find("Failed") != std::string::npos);
 }
 
+/**
+ * @brief Test that dump_load_in_progress is cleared after a failed ReadDump
+ *
+ * When ReadDump fails (e.g., corrupted file), the RAII guard ensures the
+ * loading flag is still cleared on function return. This verifies the guard
+ * stays active through the failure path and resets via RAII destruction.
+ */
+TEST_F(DumpHandlerTest, LoadingFlagClearedAfterFailedReadDump) {
+  // Create a corrupted dump file that will pass path resolution but fail ReadDump
+  std::filesystem::path corrupt_path = test_dump_dir_ / "corrupted.dmp";
+  {
+    std::ofstream ofs(corrupt_path, std::ios::binary);
+    ofs << "this is not a valid dump file";
+  }
+
+  EXPECT_FALSE(dump_load_in_progress_);
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = "corrupted.dmp";
+
+  std::string response = handler_->Handle(load_query, conn_ctx_);
+
+  // Should fail
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+
+  // Loading flag must be cleared after failed load (via RAII guard destruction)
+  EXPECT_FALSE(dump_load_in_progress_) << "dump_load_in_progress must be cleared after a failed DUMP LOAD";
+}
+
 TEST_F(DumpHandlerTest, ConcurrentFlagsNotAffected) {
   // This test verifies that read_only and loading flags work correctly
   // when set by different operations and that concurrent operations are blocked
@@ -1462,15 +1492,13 @@ TEST_F(DumpHandlerGtidTest, MultipleDumpLoadsWithDifferentGtids) {
 }
 
 /**
- * @brief Test that dump_load_in_progress is cleared BEFORE replication restarts
+ * @brief Test that dump_load_in_progress remains true during replication restart
  *
- * This verifies the fix for Issue #7: Previously, the loading guard was destroyed
- * at the end of HandleDumpLoad, which meant dump_load_in_progress was still true
- * when binlog_reader->Start() was called. Other handlers (Search, Document) refuse
- * to serve queries while dump_load_in_progress is set, creating an inconsistency
- * window where the system appeared unavailable despite the dump being fully loaded.
+ * The loading guard should stay active through the entire success path, including
+ * replication restart and BM25 rebuild. The flag is only cleared after all
+ * post-load steps complete successfully.
  */
-TEST_F(DumpHandlerGtidTest, LoadingFlagClearedBeforeReplicationRestart) {
+TEST_F(DumpHandlerGtidTest, LoadingFlagActiveDuringReplicationRestart) {
   const std::string test_gtid = "uuid:44444";
 
   // Save a dump with a GTID
@@ -1488,7 +1516,7 @@ TEST_F(DumpHandlerGtidTest, LoadingFlagClearedBeforeReplicationRestart) {
   mock_binlog_reader_->ResetTestFlags();
   mock_binlog_reader_->ObserveFlagOnStart(&dump_load_in_progress_);
 
-  // Load the dump - this should clear loading flag BEFORE calling Start()
+  // Load the dump - loading flag should remain true during Start()
   query::Query load_query;
   load_query.type = query::QueryType::DUMP_LOAD;
   load_query.filepath = test_dump_dir_.string() + "/flag_order_test.dmp";
@@ -1498,12 +1526,15 @@ TEST_F(DumpHandlerGtidTest, LoadingFlagClearedBeforeReplicationRestart) {
   // Verify Start() was called
   ASSERT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after DUMP LOAD";
 
-  // Verify dump_load_in_progress was false when Start() was called
-  EXPECT_FALSE(mock_binlog_reader_->GetFlagValueAtStart())
-      << "dump_load_in_progress must be false BEFORE replication restarts. "
-         "Other handlers check this flag and refuse queries while it is true.";
+  // Verify dump_load_in_progress was still true when Start() was called.
+  // The flag stays active through replication restart and BM25 rebuild,
+  // and is only cleared after all post-load steps complete.
+  EXPECT_TRUE(mock_binlog_reader_->GetFlagValueAtStart())
+      << "dump_load_in_progress must be true during replication restart. "
+         "The flag should only be cleared after the entire load operation "
+         "(including post-load steps) completes successfully.";
 
-  // Verify flag is also false after completion
+  // Verify flag is false after successful completion
   EXPECT_FALSE(dump_load_in_progress_);
 }
 

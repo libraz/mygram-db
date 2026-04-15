@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-04-15
+
+### Added
+
+- **BM25 relevance scoring** — `SORT _score` ranks results by term frequency and document length using BM25 ranking function (k1=1.2, b=0.75)
+- **Synonym dictionary** — Automatic OR-group search expansion from TSV synonym files; configure via `synonyms.enable` and `synonyms.file`
+- **HIGHLIGHT clause** — Snippet generation with configurable tags (`TAG`), snippet length (`SNIPPET_LEN`), and fragment count (`MAX_FRAGMENTS`)
+- **Fuzzy search** — `FUZZY [1|2]` clause for Levenshtein edit distance matching
+- **FACET command** — Filter column value aggregation with document counts, optionally scoped to search results
+- **V2 dump format** — Section envelope with per-section CRC32, forward compatibility for unknown section types; auto-detected on `DUMP LOAD`
+- **MariaDB binlog replication** — Full support for MariaDB 10.6+/11.x with MariaDB-native GTID format (`domain-server-sequence`); auto-detected from server version
+- **E2E test matrix** — MariaDB support in e2e test suite with matrix runner (MySQL 8.4, 9.4, MariaDB 10.11, 11.4)
+
+### Fixed
+
+- **DUMP LOAD premature guard release** — `dump_load_in_progress` flag now stays active through replication restart and BM25 cache rebuild; released only after the entire success path completes
+- **BM25 cache hit out-of-bounds read** — Regenerate `term_infos` before BM25 scoring when the cache-hit path skips `GenerateTermInfos()`
+- **HIGHLIGHT rejected when text storage disabled** — Explicit validation when `verify_text` is `"off"`
+- **Text storage not disabled when verify_text is off** — Prevents wasted memory
+- **Missing `<condition_variable>` include** — `query_cache.h` no longer relies on transitive inclusion
+- **Security hardening** — Password masking, SQL injection prevention, path traversal fixes, null byte injection rejection
+- **Thread safety** — Atomic conversions for cache/document store fields, mutex protection for binlog reader, TOCTOU fixes
+
+### Changed
+
+- **Search pipeline consolidation** — Extracted `GenerateTermInfos()`, `Execute()`, and `SearchPipelineResult` into reusable pipeline components
+- **Error propagation** — `DecodeFieldValue` and GTID parsing use `Expected<T, Error>` instead of sentinel strings
+- **Handler consolidation** — Clear ownership boundaries and layer decoupling across handlers
+
+### Testing
+
+- New test files: `bm25_scorer_test`, `highlighter_test`, `synonym_dictionary_test`, `edit_distance_test`, `filter_index_facet_test`, `dump_format_v2_test`, `mariadb_gtid_test`, `mariadb_event_parser_test`, `search_pipeline_test`, `bm25_sort_test`, `index_serialization_test`
+- E2E: Stale process cleanup, MariaDB replication timing race fix
+- Full matrix: 3026 unit tests, 4 e2e targets (MySQL 8.4/9.4, MariaDB 10.11/11.4)
+
+**Detailed Release Notes**: [docs/releases/v1.6.0.md](docs/releases/v1.6.0.md)
+
 ## [1.5.4] - 2026-04-13
 
 ### Added
