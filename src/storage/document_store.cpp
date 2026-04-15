@@ -146,8 +146,23 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
 
     // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
     if (!doc.filters.empty()) {
-      filter_index_->AddDocument(doc_id, doc.filters);
-      doc_filters_[doc_id] = doc.filters;
+      try {
+        filter_index_->AddDocument(doc_id, doc.filters);
+        doc_filters_[doc_id] = doc.filters;
+      } catch (const std::exception& e) {
+        // Rollback: remove document from maps to maintain consistency
+        auto pk_copy = doc_id_to_pk_[doc_id];
+        doc_id_to_pk_.erase(doc_id);
+        pk_to_doc_id_.erase(pk_copy);
+        mygram::utils::StructuredLog()
+            .Event("storage_error")
+            .Field("type", "filter_index_failed_batch")
+            .Field("doc_id", static_cast<uint64_t>(doc_id))
+            .Field("error", e.what())
+            .Error();
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageWriteError, "Failed to add document filters in batch", e.what()));
+      }
     }
 
     // Store normalized text for n-gram post-filter verification

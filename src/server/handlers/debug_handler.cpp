@@ -75,16 +75,12 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       OptimizationGuard guard(ctx_.optimization_in_progress);
 
       // Get table context
-      index::Index* current_index = nullptr;
-      storage::DocumentStore* current_doc_store = nullptr;
-      int current_ngram_size = 0;
-      int current_kanji_ngram_size = 0;
-
-      std::string error = GetTableContext(query.table, &current_index, &current_doc_store, &current_ngram_size,
-                                          &current_kanji_ngram_size);
-      if (!error.empty()) {
-        return error;
+      auto table_ctx = GetTableContext(query.table);
+      if (!table_ctx) {
+        return ResponseFormatter::FormatError(table_ctx.error().message());
       }
+      auto* current_index = table_ctx->index;
+      auto* current_doc_store = table_ctx->doc_store;
 
       // Verify index is available
       if (current_index == nullptr) {

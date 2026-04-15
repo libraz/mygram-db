@@ -337,6 +337,14 @@ class Index {
   [[nodiscard]] const PostingList* GetPostingList(std::string_view term) const;
 
   /**
+   * @brief Deserialize index from pre-loaded data buffer
+   *
+   * Core deserialization logic shared by LoadFromFile and LoadFromStream.
+   * Takes ownership of the data string to avoid extra copies.
+   */
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromData(std::string data);
+
+  /**
    * @brief Get or create posting list for term
    */
   PostingList* GetOrCreatePostingList(std::string_view term);

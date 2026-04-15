@@ -149,10 +149,12 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gmock
   )
 
+  # LABELS SLOW: Contains sleep_for-based timing assertions (e.g., PushBlocksWhenQueueFull)
   gtest_discover_tests(binlog_reader_core_test
     DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
     PROPERTIES RESOURCE_LOCK mysql_connection
+    LABELS "SLOW"
   )
 
   add_executable(binlog_reader_events_test

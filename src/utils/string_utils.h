@@ -85,7 +85,7 @@ std::vector<uint32_t> Utf8ToCodepoints(std::string_view text);
  * @param text UTF-8 encoded string
  * @param buffer Output buffer for codepoints
  * @param buffer_capacity Maximum number of codepoints the buffer can hold
- * @return Number of codepoints written, or 0 if buffer was too small
+ * @return Number of codepoints written, or SIZE_MAX if buffer was too small
  */
 size_t Utf8ToCodepoints(std::string_view text, uint32_t* buffer, size_t buffer_capacity);
 

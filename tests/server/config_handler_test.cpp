@@ -205,9 +205,10 @@ TEST_F(ConfigHandlerTest, ConfigVerifyNonExistentFile) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Should return error for non-existent file
+  // Should return error for non-existent file (security check rejects before YAML parse)
   EXPECT_TRUE(response.find("ERR") != std::string::npos);
-  EXPECT_TRUE(response.find("validation") != std::string::npos || response.find("failed") != std::string::npos ||
+  EXPECT_TRUE(response.find("file not found") != std::string::npos ||
+              response.find("validation") != std::string::npos || response.find("failed") != std::string::npos ||
               response.find("bad file") != std::string::npos);
 }
 

@@ -158,8 +158,10 @@ TEST_F(DumpHandlerTest, DumpSaveWithDefaultFilepath) {
   EXPECT_TRUE(response.find("dump_") != std::string::npos);
   EXPECT_TRUE(response.find(".dmp") != std::string::npos);
 
-  // Extract filepath from response
-  size_t start = response.find("/tmp/");
+  // Extract filepath from response using the actual dump_dir prefix
+  // (avoids hardcoding "/tmp/" which doesn't match on macOS where /tmp → /private/tmp)
+  std::string dump_prefix = test_dump_dir_.string();
+  size_t start = response.find(dump_prefix);
   if (start != std::string::npos) {
     std::string filepath = response.substr(start);
     // Remove trailing newline/carriage return
@@ -833,8 +835,9 @@ TEST_F(DumpHandlerTest, DumpSaveAllowedDuringOptimize) {
   save_query.filepath = test_filepath_;
   std::string save_response = handler_->Handle(save_query, conn_ctx_);
 
-  // Should be allowed (for auto-save support)
-  EXPECT_TRUE(save_response.find("OK SAVED") == 0 || save_response.find("ERROR") == 0) << "Response: " << save_response;
+  // Should be allowed (for auto-save support) — assert success specifically
+  // (previous assertion was a tautology: OR of OK/ERROR always passes)
+  EXPECT_EQ(save_response.find("OK SAVED"), 0u) << "Response: " << save_response;
 
   // Should not contain OPTIMIZE blocking message
   EXPECT_TRUE(save_response.find("Cannot save dump while OPTIMIZE") == std::string::npos)

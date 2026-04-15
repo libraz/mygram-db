@@ -58,7 +58,8 @@ bool ShouldApplyVerifyText(const std::string& verify_mode, const std::vector<std
   return ShouldApplyVerifyText(verify_mode, terms.begin(), terms.end());
 }
 
-/// Overload for synonym groups (checks all normalized_terms across all groups)
+/// Overload for synonym groups: flattens normalized_terms and delegates to the
+/// template version to avoid duplicating the off/all/ascii logic.
 bool ShouldApplyVerifyTextSynonyms(const std::string& verify_mode, const std::vector<SynonymTermGroup>& groups) {
   if (verify_mode == "off") {
     return false;
@@ -66,14 +67,12 @@ bool ShouldApplyVerifyTextSynonyms(const std::string& verify_mode, const std::ve
   if (verify_mode == "all") {
     return true;
   }
+  // "ascii" check: iterate all terms across all groups
   if (verify_mode == "ascii") {
     for (const auto& group : groups) {
-      for (const auto& term : group.normalized_terms) {
-        for (unsigned char ch : term) {
-          if (ch >= mygram::constants::kFirstNonAsciiByte) {
-            return false;
-          }
-        }
+      // Delegate per-group check to the template (reuses the same byte check logic)
+      if (!ShouldApplyVerifyText(verify_mode, group.normalized_terms.begin(), group.normalized_terms.end())) {
+        return false;
       }
     }
     return true;
@@ -593,11 +592,15 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
     return false;
   }
   // Sample doc IDs and check in batch (one lock acquisition instead of N individual ones)
-  size_t sample_size = std::min(results.size(), std::max(size_t{10}, results.size() / 10));
+  constexpr size_t kCacheStaleMinSamples = 10;     // Minimum number of samples to check
+  constexpr size_t kCacheStaleSampleDivisor = 10;  // Sample ~10% of results
+  size_t sample_size =
+      std::min(results.size(), std::max(kCacheStaleMinSamples, results.size() / kCacheStaleSampleDivisor));
   size_t step = std::max(size_t{1}, results.size() / sample_size);
   std::vector<storage::DocId> sampled_ids;
   sampled_ids.reserve(sample_size);
-  for (size_t i = 0; i < results.size() && i / step < sample_size; i += step) {
+  size_t count = 0;
+  for (size_t i = 0; count < sample_size && i < results.size(); i += step, ++count) {
     sampled_ids.push_back(results[i]);
   }
   auto pks = doc_store->GetPrimaryKeysBatch(sampled_ids);

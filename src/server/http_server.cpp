@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <type_traits>
@@ -304,7 +305,10 @@ void HttpServer::SetupAccessControl() {
 }
 
 void HttpServer::SetupCors() {
-  const std::string allow_origin = config_.cors_allow_origin.empty() ? "null" : config_.cors_allow_origin;
+  // NOTE: Default to "*" rather than the literal "null" string. A literal "null"
+  // origin is dangerous because browsers treat null-origin requests from
+  // sandboxed iframes as matching, enabling CORS bypass attacks.
+  const std::string allow_origin = config_.cors_allow_origin.empty() ? "*" : config_.cors_allow_origin;
 
   // CORS preflight
   server_->Options(".*", [allow_origin](const httplib::Request& /*req*/, httplib::Response& res) {
@@ -776,8 +780,14 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       return;
     }
 
+    // Validate DocId range (DocId is uint32_t, stoull returns uint64_t)
+    if (doc_id > std::numeric_limits<uint32_t>::max()) {
+      SendError(res, kHttpNotFound, "Document not found");
+      return;
+    }
+
     // Get document
-    auto doc = current_doc_store->GetDocument(doc_id);
+    auto doc = current_doc_store->GetDocument(static_cast<storage::DocId>(doc_id));
     if (!doc) {
       SendError(res, kHttpNotFound, "Document not found");
       return;
@@ -1022,9 +1032,9 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
   response["timestamp"] =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
-  // Calculate uptime (approximate, based on stats initialization)
-  static auto start_time = std::chrono::steady_clock::now();
-  auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time).count();
+  // Uptime from this HttpServer instance's construction time
+  auto uptime =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_).count();
   response["uptime_seconds"] = uptime;
 
   // Components status

@@ -8,8 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <iomanip>
-#include <sstream>
+#include <cstdio>
 
 #include "utils/constants.h"
 
@@ -181,6 +180,10 @@ using mygram::constants::kBytesPerKilobyteDouble;
 constexpr double kLargeUnitThreshold = 100.0;
 constexpr double kMediumUnitThreshold = 10.0;
 
+// Stack buffer size for codepoint conversion in GenerateNgrams/GenerateHybridNgrams.
+// 128 codepoints covers most practical text inputs without heap allocation.
+constexpr size_t kStackBufSize = 128;
+
 /**
  * @brief Get number of bytes in UTF-8 character from first byte
  */
@@ -233,7 +236,7 @@ size_t Utf8ToCodepoints(std::string_view text, uint32_t* buffer, size_t buffer_c
     int char_len = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
     if (char_len > 0) {
       if (count >= buffer_capacity) {
-        return 0;  // Buffer too small, caller should fall back to vector version
+        return SIZE_MAX;  // Buffer too small, caller should fall back to vector version
       }
       buffer[count++] = codepoint;
       i += static_cast<size_t>(char_len);
@@ -349,14 +352,13 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
 
   // Convert to codepoints for proper character-level n-grams
   // Use stack buffer for short strings to avoid heap allocation
-  constexpr size_t kStackBufSize = 128;
   std::array<uint32_t, kStackBufSize> stack_buf{};
   size_t cp_count = Utf8ToCodepoints(text, stack_buf.data(), kStackBufSize);
   const uint32_t* cp_data = stack_buf.data();
 
   // Fall back to heap for long strings
   std::vector<uint32_t> heap_buf;
-  if (cp_count == 0 && !text.empty()) {
+  if (cp_count == SIZE_MAX) {
     heap_buf = Utf8ToCodepoints(text);
     cp_count = heap_buf.size();
     cp_data = heap_buf.data();
@@ -425,14 +427,13 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
 
   // Convert to codepoints for proper character-level processing
   // Use stack buffer for short strings to avoid heap allocation
-  constexpr size_t kStackBufSize = 128;
   std::array<uint32_t, kStackBufSize> stack_buf{};
   size_t cp_count = Utf8ToCodepoints(text, stack_buf.data(), kStackBufSize);
   const uint32_t* cp_data = stack_buf.data();
 
   // Fall back to heap for long strings
   std::vector<uint32_t> heap_buf;
-  if (cp_count == 0 && !text.empty()) {
+  if (cp_count == SIZE_MAX) {
     heap_buf = Utf8ToCodepoints(text);
     cp_count = heap_buf.size();
     cp_data = heap_buf.data();
@@ -490,19 +491,19 @@ std::string FormatBytes(size_t bytes) {
     unit_index++;
   }
 
-  // Format with appropriate precision
-  std::ostringstream oss;
+  // Format with snprintf for efficiency (avoids ostringstream allocation)
+  char buf[32];
   // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index)
   if (size >= kLargeUnitThreshold) {
-    oss << std::fixed << std::setprecision(0) << size << kUnits[unit_index];
+    snprintf(buf, sizeof(buf), "%.0f%s", size, kUnits[unit_index]);
   } else if (size >= kMediumUnitThreshold) {
-    oss << std::fixed << std::setprecision(1) << size << kUnits[unit_index];
+    snprintf(buf, sizeof(buf), "%.1f%s", size, kUnits[unit_index]);
   } else {
-    oss << std::fixed << std::setprecision(2) << size << kUnits[unit_index];
+    snprintf(buf, sizeof(buf), "%.2f%s", size, kUnits[unit_index]);
   }
   // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)
 
-  return oss.str();
+  return buf;
 }
 
 // NOLINTBEGIN(readability-identifier-length)

@@ -136,6 +136,11 @@ class TcpServer {
 
   /**
    * @brief Get dump load in progress flag pointer (for HttpServer)
+   *
+   * NOTE: These raw-pointer accessors are an architectural shortcut for injecting
+   * shared state into HttpServer and handlers. Ideally these dependencies should be
+   * injected at construction time. Retained for now to avoid a large-scale refactor
+   * of the server initialization order. [AUDIT:raw-pointer-accessors]
    */
   std::atomic<bool>* GetDumpLoadInProgressFlag() { return &dump_load_in_progress_; }
 

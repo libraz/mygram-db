@@ -219,12 +219,13 @@ Expected<void, Error> Index::LoadFromFile(const std::string& filepath) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageFileNotFound, "Failed to open index file", filepath));
     }
 
-    // Read entire file into memory for CRC32 verification
+    // Read file directly into a string and deserialize via LoadFromData.
+    // This avoids the triple-copy path that LoadFromStream would introduce
+    // (file → string → istringstream copy → LoadFromStream re-read).
     std::string file_data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     ifs.close();
 
-    std::istringstream input_stream(file_data, std::ios::binary);
-    auto result = LoadFromStream(input_stream);
+    auto result = LoadFromData(std::move(file_data));
     if (!result) {
       return result;
     }
@@ -253,10 +254,13 @@ Expected<void, Error> Index::LoadFromFile(const std::string& filepath) {
 }
 
 Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
-  try {
-    // Read entire stream into memory for CRC32 verification
-    std::string all_data((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+  // Read entire stream into memory, then delegate to LoadFromData
+  std::string all_data((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+  return LoadFromData(std::move(all_data));
+}
 
+Expected<void, Error> Index::LoadFromData(std::string all_data) {
+  try {
     // Minimum size: magic(4) + version(4) + ngram(4) + term_count(8) = 20 bytes
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 20: minimum header size (magic + version + ngram_size + term_count)
@@ -384,7 +388,9 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
       term_len = mygram::utils::FromLittleEndian(term_len);
       pos += sizeof(term_len);
 
-      // Guard against malformed index files that could cause excessive memory allocation
+      // Guard against malformed index files that could cause excessive memory allocation.
+      // N-gram terms are typically under 40 UTF-8 bytes; 10000 is a generous safety
+      // limit to reject corrupted data without false positives on valid indices.
       constexpr uint32_t kMaxTermLength = 10000;
       if (term_len > kMaxTermLength) {
         mygram::utils::StructuredLog()
@@ -424,7 +430,9 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
       posting_size = mygram::utils::FromLittleEndian(posting_size);
       pos += sizeof(posting_size);
 
-      // Guard against malformed index files that could cause excessive memory allocation
+      // Guard against malformed index files that could cause excessive memory allocation.
+      // 100M entries is far beyond any realistic posting list size and prevents OOM
+      // from corrupted size fields while still allowing very large production indices.
       constexpr uint64_t kMaxPostingSize = 100'000'000;
       if (posting_size > kMaxPostingSize) {
         mygram::utils::StructuredLog()

@@ -149,6 +149,7 @@ class HttpServer {
   size_t max_query_length_{0};  // Configured max query length limit
 
   std::atomic<bool> running_{false};
+  std::chrono::steady_clock::time_point start_time_{std::chrono::steady_clock::now()};
 
   // Statistics
   ServerStats stats_;

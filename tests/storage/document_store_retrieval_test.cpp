@@ -41,16 +41,21 @@ TEST(DocumentStoreRetrievalTest, MultiColumnBatchMatchesSingleColumn) {
   auto multi_results = store.GetFilterValuesBatchMultiColumn(doc_ids, columns);
   ASSERT_EQ(multi_results.size(), 2u);  // 2 columns
 
-  // Column "color": all 3 docs have values
+  // Column "color": all 3 docs have values — verify actual values, not just presence
   ASSERT_EQ(multi_results[0].size(), 3u);
-  EXPECT_TRUE(multi_results[0][0].has_value());
-  EXPECT_TRUE(multi_results[0][1].has_value());
-  EXPECT_TRUE(multi_results[0][2].has_value());
+  ASSERT_TRUE(multi_results[0][0].has_value());
+  EXPECT_EQ(std::get<std::string>(multi_results[0][0].value()), "red");
+  ASSERT_TRUE(multi_results[0][1].has_value());
+  EXPECT_EQ(std::get<std::string>(multi_results[0][1].value()), "blue");
+  ASSERT_TRUE(multi_results[0][2].has_value());
+  EXPECT_EQ(std::get<std::string>(multi_results[0][2].value()), "green");
 
-  // Column "size": doc3 is missing
+  // Column "size": doc3 is missing — verify actual values where present
   ASSERT_EQ(multi_results[1].size(), 3u);
-  EXPECT_TRUE(multi_results[1][0].has_value());
-  EXPECT_TRUE(multi_results[1][1].has_value());
+  ASSERT_TRUE(multi_results[1][0].has_value());
+  EXPECT_EQ(std::get<int64_t>(multi_results[1][0].value()), 10);
+  ASSERT_TRUE(multi_results[1][1].has_value());
+  EXPECT_EQ(std::get<int64_t>(multi_results[1][1].value()), 20);
   EXPECT_FALSE(multi_results[1][2].has_value());  // doc3 has no "size"
 
   // Verify single-column retrieval matches

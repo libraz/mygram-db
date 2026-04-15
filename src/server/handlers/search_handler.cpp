@@ -37,11 +37,14 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   }
 
   // Get table context (needed for both cache lookup and search)
-  std::string error = GetTableContext(query.table, &output.current_index, &output.current_doc_store,
-                                      &output.current_ngram_size, &output.current_kanji_ngram_size);
-  if (!error.empty()) {
-    return error;
+  auto table_ctx = GetTableContext(query.table);
+  if (!table_ctx) {
+    return ResponseFormatter::FormatError(table_ctx.error().message());
   }
+  output.current_index = table_ctx->index;
+  output.current_doc_store = table_ctx->doc_store;
+  output.current_ngram_size = table_ctx->ngram_size;
+  output.current_kanji_ngram_size = table_ctx->kanji_ngram_size;
 
   // Verify index is available
   if (output.current_index == nullptr) {

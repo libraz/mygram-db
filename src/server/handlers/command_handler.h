@@ -17,6 +17,8 @@
 #include "server/server_stats.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
@@ -55,16 +57,21 @@ class CommandHandler {
   HandlerContext& ctx_;  // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
 
   /**
+   * @brief Result of GetTableContext lookup
+   */
+  struct TableContextResult {
+    index::Index* index = nullptr;
+    storage::DocumentStore* doc_store = nullptr;
+    int ngram_size = 0;
+    int kanji_ngram_size = 0;
+  };
+
+  /**
    * @brief Get table context for a query
    * @param table_name Table name
-   * @param index Output pointer to index
-   * @param doc_store Output pointer to document store
-   * @param ngram_size Output n-gram size
-   * @param kanji_ngram_size Output kanji n-gram size
-   * @return Error message if table not found, empty string otherwise
+   * @return Table context result or error
    */
-  std::string GetTableContext(const std::string& table_name, index::Index** index, storage::DocumentStore** doc_store,
-                              int* ngram_size, int* kanji_ngram_size);
+  mygram::utils::Expected<TableContextResult, mygram::utils::Error> GetTableContext(const std::string& table_name);
 };
 
 }  // namespace mygramdb::server

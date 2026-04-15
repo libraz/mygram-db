@@ -27,16 +27,15 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   }
 
   // Get table context
-  index::Index* current_index = nullptr;
-  storage::DocumentStore* current_doc_store = nullptr;
-  int ngram_size = 0;
-  int kanji_ngram_size = 0;
-  std::string error = GetTableContext(query.table, &current_index, &current_doc_store, &ngram_size, &kanji_ngram_size);
-  if (!error.empty()) {
-    return error;
+  auto table_ctx = GetTableContext(query.table);
+  if (!table_ctx) {
+    return ResponseFormatter::FormatError(table_ctx.error().message());
   }
+  auto* current_index = table_ctx->index;
+  auto* current_doc_store = table_ctx->doc_store;
+  int ngram_size = table_ctx->ngram_size;
+  int kanji_ngram_size = table_ctx->kanji_ngram_size;
 
-  // BUG-3: Null check after GetTableContext
   if (current_doc_store == nullptr) {
     return ResponseFormatter::FormatError("Document store not available");
   }

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 
 #include "config/config_help.h"
 #include "server/statistics_service.h"
@@ -137,6 +138,22 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     }
   }
 
+  // Security: verify the file is a regular file (not a symlink or device)
+  // to prevent reading arbitrary system files via CONFIG VERIFY.
+  {
+    std::error_code ec;
+    auto file_status = std::filesystem::symlink_status(filepath, ec);
+    if (ec || !std::filesystem::exists(file_status)) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+    }
+    if (file_status.type() == std::filesystem::file_type::symlink) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+    }
+    if (!std::filesystem::is_regular_file(file_status)) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file");
+    }
+  }
+
   // Try to load and validate the configuration file
   auto config_result = config::LoadConfig(filepath);
   if (!config_result) {
@@ -167,8 +184,8 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     summary << ")";
   }
   summary << "\r\n";
-  // Intentionally omit mysql.user to prevent credential disclosure via TCP.
-  // CONFIG VERIFY is accessible to all authenticated clients.
+  // Intentionally omit mysql.user and mysql.password to prevent credential
+  // disclosure via TCP. CONFIG VERIFY is accessible to all authenticated clients.
   summary << "  MySQL: " << test_config.mysql.host << ":" << test_config.mysql.port << "\r\n";
 
   return "+OK\r\n" + summary.str();

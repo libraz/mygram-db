@@ -58,6 +58,11 @@ class IBinlogReader {
 
   /**
    * @brief Get last error message
+   *
+   * NOTE: This method provides diagnostic error messages for logging purposes.
+   * Error propagation for control flow should use Expected<T, Error> (e.g., from
+   * Start()). This method is retained because it is widely used in reconnection
+   * and thread management logging throughout the binlog reader implementation.
    */
   virtual std::string GetLastError() const = 0;
 

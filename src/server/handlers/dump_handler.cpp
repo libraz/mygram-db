@@ -41,8 +41,11 @@ mygram::utils::Expected<std::string, mygram::utils::Error> DumpHandler::ResolveD
   }
   // Canonicalize path and validate it's within dump_dir
   try {
-    std::filesystem::path canonical = std::filesystem::weakly_canonical(filepath);
-    std::filesystem::path dump_canonical = std::filesystem::weakly_canonical(dump_dir);
+    // Use canonical() for existing paths to fully resolve symlinks;
+    // fall back to weakly_canonical() for new files (e.g., DUMP SAVE targets).
+    std::filesystem::path canonical = std::filesystem::exists(filepath) ? std::filesystem::canonical(filepath)
+                                                                        : std::filesystem::weakly_canonical(filepath);
+    std::filesystem::path dump_canonical = std::filesystem::canonical(dump_dir);
     auto rel = canonical.lexically_relative(dump_canonical);
     if (rel.empty() || *rel.begin() == std::filesystem::path("..")) {
       return mygram::utils::MakeUnexpected(
@@ -159,7 +162,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     ctx_.dump_progress->JoinWorker();
     ctx_.dump_progress->Reset(DumpStatus::SAVING, filepath, ctx_.table_catalog->GetTables().size());
 
-    // Start background worker thread
+    // Start background worker thread.
+    // NOTE: flag_guard.Release() is intentionally AFTER thread creation.
+    // If make_unique<thread> throws, the guard auto-resets the flag.
     ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
 
     // Thread created successfully - the worker thread now owns the flag cleanup
@@ -438,14 +443,15 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       ctx_.cache_manager->Clear();
     }
 
-    // Rebuild BM25 corpus statistics from loaded documents
+    // Rebuild BM25 corpus statistics from loaded documents.
+    // Use batch API to minimize per-document lock acquisitions.
     for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
       if (table_ctx->doc_store) {
         auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
+        auto all_texts = table_ctx->doc_store->GetNormalizedTextBatch(all_doc_ids);
         uint64_t total_length = 0;
         uint64_t doc_count = 0;
-        for (auto doc_id : all_doc_ids) {
-          auto text_opt = table_ctx->doc_store->GetNormalizedText(doc_id);
+        for (const auto& text_opt : all_texts) {
           if (text_opt.has_value() && !text_opt->empty()) {
             total_length += mygram::utils::CountCodePoints(*text_opt);
             ++doc_count;

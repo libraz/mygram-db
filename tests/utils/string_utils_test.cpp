@@ -1028,12 +1028,12 @@ TEST(StringUtilsTest, Utf8ToCodepointsBufferExactFit) {
 }
 
 /**
- * @brief Test buffer overload returns 0 when text exceeds capacity
+ * @brief Test buffer overload returns SIZE_MAX when text exceeds capacity
  */
 TEST(StringUtilsTest, Utf8ToCodepointsBufferOverflow) {
   uint32_t buffer[2];
   size_t count = Utf8ToCodepoints("abc", buffer, 2);
-  EXPECT_EQ(count, 0);  // Buffer too small, should return 0
+  EXPECT_EQ(count, SIZE_MAX);  // Buffer too small, should return SIZE_MAX
 }
 
 /**
@@ -1084,12 +1084,12 @@ TEST(StringUtilsTest, Utf8ToCodepointsBufferMixed) {
 /**
  * @brief Test buffer overload overflow with multi-byte characters
  *
- * 3 codepoints but buffer capacity is 2 -- should return 0.
+ * 3 codepoints but buffer capacity is 2 -- should return SIZE_MAX.
  */
 TEST(StringUtilsTest, Utf8ToCodepointsBufferMultiByteOverflow) {
   uint32_t buffer[2];
   size_t count = Utf8ToCodepoints("あいう", buffer, 2);
-  EXPECT_EQ(count, 0);  // 3 codepoints > capacity 2
+  EXPECT_EQ(count, SIZE_MAX);  // 3 codepoints > capacity 2
 }
 
 /**

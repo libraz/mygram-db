@@ -236,9 +236,11 @@ bool PostingList::Contains(DocId doc_id) const {
     // it avoids vector allocation and exits early when target is passed.
     // Since delta values are non-negative and cumulative is monotonically
     // increasing, we can stop as soon as cumulative exceeds doc_id.
-    DocId cumulative = 0;
-    for (DocId delta : delta_compressed_) {
-      cumulative += delta;
+    // Start from index 1 since delta_compressed_[0] (first doc_id) was already
+    // checked in the quick check above.
+    DocId cumulative = delta_compressed_[0];
+    for (size_t i = 1; i < delta_compressed_.size(); ++i) {
+      cumulative += delta_compressed_[i];
       if (cumulative == doc_id) {
         return true;
       }
