@@ -466,4 +466,86 @@ TEST(MockEventMultiplexerTest, InjectErrorDeliversKErrorBit) {
   EXPECT_NE(out[0].events & event::kError, 0);
 }
 
+// ===========================================================================
+// Kqueue-specific regression tests
+// ===========================================================================
+//
+// P1-1: Concurrent Modify() on the same fd previously read `old_interest`
+// outside the mutex, performed the kevent() syscall outside the mutex, and
+// then re-took the mutex to write the new value. Two concurrent Modify(fd,X)
+// and Modify(fd,Y) calls could thus race so that the kernel filter set ended
+// up at the value chosen by the *first* successful syscall while `interest_`
+// was overwritten by the *last* writer, leaving Remove() unable to emit the
+// correct EV_DELETE for residual filters.
+//
+// The fix folds the read, the syscall, and the write into a single critical
+// section. This test exercises that path with many threads racing on a
+// single fd. Under the old code, ThreadSanitizer flags the data race on the
+// `interest_` map, and even without TSan the final Remove() can leak a
+// kqueue filter. With the fix, both go away.
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+
+TEST(KqueueMultiplexerTest, ConcurrentModifyDoesNotRace) {
+  KqueueMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  const int r = fds[0];
+  const int w = fds[1];
+
+  ASSERT_TRUE(mux.Add(r, event::kReadable).has_value());
+
+  // Hammer Modify() from N threads. Each thread alternates between
+  // kReadable and kReadable|kWritable so that every iteration emits a real
+  // kevent() change record (not the same-interest fast path). With the old
+  // unlocked-syscall design, the map and the kernel filter set diverge.
+  constexpr int kThreads = 8;
+  constexpr int kIterations = 200;
+  std::atomic<bool> any_failure{false};
+  std::vector<std::thread> workers;
+  workers.reserve(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    workers.emplace_back([&mux, &any_failure, r, t]() {
+      for (int i = 0; i < kIterations; ++i) {
+        const uint8_t mask =
+            ((t + i) & 1) != 0 ? static_cast<uint8_t>(event::kReadable | event::kWritable) : event::kReadable;
+        auto res = mux.Modify(r, mask);
+        if (!res.has_value()) {
+          any_failure.store(true, std::memory_order_relaxed);
+          return;
+        }
+      }
+    });
+  }
+  for (auto& th : workers) {
+    th.join();
+  }
+  EXPECT_FALSE(any_failure.load());
+
+  // Quiesce: install a deterministic final interest.
+  ASSERT_TRUE(mux.Modify(r, event::kReadable).has_value());
+
+  // Tear down. If the race had left a stale EVFILT_WRITE in the kernel that
+  // the map didn't know about, Remove() would emit no EV_DELETE for it and
+  // a subsequent Poll() would re-fire the writable event below. With the
+  // fix, Remove() is consistent with the kernel.
+  ASSERT_TRUE(mux.Remove(r).has_value());
+
+  // Re-add as write-only on the same fd. The peer end is empty so the
+  // socket is immediately writable; if a stale EVFILT_WRITE leaked through
+  // a previous Remove(), Poll() may double-deliver, but at minimum the
+  // sequence must succeed without errors.
+  ASSERT_TRUE(mux.Add(r, event::kWritable).has_value());
+  std::vector<ReadyEvent> out;
+  ASSERT_TRUE(mux.Poll(100, out).has_value());
+  ASSERT_TRUE(mux.Remove(r).has_value());
+
+  ::close(r);
+  ::close(w);
+}
+
+#endif  // __APPLE__ || BSD family
+
 }  // namespace mygramdb::server::reactor

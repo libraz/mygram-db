@@ -173,7 +173,11 @@ class ConnectionAcceptor {
   ServerConfig config_;
   ReactorHandler reactor_handler_;
 
-  int server_fd_ = -1;
+  // The listening socket fd. Atomic because Stop() (called from any thread)
+  // closes the fd and resets it to -1 to unblock the accept loop, which is
+  // concurrently reading the same field on the accept thread. A plain int
+  // would race under the C++ memory model.
+  std::atomic<int> server_fd_{-1};
   uint16_t actual_port_ = 0;
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};

@@ -106,9 +106,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       }
     }
 
-    // Create socket
-    server_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server_fd_ < 0) {
+    // Create socket. We construct the fd in a local first and only publish it
+    // to the atomic member once it is fully bound/listened, so the accept
+    // thread (which has not yet been spawned) can never observe a half-baked
+    // value. Note that the accept thread doesn't exist until StartAccepting()
+    // anyway; the atomic discipline matters for the Stop()/AcceptLoop pair.
+    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sfd < 0) {
       auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed,
                              "Failed to create unix socket: " + std::string(strerror(errno)));
       mygram::utils::StructuredLog()
@@ -125,9 +129,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     // Safe: path length already validated above (< sizeof(sun_path)), struct is zero-initialized
     std::memcpy(bind_addr.sun_path, config_.unix_socket_path.c_str(), config_.unix_socket_path.size());
 
-    if (bind(server_fd_, ToSockaddrUn(&bind_addr), sizeof(bind_addr)) < 0) {
-      close(server_fd_);
-      server_fd_ = -1;
+    if (bind(sfd, ToSockaddrUn(&bind_addr), sizeof(bind_addr)) < 0) {
+      close(sfd);
       auto error = MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind unix socket " + config_.unix_socket_path +
                                                                 ": " + std::string(strerror(errno)));
       mygram::utils::StructuredLog()
@@ -141,8 +144,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
 
     // Set socket permissions (owner + group access)
     if (chmod(config_.unix_socket_path.c_str(), 0770) < 0) {
-      close(server_fd_);
-      server_fd_ = -1;
+      close(sfd);
       unlink(config_.unix_socket_path.c_str());
       auto error = MakeError(ErrorCode::kNetworkBindFailed,
                              "Failed to set unix socket permissions: " + std::string(strerror(errno)));
@@ -156,9 +158,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     }
 
     // Listen
-    if (listen(server_fd_, config_.max_connections) < 0) {
-      close(server_fd_);
-      server_fd_ = -1;
+    if (listen(sfd, config_.max_connections) < 0) {
+      close(sfd);
       unlink(config_.unix_socket_path.c_str());
       auto error = MakeError(ErrorCode::kNetworkListenFailed,
                              "Failed to listen on unix socket: " + std::string(strerror(errno)));
@@ -169,6 +170,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
           .Error();
       return MakeUnexpected(error);
     }
+
+    // Publish the fully-prepared listening fd. Release-store pairs with the
+    // acquire-load in AcceptLoop / Stop.
+    server_fd_.store(sfd, std::memory_order_release);
 
     actual_port_ = 0;
     should_stop_.store(false, std::memory_order_relaxed);
@@ -187,9 +192,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
 
   // === TCP mode (existing code below unchanged) ===
 
-  // Create socket
-  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd_ < 0) {
+  // Create socket. As in the UDS branch, build the fd in a local and only
+  // publish to the atomic member after listen() succeeds.
+  int sfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sfd < 0) {
     auto error =
         MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to create socket: " + std::string(strerror(errno)));
     mygram::utils::StructuredLog()
@@ -201,9 +207,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   }
 
   // Set socket options
-  if (!SetSocketOptions(server_fd_)) {
-    close(server_fd_);
-    server_fd_ = -1;
+  if (!SetSocketOptions(sfd)) {
+    close(sfd);
     auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to set socket options");
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -225,8 +230,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     bind_addr.s_addr = INADDR_ANY;
   } else {
     if (inet_pton(AF_INET, config_.host.c_str(), &bind_addr) != 1) {
-      close(server_fd_);
-      server_fd_ = -1;
+      close(sfd);
       auto error = MakeError(ErrorCode::kNetworkInvalidBindAddress, "Invalid bind address: " + config_.host);
       mygram::utils::StructuredLog()
           .Event("server_error")
@@ -239,9 +243,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   }
   address.sin_addr = bind_addr;
 
-  if (bind(server_fd_, ToSockaddr(&address), sizeof(address)) < 0) {
-    close(server_fd_);
-    server_fd_ = -1;
+  if (bind(sfd, ToSockaddr(&address), sizeof(address)) < 0) {
+    close(sfd);
     auto error = MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind to port " + std::to_string(config_.port) +
                                                               ": " + std::string(strerror(errno)));
     mygram::utils::StructuredLog()
@@ -256,7 +259,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   // Get actual port if port 0 was specified
   if (config_.port == 0) {
     socklen_t addr_len = sizeof(address);
-    if (getsockname(server_fd_, ToSockaddr(&address), &addr_len) == 0) {
+    if (getsockname(sfd, ToSockaddr(&address), &addr_len) == 0) {
       actual_port_ = ntohs(address.sin_port);
     }
   } else {
@@ -264,9 +267,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   }
 
   // Listen
-  if (listen(server_fd_, config_.max_connections) < 0) {
-    close(server_fd_);
-    server_fd_ = -1;
+  if (listen(sfd, config_.max_connections) < 0) {
+    close(sfd);
     auto error = MakeError(ErrorCode::kNetworkListenFailed, "Failed to listen: " + std::string(strerror(errno)));
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -275,6 +277,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
         .Error();
     return MakeUnexpected(error);
   }
+
+  // Publish the fully-prepared listening fd. Release-store pairs with the
+  // acquire-load in AcceptLoop / Stop.
+  server_fd_.store(sfd, std::memory_order_release);
 
   should_stop_.store(false, std::memory_order_relaxed);
   running_.store(true, std::memory_order_release);
@@ -355,11 +361,14 @@ void ConnectionAcceptor::Stop() {
   mygram::utils::StructuredLog().Event("connection_acceptor_stopping").Debug();
   should_stop_.store(true, std::memory_order_release);
 
-  // Close server socket to unblock accept()
-  if (server_fd_ >= 0) {
-    shutdown(server_fd_, SHUT_RDWR);
-    close(server_fd_);
-    server_fd_ = -1;
+  // Close server socket to unblock accept(). Atomically swap the fd out so
+  // the accept thread cannot re-use it after we close. Using exchange avoids
+  // a load+store race where the accept thread observes the original fd
+  // between our load and store.
+  const int sfd = server_fd_.exchange(-1, std::memory_order_acq_rel);
+  if (sfd >= 0) {
+    shutdown(sfd, SHUT_RDWR);
+    close(sfd);
   }
 
   // Wait for accept thread to finish (if StartAccepting() ever ran).
@@ -407,15 +416,24 @@ void ConnectionAcceptor::AcceptLoop() {
   }
 
   while (!should_stop_) {
+    // Snapshot the listening fd into a local before each accept() call. If
+    // Stop() concurrently swaps the atomic to -1 and closes the fd, we will
+    // either see the old fd (and accept() will fail with EBADF, which we
+    // handle below) or see -1 (in which case accept() returns EBADF too).
+    // Either way the should_stop_ check on the next iteration breaks us out.
+    const int sfd = server_fd_.load(std::memory_order_acquire);
+    if (sfd < 0) {
+      break;
+    }
     int client_fd = -1;
     if (IsUnixSocket()) {
       struct sockaddr_un client_addr_un {};
       socklen_t client_len_un = sizeof(client_addr_un);
-      client_fd = accept(server_fd_, ToSockaddrUn(&client_addr_un), &client_len_un);
+      client_fd = accept(sfd, ToSockaddrUn(&client_addr_un), &client_len_un);
     } else {
       struct sockaddr_in client_addr {};
       socklen_t client_len = sizeof(client_addr);
-      client_fd = accept(server_fd_, ToSockaddr(&client_addr), &client_len);
+      client_fd = accept(sfd, ToSockaddr(&client_addr), &client_len);
     }
 
     if (client_fd < 0) {

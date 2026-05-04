@@ -160,14 +160,18 @@ Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest) {
                                     "KqueueMultiplexer::Add called before Open", "fd=" + std::to_string(fd)));
   }
 
+  // Hold interest_mutex_ across both the kevent() syscall and the map update
+  // so the in-memory `interest_` view never diverges from the kernel's filter
+  // set. ApplyInterest() does not take any other mutex (verified), so there
+  // is no lock-order cycle. The syscall is short and only happens on
+  // connection register / arm-write / disarm-write paths, which are well
+  // outside the steady-state hot loop.
+  std::lock_guard<std::mutex> lock(interest_mutex_);
   auto result = ApplyInterest(fd, interest, /*old_interest=*/0U, /*is_add=*/true);
   if (!result.has_value()) {
     return result;
   }
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    interest_[fd] = interest;
-  }
+  interest_[fd] = interest;
   return {};
 }
 
@@ -177,43 +181,49 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest) {
                                     "KqueueMultiplexer::Modify called before Open", "fd=" + std::to_string(fd)));
   }
 
-  uint8_t old_interest = 0;
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    const auto it = interest_.find(fd);
-    if (it == interest_.end()) {
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
-                                      "KqueueMultiplexer::Modify called with unknown fd", "fd=" + std::to_string(fd)));
-    }
-    old_interest = it->second;
+  // Hold interest_mutex_ across the read of the previous interest, the
+  // kevent() diff syscall, and the in-memory write. Previously the syscall
+  // happened outside the lock, which let two concurrent Modify(fd, ...)
+  // callers each compute their delta from the same `old_interest` snapshot
+  // and race to publish their result, leaving `interest_` and the kernel
+  // filter set divergent. The race manifested at Remove() time as residual
+  // EVFILT_WRITE filters (see P1-1).
+  std::lock_guard<std::mutex> lock(interest_mutex_);
+  const auto it = interest_.find(fd);
+  if (it == interest_.end()) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
+                                    "KqueueMultiplexer::Modify called with unknown fd", "fd=" + std::to_string(fd)));
+  }
+  const uint8_t old_interest = it->second;
+  if (old_interest == interest) {
+    // Fast path: caller asked for the already-installed interest set, no
+    // syscall needed and no map update needed.
+    return {};
   }
 
   auto result = ApplyInterest(fd, interest, old_interest, /*is_add=*/false);
   if (!result.has_value()) {
+    // Leave `interest_` untouched on failure: the kernel state is what
+    // ApplyInterest tried (and failed) to install, and we don't know how
+    // much of the change list went through. Callers treat this as fatal.
     return result;
   }
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    interest_[fd] = interest;
-  }
+  it->second = interest;
   return {};
 }
 
 Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
-  // Drop our interest-tracking entry before touching the kernel state, so
-  // that even if the kevent teardown syscall below races with connection
-  // close we leave the map consistent.
-  uint8_t old_interest = 0;
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    const auto it = interest_.find(fd);
-    if (it == interest_.end()) {
-      // Idempotent: never-added or already-removed fds are a no-op success.
-      return {};
-    }
-    old_interest = it->second;
-    interest_.erase(it);
+  // Hold the lock across the kevent() teardown so that nothing else can
+  // re-register the fd in between erasing from `interest_` and clearing the
+  // kernel filters. This matches the new locking discipline in Add/Modify.
+  std::lock_guard<std::mutex> lock(interest_mutex_);
+  const auto it = interest_.find(fd);
+  if (it == interest_.end()) {
+    // Idempotent: never-added or already-removed fds are a no-op success.
+    return {};
   }
+  const uint8_t old_interest = it->second;
+  interest_.erase(it);
 
   if (kqueue_fd_ < 0) {
     // Multiplexer already torn down; nothing to unregister.
