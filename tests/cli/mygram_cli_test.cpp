@@ -88,10 +88,6 @@ TEST_F(CliConstantsTest, PrefixLengthsMatchProtocol) {
   EXPECT_EQ(kErrorPrefixLength, std::string("ERROR ").length());
   EXPECT_EQ(kOkSavedPrefixLength, std::string("OK SAVED ").length());
   EXPECT_EQ(kOkLoadedPrefixLength, std::string("OK LOADED ").length());
-  // INFO: skips "OK INFO\r" leaving "\n..." (8 of 9 bytes)
-  EXPECT_EQ(kOkInfoPrefixLength, std::string("OK INFO\r\n").length() - 1);
-  // REPLICATION: skips "OK REPLICATION\r" leaving "\n..." (15 of 16 bytes)
-  EXPECT_EQ(kOkReplicationPrefixLength, std::string("OK REPLICATION\r\n").length() - 1);
 }
 
 TEST_F(CliConstantsTest, MaxWaitReadyRetries) {
@@ -150,15 +146,16 @@ TEST_F(CliStringHelperTest, QuoteArgIfNeeded) {
   EXPECT_EQ(QuoteArgIfNeeded(""), "\"\"");
   // Control characters get stripped (consistent with client lib's
   // EscapeQueryString — prevents protocol injection via embedded \r\n).
-  EXPECT_EQ(QuoteArgIfNeeded("a\x01" "b"), "\"ab\"");
+  EXPECT_EQ(QuoteArgIfNeeded("a\x01"
+                             "b"),
+            "\"ab\"");
   EXPECT_EQ(QuoteArgIfNeeded("with\ttab"), "\"withtab\"");
   EXPECT_EQ(QuoteArgIfNeeded("with\nnewline"), "\"withnewline\"");
 }
 
 TEST_F(CliStringHelperTest, JoinArgsForCommand) {
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello"}), "SEARCH articles hello");
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}),
-            "SEARCH articles \"hello world\"");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles \"hello world\"");
   EXPECT_EQ(JoinArgsForCommand({}), "");
   EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
 }
@@ -358,26 +355,13 @@ TEST_F(CliPrintResponseTest, ReplicationStartedShortForm) {
 // (previously fell through to "Unknown response" passthrough)
 // =============================================================================
 
-TEST_F(CliPrintResponseTest, ConfigResponsePrintsBody) {
-  StdoutCapture capture;
-  MygramClient::PrintResponse(
-      "OK CONFIG\r\n  mysql:\r\n    host: localhost\r\n    port: 3306\r\n  runtime:\r\n    "
-      "uptime: 42s");
-  std::string output = capture.GetOutput();
-
-  EXPECT_EQ(output.find('\r'), std::string::npos);
-  EXPECT_NE(output.find("mysql:"), std::string::npos);
-  EXPECT_NE(output.find("host: localhost"), std::string::npos);
-  EXPECT_NE(output.find("uptime: 42s"), std::string::npos);
-  // Should NOT print as "Unknown response" passthrough (no "OK CONFIG" header
-  // line on its own with leading "OK ")
-  EXPECT_EQ(output.find("OK CONFIG"), std::string::npos);
-}
+// CONFIG SHOW emits "+OK\r\n<body>\r\n\r\n" (handled by the +OK branch); the
+// server never emits a literal "OK CONFIG" prefix, so there is no
+// dedicated PrintResponse case to test here.
 
 TEST_F(CliPrintResponseTest, CacheStatsResponseNormalizesAndStripsEnd) {
   StdoutCapture capture;
-  MygramClient::PrintResponse(
-      "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\ntotal_queries: 100\r\nEND");
+  MygramClient::PrintResponse("OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\ntotal_queries: 100\r\nEND");
   std::string output = capture.GetOutput();
 
   EXPECT_EQ(output.find('\r'), std::string::npos);
@@ -443,8 +427,7 @@ TEST_F(CliPrintResponseTest, DumpStartedShortForm) {
 
 TEST_F(CliPrintResponseTest, DumpInfoMultiLine) {
   StdoutCapture capture;
-  MygramClient::PrintResponse(
-      "OK DUMP_INFO /tmp/dump.bin\r\nversion: 2\r\ntables: 5\r\nfile_size: 12345\r\nEND");
+  MygramClient::PrintResponse("OK DUMP_INFO /tmp/dump.bin\r\nversion: 2\r\ntables: 5\r\nfile_size: 12345\r\nEND");
   std::string output = capture.GetOutput();
 
   EXPECT_EQ(output.find('\r'), std::string::npos);
@@ -771,20 +754,17 @@ TEST_F(CliArgumentParsingTest, VersionFlagExits) {
 class CliJoinArgsTest : public ::testing::Test {};
 
 TEST_F(CliJoinArgsTest, PreservesSimpleArgs) {
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello", "world"}),
-            "SEARCH articles hello world");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello", "world"}), "SEARCH articles hello world");
 }
 
 TEST_F(CliJoinArgsTest, QuotesSpaceContainingArgs) {
   // The old CLI just space-joined argv: "hello world" -> 2 tokens on the wire.
   // With proper quoting, it stays a single token.
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}),
-            "SEARCH articles \"hello world\"");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles \"hello world\"");
 }
 
 TEST_F(CliJoinArgsTest, EscapesEmbeddedQuotes) {
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "say \"hi\""}),
-            "SEARCH articles \"say \\\"hi\\\"\"");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "say \"hi\""}), "SEARCH articles \"say \\\"hi\\\"\"");
 }
 
 }  // namespace

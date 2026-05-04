@@ -52,8 +52,6 @@ namespace proto = mygramdb::server::protocol;
 constexpr size_t kErrorPrefixLength = proto::kErrorPrefixLen;
 constexpr size_t kOkSavedPrefixLength = proto::kOkSavedPrefixLen;
 constexpr size_t kOkLoadedPrefixLength = proto::kOkLoadedPrefixLen;
-[[maybe_unused]] constexpr size_t kOkInfoPrefixLength = proto::kOkInfoPrefixLen;
-[[maybe_unused]] constexpr size_t kOkReplicationPrefixLength = proto::kOkReplicationPrefixLen;
 
 // CLI behavior constants
 constexpr int kMaxWaitReadyRetries = 100;          // ~5 minutes at 3s interval
@@ -189,9 +187,8 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
 #ifdef USE_READLINE
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-const char* command_list[] = {"SEARCH", "COUNT",       "GET",   "INFO",  "CONFIG", "SAVE",  "LOAD",
-                              "FACET",  "REPLICATION", "DEBUG", "CACHE", "DUMP",   "SYNC",  "OPTIMIZE",
-                              "quit",   "exit",        "help",  nullptr};
+const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO", "CONFIG",   "SAVE", "LOAD", "FACET", "REPLICATION",
+                              "DEBUG",  "CACHE", "DUMP", "SYNC", "OPTIMIZE", "quit", "exit", "help",  nullptr};
 
 char* CommandGenerator(const char* text, int state) {
   static int list_index;
@@ -347,7 +344,9 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
   if (command == "DEBUG") {
     if (token_count == 1) {
-      current_keywords = {"ON", "OFF", "OPTIMIZE"};
+      // DEBUG accepts ON/OFF subcommands. OPTIMIZE is a separate top-level
+      // command (handled by query_parser) and was incorrectly listed here.
+      current_keywords = {"ON", "OFF"};
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     return nullptr;
@@ -537,8 +536,7 @@ class MygramClient {
                "\nTry reconnecting to check if the server is still running.";
       case ErrorCode::kClientCommandFailed: {
         const std::string& message = err.message();
-        if (message.find("Broken pipe") != std::string::npos ||
-            message.find("Connection reset") != std::string::npos) {
+        if (message.find("Broken pipe") != std::string::npos || message.find("Connection reset") != std::string::npos) {
           return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may "
                  "have crashed or been shut down.";
         }
@@ -576,7 +574,7 @@ class MygramClient {
 
 #ifdef USE_READLINE
       std::string prompt = config_.socket_path.empty() ? config_.host + ":" + std::to_string(config_.port) + "> "
-                                                        : config_.socket_path + "> ";
+                                                       : config_.socket_path + "> ";
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       char* raw_input = readline(prompt.c_str());
       if (raw_input == nullptr) {
@@ -685,10 +683,10 @@ class MygramClient {
       return;
     }
     if (StartsWith(response, "OK INFO") || StartsWith(response, "OK REPLICATION") ||
-        StartsWith(response, "OK CONFIG") || StartsWith(response, "OK CACHE_STATS") ||
-        StartsWith(response, "OK DUMP_STATUS")) {
+        StartsWith(response, "OK CACHE_STATS") || StartsWith(response, "OK DUMP_STATUS")) {
       // Multi-line responses with potential trailing END marker.
       // Strip leading status line + normalize CRLF + strip END.
+      // Note: CONFIG SHOW emits "+OK\r\n..." (handled below), not "OK CONFIG".
       std::cout << FormatMultiLineBody(response) << '\n';
       return;
     }
@@ -747,9 +745,7 @@ class MygramClient {
    * @brief Detect commands that should not be added to readline history
    *        (no point storing 'help', 'quit', empty lines, etc.).
    */
-  static bool IsTrivialCommand(const std::string& line) {
-    return line == "help" || line == "quit" || line == "exit";
-  }
+  static bool IsTrivialCommand(const std::string& line) { return line == "help" || line == "quit" || line == "exit"; }
 
   /**
    * @brief Print a response of the form
@@ -811,6 +807,7 @@ class MygramClient {
               << "  FACET <table> <column> [WHERE <text>]   - Compute facet counts\n"
               << "  REPLICATION STATUS|STOP|START\n"
               << "  DEBUG ON|OFF      - Toggle per-connection debug output\n"
+              << "  OPTIMIZE [table]  - Compact posting lists for one or all tables\n"
               << "  CACHE STATS|CLEAR|ENABLE|DISABLE\n"
               << "  DUMP SAVE|VERIFY|INFO|STATUS\n"
               << "  SYNC START|STOP|STATUS\n"
@@ -849,10 +846,8 @@ class MygramClient {
   static void PrintSearchOrCountResponse(const std::string& response, bool is_search) {
     // The response may contain a DEBUG block separated by "\r\n\r\n".
     size_t debug_separator = response.find("\r\n\r\n");
-    std::string main_response =
-        (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
-    std::string debug_section =
-        (debug_separator != std::string::npos) ? response.substr(debug_separator + 4) : "";
+    std::string main_response = (debug_separator != std::string::npos) ? response.substr(0, debug_separator) : response;
+    std::string debug_section = (debug_separator != std::string::npos) ? response.substr(debug_separator + 4) : "";
 
     std::istringstream iss(main_response);
     std::string status;
