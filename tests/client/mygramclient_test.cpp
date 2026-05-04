@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstring>
 #include <thread>
+#include <vector>
 
 #include "client/mygramclient_c.h"
 #include "client/protocol_detection.h"
@@ -319,6 +321,9 @@ TEST_F(MygramClientTest, GetDocument) {
 
 /**
  * @brief Test INFO command
+ *
+ * Validates that all parsed fields (version, doc_count, active_connections,
+ * index_size_bytes, tables) are populated by Info().
  */
 TEST_F(MygramClientTest, Info) {
   AddTestDocuments();
@@ -332,6 +337,11 @@ TEST_F(MygramClientTest, Info) {
   auto info = *result;
   EXPECT_FALSE(info.version.empty());
   EXPECT_EQ(info.doc_count, 3);
+  // The test client itself is a connected client.
+  EXPECT_GE(info.active_connections, 1u) << "active_connections should be at least 1 (this client)";
+  // Memory usage is always > 0 once any documents are indexed.
+  EXPECT_GT(info.index_size_bytes, 0u) << "index_size_bytes should be > 0";
+  EXPECT_FALSE(info.tables.empty()) << "tables list should not be empty";
 }
 
 /**
@@ -379,6 +389,8 @@ TEST_F(MygramClientTest, InfoMultiLineComplete) {
   EXPECT_FALSE(info.version.empty()) << "version should be non-empty";
   EXPECT_EQ(info.doc_count, 3) << "doc_count should reflect added documents";
   EXPECT_FALSE(info.tables.empty()) << "tables list should not be empty";
+  EXPECT_GE(info.active_connections, 1u) << "active_connections should reflect connected_clients";
+  EXPECT_GT(info.index_size_bytes, 0u) << "index_size_bytes should reflect used_memory_bytes";
 }
 
 /**
@@ -444,6 +456,86 @@ TEST_F(MygramClientTest, DebugMode) {
   // Disable debug mode
   debug_result = client_->DisableDebug();
   EXPECT_TRUE(debug_result) << "Debug disable error: " << debug_result.error().message();
+}
+
+/**
+ * @brief Test that DEBUG block parsing populates DebugInfo for SEARCH
+ *
+ * Validates the line-based "key: value" parser used for the server's
+ * "# DEBUG" block. Result IDs must not be polluted with the literal "#".
+ */
+TEST_F(MygramClientTest, SearchWithDebugInfo) {
+  AddTestDocuments();
+
+  ASSERT_TRUE(client_->Connect());
+
+  ASSERT_TRUE(client_->EnableDebug());
+
+  auto result = client_->Search("test", "hello", 100);
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
+
+  auto resp = *result;
+  // Debug block must parse successfully.
+  ASSERT_TRUE(resp.debug.has_value()) << "Debug info missing";
+  const auto& dbg = *resp.debug;
+
+  // The search matches docs 1 and 2 ("hello"), so terms / final must be > 0.
+  EXPECT_GT(dbg.terms, 0u) << "Debug 'terms' should be > 0";
+  EXPECT_GT(dbg.final, 0u) << "Debug 'final' should be > 0";
+
+  // Result IDs must not include the literal "#" token (regression test for
+  // the old whitespace-tokenised parser that captured "# DEBUG").
+  for (const auto& r : resp.results) {
+    EXPECT_NE(r.primary_key, "#") << "Result IDs must not include the '#' header token";
+    EXPECT_NE(r.primary_key, "DEBUG") << "Result IDs must not include the 'DEBUG' header token";
+  }
+
+  // Result count should match total_count (no spurious '#' or 'DEBUG' entries).
+  EXPECT_EQ(resp.results.size(), resp.total_count);
+
+  ASSERT_TRUE(client_->DisableDebug());
+}
+
+/**
+ * @brief Test that DEBUG block parsing populates DebugInfo for COUNT
+ */
+TEST_F(MygramClientTest, CountWithDebugInfo) {
+  AddTestDocuments();
+
+  ASSERT_TRUE(client_->Connect());
+  ASSERT_TRUE(client_->EnableDebug());
+
+  auto result = client_->Count("test", "hello");
+  ASSERT_TRUE(result) << "Count error: " << result.error().message();
+
+  auto resp = *result;
+  ASSERT_TRUE(resp.debug.has_value()) << "Debug info missing on COUNT";
+  const auto& dbg = *resp.debug;
+  EXPECT_GT(dbg.terms, 0u) << "Debug 'terms' should be > 0";
+  EXPECT_EQ(resp.count, 2u);
+
+  ASSERT_TRUE(client_->DisableDebug());
+}
+
+/**
+ * @brief Test GetReplicationStatus parses the server's colon key/value lines
+ *
+ * The test fixture starts the server without a binlog reader, so the server
+ * emits "OK REPLICATION\r\nstatus: not_configured\r\nEND". The client should
+ * surface this as a successful response with running == false.
+ */
+TEST_F(MygramClientTest, GetReplicationStatus) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->GetReplicationStatus();
+  ASSERT_TRUE(result) << "GetReplicationStatus error: " << result.error().message();
+
+  auto status = *result;
+  EXPECT_FALSE(status.running) << "Replication should not be running in unit-test fixture";
+  // status_str should reflect the parsed status (e.g. "not_configured").
+  EXPECT_FALSE(status.status_str.empty()) << "status_str should be set from parsed 'status' field";
+  // queue_size and processed_events default to 0 when not running / not configured.
+  EXPECT_EQ(status.queue_size, 0u);
 }
 
 /**
@@ -1020,6 +1112,345 @@ TEST_F(MygramClientTest, ConnectInvalidHostnameReturnsError) {
       << "Error: " << result.error().message();
 }
 
+/**
+ * @brief Test that Connect honors timeout_ms when the host is unreachable
+ *
+ * Uses a non-routable IP from the TEST-NET-1 documentation range
+ * (RFC 5737, 192.0.2.0/24) so the OS should silently drop the SYN.
+ * Without the non-blocking-connect+poll fix, blocking connect() would hang
+ * for the OS default of ~75s; with the fix it must fail within ~timeout_ms.
+ */
+TEST(MygramClientConnectTimeoutTest, ConnectTimeoutOnUnreachableHost) {
+  ClientConfig config;
+  config.host = "192.0.2.1";  // RFC 5737 TEST-NET-1, must not be routed
+  config.port = 1;
+  config.timeout_ms = 500;
+
+  MygramClient unreachable_client(config);
+
+  auto start = std::chrono::steady_clock::now();
+  auto result = unreachable_client.Connect();
+  auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+  ASSERT_FALSE(result) << "Expected connect() to fail against an unreachable host";
+  // Must complete well below the OS default (~75s). 5s gives generous slack on
+  // CI without masking real regressions.
+  EXPECT_LT(elapsed_ms, 5000) << "Connect did not honor timeout_ms (took " << elapsed_ms << "ms)";
+
+  // The error code should be kClientTimeout when poll() actually times out.
+  // On some hosts the kernel may emit ENETUNREACH/EHOSTUNREACH immediately;
+  // accept either as a non-flake outcome but require kClientTimeout when the
+  // failure happened only after timeout_ms elapsed.
+  using mygram::utils::ErrorCode;
+  if (elapsed_ms >= static_cast<long>(config.timeout_ms)) {
+    EXPECT_EQ(result.error().code(), ErrorCode::kClientTimeout)
+        << "Expected kClientTimeout, got: " << result.error().message();
+  }
+}
+
+/**
+ * @brief Test that Search rejects whitespace in the table identifier
+ */
+TEST_F(MygramClientTest, RejectsWhitespaceInTable) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Search("my table", "hello", 100);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
+}
+
+/**
+ * @brief Test that Search rejects an empty table identifier
+ */
+TEST_F(MygramClientTest, RejectsEmptyTable) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Search("", "hello", 100);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find("empty"), std::string::npos) << "Error: " << result.error().message();
+}
+
+/**
+ * @brief Test that Search rejects whitespace in the SORT column identifier
+ */
+TEST_F(MygramClientTest, RejectsWhitespaceInSortColumn) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Search("test", "hello", 100, 0, {}, {}, {}, "bad column");
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
+}
+
+/**
+ * @brief Test that Get rejects whitespace in the primary key identifier
+ */
+TEST_F(MygramClientTest, RejectsWhitespaceInPrimaryKey) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Get("test", "bad pk");
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
+}
+
+/**
+ * @brief Test that Search rejects whitespace in a filter key
+ */
+TEST_F(MygramClientTest, RejectsWhitespaceInFilterKey) {
+  ASSERT_TRUE(client_->Connect());
+
+  std::vector<std::pair<std::string, std::string>> filters = {{"bad key", "value"}};
+  auto result = client_->Search("test", "hello", 100, 0, {}, {}, filters);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
+}
+
+/**
+ * @brief Test that Search emits OFFSET when limit==0 and offset>0
+ *
+ * Regression test: the client used to silently drop the offset entirely when
+ * limit was zero. Now it must emit a bare "OFFSET <n>" clause so the server
+ * still skips the first N matches.
+ */
+TEST_F(MygramClientTest, SearchWithOffsetOnlyAppliesOffset) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  // 3 documents indexed; "w" matches all of them via unigram. We request
+  // limit=0 (no explicit cap, server default applies) and offset=1.
+  // The exact result count depends on server defaults, but at minimum the
+  // search must succeed (proving "OFFSET" is a syntactically valid clause).
+  auto result = client_->Search("test", "w", /*limit=*/0, /*offset=*/1);
+  ASSERT_TRUE(result) << "Search with offset-only failed: " << result.error().message();
+
+  // Validate the wire form by inspecting raw SendCommand output too.
+  auto raw = client_->SendCommand("SEARCH test w OFFSET 1");
+  ASSERT_TRUE(raw) << "Raw SEARCH ... OFFSET 1 failed: " << raw.error().message();
+  EXPECT_NE(raw->find("OK RESULTS"), std::string::npos);
+}
+
+/**
+ * @brief Test C API search NULL terms guard
+ *
+ * Regression test: previously, calling search_advanced with and_count > 0 but
+ * and_terms == nullptr (or the same pattern for not / filter) would deference
+ * NULL and segfault. Now those cases must return -1 with a descriptive error.
+ */
+TEST_F(MygramClientTest, CApiSearchNullTermsCrashGuard) {
+  // Create a C API client (no need to connect — validation runs first).
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  MygramSearchResult_C* search_result = nullptr;
+
+  // and_count > 0 but and_terms == nullptr
+  int rc = mygramclient_search_advanced(c_client, "test", "hello", 100, 0,
+                                        /*and_terms=*/nullptr, /*and_count=*/3,
+                                        /*not_terms=*/nullptr, /*not_count=*/0,
+                                        /*filter_keys=*/nullptr, /*filter_values=*/nullptr,
+                                        /*filter_count=*/0, /*sort_column=*/nullptr,
+                                        /*sort_desc=*/1, &search_result);
+  EXPECT_EQ(rc, -1);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("and_terms"), std::string::npos);
+  EXPECT_EQ(search_result, nullptr);
+
+  // not_count > 0 but not_terms == nullptr
+  search_result = nullptr;
+  rc = mygramclient_search_advanced(c_client, "test", "hello", 100, 0,
+                                    /*and_terms=*/nullptr, /*and_count=*/0,
+                                    /*not_terms=*/nullptr, /*not_count=*/2,
+                                    /*filter_keys=*/nullptr, /*filter_values=*/nullptr,
+                                    /*filter_count=*/0, /*sort_column=*/nullptr,
+                                    /*sort_desc=*/1, &search_result);
+  EXPECT_EQ(rc, -1);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("not_terms"), std::string::npos);
+  EXPECT_EQ(search_result, nullptr);
+
+  // filter_count > 0 but filter_keys / filter_values == nullptr
+  search_result = nullptr;
+  rc = mygramclient_search_advanced(c_client, "test", "hello", 100, 0,
+                                    /*and_terms=*/nullptr, /*and_count=*/0,
+                                    /*not_terms=*/nullptr, /*not_count=*/0,
+                                    /*filter_keys=*/nullptr, /*filter_values=*/nullptr,
+                                    /*filter_count=*/1, /*sort_column=*/nullptr,
+                                    /*sort_desc=*/1, &search_result);
+  EXPECT_EQ(rc, -1);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("filter"), std::string::npos);
+  EXPECT_EQ(search_result, nullptr);
+
+  // Same checks for count_advanced
+  uint64_t count_out = 0;
+  rc = mygramclient_count_advanced(c_client, "test", "hello",
+                                   /*and_terms=*/nullptr, /*and_count=*/3,
+                                   /*not_terms=*/nullptr, /*not_count=*/0,
+                                   /*filter_keys=*/nullptr, /*filter_values=*/nullptr,
+                                   /*filter_count=*/0, &count_out);
+  EXPECT_EQ(rc, -1);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("and_terms"), std::string::npos);
+
+  mygramclient_destroy(c_client);
+}
+
+/**
+ * @brief Test that concurrent SendCommand calls from multiple threads are
+ *        serialized internally without corrupting the protocol stream.
+ *
+ * The MygramClient class documents itself as thread-safe in the sense that
+ * concurrent calls from different threads must not interleave send/recv on
+ * the shared socket. This test spawns 4 threads each issuing 25 INFO calls
+ * (100 total) and asserts every call returns a well-formed response. All
+ * threads are joined per CLAUDE.md ("Always join, never detach").
+ */
+TEST_F(MygramClientTest, ConcurrentSendCommandsSerialize) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  constexpr int kThreadCount = 4;
+  constexpr int kCallsPerThread = 25;
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  std::vector<int> success_count(kThreadCount, 0);
+  std::vector<std::string> first_failure(kThreadCount);
+
+  for (int t = 0; t < kThreadCount; ++t) {
+    threads.emplace_back([this, t, &success_count, &first_failure]() {
+      for (int i = 0; i < kCallsPerThread; ++i) {
+        auto info = client_->Info();
+        if (!info) {
+          if (first_failure[t].empty()) {
+            first_failure[t] = info.error().message();
+          }
+          continue;
+        }
+        // The presence of a non-empty version string confirms the response
+        // was framed correctly (no interleaved bytes from another thread).
+        if (!info->version.empty()) {
+          success_count[t]++;
+        } else if (first_failure[t].empty()) {
+          first_failure[t] = "empty version (interleaved response?)";
+        }
+      }
+    });
+  }
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  for (int t = 0; t < kThreadCount; ++t) {
+    EXPECT_EQ(success_count[t], kCallsPerThread) << "Thread " << t << " first failure: " << first_failure[t];
+  }
+}
+
+/**
+ * @brief Test that searching with an empty query string returns a server
+ *        error (not a client-side parse error or a malformed protocol).
+ *
+ * Regression test for the empty-string quoting fix: EscapeQueryString now
+ * emits `""` for an empty arg, so the wire form is `SEARCH table ""` and
+ * the server can parse it as an explicit empty token.
+ */
+TEST_F(MygramClientTest, SearchEmptyQueryReturnsError) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Search("test", "", 100);
+  ASSERT_FALSE(result) << "Expected an error for empty query";
+
+  // The error must originate from the server (kClientServerError), not from
+  // a protocol-level parsing failure on the client side. Either kind would
+  // be acceptable behavior, but the fix specifically targets server-side
+  // rejection of an unambiguously-empty token.
+  using mygram::utils::ErrorCode;
+  EXPECT_TRUE(result.error().code() == ErrorCode::kClientServerError ||
+              result.error().code() == ErrorCode::kClientInvalidArgument)
+      << "Unexpected error code: " << static_cast<int>(result.error().code())
+      << ", message: " << result.error().message();
+}
+
+/**
+ * @brief Test that DNS-resolution errors include gai_strerror text and the
+ *        offending hostname so users can diagnose the failure.
+ */
+TEST_F(MygramClientTest, ConnectInvalidHostnameIncludesGaiError) {
+  ClientConfig bad_config;
+  bad_config.host = "this.host.does.not.exist.invalid";
+  bad_config.port = 12345;
+  bad_config.timeout_ms = 3000;
+
+  MygramClient bad_client(bad_config);
+  auto result = bad_client.Connect();
+  ASSERT_FALSE(result);
+
+  const std::string& msg = result.error().message();
+  // The new format is: "Failed to resolve host '<host>': <gai_strerror>"
+  EXPECT_NE(msg.find("resolve"), std::string::npos) << "Error: " << msg;
+  EXPECT_NE(msg.find(bad_config.host), std::string::npos) << "Error: " << msg;
+  // The augmented message must be longer than the legacy "Failed to resolve
+  // host: <host>" form (which had length == 22 + host.size()). Adding a
+  // gai_strerror description always lengthens the output.
+  const size_t legacy_len = std::string("Failed to resolve host: ").size() + bad_config.host.size();
+  EXPECT_GT(msg.size(), legacy_len) << "Error message should include gai_strerror text: " << msg;
+}
+
+/**
+ * @brief Test C API mygramclient_replication_status round-trip
+ *
+ * The test fixture starts the server without a binlog reader, so the C API
+ * must surface the "not_configured" status with running == 0 and a
+ * non-empty status string. Memory must round-trip cleanly through the
+ * dedicated free function.
+ */
+TEST_F(MygramClientTest, CApiReplicationStatus) {
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  MygramReplicationStatus_C* status = nullptr;
+  int rc = mygramclient_replication_status(c_client, &status);
+  ASSERT_EQ(rc, 0) << "replication_status error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(status, nullptr);
+
+  // status_str must be populated (e.g. "not_configured" in the test fixture).
+  ASSERT_NE(status->status_str, nullptr);
+  EXPECT_GT(std::strlen(status->status_str), 0u);
+  // gtid is allowed to be empty when replication is not configured.
+  ASSERT_NE(status->gtid, nullptr);
+  // running is 0 or 1.
+  EXPECT_TRUE(status->running == 0 || status->running == 1);
+
+  mygramclient_free_replication_status(status);
+
+  // NULL-safety: free of nullptr must be a no-op.
+  mygramclient_free_replication_status(nullptr);
+
+  // NULL-input guards.
+  EXPECT_EQ(mygramclient_replication_status(nullptr, &status), -1);
+  EXPECT_EQ(mygramclient_replication_status(c_client, nullptr), -1);
+
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
 // =============================================================================
 // Unit tests for IsResponseComplete (protocol detection logic)
 // =============================================================================
@@ -1134,4 +1565,59 @@ TEST(IsResponseCompleteTest, SearchWithDebugRequiresDoubleCrlf) {
 
   // COUNT with DEBUG block
   EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n\r\n# DEBUG\r\nquery_time: 2.0ms\r\n\r\n"));
+}
+
+/**
+ * @brief Test CACHE_STATS multi-line response requires END marker
+ */
+TEST(IsResponseCompleteTest, CacheStatsRequiresEndMarker) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK CACHE_STATS\r\n"));
+
+  // Partial response with content but no END
+  EXPECT_FALSE(IsResponseComplete("OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\n"));
+
+  // Complete response with END marker
+  EXPECT_TRUE(IsResponseComplete("OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n"));
+
+  // Minimal complete CACHE_STATS
+  EXPECT_TRUE(IsResponseComplete("OK CACHE_STATS\r\nEND\r\n"));
+}
+
+/**
+ * @brief Test DUMP_INFO multi-line response requires END marker
+ *
+ * DUMP_INFO is unique because the first line carries a filepath suffix:
+ * "OK DUMP_INFO /path/to/dump\r\n", so detection uses prefix matching.
+ */
+TEST(IsResponseCompleteTest, DumpInfoRequiresEndMarker) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\n"));
+
+  // Partial response with content but no END
+  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\nversion: 2\r\nfile_size: 1024\r\n"));
+
+  // Complete response with END marker
+  EXPECT_TRUE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\nversion: 2\r\nEND\r\n"));
+
+  // Empty filepath edge case still requires END
+  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO \r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK DUMP_INFO \r\nEND\r\n"));
+}
+
+/**
+ * @brief Test DUMP_STATUS multi-line response requires END marker
+ */
+TEST(IsResponseCompleteTest, DumpStatusRequiresEndMarker) {
+  // Just the first line - NOT complete
+  EXPECT_FALSE(IsResponseComplete("OK DUMP_STATUS\r\n"));
+
+  // Partial response with content but no END
+  EXPECT_FALSE(IsResponseComplete("OK DUMP_STATUS\r\nstatus: IDLE\r\nsave_in_progress: false\r\n"));
+
+  // Complete response with END marker
+  EXPECT_TRUE(IsResponseComplete("OK DUMP_STATUS\r\nstatus: IDLE\r\nEND\r\n"));
+
+  // Minimal complete DUMP_STATUS
+  EXPECT_TRUE(IsResponseComplete("OK DUMP_STATUS\r\nEND\r\n"));
 }

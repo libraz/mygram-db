@@ -78,27 +78,90 @@ static void free_c_string_array(char** array, size_t count) {
   free(array);
 }
 
+/**
+ * @brief Convert a C string array (char* const*) into std::vector<std::string>.
+ *
+ * Defensively skips NULL pointer entries. Returns an empty vector when @p arr
+ * is NULL or @p count is zero.
+ */
+static std::vector<std::string> CArrayToVector(const char* const* arr, size_t count) {
+  std::vector<std::string> result;
+  if (arr == nullptr || count == 0) {
+    return result;
+  }
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    if (arr[i] != nullptr) {
+      result.emplace_back(arr[i]);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Convert paired C key/value arrays into a vector of pairs.
+ *
+ * Skips entries where either key or value is NULL. Returns an empty vector
+ * when @p count is zero or either array pointer is NULL.
+ */
+static std::vector<std::pair<std::string, std::string>> CFilterArraysToVector(const char* const* keys,
+                                                                              const char* const* values, size_t count) {
+  std::vector<std::pair<std::string, std::string>> result;
+  if (keys == nullptr || values == nullptr || count == 0) {
+    return result;
+  }
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    if (keys[i] != nullptr && values[i] != nullptr) {
+      result.emplace_back(keys[i], values[i]);
+    }
+  }
+  return result;
+}
+
+/**
+ * @brief Run a void-returning C++ client method and translate to C return code.
+ *
+ * Validates the client handle, invokes @p fn with a reference to the wrapped
+ * MygramClient, stores any error message in last_error, and returns 0/-1.
+ */
+template <typename Fn>
+static int ForwardVoid(MygramClient_C* client, Fn&& fn) {
+  if (client == nullptr || client->client == nullptr) {
+    return -1;
+  }
+  auto result = fn(*client->client);
+  if (!result) {
+    client->last_error = result.error().to_string();
+    return -1;
+  }
+  return 0;
+}
+
 MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
   if (config == nullptr) {
     return nullptr;
   }
 
-  MygramClient_C* client_c = nullptr;
+  // Use unique_ptr so any exception during MygramClient construction frees
+  // the wrapper without leaking memory. release() transfers ownership to the
+  // caller only after every fallible step has succeeded.
+  std::unique_ptr<MygramClient_C> client_c;
   try {
-    client_c = new MygramClient_C();
+    client_c = std::make_unique<MygramClient_C>();
+
+    ClientConfig cpp_config;
+    cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
+    cpp_config.port = config->port != 0 ? config->port : 11016;
+    cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
+    cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
+
+    client_c->client = std::make_unique<MygramClient>(cpp_config);
   } catch (...) {
     return nullptr;
   }
 
-  ClientConfig cpp_config;
-  cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
-  cpp_config.port = config->port != 0 ? config->port : 11016;
-  cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
-  cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
-
-  client_c->client = std::make_unique<MygramClient>(cpp_config);
-
-  return client_c;
+  return client_c.release();
 }
 
 void mygramclient_destroy(MygramClient_C* client) {
@@ -148,27 +211,25 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
     return -1;
   }
 
+  // Reject the (count > 0, ptr == nullptr) combination for each array argument.
+  // Without this guard, the conversion loops below dereference a NULL pointer.
+  if (and_count > 0 && and_terms == nullptr) {
+    client->last_error = "Invalid argument: and_terms is NULL but and_count > 0";
+    return -1;
+  }
+  if (not_count > 0 && not_terms == nullptr) {
+    client->last_error = "Invalid argument: not_terms is NULL but not_count > 0";
+    return -1;
+  }
+  if (filter_count > 0 && (filter_keys == nullptr || filter_values == nullptr)) {
+    client->last_error = "Invalid argument: filter_keys or filter_values is NULL but filter_count > 0";
+    return -1;
+  }
+
   // Convert C arrays to C++ vectors
-  std::vector<std::string> and_terms_vec;
-  for (size_t i = 0; i < and_count; ++i) {
-    if (and_terms[i] != nullptr) {
-      and_terms_vec.emplace_back(and_terms[i]);
-    }
-  }
-
-  std::vector<std::string> not_terms_vec;
-  for (size_t i = 0; i < not_count; ++i) {
-    if (not_terms[i] != nullptr) {
-      not_terms_vec.emplace_back(not_terms[i]);
-    }
-  }
-
-  std::vector<std::pair<std::string, std::string>> filters_vec;
-  for (size_t i = 0; i < filter_count; ++i) {
-    if (filter_keys[i] != nullptr && filter_values[i] != nullptr) {
-      filters_vec.emplace_back(filter_keys[i], filter_values[i]);
-    }
-  }
+  auto and_terms_vec = CArrayToVector(and_terms, and_count);
+  auto not_terms_vec = CArrayToVector(not_terms, not_count);
+  auto filters_vec = CFilterArraysToVector(filter_keys, filter_values, filter_count);
 
   std::string sort_column_str = sort_column != nullptr ? sort_column : "";
 
@@ -228,27 +289,24 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
     return -1;
   }
 
+  // Reject the (count > 0, ptr == nullptr) combination for each array argument.
+  if (and_count > 0 && and_terms == nullptr) {
+    client->last_error = "Invalid argument: and_terms is NULL but and_count > 0";
+    return -1;
+  }
+  if (not_count > 0 && not_terms == nullptr) {
+    client->last_error = "Invalid argument: not_terms is NULL but not_count > 0";
+    return -1;
+  }
+  if (filter_count > 0 && (filter_keys == nullptr || filter_values == nullptr)) {
+    client->last_error = "Invalid argument: filter_keys or filter_values is NULL but filter_count > 0";
+    return -1;
+  }
+
   // Convert C arrays to C++ vectors
-  std::vector<std::string> and_terms_vec;
-  for (size_t i = 0; i < and_count; ++i) {
-    if (and_terms[i] != nullptr) {
-      and_terms_vec.emplace_back(and_terms[i]);
-    }
-  }
-
-  std::vector<std::string> not_terms_vec;
-  for (size_t i = 0; i < not_count; ++i) {
-    if (not_terms[i] != nullptr) {
-      not_terms_vec.emplace_back(not_terms[i]);
-    }
-  }
-
-  std::vector<std::pair<std::string, std::string>> filters_vec;
-  for (size_t i = 0; i < filter_count; ++i) {
-    if (filter_keys[i] != nullptr && filter_values[i] != nullptr) {
-      filters_vec.emplace_back(filter_keys[i], filter_values[i]);
-    }
-  }
+  auto and_terms_vec = CArrayToVector(and_terms, and_count);
+  auto not_terms_vec = CArrayToVector(not_terms, not_count);
+  auto filters_vec = CFilterArraysToVector(filter_keys, filter_values, filter_count);
 
   auto count_result = client->client->Count(table, query, and_terms_vec, not_terms_vec, filters_vec);
 
@@ -421,60 +479,75 @@ int mygramclient_load(MygramClient_C* client, const char* filepath, char** loade
   return 0;
 }
 
-int mygramclient_replication_stop(MygramClient_C* client) {
-  if (client == nullptr || client->client == nullptr) {
+int mygramclient_replication_status(MygramClient_C* client, MygramReplicationStatus_C** status) {
+  if (client == nullptr || client->client == nullptr || status == nullptr) {
     return -1;
   }
 
-  auto result = client->client->StopReplication();
-  if (!result) {
-    client->last_error = result.error().to_string();
+  auto repl_result = client->client->GetReplicationStatus();
+  if (!repl_result) {
+    client->last_error = repl_result.error().to_string();
     return -1;
   }
 
+  const auto& repl = *repl_result;
+
+  auto* out = static_cast<MygramReplicationStatus_C*>(malloc(sizeof(MygramReplicationStatus_C)));
+  if (out == nullptr) {
+    client->last_error = "Memory allocation failed";
+    return -1;
+  }
+
+  // Initialize all pointer fields to NULL up front so partial failure
+  // below leaves the struct in a state safe to free.
+  out->gtid = nullptr;
+  out->status_str = nullptr;
+  out->running = repl.running ? 1 : 0;
+  out->processed_events = repl.processed_events;
+  out->queue_size = repl.queue_size;
+
+  out->gtid = strdup_safe(repl.gtid);
+  if (out->gtid == nullptr) {
+    free(out);
+    client->last_error = "Memory allocation failed";
+    return -1;
+  }
+
+  out->status_str = strdup_safe(repl.status_str);
+  if (out->status_str == nullptr) {
+    free(out->gtid);
+    free(out);
+    client->last_error = "Memory allocation failed";
+    return -1;
+  }
+
+  *status = out;
   return 0;
+}
+
+void mygramclient_free_replication_status(MygramReplicationStatus_C* status) {
+  if (status == nullptr) {
+    return;
+  }
+  free(status->gtid);
+  free(status->status_str);
+  free(status);
+}
+
+int mygramclient_replication_stop(MygramClient_C* client) {
+  return ForwardVoid(client, [](MygramClient& c) { return c.StopReplication(); });
 }
 
 int mygramclient_replication_start(MygramClient_C* client) {
-  if (client == nullptr || client->client == nullptr) {
-    return -1;
-  }
-
-  auto result = client->client->StartReplication();
-  if (!result) {
-    client->last_error = result.error().to_string();
-    return -1;
-  }
-
-  return 0;
+  return ForwardVoid(client, [](MygramClient& c) { return c.StartReplication(); });
 }
 
 int mygramclient_debug_on(MygramClient_C* client) {
-  if (client == nullptr || client->client == nullptr) {
-    return -1;
-  }
-
-  auto result = client->client->EnableDebug();
-  if (!result) {
-    client->last_error = result.error().to_string();
-    return -1;
-  }
-
-  return 0;
+  return ForwardVoid(client, [](MygramClient& c) { return c.EnableDebug(); });
 }
 
 int mygramclient_debug_off(MygramClient_C* client) {
-  if (client == nullptr || client->client == nullptr) {
-    return -1;
-  }
-
-  auto result = client->client->DisableDebug();
-  if (!result) {
-    client->last_error = result.error().to_string();
-    return -1;
-  }
-
-  return 0;
+  return ForwardVoid(client, [](MygramClient& c) { return c.DisableDebug(); });
 }
 
 int mygramclient_send_command(MygramClient_C* client, const char* command, char** response) {
@@ -548,12 +621,6 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
     return -1;
   }
 
-  // Also parse to get optional terms
-  auto expr_result = ParseSearchExpression(expression);
-  if (!expr_result) {
-    return -1;
-  }
-
   // Allocate result
   auto* result = static_cast<MygramParsedExpression_C*>(malloc(sizeof(MygramParsedExpression_C)));
   if (result == nullptr) {
@@ -571,9 +638,12 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
   result->not_count = not_terms.size();
   result->not_terms = string_vector_to_c_array(not_terms);
 
-  // Copy optional terms
-  result->optional_count = expr_result->optional_terms.size();
-  result->optional_terms = string_vector_to_c_array(expr_result->optional_terms);
+  // optional_terms / optional_count are deprecated since the implicit-AND
+  // parser change: every parsed term is now classified as required (AND)
+  // or excluded (NOT). Emit NULL / 0 explicitly so consumers do not need
+  // to defensively check string_vector_to_c_array's empty-input behavior.
+  result->optional_terms = nullptr;
+  result->optional_count = 0;
 
   *parsed = result;
   return 0;
