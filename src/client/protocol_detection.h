@@ -10,8 +10,23 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 namespace mygramdb::client::detail {
+
+/**
+ * @brief Check whether a string ends with a given suffix
+ *
+ * @param str   The string to inspect
+ * @param suffix The suffix to test for
+ * @return true if @p str has @p suffix at its end
+ */
+inline bool EndsWith(const std::string& str, std::string_view suffix) {
+  if (str.size() < suffix.size()) {
+    return false;
+  }
+  return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
 
 /**
  * @brief Check if a response buffer contains a complete protocol response
@@ -22,10 +37,11 @@ namespace mygramdb::client::detail {
  *    These are complete when the response ends with \r\n and the first
  *    \r\n is at the very end (no internal line breaks).
  *
- * 2. Multi-line responses: INFO, REPLICATION STATUS, CONFIG, FACET, and
- *    responses with DEBUG blocks. These contain internal \r\n delimiters
- *    and use specific end markers:
- *    - INFO and REPLICATION STATUS end with "END\r\n"
+ * 2. Multi-line responses: INFO, REPLICATION STATUS, CONFIG, FACET,
+ *    CACHE_STATS, DUMP_INFO, DUMP_STATUS, and responses with DEBUG blocks.
+ *    These contain internal \r\n delimiters and use specific end markers:
+ *    - INFO, REPLICATION STATUS, CACHE_STATS, DUMP_INFO, DUMP_STATUS
+ *      end with "END\r\n"
  *    - CONFIG (+OK prefix), FACET, and DEBUG blocks end with "\r\n\r\n"
  *
  * @param response The accumulated response data so far
@@ -55,33 +71,47 @@ inline bool IsResponseComplete(const std::string& response) {
   // Known prefix lengths for multi-line response detection
   constexpr size_t kOkInfoLen = 7;          // "OK INFO"
   constexpr size_t kOkReplicationLen = 14;  // "OK REPLICATION"
-  constexpr size_t kEndMarkerLen = 5;       // "END\r\n"
-  constexpr size_t kDoubleCrlfLen = 4;      // "\r\n\r\n"
+  constexpr size_t kOkCacheStatsLen = 14;   // "OK CACHE_STATS"
+  constexpr size_t kOkDumpInfoLen = 12;     // "OK DUMP_INFO"
+  constexpr size_t kOkDumpStatusLen = 14;   // "OK DUMP_STATUS"
   constexpr size_t kPlusOkLen = 3;          // "+OK"
   constexpr size_t kOkFacetLen = 8;         // "OK FACET"
+  constexpr std::string_view kEndMarker = "END\r\n";
+  constexpr std::string_view kDoubleCrlf = "\r\n\r\n";
 
   // INFO: first line is exactly "OK INFO"
   if (first_crlf == kOkInfoLen && response.compare(0, kOkInfoLen, "OK INFO") == 0) {
-    return response.size() >= kEndMarkerLen &&
-           response.compare(response.size() - kEndMarkerLen, kEndMarkerLen, "END\r\n") == 0;
+    return EndsWith(response, kEndMarker);
   }
 
   // REPLICATION STATUS: first line is exactly "OK REPLICATION"
   if (first_crlf == kOkReplicationLen && response.compare(0, kOkReplicationLen, "OK REPLICATION") == 0) {
-    return response.size() >= kEndMarkerLen &&
-           response.compare(response.size() - kEndMarkerLen, kEndMarkerLen, "END\r\n") == 0;
+    return EndsWith(response, kEndMarker);
+  }
+
+  // CACHE_STATS: first line is exactly "OK CACHE_STATS"
+  if (first_crlf == kOkCacheStatsLen && response.compare(0, kOkCacheStatsLen, "OK CACHE_STATS") == 0) {
+    return EndsWith(response, kEndMarker);
+  }
+
+  // DUMP_INFO: first line starts with "OK DUMP_INFO" (followed by " <filepath>")
+  if (first_crlf >= kOkDumpInfoLen && response.compare(0, kOkDumpInfoLen, "OK DUMP_INFO") == 0) {
+    return EndsWith(response, kEndMarker);
+  }
+
+  // DUMP_STATUS: first line is exactly "OK DUMP_STATUS"
+  if (first_crlf == kOkDumpStatusLen && response.compare(0, kOkDumpStatusLen, "OK DUMP_STATUS") == 0) {
+    return EndsWith(response, kEndMarker);
   }
 
   // CONFIG: first line starts with "+OK"
   if (first_crlf >= kPlusOkLen && response.compare(0, kPlusOkLen, "+OK") == 0) {
-    return response.size() >= kDoubleCrlfLen &&
-           response.compare(response.size() - kDoubleCrlfLen, kDoubleCrlfLen, "\r\n\r\n") == 0;
+    return EndsWith(response, kDoubleCrlf);
   }
 
   // FACET: first line starts with "OK FACET"
   if (first_crlf >= kOkFacetLen && response.compare(0, kOkFacetLen, "OK FACET") == 0) {
-    return response.size() >= kDoubleCrlfLen &&
-           response.compare(response.size() - kDoubleCrlfLen, kDoubleCrlfLen, "\r\n\r\n") == 0;
+    return EndsWith(response, kDoubleCrlf);
   }
 
   // For other response types (SEARCH, COUNT, GET, SAVE, LOAD, ERROR, etc.):
@@ -93,8 +123,7 @@ inline bool IsResponseComplete(const std::string& response) {
   }
 
   // Multi-line response with content after first line (e.g., SEARCH with DEBUG)
-  return response.size() >= kDoubleCrlfLen &&
-         response.compare(response.size() - kDoubleCrlfLen, kDoubleCrlfLen, "\r\n\r\n") == 0;
+  return EndsWith(response, kDoubleCrlf);
 }
 
 }  // namespace mygramdb::client::detail
