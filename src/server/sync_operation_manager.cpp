@@ -69,7 +69,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  std::lock_guard<std::mutex> lock(sync_mutex_);
+  std::unique_lock<std::mutex> lock(sync_mutex_);
 
   // Check if table exists
   if (table_contexts_.find(table_name) == table_contexts_.end()) {
@@ -110,12 +110,21 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
   sync_states_[table_name].processed_rows = 0;
   sync_states_[table_name].error_message.clear();
 
-  // Clean up old thread if it exists and is joinable
-  // Note: Thread access is now protected by sync_mutex_ (same as sync_states_)
-  // to prevent race conditions between state updates and thread lifecycle
+  // Clean up old thread if it exists and is joinable.
+  // Move out the previous thread under the lock, then release the lock and
+  // join. Holding sync_mutex_ across join() can deadlock with
+  // BuildSnapshotAsync's update_state lambda which acquires sync_mutex_ at
+  // the end of the background thread.
+  std::thread previous_thread;
   auto thread_iter = sync_threads_.find(table_name);
   if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-    thread_iter->second.join();
+    previous_thread = std::move(thread_iter->second);
+    sync_threads_.erase(thread_iter);
+  }
+  if (previous_thread.joinable()) {
+    lock.unlock();
+    previous_thread.join();
+    lock.lock();
   }
   // Launch async build (store thread instead of detaching)
   // Wrap in try/catch to rollback state if thread creation fails
