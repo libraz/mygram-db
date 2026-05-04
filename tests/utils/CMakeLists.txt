@@ -313,3 +313,17 @@ gtest_discover_tests(atomic_file_writer_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
+
+add_executable(safe_path_test
+  safe_path_test.cpp
+)
+
+target_link_libraries(safe_path_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(safe_path_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

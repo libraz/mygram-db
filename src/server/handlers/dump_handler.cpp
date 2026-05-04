@@ -20,6 +20,7 @@
 #include "storage/dump_format_v2.h"
 #include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
+#include "utils/safe_path.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -31,32 +32,23 @@ namespace mygramdb::server {
 
 mygram::utils::Expected<std::string, mygram::utils::Error> DumpHandler::ResolveDumpPath(const std::string& input,
                                                                                         const std::string& dump_dir) {
-  std::string filepath = input;
-  if (filepath.empty()) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument, "Empty filepath"));
-  }
-  if (filepath[0] != '/') {
-    filepath = dump_dir + "/" + filepath;
-  }
-  // Canonicalize path and validate it's within dump_dir
-  try {
-    // Use canonical() for existing paths to fully resolve symlinks;
-    // fall back to weakly_canonical() for new files (e.g., DUMP SAVE targets).
-    std::filesystem::path canonical = std::filesystem::exists(filepath) ? std::filesystem::canonical(filepath)
-                                                                        : std::filesystem::weakly_canonical(filepath);
-    std::filesystem::path dump_canonical = std::filesystem::canonical(dump_dir);
-    auto rel = canonical.lexically_relative(dump_canonical);
-    if (rel.empty() || *rel.begin() == std::filesystem::path("..")) {
-      return mygram::utils::MakeUnexpected(
-          mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
-                                   "Invalid filepath: path must be within dump directory (" + dump_dir + ")"));
+  // Thin wrapper around the shared ResolveSafePath utility. The dump-handler
+  // signature is preserved for existing call sites; the error message tweak
+  // here keeps the historical wording ("dump directory") expected by tests.
+  auto resolved = mygram::utils::ResolveSafePath(input, dump_dir);
+  if (!resolved) {
+    auto err = resolved.error();
+    // Preserve the historical error string ("must be within dump directory")
+    // for backward compatibility with existing clients/tests.
+    std::string msg = err.message();
+    const std::string from = "must be within base directory";
+    auto pos = msg.find(from);
+    if (pos != std::string::npos) {
+      msg.replace(pos, from.size(), "must be within dump directory");
     }
-  } catch (const std::exception& e) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
-                                                                  std::string("Invalid filepath: ") + e.what()));
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(err.code(), msg));
   }
-  return filepath;
+  return *resolved;
 }
 
 std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
@@ -93,14 +85,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 
   // Block if any table is currently syncing
   if (ctx_.sync_manager != nullptr) {
-    std::vector<std::string> syncing_tables;
-    if (ctx_.sync_manager->GetSyncingTablesIfAny(syncing_tables)) {
-      std::ostringstream oss;
-      oss << "Cannot save dump while SYNC is in progress for tables:";
-      for (const auto& table : syncing_tables) {
-        oss << " " << table;
-      }
-      return ResponseFormatter::FormatError(oss.str());
+    auto check = ctx_.sync_manager->CheckNoSyncInProgress("save dump");
+    if (!check) {
+      return ResponseFormatter::FormatError(check.error().message());
     }
   }
 #endif
@@ -323,14 +310,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   // Check if any table is currently syncing (block DUMP LOAD)
   if (ctx_.sync_manager != nullptr) {
-    std::vector<std::string> syncing_tables;
-    if (ctx_.sync_manager->GetSyncingTablesIfAny(syncing_tables)) {
-      std::ostringstream oss;
-      oss << "Cannot load dump while SYNC is in progress for tables:";
-      for (const auto& table : syncing_tables) {
-        oss << " " << table;
-      }
-      return ResponseFormatter::FormatError(oss.str());
+    auto check = ctx_.sync_manager->CheckNoSyncInProgress("load dump");
+    if (!check) {
+      return ResponseFormatter::FormatError(check.error().message());
     }
   }
 #endif

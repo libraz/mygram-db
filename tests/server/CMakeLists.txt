@@ -408,6 +408,22 @@ gtest_discover_tests(sync_operation_manager_deadlock_test
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
+# SyncOperationManager API tests (idle-state helpers)
+
+add_executable(sync_operation_manager_test
+  sync_operation_manager_test.cpp
+)
+
+target_link_libraries(sync_operation_manager_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(sync_operation_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # RateLimiter tests
 
 add_executable(rate_limiter_test

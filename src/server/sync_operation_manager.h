@@ -13,9 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "config/config.h"
 #include "server/server_types.h"
@@ -149,6 +151,22 @@ class SyncOperationManager {
    * @return true if any tables are syncing, false otherwise
    */
   bool GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const;
+
+  /**
+   * @brief Verify that no SYNC is currently in progress.
+   *
+   * Convenience wrapper used by handlers (DUMP SAVE/LOAD, REPLICATION START,
+   * OPTIMIZE, SET mysql.*) to centralize the conflict-check pattern. When a
+   * SYNC is active, returns an Error with a formatted message of the form:
+   *   "Cannot {operation} while SYNC is in progress for tables: a b c"
+   *
+   * @param operation Short verb phrase describing the blocked operation
+   *                  (e.g., "save dump", "start replication"). Used inside
+   *                  the formatted error message.
+   * @return Empty Expected on success (no syncs in progress); Unexpected
+   *         containing an `ErrorCode::kSyncAlreadyInProgress` Error otherwise.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> CheckNoSyncInProgress(std::string_view operation) const;
 
   /**
    * @brief Set the cache manager (for deferred initialization)

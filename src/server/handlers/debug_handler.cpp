@@ -39,10 +39,11 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
     case query::QueryType::OPTIMIZE: {
 #ifdef USE_MYSQL
       // Check if any table is currently syncing
-      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        return ResponseFormatter::FormatError(
-            "Cannot optimize while SYNC is in progress. "
-            "Please wait for SYNC to complete.");
+      if (ctx_.sync_manager != nullptr) {
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress("optimize");
+        if (!check) {
+          return ResponseFormatter::FormatError(check.error().message());
+        }
       }
 #endif
 

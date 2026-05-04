@@ -7,13 +7,12 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
-#include <cctype>
 #include <filesystem>
 
 #include "config/config_help.h"
 #include "server/statistics_service.h"
 #include "server/table_catalog.h"
+#include "utils/safe_path.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -123,48 +122,67 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
   }
 
-  // Restrict to YAML/YML configuration files only to prevent reading
-  // arbitrary filesystem paths via this command.
-  {
-    const auto dot_pos = filepath.rfind('.');
-    if (dot_pos == std::string::npos) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
-    }
-    std::string ext = filepath.substr(dot_pos);
-    // Case-insensitive extension check
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
-    if (ext != ".yaml" && ext != ".yml") {
-      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
-    }
-  }
-
-  // Security: restrict CONFIG VERIFY to relative paths without directory traversal
-  // to prevent reading arbitrary filesystem paths via this command.
-  if (filepath.find("..") != std::string::npos) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
-  }
+  // Security: restrict to relative paths to avoid reading arbitrary filesystem
+  // paths through CONFIG VERIFY. The check is performed before symlink
+  // resolution so that the user-visible argument is what we evaluate.
   if (!filepath.empty() && filepath[0] == '/') {
     return ResponseFormatter::FormatError("CONFIG VERIFY: absolute paths not allowed");
   }
+  // Reject any traversal sequence (..) explicitly — even though
+  // ResolveSafePath would later catch escapes via lexically_relative, the
+  // historical error message "path traversal (..) not allowed" is part of the
+  // public CLI surface and must be preserved.
+  if (filepath.find("..") != std::string::npos) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
+  }
 
-  // Security: verify the file is a regular file (not a symlink or device)
-  // to prevent reading arbitrary system files via CONFIG VERIFY.
-  {
-    std::error_code ec;
-    auto file_status = std::filesystem::symlink_status(filepath, ec);
-    if (ec || !std::filesystem::exists(file_status)) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+  // Resolve via shared safe-path utility. CONFIG VERIFY uses the current
+  // working directory as the base directory (matching the previous
+  // behaviour of passing the relative path directly to LoadConfig).
+  std::error_code ec;
+  std::string base_dir = std::filesystem::current_path(ec).string();
+  if (ec) {
+    return ResponseFormatter::FormatError(std::string("CONFIG VERIFY: cannot resolve current directory: ") +
+                                          ec.message());
+  }
+
+  auto resolved = mygram::utils::ResolveSafePath(filepath, base_dir, {".yaml", ".yml"});
+  if (!resolved) {
+    const auto& err = resolved.error();
+    // Surface a more user-friendly error for the most common failure modes.
+    if (err.message().find("Disallowed file extension") != std::string::npos) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
     }
-    if (file_status.type() == std::filesystem::file_type::symlink) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+    if (err.message().find("must be within base directory") != std::string::npos) {
+      return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
     }
-    if (!std::filesystem::is_regular_file(file_status)) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file");
-    }
+    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+  }
+  std::string canonical_path = std::move(*resolved);
+
+  // ResolveSafePath canonicalizes via std::filesystem::canonical which
+  // follows symlinks, so a symlinked file resolves to its real target inside
+  // base_dir. To preserve the historical "symbolic links are not allowed"
+  // semantic and reject any symlink (file or parent directory), compare the
+  // resolved canonical path against the path obtained by joining base_dir
+  // with the input via lexically_normal — they differ when any component
+  // along the way was a symlink.
+  std::filesystem::path joined = std::filesystem::path(base_dir) / std::filesystem::path(filepath);
+  std::filesystem::path joined_normal = joined.lexically_normal();
+  if (std::filesystem::exists(joined_normal, ec) && std::filesystem::path(canonical_path) != joined_normal) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+  }
+
+  // Verify the resolved target is a regular file (not a device, FIFO, etc.).
+  if (!std::filesystem::exists(canonical_path, ec)) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+  }
+  if (!std::filesystem::is_regular_file(canonical_path, ec)) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file");
   }
 
   // Try to load and validate the configuration file
-  auto config_result = config::LoadConfig(filepath);
+  auto config_result = config::LoadConfig(canonical_path);
   if (!config_result) {
     // Logged at WARN: this is a client-input validation failure (user supplied
     // a bad YAML), not a server-side system error, so it should not raise

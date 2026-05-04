@@ -395,6 +395,23 @@ bool SyncOperationManager::GetSyncingTablesIfAny(std::vector<std::string>& out_t
   return true;
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::CheckNoSyncInProgress(
+    std::string_view operation) const {
+  std::vector<std::string> syncing_tables;
+  if (!GetSyncingTablesIfAny(syncing_tables)) {
+    return {};
+  }
+  // Build the conflict message in the historical format:
+  //   "Cannot {operation} while SYNC is in progress for tables: a b c"
+  std::ostringstream oss;
+  oss << "Cannot " << operation << " while SYNC is in progress for tables:";
+  for (const auto& table : syncing_tables) {
+    oss << " " << table;
+  }
+  return mygram::utils::MakeUnexpected(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kSyncAlreadyInProgress, oss.str()));
+}
+
 void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   // Update state under lock
   {

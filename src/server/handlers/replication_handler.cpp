@@ -53,10 +53,11 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       }
 
       // Check if any table is currently syncing
-      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        return ResponseFormatter::FormatError(
-            "Cannot start replication while SYNC is in progress. "
-            "SYNC will automatically start replication when complete.");
+      if (ctx_.sync_manager != nullptr) {
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress("start replication");
+        if (!check) {
+          return ResponseFormatter::FormatError(check.error().message());
+        }
       }
 
       // Check if DUMP LOAD is in progress (block REPLICATION START)

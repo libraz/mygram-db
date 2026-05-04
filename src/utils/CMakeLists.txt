@@ -6,6 +6,7 @@ add_library(mygramdb_utils STATIC
   memory_utils.cpp
   daemon_utils.cpp
   datetime_converter.cpp
+  safe_path.cpp
   sql_utils.cpp
 )
 
