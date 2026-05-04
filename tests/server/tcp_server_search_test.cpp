@@ -651,3 +651,40 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
 
   close(sock);
 }
+
+/**
+ * @brief Regression test for P1-10: SearchHandler must format SortAndPaginate
+ * errors through ResponseFormatter::FormatError so the response begins with
+ * the canonical `ERROR ` prefix instead of leaking the internal Error
+ * to_string() representation (e.g. `[Error 1004 (...)] message`).
+ */
+TEST_F(TcpServerTest, SearchSortByMissingColumnReturnsErrFormat) {
+  // Add at least one document so SortAndPaginate is reached (it short-circuits
+  // when the result set is empty).
+  auto doc_id1 = doc_store_->AddDocument("1", {});
+  index_->AddDocument(static_cast<index::DocId>(*doc_id1), "alpha");
+
+  auto doc_id2 = doc_store_->AddDocument("2", {});
+  index_->AddDocument(static_cast<index::DocId>(*doc_id2), "alpha");
+
+  StartServerOrSkip();
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  // Sort column does not exist: SortAndPaginate returns Error.
+  std::string response = SendRequest(sock, "SEARCH test alpha SORT nonexistent_col DESC");
+
+  // Must use the canonical ERROR-prefixed protocol response, not the internal
+  // [Error <code> (<id>)] formatting from Error::to_string().
+  EXPECT_EQ(response.rfind("ERROR ", 0), 0u) << "Response should start with 'ERROR ' but was: " << response;
+  EXPECT_EQ(response.find("[Error "), std::string::npos)
+      << "Response must not leak Error::to_string() formatting; was: " << response;
+  // Sanity: the human-readable column-not-found message is preserved.
+  EXPECT_NE(response.find("nonexistent_col"), std::string::npos);
+
+  close(sock);
+}

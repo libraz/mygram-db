@@ -8,11 +8,14 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <future>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 
@@ -113,6 +116,144 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
     return val.get<bool>() ? "1" : "0";
   }
   return std::nullopt;
+}
+
+/**
+ * @brief Validate a table name supplied via the HTTP API.
+ *
+ * Permitted characters:
+ * - ASCII letters, digits, underscore, hyphen, and dot.
+ * - Any non-ASCII byte (>= 0x80), which lets UTF-8-encoded names such as
+ *   "テーブル" pass through unchanged.
+ *
+ * Rejected: empty names, ASCII whitespace, ASCII control characters, and any
+ * other ASCII punctuation. The goal is to prevent the value from breaking the
+ * QueryParser command grammar (e.g. `articles foo` would inject an extra
+ * token, and `articles;` would inject a stray punctuation token).
+ *
+ * @param table Table name from the request URL.
+ * @return true if the name is safe to embed in a parser command, false
+ *         otherwise.
+ */
+bool IsValidTableName(std::string_view table) {
+  if (table.empty()) {
+    return false;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  constexpr size_t kMaxTableNameLength = 256;
+  if (table.size() > kMaxTableNameLength) {
+    return false;
+  }
+  for (char c : table) {
+    auto u = static_cast<unsigned char>(c);
+    bool ascii_safe =
+        (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
+    bool non_ascii = u >= 0x80;
+    if (!ascii_safe && !non_ascii) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Detect QueryParser clause keywords inside a JSON-supplied query string.
+ *
+ * The HTTP API exposes `limit`, `offset`, and `filters` as dedicated JSON
+ * fields. Allowing the same keywords to appear inside the search expression
+ * (`q`) would let a caller silently override those JSON values, which is a
+ * parameter pollution vulnerability (P1-9). This helper rejects such inputs by
+ * scanning for the dangerous keywords as standalone tokens, ignoring contents
+ * inside single- or double-quoted regions so that legitimate phrase searches
+ * such as `"foo LIMIT bar"` remain valid.
+ *
+ * Boolean operators (`AND`, `OR`, `NOT`) are intentionally NOT rejected: they
+ * are first-class search syntax with no JSON equivalent, and the existing
+ * tests/clients depend on them being usable inside `q`.
+ *
+ * @param query_text Raw query string from the JSON `q` field.
+ * @param[out] offending_keyword Set to the matched keyword (uppercase) on
+ *             rejection.
+ * @return true if the query is safe; false if it embeds a forbidden keyword.
+ */
+bool ValidateQueryTextNoReservedClauses(std::string_view query_text, std::string& offending_keyword) {
+  static const std::array<std::string_view, 7> kForbiddenKeywords = {"LIMIT", "OFFSET",    "ORDER", "FILTER",
+                                                                     "SORT",  "HIGHLIGHT", "FUZZY"};
+
+  auto match_keyword = [&](std::string_view token) -> std::string_view {
+    for (auto kw : kForbiddenKeywords) {
+      if (token.size() != kw.size()) {
+        continue;
+      }
+      bool eq = true;
+      for (size_t i = 0; i < kw.size(); ++i) {
+        auto a = static_cast<unsigned char>(token[i]);
+        auto b = static_cast<unsigned char>(kw[i]);
+        if (std::toupper(a) != b) {
+          eq = false;
+          break;
+        }
+      }
+      if (eq) {
+        return kw;
+      }
+    }
+    return {};
+  };
+
+  size_t i = 0;
+  const size_t n = query_text.size();
+  char quote = '\0';
+
+  while (i < n) {
+    char c = query_text[i];
+
+    if (quote != '\0') {
+      // Inside quotes: skip everything until matching close (honor backslash escape).
+      if (c == '\\' && i + 1 < n) {
+        i += 2;
+        continue;
+      }
+      if (c == quote) {
+        quote = '\0';
+      }
+      ++i;
+      continue;
+    }
+
+    if (c == '"' || c == '\'') {
+      quote = c;
+      ++i;
+      continue;
+    }
+
+    // Skip ASCII whitespace.
+    auto u = static_cast<unsigned char>(c);
+    if (std::isspace(u) != 0) {
+      ++i;
+      continue;
+    }
+
+    // Collect a token of non-whitespace, non-quote characters.
+    size_t start = i;
+    while (i < n) {
+      char tc = query_text[i];
+      auto tu = static_cast<unsigned char>(tc);
+      if (std::isspace(tu) != 0 || tc == '"' || tc == '\'') {
+        break;
+      }
+      ++i;
+    }
+
+    std::string_view token = query_text.substr(start, i - start);
+    auto matched = match_keyword(token);
+    if (!matched.empty()) {
+      offending_keyword.assign(matched.begin(), matched.end());
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -437,6 +578,15 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Extract table name from URL
     std::string table = req.matches[1];
 
+    // Validate table name (whitelist) before any further processing.
+    // Rejecting unsafe names here prevents the value from breaking the
+    // QueryParser command grammar and turning the URL path into a query
+    // injection vector (e.g. `articles foo`).
+    if (!IsValidTableName(table)) {
+      SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
+      return;
+    }
+
     // Lookup table
     auto table_iter = table_contexts_.find(table);
     if (table_iter == table_contexts_.end()) {
@@ -480,10 +630,15 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       }
     }
 
-    // Validate table name for control characters
-    for (char c : table) {
-      if (c == '\r' || c == '\n' || c == '\0') {
-        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+    // Reject parser clause keywords smuggled into `q`. JSON-supplied `limit`,
+    // `offset`, and `filters` would otherwise be silently overridden by tokens
+    // such as `LIMIT 0 OFFSET 999999` embedded in the search text (P1-9).
+    {
+      std::string offending;
+      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
+        SendError(res, kHttpBadRequest,
+                  "Reserved keyword '" + offending +
+                      "' is not allowed in 'q'. Use the dedicated JSON fields (limit, offset, filters) instead.");
         return;
       }
     }
@@ -638,6 +793,13 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Extract table name from URL
     std::string table = req.matches[1];
 
+    // Validate table name (whitelist) before any further processing. See
+    // HandleSearch for the rationale.
+    if (!IsValidTableName(table)) {
+      SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
+      return;
+    }
+
     // Lookup table
     auto table_iter = table_contexts_.find(table);
     if (table_iter == table_contexts_.end()) {
@@ -680,10 +842,13 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
       }
     }
 
-    // Validate table name for control characters
-    for (char c : table) {
-      if (c == '\r' || c == '\n' || c == '\0') {
-        SendError(res, kHttpBadRequest, "Table name contains invalid control characters");
+    // Reject parser clause keywords smuggled into `q` (see HandleSearch).
+    {
+      std::string offending;
+      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
+        SendError(res, kHttpBadRequest,
+                  "Reserved keyword '" + offending +
+                      "' is not allowed in 'q'. Use the dedicated JSON fields (filters) instead.");
         return;
       }
     }
