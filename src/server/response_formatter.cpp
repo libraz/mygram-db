@@ -892,4 +892,23 @@ std::string ResponseFormatter::FormatError(std::string_view message) {
   return result;
 }
 
+std::string ResponseFormatter::FormatOk(std::string_view body) {
+  if (body.empty()) {
+    return "+OK";
+  }
+  std::string result;
+  result.reserve(4 + body.size());
+  result += "+OK ";
+  result += body;
+  return result;
+}
+
+std::string ResponseFormatter::FormatStatus(std::string_view body) {
+  std::string result;
+  result.reserve(3 + body.size());
+  result += "OK ";
+  result += body;
+  return result;
+}
+
 }  // namespace mygramdb::server

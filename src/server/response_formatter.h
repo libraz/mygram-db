@@ -164,6 +164,33 @@ class ResponseFormatter {
    * @return Formatted response
    */
   static std::string FormatError(std::string_view message);
+
+  /**
+   * @brief Format a simple "+OK" status reply (Redis-style).
+   *
+   * Produces `"+OK"` when @p body is empty, or `"+OK <body>"` otherwise.
+   * Used for status-only acknowledgements where the caller subsequently appends
+   * payload separated by `"\r\n"` (e.g., CONFIG SHOW / CONFIG VERIFY).
+   *
+   * Note: This helper does NOT append a trailing `"\r\n"` — callers control framing.
+   *
+   * @param body Optional inline status body (single line, no CRLF)
+   * @return `"+OK"` or `"+OK <body>"`
+   */
+  static std::string FormatOk(std::string_view body = {});
+
+  /**
+   * @brief Format a result-style "OK <body>" reply (no leading `+`).
+   *
+   * Produces `"OK <body>"`. Used for command results that carry a single-line
+   * payload such as `OK SAVED <path>`, `OK CACHE_CLEARED`, `OK DEBUG_ON`.
+   *
+   * Note: This helper does NOT append a trailing `"\r\n"` — callers control framing.
+   *
+   * @param body Result body (must be non-empty for callers; required for protocol parsers)
+   * @return `"OK <body>"`
+   */
+  static std::string FormatStatus(std::string_view body);
 };
 
 }  // namespace mygramdb::server

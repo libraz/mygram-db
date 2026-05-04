@@ -323,6 +323,41 @@ TEST_F(ResponseFormatterTest, FormatErrorEmpty) {
 }
 
 /**
+ * @brief FormatOk with no body returns the bare "+OK" status reply
+ */
+TEST_F(ResponseFormatterTest, FormatOkNoBody) {
+  EXPECT_EQ(ResponseFormatter::FormatOk(), "+OK");
+  EXPECT_EQ(ResponseFormatter::FormatOk(""), "+OK");
+}
+
+/**
+ * @brief FormatOk with body produces "+OK <body>" with no trailing CRLF
+ */
+TEST_F(ResponseFormatterTest, FormatOkWithBody) {
+  EXPECT_EQ(ResponseFormatter::FormatOk("hello"), "+OK hello");
+  EXPECT_EQ(ResponseFormatter::FormatOk("Variable 'x' set to '1'"), "+OK Variable 'x' set to '1'");
+}
+
+/**
+ * @brief FormatOk preserves bytes for combined "+OK\r\n<body>" call sites
+ */
+TEST_F(ResponseFormatterTest, FormatOkComposesWithCRLF) {
+  // Mirrors the admin_handler.cpp pattern: FormatOk() + "\r\n" + body
+  std::string composed = ResponseFormatter::FormatOk() + "\r\n" + "payload\r\n";
+  EXPECT_EQ(composed, "+OK\r\npayload\r\n");
+}
+
+/**
+ * @brief FormatStatus produces "OK <body>" without leading "+"
+ */
+TEST_F(ResponseFormatterTest, FormatStatusBasic) {
+  EXPECT_EQ(ResponseFormatter::FormatStatus("CACHE_CLEARED"), "OK CACHE_CLEARED");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("DEBUG_ON"), "OK DEBUG_ON");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("SAVED /tmp/dump.bin"), "OK SAVED /tmp/dump.bin");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("DUMP_STARTED /tmp/x"), "OK DUMP_STARTED /tmp/x");
+}
+
+/**
  * @brief Test Prometheus metrics response
  */
 TEST_F(ResponseFormatterTest, FormatPrometheusMetrics) {

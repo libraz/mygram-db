@@ -274,10 +274,10 @@ void IoReactor::EventLoop() {
       poll_result = mux_->Poll(config_.poll_timeout_ms, ready);
     }
     if (!poll_result) {
-      mygram::utils::StructuredLog()
-          .Event("reactor_poll_failed")
-          .Field("error", poll_result.error().to_string())
-          .Warn();
+      // Promoted from Warn to Error: a poll syscall failure indicates a real
+      // I/O multiplexer fault that should raise operator alerts; the reactor
+      // continues but events may be dropped until the next successful poll.
+      mygram::utils::StructuredLog().Event("reactor_poll_failed").FieldError(poll_result.error()).Error();
       continue;
     }
     for (const auto& ev : ready) {

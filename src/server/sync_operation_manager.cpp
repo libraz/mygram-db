@@ -476,6 +476,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("operation", "sync")
           .Field("table", table_name)
           .Field("error", error_msg)
+          .Field("error_code", static_cast<int64_t>(connect_result.error().code()))
           .Error();
       return;
     }
@@ -678,7 +679,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
               .Event("server_error")
               .Field("operation", "sync_replication")
               .Field("table", table_name)
-              .Field("error", start_result.error().message())
+              .FieldError(start_result.error())
               .Error();
         }
       } else {
@@ -734,6 +735,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("operation", "sync")
           .Field("table", table_name)
           .Field("error", error_msg)
+          .Field("error_code", static_cast<int64_t>(result.error().code()))
           .Error();
 
       // Restart replication from the saved GTID position (before SYNC started).
@@ -836,7 +838,7 @@ void SyncOperationManager::RestartReplicationFromGtid(mysql::IBinlogReader* read
         .Field("table", table_name)
         .Field("reason", reason)
         .Field("gtid", gtid)
-        .Field("error", start_result.error().message())
+        .FieldError(start_result.error())
         .Error();
   }
 }

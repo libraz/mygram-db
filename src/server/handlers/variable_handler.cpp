@@ -70,14 +70,14 @@ std::string VariableHandler::HandleSet(const Query& query) {
   // Success
   if (query.variable_assignments.size() == 1) {
     const auto& [variable_name, value] = query.variable_assignments[0];
-    std::ostringstream oss;
-    oss << "+OK Variable '" << variable_name << "' set to '" << value << "'\r\n";
-    return oss.str();
+    std::ostringstream body;
+    body << "Variable '" << variable_name << "' set to '" << value << "'";
+    return ResponseFormatter::FormatOk(body.str()) + "\r\n";
   }
 
-  std::ostringstream oss;
-  oss << "+OK " << query.variable_assignments.size() << " variables set\r\n";
-  return oss.str();
+  std::ostringstream body;
+  body << query.variable_assignments.size() << " variables set";
+  return ResponseFormatter::FormatOk(body.str()) + "\r\n";
 }
 
 std::string VariableHandler::HandleShowVariables(const Query& query) {
@@ -118,7 +118,7 @@ std::string VariableHandler::HandleShowVariables(const Query& query) {
 
 std::string VariableHandler::FormatVariablesTable(const std::map<std::string, config::VariableInfo>& variables) {
   if (variables.empty()) {
-    return "+OK 0 rows\r\n";
+    return ResponseFormatter::FormatOk("0 rows") + "\r\n";
   }
 
   // Calculate column widths

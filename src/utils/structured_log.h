@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "utils/error.h"
+
 namespace mygram::utils {
 
 /**
@@ -164,6 +166,22 @@ class StructuredLog {
     } else {
       fields_text_.push_back(key + "=" + val_str);
     }
+    return *this;
+  }
+
+  /**
+   * @brief Add an Error object as two fields: "error" (message) and "error_code" (numeric).
+   *
+   * Shortcut for `.Field("error", err.message()).Field("error_code", static_cast<int64_t>(err.code()))`.
+   * Pairs the human-readable error message with its numeric code so log aggregators can
+   * group/filter on `error_code` even when message text varies.
+   *
+   * @param err Error object to log
+   * @return Reference to *this for chaining
+   */
+  StructuredLog& FieldError(const mygram::utils::Error& err) {
+    Field("error", err.message());
+    Field("error_code", static_cast<int64_t>(err.code()));
     return *this;
   }
 

@@ -317,6 +317,56 @@ TEST_F(StructuredLogTest, TextFormatStringWithSpaces) {
 }
 
 /**
+ * @brief Test FieldError shortcut emits both "error" and "error_code" fields
+ */
+TEST_F(StructuredLogTest, FieldErrorEmitsMessageAndCode) {
+  Error err(ErrorCode::kStorageReadError, "disk read failed");
+
+  StructuredLog().Event("storage_op").FieldError(err).Error();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"event\":\"storage_op\""), std::string::npos);
+  EXPECT_NE(output.find("\"error\":\"disk read failed\""), std::string::npos);
+  // kStorageReadError = 5001
+  EXPECT_NE(output.find("\"error_code\":5001"), std::string::npos);
+}
+
+/**
+ * @brief FieldError uses err.message(), not the formatted to_string()
+ */
+TEST_F(StructuredLogTest, FieldErrorUsesPlainMessage) {
+  // Constructor with three args sets context, but message() should still
+  // return only the message portion, not the bracketed code-prefixed form.
+  Error err(ErrorCode::kInvalidArgument, "bad input", "ctx");
+
+  StructuredLog().Event("op").FieldError(err).Error();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"error\":\"bad input\""), std::string::npos);
+  // kInvalidArgument = 2
+  EXPECT_NE(output.find("\"error_code\":2"), std::string::npos);
+  // The bracket-prefixed form should NOT appear in the "error" field
+  EXPECT_EQ(output.find("\"error\":\"[Invalid argument"), std::string::npos);
+}
+
+/**
+ * @brief FieldError chains with other Field calls
+ */
+TEST_F(StructuredLogTest, FieldErrorChainable) {
+  Error err(ErrorCode::kQuerySyntaxError, "missing operand");
+
+  StructuredLog().Event("query_op").Field("table", "articles").FieldError(err).Field("retry", false).Error();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"event\":\"query_op\""), std::string::npos);
+  EXPECT_NE(output.find("\"table\":\"articles\""), std::string::npos);
+  EXPECT_NE(output.find("\"error\":\"missing operand\""), std::string::npos);
+  // kQuerySyntaxError = 3000
+  EXPECT_NE(output.find("\"error_code\":3000"), std::string::npos);
+  EXPECT_NE(output.find("\"retry\":false"), std::string::npos);
+}
+
+/**
  * @brief Test ParseFormat() function
  */
 TEST_F(StructuredLogTest, ParseFormat) {

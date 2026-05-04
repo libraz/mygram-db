@@ -24,7 +24,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
           .Event("debug_mode_enabled")
           .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
-      return "OK DEBUG_ON";
+      return ResponseFormatter::FormatStatus("DEBUG_ON");
     }
 
     case query::QueryType::DEBUG_OFF: {
@@ -33,7 +33,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
           .Event("debug_mode_disabled")
           .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
-      return "OK DEBUG_OFF";
+      return ResponseFormatter::FormatStatus("DEBUG_OFF");
     }
 
     case query::QueryType::OPTIMIZE: {

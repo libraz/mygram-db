@@ -57,7 +57,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     mygram::utils::StructuredLog()
         .Event("server_error")
         .Field("operation", "config_help")
-        .Field("error", explorer_result.error().message())
+        .FieldError(explorer_result.error())
         .Error();
     return ResponseFormatter::FormatError(std::string("CONFIG HELP failed: ") + explorer_result.error().message());
   }
@@ -71,7 +71,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
       result.append("\r\n");
     }
-    return "+OK\r\n" + result;
+    return ResponseFormatter::FormatOk() + "\r\n" + result;
   }
 
   // Show help for specific path
@@ -85,7 +85,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
     result.append("\r\n");
   }
-  return "+OK\r\n" + result;
+  return ResponseFormatter::FormatOk() + "\r\n" + result;
 }
 
 std::string AdminHandler::HandleConfigShow(const std::string& path) {
@@ -103,7 +103,7 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
     mygram::utils::StructuredLog()
         .Event("server_error")
         .Field("operation", "config_show")
-        .Field("error", format_result.error().message())
+        .FieldError(format_result.error())
         .Error();
     return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + format_result.error().message());
   }
@@ -115,7 +115,7 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
   if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
     result.append("\r\n");
   }
-  return "+OK\r\n" + result;
+  return ResponseFormatter::FormatOk() + "\r\n" + result;
 }
 
 std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
@@ -166,12 +166,16 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
   // Try to load and validate the configuration file
   auto config_result = config::LoadConfig(filepath);
   if (!config_result) {
+    // Logged at WARN: this is a client-input validation failure (user supplied
+    // a bad YAML), not a server-side system error, so it should not raise
+    // operator alerts. Event renamed from "server_error" to "config_verify_failed"
+    // for clearer attribution.
     mygram::utils::StructuredLog()
-        .Event("server_error")
+        .Event("config_verify_failed")
         .Field("operation", "config_verify")
         .Field("filepath", filepath)
-        .Field("error", config_result.error().to_string())
-        .Error();
+        .FieldError(config_result.error())
+        .Warn();
     return ResponseFormatter::FormatError(std::string("Configuration validation failed:\r\n  ") +
                                           config_result.error().message());
   }
@@ -197,7 +201,7 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
   // disclosure via TCP. CONFIG VERIFY is accessible to all authenticated clients.
   summary << "  MySQL: " << test_config.mysql.host << ":" << test_config.mysql.port << "\r\n";
 
-  return "+OK\r\n" + summary.str();
+  return ResponseFormatter::FormatOk() + "\r\n" + summary.str();
 }
 
 }  // namespace mygramdb::server

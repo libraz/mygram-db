@@ -126,6 +126,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
         .Event("server_error")
         .Field("operation", "dump_save")
         .Field("reason", "config_not_available")
+        .Field("error", error_msg)
         .Error();
     return ResponseFormatter::FormatError(error_msg);
   }
@@ -174,7 +175,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     // Return immediately with started message (async mode)
     // Do NOT embed \r\n in the response -- the TCP protocol uses \r\n as the
     // frame terminator, so the client would truncate at the first \r\n.
-    return "OK DUMP_STARTED " + filepath;
+    return ResponseFormatter::FormatStatus("DUMP_STARTED " + filepath);
   }
 
   // Fallback: run synchronously if no progress tracking available (e.g., in tests)
@@ -191,7 +192,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 
   // Check result and return appropriate response (sync mode)
   if (success) {
-    return "OK SAVED " + filepath;
+    return ResponseFormatter::FormatStatus("SAVED " + filepath);
   }
   return ResponseFormatter::FormatError("Dump save failed");
 }
@@ -299,7 +300,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
         .Event("dump_save_failed")
         .Field("filepath", filepath)
         .Field("gtid", gtid)
-        .Field("error", error_msg)
+        .FieldError(result.error())
         .Error();
     if (ctx_.dump_progress != nullptr) {
       ctx_.dump_progress->Fail("Failed to save dump: " + error_msg);
@@ -474,6 +475,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       .Field("operation", "dump_load")
       .Field("filepath", filepath)
       .Field("error", error_msg)
+      .Field("error_code", static_cast<int64_t>(result.error().code()))
       .Error();
   return ResponseFormatter::FormatError(error_msg);
 }
@@ -495,7 +497,7 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
 
   if (result) {
     mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field("path", filepath).Info();
-    return "OK DUMP_VERIFIED " + filepath;
+    return ResponseFormatter::FormatStatus("DUMP_VERIFIED " + filepath);
   }
 
   std::string error_msg = "Dump verification failed for " + filepath + ": " + result.error().message();
@@ -507,6 +509,7 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
       .Field("operation", "dump_verify")
       .Field("filepath", filepath)
       .Field("error", error_msg)
+      .Field("error_code", static_cast<int64_t>(result.error().code()))
       .Error();
   return ResponseFormatter::FormatError(error_msg);
 }
