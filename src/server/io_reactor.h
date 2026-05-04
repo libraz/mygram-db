@@ -213,9 +213,21 @@ class IoReactor {
   // The backends (epoll/kqueue) are kernel-level thread-safe for concurrent
   // poll + ctl/kevent from different threads; KqueueMultiplexer uses its own
   // internal mutex to protect its interest_ map.
+  //
+  // Lock ordering (must be acquired in this order to avoid deadlock):
+  //   start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_
+  // The event-loop thread NEVER takes start_stop_mutex_ (it would deadlock
+  // against its own joiner in Stop()).
   mutable std::shared_mutex mux_lifecycle_;
   std::thread event_loop_thread_;
   std::atomic<bool> running_{false};
+
+  // Serialises Start() and Stop() against each other. Without this, a Stop()
+  // racing with the body of Start() can observe `running_=true` set by
+  // Start, exchange it back to false, attempt to join the event_loop_thread_
+  // before Start has assigned to it, and silently leak the worker thread
+  // that Start eventually spawns.
+  std::mutex start_stop_mutex_;
 
   mutable std::shared_mutex connections_mutex_;
   std::unordered_map<int, std::shared_ptr<ReactorConnection>> connections_;

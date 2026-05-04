@@ -143,19 +143,31 @@ bool ReactorConnection::OnReadable() {
   // pending in the write queue, we can tear down immediately. Otherwise the
   // drain task (or OnWritable, after the write queue drains) will do the
   // close for us.
+  //
+  // Bug fix (P1-3): the empty-queue test must hold BOTH mutexes
+  // simultaneously. Releasing frame_mutex_ before acquiring write_mutex_
+  // opens a window where an in-flight DrainTask can finish dispatching the
+  // last frame and call EnqueueResponse → write_queue_.push_back AFTER we
+  // observed pending_frames_/drain_scheduled_ both empty but BEFORE we read
+  // write_queue_. The result was a closing_=true decision while a fresh
+  // response sat in the write queue, dropping the response on the floor.
+  //
+  // Lock ordering (consistent with the rest of this file):
+  //   frame_mutex_ -> write_mutex_
+  // No code path takes write_mutex_ then frame_mutex_; OnWritable
+  // deliberately avoids acquiring frame_mutex_ while holding write_mutex_
+  // (see commentary in OnWritable).
   if (read_eof_.load(std::memory_order_acquire)) {
-    bool nothing_to_dispatch = false;
+    bool should_close = false;
     {
-      std::lock_guard<std::mutex> lock(frame_mutex_);
-      nothing_to_dispatch = pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire);
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      std::lock_guard<std::mutex> write_lock(write_mutex_);
+      if (pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire) && write_queue_.empty()) {
+        closing_.store(true, std::memory_order_release);
+        should_close = true;
+      }
     }
-    bool write_queue_empty = false;
-    {
-      std::lock_guard<std::mutex> lock(write_mutex_);
-      write_queue_empty = write_queue_.empty();
-    }
-    if (nothing_to_dispatch && write_queue_empty) {
-      closing_.store(true, std::memory_order_release);
+    if (should_close) {
       return false;
     }
   }
@@ -300,19 +312,53 @@ void ReactorConnection::DrainTask() {
   // Netty/Vert.x "clear-then-recheck": before releasing the drain slot,
   // confirm that no new frames arrived in the window between the last
   // queue-empty check and now. If frames did arrive, reschedule ourselves.
+  //
+  // Bug fix (P1-4): the previous version cleared `drain_scheduled_=false`
+  // OUTSIDE the frame_mutex_ critical section and BEFORE calling
+  // ScheduleDrainTask. That created a window where another thread's
+  // ScheduleDrainTask CAS could succeed (because drain_scheduled_ was
+  // momentarily false) AND this task's subsequent ScheduleDrainTask CAS
+  // would also succeed (after the other task's CAS reset it to false), so
+  // two drain tasks ran concurrently against the same connection,
+  // violating the "at most one drain task per connection" invariant.
+  //
+  // The fix: do the empty/closing test under frame_mutex_, and only flip
+  // drain_scheduled_ to false in the path where we are NOT going to
+  // reschedule. When we ARE going to reschedule, leave drain_scheduled_
+  // as true so any concurrent ScheduleDrainTask CAS fails; this task then
+  // submits the follow-up drain externally and returns.
   bool reschedule = false;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (!pending_frames_.empty() && !closing_.load(std::memory_order_acquire)) {
+    if (pending_frames_.empty() || closing_.load(std::memory_order_acquire)) {
+      drain_scheduled_.store(false, std::memory_order_release);
+    } else {
+      // Keep drain_scheduled_ = true so concurrent ScheduleDrainTask
+      // attempts fail their CAS — we own the next drain submission.
       reschedule = true;
     }
   }
-  drain_scheduled_.store(false, std::memory_order_release);
   if (reschedule) {
-    if (!ScheduleDrainTask()) {
-      // Scheduling failed (e.g., thread pool full) — close the connection
-      // to avoid silently abandoning pending frames.
+    // Submit the follow-up task directly. We deliberately bypass
+    // ScheduleDrainTask's CAS because drain_scheduled_ is already true and
+    // belongs to us; calling ScheduleDrainTask here would early-return
+    // without submitting. If submission fails (e.g., thread pool full),
+    // we must clear drain_scheduled_ so the connection can recover, then
+    // close it because we can no longer guarantee progress on its frames.
+    if (thread_pool_ == nullptr || dispatcher_ == nullptr) {
+      drain_scheduled_.store(false, std::memory_order_release);
       closing_.store(true, std::memory_order_release);
+    } else {
+      auto self = shared_from_this();
+      const bool submitted = thread_pool_->Submit([self]() { self->DrainTask(); });
+      if (!submitted) {
+        drain_scheduled_.store(false, std::memory_order_release);
+        mygram::utils::StructuredLog()
+            .Event("reactor_drain_resubmit_failed")
+            .Field("fd", static_cast<int64_t>(fd_))
+            .Warn();
+        closing_.store(true, std::memory_order_release);
+      }
     }
     return;
   }

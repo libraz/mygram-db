@@ -40,6 +40,13 @@ IoReactor::~IoReactor() {
 }
 
 Expected<void, Error> IoReactor::Start() {
+  // Serialise against Stop() and any concurrent Start() invocation. Without
+  // this lock, a Stop() racing with Start can observe running_=true after
+  // Start sets it, exchange it back to false, attempt to join() the
+  // event_loop_thread_ before Start assigns it, and silently leak the
+  // worker thread Start subsequently spawns.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   if (running_.load(std::memory_order_acquire)) {
     return {};
   }
@@ -64,7 +71,12 @@ Expected<void, Error> IoReactor::Start() {
     return MakeUnexpected(r.error());
   }
 
-  mux_ = std::move(mux);
+  // Take mux_lifecycle_ exclusively to publish mux_ atomically with
+  // running_=true. Lock order: start_stop_mutex_ -> mux_lifecycle_.
+  {
+    std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    mux_ = std::move(mux);
+  }
   running_.store(true, std::memory_order_release);
   event_loop_thread_ = std::thread([this]() { EventLoop(); });
 
@@ -77,6 +89,15 @@ Expected<void, Error> IoReactor::Start() {
 }
 
 void IoReactor::Stop() {
+  // Serialise against Start() and any concurrent Stop(). See start_stop_mutex_
+  // commentary in the header for the race this guards.
+  //
+  // The event-loop thread MUST NOT take start_stop_mutex_ — Stop() joins it
+  // while holding the lock. EventLoop only acquires mux_lifecycle_ (shared),
+  // which is consistent with the global ordering
+  // start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   if (!running_.exchange(false, std::memory_order_acq_rel)) {
     // Never started, or already stopped.
     if (event_loop_thread_.joinable()) {
@@ -92,14 +113,14 @@ void IoReactor::Stop() {
   // Drop all registered connections. Drain tasks that still hold a
   // shared_ptr copy will keep their connection alive until they finish.
   {
-    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
     connections_.clear();
   }
   {
     // Exclusive lock: wait for any in-flight Register/Unregister/ArmWrite to
     // finish before destroying the multiplexer. The event-loop thread has
     // already been joined, so the only contenders are other threads.
-    std::unique_lock<std::shared_mutex> lock(mux_lifecycle_);
+    std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
     mux_.reset();
   }
 
@@ -110,9 +131,6 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
   if (!conn) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Register called with null connection"));
   }
-  if (!running_.load(std::memory_order_acquire)) {
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register before Start"));
-  }
 
   const int fd = conn->Fd();
   if (fd < 0) {
@@ -121,6 +139,8 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
 
   // Put the socket in non-blocking mode before handing it to the event loop.
   // Without this, a recv() inside OnReadable would block the entire reactor.
+  // This is done outside any reactor lock because fcntl(2) is independent of
+  // reactor state.
   const int flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
     return MakeUnexpected(MakeError(ErrorCode::kNetworkSocketCreationFailed,
@@ -133,42 +153,38 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
     }
   }
 
+  // Acquire mux_lifecycle_ (shared) FIRST and perform every reactor-state
+  // mutation — running_ check, connections_ insert, mux_->Add — inside this
+  // critical section. Stop() takes mux_lifecycle_ exclusively at the very end
+  // of its shutdown sequence; while we hold this shared lock, Stop() cannot
+  // proceed past `connections_.clear()` (which happens BEFORE the exclusive
+  // mux_lifecycle_ acquisition in Stop). That eliminates the window where
+  // Register's connections_.emplace could leak past Stop's clear().
+  //
+  // Lock ordering: mux_lifecycle_ (shared) -> connections_mutex_ (unique).
+  std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+
+  if (!running_.load(std::memory_order_acquire) || !mux_) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register before Start"));
+  }
+
+  // Insert into connections_ first so an event delivered between mux_->Add
+  // and the map insert never sees a missing entry.
   {
-    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
     if (connections_.count(fd) != 0U) {
       return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd"));
     }
     connections_.emplace(fd, conn);
   }
 
-  {
-    std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
-    if (!mux_) {
-      // Racing with Stop(): undo the insert.
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register during shutdown"));
-    }
-    auto r = mux_->Add(fd, reactor::event::kReadable);
-    if (!r) {
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);
-      return MakeUnexpected(r.error());
-    }
-
-    // Narrow race: Stop() sets running_=false and clears connections_
-    // *before* blocking on mux_lifecycle_ exclusive. If that sequence
-    // interleaved between our initial running_ check and this point, our
-    // emplace is already gone from the map and the about-to-be-destroyed
-    // multiplexer will never deliver events for this fd. Detect that window
-    // by re-checking running_ while we still hold mux_lifecycle_ shared,
-    // and roll back the Add so the caller sees a clean failure.
-    if (!running_.load(std::memory_order_acquire)) {
-      (void)mux_->Remove(fd);
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);  // no-op if Stop() already cleared the map
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register raced with Stop"));
-    }
+  auto add_result = mux_->Add(fd, reactor::event::kReadable);
+  if (!add_result) {
+    // Roll back the map insert so a subsequent Register attempt with the
+    // same fd sees a clean slate.
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    connections_.erase(fd);
+    return MakeUnexpected(add_result.error());
   }
 
   return {};

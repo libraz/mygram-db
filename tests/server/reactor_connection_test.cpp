@@ -439,3 +439,48 @@ TEST_F(ReactorConnectionTest, DrainTaskOrderingPreserved) {
 // SKIP — DrainTaskReschedulesAfterEmptyCheck: deterministic triggering of the
 // reschedule window requires injecting artificial delays between queue-empty
 // check and drain_scheduled_ CAS; covered by TSan stress runs in Phase 2.T5.
+
+// ---------------------------------------------------------------------------
+// Bug fix regression (P1-3): EofWithFrameDispatchedDoesNotDropResponse
+//
+// Reproduces the race where:
+//   1. peer half-closes (recv()==0 → read_eof_=true).
+//   2. OnReadable's tail check formerly released frame_mutex_ before
+//      acquiring write_mutex_, so a concurrent DrainTask finishing between
+//      the two locks could push a response into write_queue_ AFTER the
+//      first lock observed pending_frames_ empty but BEFORE the second lock
+//      observed write_queue_, leading the close-decision to fire and drop
+//      the response.
+//
+// Post-fix: the empty-queue test holds both mutexes simultaneously, so the
+// drain task's response push is either fully observed (close suppressed)
+// or fully invisible (drain task hasn't dispatched yet, but pending_frames_
+// is non-empty so close is suppressed via the first condition).
+//
+// This test sends a frame, half-closes the write side from the peer, and
+// asserts the response arrives on the peer fd. With the bug, the response
+// is occasionally lost; with the fix, it is always delivered.
+// ---------------------------------------------------------------------------
+
+TEST_F(ReactorConnectionTest, EofWithFrameDispatchedDoesNotDropResponse) {
+  // Send a frame and immediately close the write side of the peer to set
+  // read_eof_ on the next OnReadable.
+  WriteAll(peer_fd_, "INFO\r\n");
+  ASSERT_EQ(::shutdown(peer_fd_, SHUT_WR), 0) << "peer shutdown failed: " << std::strerror(errno);
+
+  // First OnReadable drains the pending bytes, schedules the drain task,
+  // and observes recv()==0 → sets read_eof_. The drain task runs on the
+  // thread pool; the close-decision in OnReadable must NOT fire while the
+  // drain task is in-flight.
+  EXPECT_TRUE(conn_->OnReadable());
+
+  // The drain task dispatches the frame and enqueues a response. Wait for
+  // it to arrive on the peer fd. If the bug's race triggers, this read
+  // either times out (response dropped) or sees only EOF.
+  ASSERT_TRUE(WaitReadable(peer_fd_, 3000)) << "Response was dropped — close decision raced with drain task";
+  char buf[256] = {};
+  ssize_t n = ::recv(peer_fd_, buf, sizeof(buf) - 1, 0);
+  ASSERT_GT(n, 0) << "Expected response bytes, got n=" << n << " errno=" << errno;
+  std::string response(buf, static_cast<size_t>(n));
+  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0) << "Unexpected response: " << response;
+}

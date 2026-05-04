@@ -463,4 +463,139 @@ TEST_F(IoReactorTest, ShutdownWith500ActiveConnectionsIsClean) {
   // on destruction — no fd leak.
 }
 
+// ---------------------------------------------------------------------------
+// Test 18: StartStopRapidCycleNoThreadLeak (Bug P1-6 regression)
+//
+// Repeats Start()→Stop() many times. Without the start_stop_mutex_ added in
+// the P1-6 fix, a Stop() that observed running_=true set by an interleaving
+// Start could exchange running_ back to false, find event_loop_thread_
+// non-joinable (Start had not yet assigned it), and silently let the
+// subsequently-spawned thread leak. The test process completing without
+// thread-sanitizer warnings or hangs validates the fix.
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, StartStopRapidCycleNoThreadLeak) {
+  for (int i = 0; i < 100; ++i) {
+    auto pool = std::make_unique<ThreadPool>(1, 16);
+    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
+
+    auto start_result = reactor->Start();
+    ASSERT_TRUE(start_result) << "iteration " << i << ": " << start_result.error().to_string();
+    reactor->Stop();
+    EXPECT_FALSE(reactor->IsRunning()) << "iteration " << i;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: StartStopConcurrentNoLeak (Bug P1-6 regression)
+//
+// Drives Start/Stop from two threads simultaneously and confirms the reactor
+// reaches a consistent stopped state without orphaning the event-loop thread.
+// The start_stop_mutex_ serialises Start/Stop so this is well-defined.
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, StartStopConcurrentNoLeak) {
+  for (int i = 0; i < 50; ++i) {
+    auto pool = std::make_unique<ThreadPool>(1, 16);
+    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
+
+    std::atomic<bool> go{false};
+    std::thread t1([&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      (void)reactor->Start();
+    });
+    std::thread t2([&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      reactor->Stop();
+    });
+    go.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    // Whatever the interleaving, a final Stop() must leave us not-running and
+    // must not deadlock or leak the event-loop thread.
+    reactor->Stop();
+    EXPECT_FALSE(reactor->IsRunning()) << "iteration " << i;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: RegisterRaceWithStopLeavesNoStaleEntries (Bug P1-2 regression)
+//
+// Hammers Register from a worker thread while the main thread issues Stop().
+// The bug fix moves connections_ insertion under mux_lifecycle_'s shared
+// lock, so a Register either succeeds (connection is registered AND added to
+// the mux before Stop's exclusive mux_lifecycle_ acquisition can proceed) or
+// fails cleanly (running_=false observed, no map insert).
+//
+// After the dust settles we verify ConnectionCount() == 0 (Stop's clear()
+// always runs) and that no Register() that was reported as failed left a
+// stale entry behind.
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
+  for (int iter = 0; iter < 20; ++iter) {
+    auto pool = std::make_unique<ThreadPool>(2, 64);
+    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
+    ASSERT_TRUE(reactor->Start());
+
+    constexpr int kRegistersPerIter = 32;
+    std::vector<std::unique_ptr<SocketPair>> pairs;
+    pairs.reserve(kRegistersPerIter);
+    std::vector<int> fds;
+    fds.reserve(kRegistersPerIter);
+    for (int i = 0; i < kRegistersPerIter; ++i) {
+      auto sp = std::make_unique<SocketPair>();
+      fds.push_back(sp->TakeClient());
+      pairs.push_back(std::move(sp));
+    }
+
+    std::atomic<bool> go{false};
+    std::atomic<int> register_successes{0};
+    std::atomic<int> register_failures{0};
+
+    std::thread registrar([&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      for (int fd : fds) {
+        auto conn = ReactorConnection::Create(fd, reactor.get(), nullptr, pool.get());
+        auto r = reactor->Register(conn);
+        if (r) {
+          register_successes.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          register_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+
+    std::thread stopper([&]() {
+      while (!go.load(std::memory_order_acquire)) {
+      }
+      // Tiny stagger so some Register calls land before Stop, others after.
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      reactor->Stop();
+    });
+
+    go.store(true, std::memory_order_release);
+    registrar.join();
+    stopper.join();
+
+    // Invariant: after Stop, the connection map is empty regardless of how
+    // many registers succeeded/failed. The bug being regressed against
+    // would manifest as ConnectionCount() > 0 (entries inserted by a
+    // Register that won the race after Stop's clear()).
+    //
+    // Because Stop is idempotent, a second call is a no-op but confirms the
+    // reactor is in a consistent state.
+    reactor->Stop();
+    EXPECT_EQ(reactor->ConnectionCount(), 0u)
+        << "iter " << iter << " successes=" << register_successes.load() << " failures=" << register_failures.load();
+  }
+}
+
 }  // namespace mygramdb::server
