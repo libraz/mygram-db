@@ -18,6 +18,7 @@
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
+#include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
 
@@ -27,13 +28,15 @@ constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every se
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
-                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress)
+                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
+                                     std::atomic<bool>& replication_paused_for_dump)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader),
-      dump_save_in_progress_(dump_save_in_progress) {
+      dump_save_in_progress_(dump_save_in_progress),
+      replication_paused_for_dump_(replication_paused_for_dump) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -47,6 +50,12 @@ void SnapshotScheduler::Start() {
     mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return;
   }
+
+  // Hold start_stop_mutex_ across the entire Start sequence so that a
+  // concurrent Stop() cannot observe running_ == true and skip joining
+  // before scheduler_thread_ has been constructed. SchedulerLoop never
+  // acquires this mutex, so there is no risk of self-deadlock.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
 
   // Atomically try to set running_ from false to true to prevent TOCTOU race
   bool expected = false;
@@ -69,6 +78,13 @@ void SnapshotScheduler::Start() {
 }
 
 void SnapshotScheduler::Stop() {
+  // Hold start_stop_mutex_ across the entire Stop sequence to serialize
+  // with Start(). Without this, Stop() could observe running_ == true while
+  // Start() is still mid-construction (compare_exchange has succeeded but the
+  // thread has not yet been created), leak the not-yet-created thread, and
+  // race Start() to completion. SchedulerLoop never acquires this mutex.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   // Use compare_exchange to ensure only one thread performs the stop sequence.
   // Without this, two concurrent Stop() calls could both pass the running_
   // check and double-join the thread, causing std::terminate.
@@ -152,7 +168,53 @@ void SnapshotScheduler::TakeSnapshot() {
 
     mygram::utils::StructuredLog().Event("snapshot_taking").Field("path", dump_path.string()).Info();
 
-    // Get current GTID
+#ifdef USE_MYSQL
+    // Pause replication while writing the snapshot. Without this, the binlog
+    // worker thread may concurrently mutate Index/DocumentStore while WriteDump
+    // is iterating, producing inconsistent output and racing with concurrent
+    // Index::Add() calls. This mirrors the behavior of manual DUMP SAVE in
+    // DumpHandler::DumpSaveWorker.
+    bool replication_was_running = (binlog_reader_ != nullptr) && binlog_reader_->IsRunning();
+    if (replication_was_running) {
+      binlog_reader_->Stop();
+      replication_paused_for_dump_.store(true, std::memory_order_release);
+      mygram::utils::StructuredLog()
+          .Event("replication_paused_for_dump")
+          .Field("operation", "snapshot")
+          .Field("filepath", dump_path.string())
+          .Field("auto_resume", "true")
+          .Info();
+    }
+
+    // RAII restore: even on exception or early return, replication is resumed
+    // and the paused flag is cleared. The lambda captures the dump_path string
+    // by value defensively; structured-log fields are formatted inside.
+    const std::string dump_path_str = dump_path.string();
+    auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str]() {
+      if (!replication_was_running || binlog_reader_ == nullptr) {
+        return;
+      }
+      replication_paused_for_dump_.store(false, std::memory_order_release);
+      auto start_result = binlog_reader_->Start();
+      if (start_result) {
+        mygram::utils::StructuredLog()
+            .Event("replication_resumed_after_dump")
+            .Field("operation", "snapshot")
+            .Field("filepath", dump_path_str)
+            .Info();
+      } else {
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_failed")
+            .Field("operation", "snapshot")
+            .Field("filepath", dump_path_str)
+            .Field("error", binlog_reader_->GetLastError())
+            .Error();
+      }
+    });
+#endif
+
+    // Get current GTID (after stopping replication so we record the last
+    // processed position, matching DumpSaveWorker's ordering).
     std::string gtid;
     if (binlog_reader_ != nullptr) {
       gtid = binlog_reader_->GetCurrentGTID();
@@ -174,6 +236,9 @@ void SnapshotScheduler::TakeSnapshot() {
           .Field("error", result.error().message())
           .Error();
     }
+
+    // restore_replication runs here (when in scope), resuming replication
+    // before dump_save_guard releases the dump_save_in_progress flag.
 
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog()

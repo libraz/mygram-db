@@ -398,8 +398,9 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, "TableCatalog must not be null for SnapshotScheduler"));
   }
 
-  auto scheduler = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_,
-                                                       binlog_reader_, dump_save_in_progress_);
+  auto scheduler =
+      std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_,
+                                          dump_save_in_progress_, replication_paused_for_dump_);
 
   // Start the scheduler
   scheduler->Start();

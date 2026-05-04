@@ -51,10 +51,12 @@ class SnapshotScheduler {
    * @param dump_dir Directory for snapshot files
    * @param binlog_reader Optional binlog reader for GTID tracking
    * @param dump_save_in_progress Reference to DUMP SAVE flag for mutual exclusion with manual DUMP SAVE
+   * @param replication_paused_for_dump Reference to replication-paused flag, asserted while
+   *        a snapshot is in progress so that manual REPLICATION START is rejected during the dump.
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
-                    std::string dump_dir, mysql::IBinlogReader* binlog_reader,
-                    std::atomic<bool>& dump_save_in_progress);
+                    std::string dump_dir, mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
+                    std::atomic<bool>& replication_paused_for_dump);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -110,10 +112,22 @@ class SnapshotScheduler {
   std::condition_variable stop_cv_;
   std::unique_ptr<std::thread> scheduler_thread_;
 
+  // Serializes Start()/Stop() so concurrent calls cannot race on
+  // scheduler_thread_ creation/join. Without this, a Stop() that observes
+  // running_ == true between Start()'s compare_exchange and the thread's
+  // construction would skip the join and leak the thread.
+  std::mutex start_stop_mutex_;
+
   mysql::IBinlogReader* binlog_reader_;
 
   // Reference to dump_save_in_progress flag (shared with DumpHandler for mutual exclusion)
   std::atomic<bool>& dump_save_in_progress_;
+
+  // Reference to replication-paused flag (shared with DumpHandler/TcpServer).
+  // Asserted while a scheduled snapshot is in progress so that concurrent
+  // REPLICATION START requests are rejected, mirroring the behavior of
+  // manual DUMP SAVE/LOAD.
+  std::atomic<bool>& replication_paused_for_dump_;
 };
 
 }  // namespace mygramdb::server

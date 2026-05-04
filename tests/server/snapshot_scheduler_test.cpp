@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -16,9 +17,11 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/server_types.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
@@ -82,6 +85,7 @@ class SnapshotSchedulerTest : public ::testing::Test {
 
     // Initialize read_only flag for mutual exclusion testing
     dump_save_in_progress_ = false;
+    replication_paused_for_dump_ = false;
   }
 
   void TearDown() override {
@@ -94,7 +98,8 @@ class SnapshotSchedulerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> tables_;
   std::unique_ptr<TableCatalog> catalog_;
   Config full_config_;
-  std::atomic<bool> dump_save_in_progress_{false};  // For mutual exclusion with manual DUMP SAVE
+  std::atomic<bool> dump_save_in_progress_{false};        // For mutual exclusion with manual DUMP SAVE
+  std::atomic<bool> replication_paused_for_dump_{false};  // Asserted while a snapshot is in progress
 };
 
 // ===========================================================================
@@ -107,7 +112,7 @@ TEST_F(SnapshotSchedulerTest, ConstructWithValidParams) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   EXPECT_FALSE(scheduler.IsRunning());
 }
@@ -118,7 +123,7 @@ TEST_F(SnapshotSchedulerTest, StartAndStop) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -133,7 +138,7 @@ TEST_F(SnapshotSchedulerTest, DoubleStartIsIdempotent) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -151,7 +156,7 @@ TEST_F(SnapshotSchedulerTest, DoubleStopIsIdempotent) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   scheduler.Stop();
@@ -169,7 +174,7 @@ TEST_F(SnapshotSchedulerTest, DestructorStopsScheduler) {
 
   {
     SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                                dump_save_in_progress_);
+                                dump_save_in_progress_, replication_paused_for_dump_);
     scheduler.Start();
     EXPECT_TRUE(scheduler.IsRunning());
     // Destructor should stop the scheduler
@@ -189,7 +194,7 @@ TEST_F(SnapshotSchedulerTest, DisabledWithZeroInterval) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   // Should not start thread when interval is 0
@@ -202,7 +207,7 @@ TEST_F(SnapshotSchedulerTest, DisabledWithNegativeInterval) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   EXPECT_FALSE(scheduler.IsRunning());
@@ -222,7 +227,7 @@ TEST_F(SnapshotSchedulerTest, CleanupPreservesNonAutoFiles) {
   dump_config.retain = 1;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   // Files should still exist (cleanup only affects auto_ prefixed files)
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "manual_backup.dmp"));
@@ -239,7 +244,7 @@ TEST_F(SnapshotSchedulerTest, CleanupRetainZeroSkipsCleanup) {
   dump_config.retain = 0;  // No retention policy = no cleanup
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   // Files should still exist (retain=0 means no cleanup)
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240101_120000.dmp"));
@@ -259,7 +264,7 @@ TEST_F(SnapshotSchedulerTest, EmptyTableCatalog) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, empty_catalog.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   EXPECT_TRUE(scheduler.IsRunning());
@@ -276,7 +281,7 @@ TEST_F(SnapshotSchedulerTest, NonExistentDumpDir) {
 
   // Scheduler should still construct (directory created on snapshot)
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, non_existent.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   EXPECT_FALSE(scheduler.IsRunning());
 }
@@ -287,7 +292,7 @@ TEST_F(SnapshotSchedulerTest, StopWithoutStart) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   // Stop without start should be safe
   scheduler.Stop();
@@ -334,7 +339,7 @@ TEST_F(SnapshotSchedulerTest, CleanupContinuesOnDeleteFailure) {
   dump_config.retain = 1;  // Only keep 1 file
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   scheduler.Start();
   // Wait enough time for at least one scheduler cycle
@@ -357,7 +362,7 @@ TEST_F(SnapshotSchedulerTest, StartStopRapidly) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
-                              dump_save_in_progress_);
+                              dump_save_in_progress_, replication_paused_for_dump_);
 
   // Rapid start/stop cycles
   for (int i = 0; i < 5; ++i) {
@@ -368,3 +373,185 @@ TEST_F(SnapshotSchedulerTest, StartStopRapidly) {
 
   EXPECT_FALSE(scheduler.IsRunning());
 }
+
+/**
+ * @brief Regression for the Start/Stop race that could leak a thread.
+ *
+ * Before the fix, Start() would set running_=true and *then* construct
+ * scheduler_thread_. A concurrent Stop() observing running_=true between
+ * those two steps would skip joining (because scheduler_thread_ was still
+ * null) and Start() would later spawn a thread that exited immediately
+ * because Stop() had already cleared running_, leaving an unjoined
+ * std::thread that detached on destruction.
+ *
+ * After the fix Start()/Stop() are serialized by start_stop_mutex_, so
+ * the thread is always joined and IsRunning() is consistent on return.
+ *
+ * The test is structured so that even on the racy code path the failure
+ * mode (std::terminate from destructing a joinable thread) would show up
+ * as a process abort, not just a soft test failure.
+ */
+TEST_F(SnapshotSchedulerTest, StartStopConcurrentDoesNotLeakThread) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 60;
+  dump_config.retain = 3;
+
+  // Many iterations to widen the race window.
+  for (int iter = 0; iter < 50; ++iter) {
+    SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                                dump_save_in_progress_, replication_paused_for_dump_);
+
+    std::thread starter([&scheduler]() { scheduler.Start(); });
+    std::thread stopper([&scheduler]() { scheduler.Stop(); });
+
+    starter.join();
+    stopper.join();
+
+    // After both calls return, ensure the scheduler is fully stopped.
+    // A second Stop() must be safe (idempotent) and must not deadlock.
+    scheduler.Stop();
+    EXPECT_FALSE(scheduler.IsRunning());
+    // Destructor would std::terminate if it found a joinable, unjoined
+    // thread, so reaching the next iteration confirms no leak occurred.
+  }
+}
+
+#ifdef USE_MYSQL
+
+namespace {
+
+/**
+ * @brief Minimal IBinlogReader stub for verifying snapshot replication pause.
+ *
+ * Records Stop()/Start() invocation counts and captures the value of an
+ * externally provided flag at the moment GetCurrentGTID() is called.
+ *
+ * GetCurrentGTID() is invoked by SnapshotScheduler::TakeSnapshot() *after*
+ * Stop() returns and the replication-paused flag has been set, but *before*
+ * the scope guard restores it. Observing the flag at GetCurrentGTID() time
+ * therefore proves the flag was true while the dump was being written.
+ */
+class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    running_.store(true, std::memory_order_release);
+    start_count_.fetch_add(1, std::memory_order_acq_rel);
+    return {};
+  }
+
+  void Stop() override {
+    running_.store(false, std::memory_order_release);
+    stop_count_.fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  bool IsRunning() const override { return running_.load(std::memory_order_acquire); }
+
+  std::string GetCurrentGTID() const override {
+    if (observed_flag_ != nullptr && observed_flag_->load(std::memory_order_acquire)) {
+      flag_seen_true_at_gtid_.store(true, std::memory_order_release);
+    }
+    get_gtid_count_.fetch_add(1, std::memory_order_acq_rel);
+    return current_gtid_;
+  }
+
+  void SetCurrentGTID(const std::string& gtid) override { current_gtid_ = gtid; }
+
+  std::string GetLastError() const override { return ""; }
+
+  uint64_t GetProcessedEvents() const override { return 0; }
+
+  size_t GetQueueSize() const override { return 0; }
+
+  void SetGtidForTest(const std::string& gtid) { current_gtid_ = gtid; }
+  void SetRunningForTest(bool running) { running_.store(running, std::memory_order_release); }
+  void ObserveFlagAtGetGtid(std::atomic<bool>* flag) { observed_flag_ = flag; }
+
+  int StartCount() const { return start_count_.load(std::memory_order_acquire); }
+  int StopCount() const { return stop_count_.load(std::memory_order_acquire); }
+  int GetGtidCount() const { return get_gtid_count_.load(std::memory_order_acquire); }
+  bool FlagSeenTrueAtGetGtid() const { return flag_seen_true_at_gtid_.load(std::memory_order_acquire); }
+
+ private:
+  std::string current_gtid_;
+  std::atomic<bool> running_{false};
+  std::atomic<int> start_count_{0};
+  std::atomic<int> stop_count_{0};
+  mutable std::atomic<int> get_gtid_count_{0};
+  mutable std::atomic<bool> flag_seen_true_at_gtid_{false};
+  std::atomic<bool>* observed_flag_ = nullptr;
+};
+
+}  // namespace
+
+/**
+ * @brief Verifies that scheduled snapshots pause replication for the
+ *        duration of WriteDump and resume it afterward.
+ *
+ * Without the pause, the binlog worker could mutate the index/document
+ * store while WriteDump iterates, producing inconsistent dumps and
+ * racing with Index::Add().
+ */
+TEST_F(SnapshotSchedulerTest, TakeSnapshotPausesAndResumesReplication) {
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(true);
+  stub.ObserveFlagAtGetGtid(&replication_paused_for_dump_);
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;  // Trigger a snapshot quickly
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  scheduler.Start();
+  // Wait long enough for at least one snapshot cycle to run to completion.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+  scheduler.Stop();
+
+  // Replication must have been paused and resumed at least once.
+  EXPECT_GE(stub.StopCount(), 1) << "Replication must be stopped before WriteDump";
+  EXPECT_GE(stub.StartCount(), 1) << "Replication must be resumed after WriteDump";
+  EXPECT_EQ(stub.StopCount(), stub.StartCount())
+      << "Every Stop() must be matched by a Start() so replication is not left paused";
+
+  // The replication-paused flag must have been true at the point GTID was
+  // captured (i.e. after Stop and the flag set, before the scope guard).
+  EXPECT_TRUE(stub.FlagSeenTrueAtGetGtid())
+      << "replication_paused_for_dump must be asserted while the dump is being written";
+
+  // Final state: flag cleared and stub running again.
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+  EXPECT_TRUE(stub.IsRunning()) << "Replication must be running after the snapshot completes";
+}
+
+/**
+ * @brief Verifies that when replication is not running, the scheduler
+ *        does not call Stop()/Start() on the binlog reader.
+ *
+ * This matches DumpHandler::DumpSaveWorker semantics: only resume
+ * replication if it was running before the dump began.
+ */
+TEST_F(SnapshotSchedulerTest, TakeSnapshotSkipsReplicationControlWhenStopped) {
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(false);  // Replication already stopped
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  scheduler.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+  scheduler.Stop();
+
+  EXPECT_EQ(stub.StopCount(), 0) << "Must not stop replication that wasn't running";
+  EXPECT_EQ(stub.StartCount(), 0) << "Must not start replication that wasn't running";
+  EXPECT_FALSE(replication_paused_for_dump_.load())
+      << "replication_paused_for_dump must remain false when replication wasn't running";
+}
+
+#endif  // USE_MYSQL
