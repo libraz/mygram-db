@@ -174,7 +174,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     should_stop_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
 
-    accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
+    // NOTE: accept loop thread is intentionally NOT started here. The caller
+    // must invoke `StartAccepting()` after wiring up `SetReactorHandler()`.
+    // See header doc for the data-race rationale.
 
     mygram::utils::StructuredLog()
         .Event("connection_acceptor_listening")
@@ -277,14 +279,67 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   should_stop_.store(false, std::memory_order_relaxed);
   running_.store(true, std::memory_order_release);
 
-  // Start accept thread
-  accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
+  // NOTE: accept loop thread is intentionally NOT started here. The caller
+  // must invoke `StartAccepting()` after wiring up `SetReactorHandler()`.
+  // See header doc for the data-race rationale.
 
   mygram::utils::StructuredLog()
       .Event("connection_acceptor_listening")
       .Field("host", config_.host)
       .Field("port", static_cast<uint64_t>(actual_port_))
       .Debug();
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::StartAccepting() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  // Precondition: Start() must have completed (socket bound + listening).
+  if (!running_.load(std::memory_order_acquire)) {
+    auto error = MakeError(ErrorCode::kNetworkServerNotStarted,
+                           "ConnectionAcceptor::StartAccepting called before Start (no listening socket)");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "connection_acceptor_start_accepting")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
+  }
+
+  // Precondition: caller installed a reactor handler. Reading reactor_handler_
+  // here is safe because StartAccepting() is required to be called from the
+  // same thread that calls SetReactorHandler() (i.e. the embedder), prior to
+  // the accept thread existing.
+  if (!reactor_handler_) {
+    auto error = MakeError(ErrorCode::kNetworkAcceptorNoHandler,
+                           "ConnectionAcceptor::StartAccepting called before SetReactorHandler");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "connection_acceptor_start_accepting")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
+  }
+
+  // Idempotency guard: refuse a second StartAccepting() on the same instance.
+  // The accept thread, if started, exists until Stop() joins+resets it.
+  if (accept_thread_) {
+    auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "ConnectionAcceptor accept thread already started");
+    mygram::utils::StructuredLog()
+        .Event("server_error")
+        .Field("operation", "connection_acceptor_start_accepting")
+        .Field("error", error.to_string())
+        .Error();
+    return MakeUnexpected(error);
+  }
+
+  // The thread constructor synchronizes-with the new thread's first action,
+  // so any writes to reactor_handler_ that happened-before this call are
+  // visible inside AcceptLoop. This is the actual fix for the prior data
+  // race on reactor_handler_.
+  accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
   return {};
 }
 
@@ -307,10 +362,14 @@ void ConnectionAcceptor::Stop() {
     server_fd_ = -1;
   }
 
-  // Wait for accept thread to finish
+  // Wait for accept thread to finish (if StartAccepting() ever ran).
   if (accept_thread_ && accept_thread_->joinable()) {
     accept_thread_->join();
   }
+  // Reset so a subsequent Start() + StartAccepting() can spin up a fresh
+  // thread (and so the StartAccepting idempotency guard doesn't spuriously
+  // fire after restart).
+  accept_thread_.reset();
 
   // Remove unix socket file
   if (!unix_socket_path_.empty()) {

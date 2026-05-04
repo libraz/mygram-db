@@ -69,6 +69,7 @@ TEST_F(ConnectionAcceptorUnixTest, StartAndStopUnixSocket) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
   EXPECT_TRUE(acceptor.IsRunning());
   EXPECT_TRUE(acceptor.IsUnixSocket());
   EXPECT_EQ(acceptor.GetPort(), 0);
@@ -99,6 +100,7 @@ TEST_F(ConnectionAcceptorUnixTest, AcceptsUnixConnection) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   // Connect via UDS
   int client_fd = ConnectToUnixSocket(socket_path_);
@@ -140,6 +142,7 @@ TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   acceptor.Stop();
 }
@@ -174,6 +177,7 @@ TEST_F(ConnectionAcceptorUnixTest, SocketFileRemovedOnStop) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
   EXPECT_TRUE(std::filesystem::exists(socket_path_));
 
   acceptor.Stop();
@@ -193,6 +197,7 @@ TEST_F(ConnectionAcceptorUnixTest, SocketPermissionsAreRestricted) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   // Verify socket file permissions are 0770
   struct stat st {};

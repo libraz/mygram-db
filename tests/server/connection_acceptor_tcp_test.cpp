@@ -82,6 +82,9 @@ TEST_F(ConnectionAcceptorTcpTest, StartAndStopOnAutoPort) {
   EXPECT_FALSE(acceptor.IsUnixSocket());
   EXPECT_GT(acceptor.GetPort(), 0);
 
+  auto accept_result = acceptor.StartAccepting();
+  ASSERT_TRUE(accept_result.has_value()) << accept_result.error().to_string();
+
   acceptor.Stop();
   EXPECT_FALSE(acceptor.IsRunning());
 }
@@ -97,6 +100,7 @@ TEST_F(ConnectionAcceptorTcpTest, PortZeroAssignsEphemeralPort) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   uint16_t port = acceptor.GetPort();
   EXPECT_GE(port, 1024) << "Ephemeral port should be >= 1024";
@@ -139,6 +143,7 @@ TEST_F(ConnectionAcceptorTcpTest, AlreadyRunningReturnsError) {
   ASSERT_FALSE(second.has_value());
   EXPECT_EQ(second.error().code(), mygram::utils::ErrorCode::kNetworkAlreadyRunning);
 
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
   acceptor.Stop();
 }
 
@@ -157,6 +162,7 @@ TEST_F(ConnectionAcceptorTcpTest, AcceptsTcpConnection) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
   ASSERT_GE(client, 0) << "connect() failed: " << strerror(errno);
@@ -178,6 +184,7 @@ TEST_F(ConnectionAcceptorTcpTest, ReactorHandlerRejectionSendsServerBusy) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
   ASSERT_GE(client, 0);
@@ -213,6 +220,7 @@ TEST_F(ConnectionAcceptorTcpTest, MaxConnectionsEnforced) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   // Fill up the 2 slots
   int c1 = ConnectToTcp("127.0.0.1", acceptor.GetPort());
@@ -260,6 +268,7 @@ TEST_F(ConnectionAcceptorTcpTest, DoubleStopIsSafe) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   acceptor.Stop();
   EXPECT_FALSE(acceptor.IsRunning());
@@ -291,6 +300,7 @@ TEST_F(ConnectionAcceptorTcpTest, DestructorStopsAcceptor) {
 
     auto result = acceptor.Start();
     ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(acceptor.StartAccepting().has_value());
     port = acceptor.GetPort();
     EXPECT_TRUE(acceptor.IsRunning());
     // Destructor runs here
@@ -317,6 +327,7 @@ TEST_F(ConnectionAcceptorTcpTest, BindToAllInterfaces) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
   EXPECT_GT(acceptor.GetPort(), 0);
 
   acceptor.Stop();
@@ -336,7 +347,111 @@ TEST_F(ConnectionAcceptorTcpTest, EmptyHostBindsToAll) {
 
   auto result = acceptor.Start();
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
+  acceptor.Stop();
+}
+
+// --- StartAccepting precondition tests ---
+
+TEST_F(ConnectionAcceptorTcpTest, StartAcceptingFailsWithoutStart) {
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+
+  // Calling StartAccepting() without Start() should fail.
+  auto result = acceptor.StartAccepting();
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkServerNotStarted);
+}
+
+TEST_F(ConnectionAcceptorTcpTest, StartAcceptingFailsWithoutHandler) {
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+
+  // No SetReactorHandler call.
+  auto start = acceptor.Start();
+  ASSERT_TRUE(start.has_value()) << start.error().to_string();
+
+  auto accept_result = acceptor.StartAccepting();
+  ASSERT_FALSE(accept_result.has_value());
+  EXPECT_EQ(accept_result.error().code(), mygram::utils::ErrorCode::kNetworkAcceptorNoHandler);
+
+  acceptor.Stop();
+}
+
+TEST_F(ConnectionAcceptorTcpTest, StartAcceptingIsIdempotent) {
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+
+  ASSERT_TRUE(acceptor.Start().has_value());
+  auto first = acceptor.StartAccepting();
+  ASSERT_TRUE(first.has_value()) << first.error().to_string();
+
+  // Second StartAccepting() must return kNetworkAlreadyRunning, not crash or
+  // double-spawn the accept thread.
+  auto second = acceptor.StartAccepting();
+  ASSERT_FALSE(second.has_value());
+  EXPECT_EQ(second.error().code(), mygram::utils::ErrorCode::kNetworkAlreadyRunning);
+
+  acceptor.Stop();
+}
+
+TEST_F(ConnectionAcceptorTcpTest, NormalFlowStartSetHandlerStartAccepting) {
+  // Documents the recommended embedder ordering:
+  //   Start() -> SetReactorHandler() -> StartAccepting()
+  // SetReactorHandler called between Start and StartAccepting must be the one
+  // observed by the accept thread.
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+
+  ASSERT_TRUE(acceptor.Start().has_value());
+  EXPECT_TRUE(acceptor.IsRunning());
+
+  std::atomic<int> hits{0};
+  acceptor.SetReactorHandler([&hits](int fd) {
+    hits++;
+    close(fd);
+    return true;
+  });
+
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+
+  int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
+  ASSERT_GE(client, 0) << strerror(errno);
+  close(client);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_GE(hits.load(), 1);
+
+  acceptor.Stop();
+}
+
+TEST_F(ConnectionAcceptorTcpTest, RestartAfterStopWorks) {
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+  acceptor.Stop();
+  EXPECT_FALSE(acceptor.IsRunning());
+
+  // After Stop(), Start() + StartAccepting() should both succeed again.
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
   acceptor.Stop();
 }
 

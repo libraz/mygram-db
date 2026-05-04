@@ -147,6 +147,7 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReactorQueueFull = 6022,       ///< Per-connection write queue cap exceeded (slow reader)
   kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
   kNetworkNullDependency = 6024,         ///< Required dependency pointer is null
+  kNetworkAcceptorNoHandler = 6025,      ///< Acceptor reactor handler not installed before StartAccepting
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -389,6 +390,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Event multiplexer already opened";
     case ErrorCode::kNetworkNullDependency:
       return "Required dependency is null";
+    case ErrorCode::kNetworkAcceptorNoHandler:
+      return "Acceptor reactor handler not installed";
 
     // Client
     case ErrorCode::kClientNotConnected:
