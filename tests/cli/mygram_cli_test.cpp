@@ -1,19 +1,22 @@
 /**
  * @file mygram_cli_test.cpp
- * @brief Tests for mygram-cli response parsing and configuration defaults
+ * @brief Tests for mygram-cli helpers, response parsing, and configuration.
  *
- * Since the CLI source is monolithic (all in one file with an anonymous namespace
- * and main()), we include the source file directly with main() renamed to avoid
- * linker conflicts. This gives us access to Config, PrintResponse, and constants.
+ * The CLI source is monolithic (single file with an anonymous namespace and
+ * main()). To exercise the internal helpers we include the source file
+ * directly with main() renamed to avoid linker conflicts. We also #define
+ * private public so we can call MygramClient::PrintResponse, which is a
+ * private static.
  */
 
 #include <gtest/gtest.h>
 
 #include <sstream>
 #include <string>
+#include <vector>
 
-// Rename main() to avoid conflict with gtest's main, and expose private
-// members for testing (PrintResponse is private static in MygramClient).
+// Rename main() to avoid clashing with gtest's main, and unprivate
+// MygramClient::PrintResponse for direct test access.
 #define main cli_main
 #define private public         // NOLINT(cppcoreguidelines-macro-usage)
 #include "cli/mygram-cli.cpp"  // NOLINT(bugprone-suspicious-include)
@@ -23,15 +26,13 @@
 namespace {
 
 /**
- * @brief RAII helper to capture stdout into a string
+ * @brief RAII helper to capture stdout into a string.
  */
 class StdoutCapture {
  public:
   StdoutCapture() { old_buf_ = std::cout.rdbuf(capture_.rdbuf()); }
-
   ~StdoutCapture() { std::cout.rdbuf(old_buf_); }
 
-  // Non-copyable, non-movable
   StdoutCapture(const StdoutCapture&) = delete;
   StdoutCapture& operator=(const StdoutCapture&) = delete;
   StdoutCapture(StdoutCapture&&) = delete;
@@ -44,9 +45,9 @@ class StdoutCapture {
   std::streambuf* old_buf_{nullptr};
 };
 
-// ============================================================================
-// Config default value tests
-// ============================================================================
+// =============================================================================
+// Config defaults
+// =============================================================================
 
 class CliConfigTest : public ::testing::Test {};
 
@@ -60,10 +61,9 @@ TEST_F(CliConfigTest, DefaultValues) {
   EXPECT_TRUE(config.socket_path.empty());
 }
 
-TEST_F(CliConfigTest, SocketPathOverridesDefault) {
+TEST_F(CliConfigTest, SocketPathOverride) {
   Config config;
   config.socket_path = "/tmp/mygramdb.sock";
-  EXPECT_FALSE(config.socket_path.empty());
   EXPECT_EQ(config.socket_path, "/tmp/mygramdb.sock");
 }
 
@@ -73,9 +73,134 @@ TEST_F(CliConfigTest, WaitReadyRetrySetsMaxRetries) {
   EXPECT_EQ(config.retry_count, 100);
 }
 
-// ============================================================================
-// PrintResponse tests - SEARCH responses
-// ============================================================================
+// =============================================================================
+// Constants
+// =============================================================================
+
+class CliConstantsTest : public ::testing::Test {};
+
+TEST_F(CliConstantsTest, BufferSizeIs64KB) {
+  EXPECT_EQ(kReceiveBufferSize, 65536U);
+}
+
+TEST_F(CliConstantsTest, PrefixLengthsMatchProtocol) {
+  // Sanity: each prefix offset corresponds to the documented response prefix.
+  EXPECT_EQ(kErrorPrefixLength, std::string("ERROR ").length());
+  EXPECT_EQ(kOkSavedPrefixLength, std::string("OK SAVED ").length());
+  EXPECT_EQ(kOkLoadedPrefixLength, std::string("OK LOADED ").length());
+  // INFO: skips "OK INFO\r" leaving "\n..." (8 of 9 bytes)
+  EXPECT_EQ(kOkInfoPrefixLength, std::string("OK INFO\r\n").length() - 1);
+  // REPLICATION: skips "OK REPLICATION\r" leaving "\n..." (15 of 16 bytes)
+  EXPECT_EQ(kOkReplicationPrefixLength, std::string("OK REPLICATION\r\n").length() - 1);
+}
+
+TEST_F(CliConstantsTest, MaxWaitReadyRetries) {
+  EXPECT_EQ(kMaxWaitReadyRetries, 100);
+}
+
+// =============================================================================
+// String helpers
+// =============================================================================
+
+class CliStringHelperTest : public ::testing::Test {};
+
+TEST_F(CliStringHelperTest, ToUpperBasic) {
+  EXPECT_EQ(ToUpper("search"), "SEARCH");
+  EXPECT_EQ(ToUpper("Search"), "SEARCH");
+  EXPECT_EQ(ToUpper("SEARCH"), "SEARCH");
+  EXPECT_EQ(ToUpper(""), "");
+}
+
+TEST_F(CliStringHelperTest, TrimWhitespace) {
+  EXPECT_EQ(Trim("  hello  "), "hello");
+  EXPECT_EQ(Trim("\t\nhello\r\n"), "hello");
+  EXPECT_EQ(Trim("hello"), "hello");
+  EXPECT_EQ(Trim("   "), "");
+  EXPECT_EQ(Trim(""), "");
+  EXPECT_EQ(Trim("hello world"), "hello world");
+}
+
+TEST_F(CliStringHelperTest, NormalizeCrlfReplacesAllOccurrences) {
+  EXPECT_EQ(NormalizeCrlf("a\r\nb\r\nc"), "a\nb\nc");
+  EXPECT_EQ(NormalizeCrlf("\r\n"), "\n");
+  EXPECT_EQ(NormalizeCrlf(""), "");
+  EXPECT_EQ(NormalizeCrlf("no crlf here"), "no crlf here");
+  // Lone \r or \n untouched
+  EXPECT_EQ(NormalizeCrlf("a\rb\nc"), "a\rb\nc");
+}
+
+TEST_F(CliStringHelperTest, StripTrailingEndMarker) {
+  EXPECT_EQ(StripTrailingEndMarker("foo\nEND"), "foo");
+  EXPECT_EQ(StripTrailingEndMarker("foo\nEND\n"), "foo");
+  EXPECT_EQ(StripTrailingEndMarker("foo\nEND\r\n"), "foo");
+  EXPECT_EQ(StripTrailingEndMarker("END"), "");
+  // Don't strip "END" mid-line / not at line start
+  EXPECT_EQ(StripTrailingEndMarker("FRIEND"), "FRIEND");
+  EXPECT_EQ(StripTrailingEndMarker("FRIEND\n"), "FRIEND");
+  // Empty / no-op
+  EXPECT_EQ(StripTrailingEndMarker(""), "");
+  EXPECT_EQ(StripTrailingEndMarker("no marker"), "no marker");
+}
+
+TEST_F(CliStringHelperTest, QuoteArgIfNeeded) {
+  EXPECT_EQ(QuoteArgIfNeeded("plain"), "plain");
+  EXPECT_EQ(QuoteArgIfNeeded("with space"), "\"with space\"");
+  EXPECT_EQ(QuoteArgIfNeeded("with\"quote"), "\"with\\\"quote\"");
+  EXPECT_EQ(QuoteArgIfNeeded("with\\backslash"), "\"with\\\\backslash\"");
+  EXPECT_EQ(QuoteArgIfNeeded(""), "\"\"");
+  // Control characters get stripped (consistent with client lib's
+  // EscapeQueryString — prevents protocol injection via embedded \r\n).
+  EXPECT_EQ(QuoteArgIfNeeded("a\x01" "b"), "\"ab\"");
+  EXPECT_EQ(QuoteArgIfNeeded("with\ttab"), "\"withtab\"");
+  EXPECT_EQ(QuoteArgIfNeeded("with\nnewline"), "\"withnewline\"");
+}
+
+TEST_F(CliStringHelperTest, JoinArgsForCommand) {
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello"}), "SEARCH articles hello");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}),
+            "SEARCH articles \"hello world\"");
+  EXPECT_EQ(JoinArgsForCommand({}), "");
+  EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
+}
+
+// =============================================================================
+// Port parsing (closes the gap where the old code silently truncated)
+// =============================================================================
+
+class CliPortParsingTest : public ::testing::Test {};
+
+TEST_F(CliPortParsingTest, ParsesValidPorts) {
+  EXPECT_TRUE(ParsePort("1").ok);
+  EXPECT_EQ(ParsePort("1").port, 1);
+  EXPECT_TRUE(ParsePort("11016").ok);
+  EXPECT_EQ(ParsePort("11016").port, 11016);
+  EXPECT_TRUE(ParsePort("65535").ok);
+  EXPECT_EQ(ParsePort("65535").port, 65535);
+}
+
+TEST_F(CliPortParsingTest, RejectsOutOfRange) {
+  EXPECT_FALSE(ParsePort("0").ok);
+  EXPECT_FALSE(ParsePort("-1").ok);
+  EXPECT_FALSE(ParsePort("65536").ok);
+  EXPECT_FALSE(ParsePort("70000").ok);
+  EXPECT_FALSE(ParsePort("99999").ok);
+}
+
+TEST_F(CliPortParsingTest, RejectsNonNumeric) {
+  EXPECT_FALSE(ParsePort("").ok);
+  EXPECT_FALSE(ParsePort("abc").ok);
+  EXPECT_FALSE(ParsePort("80abc").ok);
+  EXPECT_FALSE(ParsePort("80 ").ok);
+}
+
+TEST_F(CliPortParsingTest, ErrorMessageNonEmpty) {
+  EXPECT_FALSE(ParsePort("foo").error.empty());
+  EXPECT_FALSE(ParsePort("70000").error.empty());
+}
+
+// =============================================================================
+// PrintResponse — SEARCH responses
+// =============================================================================
 
 class CliPrintResponseTest : public ::testing::Test {};
 
@@ -97,7 +222,6 @@ TEST_F(CliPrintResponseTest, SearchResponseZeroResults) {
   std::string output = capture.GetOutput();
 
   EXPECT_NE(output.find("0 results"), std::string::npos);
-  // Should not contain "showing"
   EXPECT_EQ(output.find("showing"), std::string::npos);
 }
 
@@ -119,11 +243,22 @@ TEST_F(CliPrintResponseTest, SearchResponseWithDebugInfo) {
   EXPECT_NE(output.find("5 results"), std::string::npos);
   EXPECT_NE(output.find("# DEBUG"), std::string::npos);
   EXPECT_NE(output.find("time: 1ms"), std::string::npos);
+  // Debug should be normalized to LF, not contain literal "\r\n"
+  EXPECT_EQ(output.find("\\r\\n"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - COUNT responses
-// ============================================================================
+TEST_F(CliPrintResponseTest, SearchResponseLargeCount) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK RESULTS 1000000 1 2 3 4 5 6 7 8 9 10");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("1000000 results"), std::string::npos);
+  EXPECT_NE(output.find("showing 10"), std::string::npos);
+}
+
+// =============================================================================
+// PrintResponse — COUNT responses
+// =============================================================================
 
 TEST_F(CliPrintResponseTest, CountResponse) {
   StdoutCapture capture;
@@ -148,61 +283,61 @@ TEST_F(CliPrintResponseTest, CountResponseWithDebugInfo) {
 
   EXPECT_NE(output.find("(integer) 100"), std::string::npos);
   EXPECT_NE(output.find("# DEBUG"), std::string::npos);
+  EXPECT_NE(output.find("index_scan: 2ms"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - GET (DOC) responses
-// ============================================================================
+// =============================================================================
+// PrintResponse — GET responses
+// =============================================================================
 
-TEST_F(CliPrintResponseTest, DocResponse) {
+TEST_F(CliPrintResponseTest, DocResponseStripsOkPrefix) {
   StdoutCapture capture;
   MygramClient::PrintResponse("OK DOC 42 title=hello author=world");
   std::string output = capture.GetOutput();
 
-  // Should strip "OK " prefix and print the rest
   EXPECT_NE(output.find("DOC 42 title=hello author=world"), std::string::npos);
-  // Should NOT start with "OK"
   EXPECT_EQ(output.find("OK "), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - INFO responses
-// ============================================================================
+// =============================================================================
+// PrintResponse — INFO / REPLICATION (multi-line, CRLF normalization,
+// trailing-END stripping)
+// =============================================================================
 
-TEST_F(CliPrintResponseTest, InfoResponse) {
+TEST_F(CliPrintResponseTest, InfoResponseNormalizesAndStripsEnd) {
   StdoutCapture capture;
-  MygramClient::PrintResponse("OK INFO\r\nversion: 1.0\r\ntables: articles");
+  MygramClient::PrintResponse("OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\ntables: articles\r\nEND");
   std::string output = capture.GetOutput();
 
+  // No CRLF leaks into the visible output
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  // Section header / fields preserved
+  EXPECT_NE(output.find("# Server"), std::string::npos);
   EXPECT_NE(output.find("version: 1.0"), std::string::npos);
   EXPECT_NE(output.find("tables: articles"), std::string::npos);
+  // Trailing END marker stripped
+  EXPECT_EQ(output.find("END"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - SAVE/LOAD responses
-// ============================================================================
-
-TEST_F(CliPrintResponseTest, SaveResponse) {
+TEST_F(CliPrintResponseTest, ReplicationStatusResponseNormalizesCrlf) {
+  // This is the case that was completely broken in the old CLI: it searched
+  // for literal "\\r\\n" / replaced with literal "\\n" — neither matched.
   StdoutCapture capture;
-  MygramClient::PrintResponse("OK SAVED /data/snapshot.bin");
+  MygramClient::PrintResponse("OK REPLICATION\r\nstatus: running\r\ncurrent_gtid: abc-def\r\nEND");
   std::string output = capture.GetOutput();
 
-  EXPECT_NE(output.find("Snapshot saved to: /data/snapshot.bin"), std::string::npos);
+  // No raw CR characters in output, no literal "\r\n", no "\\n"
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_EQ(output.find("\\r\\n"), std::string::npos);
+  EXPECT_EQ(output.find("\\n"), std::string::npos);
+  // Real fields visible on their own lines
+  EXPECT_NE(output.find("status: running"), std::string::npos);
+  EXPECT_NE(output.find("current_gtid: abc-def"), std::string::npos);
+  // Trailing END marker stripped
+  EXPECT_EQ(output.find("END"), std::string::npos);
 }
 
-TEST_F(CliPrintResponseTest, LoadResponse) {
-  StdoutCapture capture;
-  MygramClient::PrintResponse("OK LOADED /data/snapshot.bin");
-  std::string output = capture.GetOutput();
-
-  EXPECT_NE(output.find("Snapshot loaded from: /data/snapshot.bin"), std::string::npos);
-}
-
-// ============================================================================
-// PrintResponse tests - REPLICATION responses
-// ============================================================================
-
-TEST_F(CliPrintResponseTest, ReplicationStoppedResponse) {
+TEST_F(CliPrintResponseTest, ReplicationStoppedShortForm) {
   StdoutCapture capture;
   MygramClient::PrintResponse("OK REPLICATION_STOPPED");
   std::string output = capture.GetOutput();
@@ -210,7 +345,7 @@ TEST_F(CliPrintResponseTest, ReplicationStoppedResponse) {
   EXPECT_NE(output.find("Replication stopped successfully"), std::string::npos);
 }
 
-TEST_F(CliPrintResponseTest, ReplicationStartedResponse) {
+TEST_F(CliPrintResponseTest, ReplicationStartedShortForm) {
   StdoutCapture capture;
   MygramClient::PrintResponse("OK REPLICATION_STARTED");
   std::string output = capture.GetOutput();
@@ -218,9 +353,147 @@ TEST_F(CliPrintResponseTest, ReplicationStartedResponse) {
   EXPECT_NE(output.find("Replication started successfully"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - DEBUG responses
-// ============================================================================
+// =============================================================================
+// PrintResponse — CONFIG / FACET / CACHE / SYNC / DUMP / OPTIMIZED / +OK
+// (previously fell through to "Unknown response" passthrough)
+// =============================================================================
+
+TEST_F(CliPrintResponseTest, ConfigResponsePrintsBody) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(
+      "OK CONFIG\r\n  mysql:\r\n    host: localhost\r\n    port: 3306\r\n  runtime:\r\n    "
+      "uptime: 42s");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_NE(output.find("mysql:"), std::string::npos);
+  EXPECT_NE(output.find("host: localhost"), std::string::npos);
+  EXPECT_NE(output.find("uptime: 42s"), std::string::npos);
+  // Should NOT print as "Unknown response" passthrough (no "OK CONFIG" header
+  // line on its own with leading "OK ")
+  EXPECT_EQ(output.find("OK CONFIG"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, CacheStatsResponseNormalizesAndStripsEnd) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(
+      "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\ntotal_queries: 100\r\nEND");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_NE(output.find("# Cache"), std::string::npos);
+  EXPECT_NE(output.find("enabled: true"), std::string::npos);
+  EXPECT_NE(output.find("total_queries: 100"), std::string::npos);
+  EXPECT_EQ(output.find("END"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, CacheClearedShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK CACHE_CLEARED");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("CACHE_CLEARED"), std::string::npos);
+  EXPECT_EQ(output.find("OK CACHE_CLEARED"), std::string::npos);  // "OK " stripped
+}
+
+TEST_F(CliPrintResponseTest, CacheEnabledShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK CACHE_ENABLED");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("CACHE_ENABLED"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, CacheDisabledShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK CACHE_DISABLED");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("CACHE_DISABLED"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, FacetResponseShowsValueLines) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK FACET 2\r\nhello\t10\r\nworld\t5\r\n");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  // First line: "FACET 2" (with "OK " stripped)
+  EXPECT_NE(output.find("FACET 2"), std::string::npos);
+  EXPECT_NE(output.find("hello\t10"), std::string::npos);
+  EXPECT_NE(output.find("world\t5"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, SyncStartedShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK SYNC STARTED table=foo job_id=1");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("SYNC STARTED"), std::string::npos);
+  EXPECT_NE(output.find("table=foo"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, DumpStartedShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK DUMP_STARTED /tmp/dump.bin");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("DUMP_STARTED /tmp/dump.bin"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, DumpInfoMultiLine) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(
+      "OK DUMP_INFO /tmp/dump.bin\r\nversion: 2\r\ntables: 5\r\nfile_size: 12345\r\nEND");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_NE(output.find("DUMP_INFO /tmp/dump.bin"), std::string::npos);
+  EXPECT_NE(output.find("version: 2"), std::string::npos);
+  EXPECT_NE(output.find("file_size: 12345"), std::string::npos);
+  EXPECT_EQ(output.find("END"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, OptimizedShortForm) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK OPTIMIZED terms=100 delta=5");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("OPTIMIZED terms=100"), std::string::npos);
+  EXPECT_EQ(output.find("OK OPTIMIZED"), std::string::npos);  // "OK " stripped
+}
+
+TEST_F(CliPrintResponseTest, PlusOkSimpleOk) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("+OK Variable 'foo' set to 'bar'");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("Variable 'foo' set to 'bar'"), std::string::npos);
+  EXPECT_EQ(output.find("+OK"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, PlusOkBareOk) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("+OK");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("OK"), std::string::npos);
+  EXPECT_EQ(output.find("+OK"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, PlusOkWithCrlfBody) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("+OK\r\nrow1\r\nrow2");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_NE(output.find("row1"), std::string::npos);
+  EXPECT_NE(output.find("row2"), std::string::npos);
+}
+
+// =============================================================================
+// PrintResponse — DEBUG / SAVE / LOAD
+// =============================================================================
 
 TEST_F(CliPrintResponseTest, DebugOnResponse) {
   StdoutCapture capture;
@@ -238,9 +511,25 @@ TEST_F(CliPrintResponseTest, DebugOffResponse) {
   EXPECT_NE(output.find("Debug mode disabled"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - ERROR responses
-// ============================================================================
+TEST_F(CliPrintResponseTest, SaveResponse) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK SAVED /data/snapshot.bin");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("Snapshot saved to: /data/snapshot.bin"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, LoadResponse) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK LOADED /data/snapshot.bin");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("Snapshot loaded from: /data/snapshot.bin"), std::string::npos);
+}
+
+// =============================================================================
+// PrintResponse — ERROR / fallback
+// =============================================================================
 
 TEST_F(CliPrintResponseTest, ErrorResponse) {
   StdoutCapture capture;
@@ -258,188 +547,244 @@ TEST_F(CliPrintResponseTest, ErrorResponseWithCode) {
   EXPECT_NE(output.find("(error) 3001 Invalid query syntax"), std::string::npos);
 }
 
-// ============================================================================
-// PrintResponse tests - Unknown responses
-// ============================================================================
-
-TEST_F(CliPrintResponseTest, UnknownResponsePassthrough) {
+TEST_F(CliPrintResponseTest, UnknownResponseFallbackNormalizesCrlf) {
   StdoutCapture capture;
-  MygramClient::PrintResponse("SOMETHING UNEXPECTED");
+  MygramClient::PrintResponse("SOMETHING UNEXPECTED\r\nWITH MULTIPLE LINES");
   std::string output = capture.GetOutput();
 
   EXPECT_NE(output.find("SOMETHING UNEXPECTED"), std::string::npos);
+  EXPECT_NE(output.find("WITH MULTIPLE LINES"), std::string::npos);
+  EXPECT_EQ(output.find('\r'), std::string::npos);
 }
 
-// ============================================================================
-// Constants tests
-// ============================================================================
+TEST_F(CliPrintResponseTest, EmptyResponseDoesNotCrash) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("");
+  std::string output = capture.GetOutput();
 
-class CliConstantsTest : public ::testing::Test {};
-
-TEST_F(CliConstantsTest, BufferSizeIs64KB) {
-  EXPECT_EQ(kReceiveBufferSize, 65536U);
+  EXPECT_EQ(output, "\n");
 }
 
-TEST_F(CliConstantsTest, PrefixLengthsAreCorrect) {
-  // Verify prefix lengths match the actual prefix strings
-  EXPECT_EQ(kOkInfoPrefixLength, std::string("OK INFO\r\n").length() - 1);
-  EXPECT_EQ(kOkSavedPrefixLength, std::string("OK SAVED ").length());
-  EXPECT_EQ(kOkLoadedPrefixLength, std::string("OK LOADED ").length());
-  EXPECT_EQ(kErrorPrefixLength, std::string("ERROR ").length());
-}
-
-TEST_F(CliConstantsTest, MaxWaitReadyRetries) {
-  EXPECT_EQ(kMaxWaitReadyRetries, 100);
-}
-
-// ============================================================================
-// Argument parsing simulation tests
-// ============================================================================
+// =============================================================================
+// Argument parsing simulation
+// =============================================================================
 
 class CliArgumentParsingTest : public ::testing::Test {};
 
-TEST_F(CliArgumentParsingTest, DefaultConfigNoArgs) {
-  // Simulate: mygram-cli (no args)
+TEST_F(CliArgumentParsingTest, NoArgsDefaultsToInteractive) {
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
-  const char* argv[] = {"mygram-cli"};
-  int argc = 1;
+  char arg0[] = "mygram-cli";
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+  char* argv[] = {arg0};
 
-  Config config;
-  std::vector<std::string> command_args;
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg(argv[i]);  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    command_args.emplace_back(arg);
-  }
-
-  // No args means interactive mode with defaults
-  EXPECT_TRUE(config.interactive);
-  EXPECT_TRUE(command_args.empty());
-  EXPECT_EQ(config.host, "127.0.0.1");
-  EXPECT_EQ(config.port, 11016);
+  ParseResult result = ParseArguments(1, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_TRUE(result.config.interactive);
+  EXPECT_EQ(result.config.host, "127.0.0.1");
+  EXPECT_EQ(result.config.port, 11016);
+  EXPECT_TRUE(result.command_args.empty());
 }
 
-TEST_F(CliArgumentParsingTest, HostAndPortArgs) {
-  // Simulate: mygram-cli -h localhost -p 12345
-  Config config;
+TEST_F(CliArgumentParsingTest, HostAndPortFlags) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-h";
+  char arg2[] = "example.com";
+  char arg3[] = "-p";
+  char arg4[] = "12345";
+  char* argv[] = {arg0, arg1, arg2, arg3, arg4};
 
-  // Simulate parsing -h and -p
-  config.host = "localhost";
-  config.port = 12345;
-
-  EXPECT_EQ(config.host, "localhost");
-  EXPECT_EQ(config.port, 12345);
+  ParseResult result = ParseArguments(5, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_EQ(result.config.host, "example.com");
+  EXPECT_EQ(result.config.port, 12345);
+  EXPECT_TRUE(result.config.interactive);
 }
 
-TEST_F(CliArgumentParsingTest, SocketPathOverridesTcp) {
-  // Simulate: mygram-cli -s /tmp/mygramdb.sock
-  Config config;
-  config.socket_path = "/tmp/mygramdb.sock";
+TEST_F(CliArgumentParsingTest, RejectsOutOfRangePort) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char arg2[] = "70000";
+  char* argv[] = {arg0, arg1, arg2};
 
-  // Socket path should be set; host/port still have defaults but are unused
-  EXPECT_FALSE(config.socket_path.empty());
-  EXPECT_EQ(config.host, "127.0.0.1");  // Default unchanged
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
 }
 
-TEST_F(CliArgumentParsingTest, RetryFlag) {
-  Config config;
-  config.retry_count = 5;
+TEST_F(CliArgumentParsingTest, RejectsNonNumericPort) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char arg2[] = "abc";
+  char* argv[] = {arg0, arg1, arg2};
 
-  EXPECT_EQ(config.retry_count, 5);
-  EXPECT_GT(config.retry_count, 0);
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, RejectsZeroPort) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char arg2[] = "0";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, RejectsNegativePort) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char arg2[] = "-5";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, RejectsTrailingGarbageInPort) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char arg2[] = "80abc";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, MissingPortArgument) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-p";
+  char* argv[] = {arg0, arg1};
+
+  ParseResult result = ParseArguments(2, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, MissingHostArgument) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-h";
+  char* argv[] = {arg0, arg1};
+
+  ParseResult result = ParseArguments(2, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
+}
+
+TEST_F(CliArgumentParsingTest, SocketPathFlag) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "-s";
+  char arg2[] = "/tmp/mygramdb.sock";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_EQ(result.config.socket_path, "/tmp/mygramdb.sock");
+  EXPECT_TRUE(result.config.interactive);
+}
+
+TEST_F(CliArgumentParsingTest, RetryFlagAccepted) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--retry";
+  char arg2[] = "5";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_EQ(result.config.retry_count, 5);
+}
+
+TEST_F(CliArgumentParsingTest, RetryFlagRejectsNegative) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--retry";
+  char arg2[] = "-1";
+  char* argv[] = {arg0, arg1, arg2};
+
+  ParseResult result = ParseArguments(3, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 1);
 }
 
 TEST_F(CliArgumentParsingTest, WaitReadyFlag) {
-  Config config;
-  config.retry_count = kMaxWaitReadyRetries;
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--wait-ready";
+  char* argv[] = {arg0, arg1};
 
-  EXPECT_EQ(config.retry_count, 100);
+  ParseResult result = ParseArguments(2, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_EQ(result.config.retry_count, kMaxWaitReadyRetries);
 }
 
-TEST_F(CliArgumentParsingTest, SingleCommandMode) {
-  // Simulate: mygram-cli SEARCH articles hello
-  Config config;
-  config.interactive = false;
+TEST_F(CliArgumentParsingTest, SingleCommandModeSetsInteractiveFalse) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "SEARCH";
+  char arg2[] = "articles";
+  char arg3[] = "hello";
+  char* argv[] = {arg0, arg1, arg2, arg3};
 
-  std::vector<std::string> command_args = {"SEARCH", "articles", "hello"};
-
-  // Build command string (same logic as main())
-  std::ostringstream command;
-  for (size_t i = 0; i < command_args.size(); ++i) {
-    if (i > 0) {
-      command << " ";
-    }
-    command << command_args[i];
-  }
-
-  EXPECT_FALSE(config.interactive);
-  EXPECT_EQ(command.str(), "SEARCH articles hello");
+  ParseResult result = ParseArguments(4, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_FALSE(result.config.interactive);
+  ASSERT_EQ(result.command_args.size(), 3U);
+  EXPECT_EQ(result.command_args[0], "SEARCH");
+  EXPECT_EQ(result.command_args[1], "articles");
+  EXPECT_EQ(result.command_args[2], "hello");
 }
 
-TEST_F(CliArgumentParsingTest, CommandBuildingPreservesSpacing) {
-  std::vector<std::string> args = {"SEARCH", "articles", "hello", "world", "LIMIT", "10", "OFFSET", "5"};
+TEST_F(CliArgumentParsingTest, HelpFlagExits) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--help";
+  char* argv[] = {arg0, arg1};
 
-  std::ostringstream command;
-  for (size_t i = 0; i < args.size(); ++i) {
-    if (i > 0) {
-      command << " ";
-    }
-    command << args[i];
-  }
-
-  EXPECT_EQ(command.str(), "SEARCH articles hello world LIMIT 10 OFFSET 5");
-}
-
-// ============================================================================
-// Search result large count test
-// ============================================================================
-
-TEST_F(CliPrintResponseTest, SearchResponseLargeCount) {
   StdoutCapture capture;
-  MygramClient::PrintResponse("OK RESULTS 1000000 1 2 3 4 5 6 7 8 9 10");
+  ParseResult result = ParseArguments(2, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 0);
+  // Help text should mention key options
   std::string output = capture.GetOutput();
-
-  EXPECT_NE(output.find("1000000 results"), std::string::npos);
-  EXPECT_NE(output.find("showing 10"), std::string::npos);
+  EXPECT_NE(output.find("-h HOST"), std::string::npos);
+  EXPECT_NE(output.find("-p PORT"), std::string::npos);
+  EXPECT_NE(output.find("--retry"), std::string::npos);
+  EXPECT_NE(output.find("--wait-ready"), std::string::npos);
 }
 
-// ============================================================================
-// Port validation tests
-// ============================================================================
+TEST_F(CliArgumentParsingTest, VersionFlagExits) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--version";
+  char* argv[] = {arg0, arg1};
 
-class CliPortValidationTest : public ::testing::Test {};
-
-TEST_F(CliPortValidationTest, ValidPortRange) {
-  // Port 1 is the minimum valid port
-  int port_int = 1;
-  EXPECT_GE(port_int, 1);
-  EXPECT_LE(port_int, 65535);
-
-  // Port 65535 is the maximum valid port
-  port_int = 65535;
-  EXPECT_GE(port_int, 1);
-  EXPECT_LE(port_int, 65535);
+  StdoutCapture capture;
+  ParseResult result = ParseArguments(2, argv);
+  EXPECT_TRUE(result.exit_now);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(capture.GetOutput().find("mygram-cli"), std::string::npos);
 }
 
-TEST_F(CliPortValidationTest, InvalidPortZero) {
-  int port_int = 0;
-  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 0 should be invalid";
+// =============================================================================
+// Single-command-mode argument joining (preserves spaces via QuoteArgIfNeeded)
+// =============================================================================
+
+class CliJoinArgsTest : public ::testing::Test {};
+
+TEST_F(CliJoinArgsTest, PreservesSimpleArgs) {
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello", "world"}),
+            "SEARCH articles hello world");
 }
 
-TEST_F(CliPortValidationTest, InvalidPortNegative) {
-  int port_int = -1;
-  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port -1 should be invalid";
+TEST_F(CliJoinArgsTest, QuotesSpaceContainingArgs) {
+  // The old CLI just space-joined argv: "hello world" -> 2 tokens on the wire.
+  // With proper quoting, it stays a single token.
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}),
+            "SEARCH articles \"hello world\"");
 }
 
-TEST_F(CliPortValidationTest, InvalidPortTooLarge) {
-  int port_int = 70000;
-  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 70000 should be invalid";
-}
-
-TEST_F(CliPortValidationTest, InvalidPortOverflow) {
-  // Verify that a port parsed as int > 65535 would be caught
-  int port_int = 99999;
-  EXPECT_TRUE(port_int < 1 || port_int > 65535) << "Port 99999 should be invalid";
+TEST_F(CliJoinArgsTest, EscapesEmbeddedQuotes) {
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "say \"hi\""}),
+            "SEARCH articles \"say \\\"hi\\\"\"");
 }
 
 }  // namespace
