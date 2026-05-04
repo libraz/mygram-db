@@ -469,10 +469,23 @@ bool SimplifySearchExpression(const std::string& expression, std::string& main_t
 
   auto& expr = *result;
 
-  // Extract main term - all terms are now in required_terms
+  // Extract main term. Required terms (from + prefix or implicit AND) take
+  // priority; the first becomes main_term and the rest are AND terms.
   if (!expr.required_terms.empty()) {
     main_term = expr.required_terms[0];
     and_terms.assign(expr.required_terms.begin() + 1, expr.required_terms.end());
+  } else if (!expr.raw_expression.empty()) {
+    // No required terms but the expression contains an OR / parenthesized
+    // sub-expression (e.g. "python OR ruby" or "(a OR b)"). Surface the raw
+    // expression as the main term, wrapping it in parentheses if it isn't
+    // already so the result is a valid query when AND-composed by callers.
+    const std::string& raw = expr.raw_expression;
+    if (!raw.empty() && raw.front() == '(' && raw.back() == ')') {
+      main_term = raw;
+    } else {
+      main_term = "(" + raw + ")";
+    }
+    and_terms.clear();
   } else {
     return false;  // No terms found
   }
