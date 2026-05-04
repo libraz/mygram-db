@@ -146,18 +146,6 @@ class ResponseFormatter {
   static std::string FormatReplicationStartResponse();
 
   /**
-   * @brief Format CONFIG response
-   * @param full_config Full configuration
-   * @param connection_count Current connection count
-   * @param max_connections Maximum connections allowed
-   * @param read_only Read-only mode flag
-   * @param uptime_seconds Server uptime in seconds
-   * @return Formatted response
-   */
-  static std::string FormatConfigResponse(const config::Config* full_config, size_t connection_count,
-                                          int max_connections, bool read_only, uint64_t uptime_seconds);
-
-  /**
    * @brief Format Prometheus metrics response
    * @param metrics Pre-computed aggregated metrics
    * @param stats Server statistics (const reference, no mutation)
