@@ -241,236 +241,142 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
 mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> ServerLifecycleManager::InitThreadPool()
     const {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  try {
-    const size_t queue_size = config_.thread_pool_queue_size > 0 ? static_cast<size_t>(config_.thread_pool_queue_size)
-                                                                 : kDefaultThreadPoolQueueSize;
-    auto pool = std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, queue_size);
-    return pool;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create thread pool: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_thread_pool")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
+  const size_t queue_size = config_.thread_pool_queue_size > 0 ? static_cast<size_t>(config_.thread_pool_queue_size)
+                                                               : kDefaultThreadPoolQueueSize;
+  auto pool = std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, queue_size);
+  return pool;
 }
 
 mygram::utils::Expected<std::unique_ptr<TableCatalog>, mygram::utils::Error>
 ServerLifecycleManager::InitTableCatalog() {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  try {
-    auto catalog = std::make_unique<TableCatalog>(table_contexts_);
-    return catalog;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create table catalog: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_table_catalog")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
+  auto catalog = std::make_unique<TableCatalog>(table_contexts_);
+  return catalog;
 }
 
 mygram::utils::Expected<std::unique_ptr<cache::CacheManager>, mygram::utils::Error>
 ServerLifecycleManager::InitCacheManager() {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
   // Cache manager is optional (depends on config)
   if (full_config_ == nullptr || !full_config_->cache.enabled) {
     return std::unique_ptr<cache::CacheManager>(nullptr);
   }
 
-  try {
-    // Build NgramConfigMap from table_contexts for cache invalidation
-    cache::NgramConfigMap ngram_configs;
-    for (const auto& [name, ctx] : table_contexts_) {
-      ngram_configs[name] = cache::NgramConfig{
-          .ngram_size = ctx->config.ngram_size,
-          .kanji_ngram_size = ctx->config.kanji_ngram_size,
-          .cross_boundary_ngrams = ctx->config.cross_boundary_ngrams,
-      };
-    }
-    auto cache_manager = std::make_unique<cache::CacheManager>(full_config_->cache, std::move(ngram_configs));
-    return cache_manager;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create cache manager: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_cache_manager")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
+  // Build NgramConfigMap from table_contexts for cache invalidation
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] = cache::NgramConfig{
+        .ngram_size = ctx->config.ngram_size,
+        .kanji_ngram_size = ctx->config.kanji_ngram_size,
+        .cross_boundary_ngrams = ctx->config.cross_boundary_ngrams,
+    };
   }
+  auto cache_manager = std::make_unique<cache::CacheManager>(full_config_->cache, std::move(ngram_configs));
+  return cache_manager;
 }
 
 mygram::utils::Expected<std::unique_ptr<HandlerContext>, mygram::utils::Error>
 ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::CacheManager* cache_manager,
                                            config::RuntimeVariableManager* variable_manager) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
-  try {
-    auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
-        .table_catalog = table_catalog,
-        .stats = stats_,
-        .full_config = full_config_,
-        .dump_dir = dump_dir_,
-        .dump_load_in_progress = dump_load_in_progress_,
-        .dump_save_in_progress = dump_save_in_progress_,
-        .optimization_in_progress = optimization_in_progress_,
-        .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
-        .binlog_reader = binlog_reader_,
+  auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
+      .table_catalog = table_catalog,
+      .stats = stats_,
+      .full_config = full_config_,
+      .dump_dir = dump_dir_,
+      .dump_load_in_progress = dump_load_in_progress_,
+      .dump_save_in_progress = dump_save_in_progress_,
+      .optimization_in_progress = optimization_in_progress_,
+      .replication_paused_for_dump = replication_paused_for_dump_,
+      .mysql_reconnecting = mysql_reconnecting_,
+      .binlog_reader = binlog_reader_,
 #ifdef USE_MYSQL
-        .sync_manager = sync_manager_,
+      .sync_manager = sync_manager_,
 #endif
-        .cache_manager = cache_manager,
-        .variable_manager = variable_manager,
-    });
-    return handler_context;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create handler context: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_handler_context")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
+      .cache_manager = cache_manager,
+      .variable_manager = variable_manager,
+  });
+  return handler_context;
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::InitHandlers(
     HandlerContext& handler_context) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   InitializedComponents handlers;
 
-  try {
-    handlers.search_handler = std::make_unique<SearchHandler>(handler_context);
-    handlers.facet_handler = std::make_unique<FacetHandler>(handler_context);
-    handlers.document_handler = std::make_unique<DocumentHandler>(handler_context);
-    handlers.dump_handler = std::make_unique<DumpHandler>(handler_context);
-    handlers.admin_handler = std::make_unique<AdminHandler>(handler_context);
-    handlers.replication_handler = std::make_unique<ReplicationHandler>(handler_context);
-    handlers.debug_handler = std::make_unique<DebugHandler>(handler_context);
-    handlers.cache_handler = std::make_unique<CacheHandler>(handler_context);
-    handlers.variable_handler = std::make_unique<VariableHandler>(handler_context);
+  handlers.search_handler = std::make_unique<SearchHandler>(handler_context);
+  handlers.facet_handler = std::make_unique<FacetHandler>(handler_context);
+  handlers.document_handler = std::make_unique<DocumentHandler>(handler_context);
+  handlers.dump_handler = std::make_unique<DumpHandler>(handler_context);
+  handlers.admin_handler = std::make_unique<AdminHandler>(handler_context);
+  handlers.replication_handler = std::make_unique<ReplicationHandler>(handler_context);
+  handlers.debug_handler = std::make_unique<DebugHandler>(handler_context);
+  handlers.cache_handler = std::make_unique<CacheHandler>(handler_context);
+  handlers.variable_handler = std::make_unique<VariableHandler>(handler_context);
 #ifdef USE_MYSQL
-    // Note: SyncHandler now takes SyncOperationManager* instead of TcpServer&
-    // This eliminates circular dependency
-    // sync_manager_ is guaranteed to be non-null (enforced in Create())
-    auto sync_handler_result = SyncHandler::Create(handler_context, sync_manager_);
-    if (!sync_handler_result) {
-      return MakeUnexpected(sync_handler_result.error());
-    }
-    handlers.sync_handler = std::move(*sync_handler_result);
+  // Note: SyncHandler now takes SyncOperationManager* instead of TcpServer&
+  // This eliminates circular dependency
+  // sync_manager_ is guaranteed to be non-null (enforced in Create())
+  auto sync_handler_result = SyncHandler::Create(handler_context, sync_manager_);
+  if (!sync_handler_result) {
+    return MakeUnexpected(sync_handler_result.error());
+  }
+  handlers.sync_handler = std::move(*sync_handler_result);
 #endif
 
-    return handlers;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create command handlers: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_handlers")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
+  return handlers;
 }
 
 mygram::utils::Expected<std::unique_ptr<RequestDispatcher>, mygram::utils::Error>
 ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const InitializedComponents& handlers) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
+  auto dispatcher = std::make_unique<RequestDispatcher>(handler_context, config_);
 
-  try {
-    auto dispatcher = std::make_unique<RequestDispatcher>(handler_context, config_);
-
-    // Register all command handlers
-    dispatcher->RegisterHandler(query::QueryType::SEARCH, handlers.search_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::COUNT, handlers.search_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::FACET, handlers.facet_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::GET, handlers.document_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DUMP_SAVE, handlers.dump_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DUMP_LOAD, handlers.dump_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DUMP_VERIFY, handlers.dump_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DUMP_INFO, handlers.dump_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DUMP_STATUS, handlers.dump_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::INFO, handlers.admin_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CONFIG_HELP, handlers.admin_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CONFIG_SHOW, handlers.admin_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CONFIG_VERIFY, handlers.admin_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::REPLICATION_STATUS, handlers.replication_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::REPLICATION_STOP, handlers.replication_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::REPLICATION_START, handlers.replication_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DEBUG_ON, handlers.debug_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::DEBUG_OFF, handlers.debug_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::OPTIMIZE, handlers.debug_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CACHE_CLEAR, handlers.cache_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CACHE_STATS, handlers.cache_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CACHE_ENABLE, handlers.cache_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::CACHE_DISABLE, handlers.cache_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::SET, handlers.variable_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::SHOW_VARIABLES, handlers.variable_handler.get());
+  // Register all command handlers
+  dispatcher->RegisterHandler(query::QueryType::SEARCH, handlers.search_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::COUNT, handlers.search_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::FACET, handlers.facet_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::GET, handlers.document_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DUMP_SAVE, handlers.dump_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DUMP_LOAD, handlers.dump_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DUMP_VERIFY, handlers.dump_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DUMP_INFO, handlers.dump_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DUMP_STATUS, handlers.dump_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::INFO, handlers.admin_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CONFIG_HELP, handlers.admin_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CONFIG_SHOW, handlers.admin_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CONFIG_VERIFY, handlers.admin_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::REPLICATION_STATUS, handlers.replication_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::REPLICATION_STOP, handlers.replication_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::REPLICATION_START, handlers.replication_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DEBUG_ON, handlers.debug_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::DEBUG_OFF, handlers.debug_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::OPTIMIZE, handlers.debug_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CACHE_CLEAR, handlers.cache_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CACHE_STATS, handlers.cache_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CACHE_ENABLE, handlers.cache_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::CACHE_DISABLE, handlers.cache_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::SET, handlers.variable_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::SHOW_VARIABLES, handlers.variable_handler.get());
 #ifdef USE_MYSQL
-    // sync_handler is guaranteed to be non-null (sync_manager_ is enforced in constructor)
-    dispatcher->RegisterHandler(query::QueryType::SYNC, handlers.sync_handler.get());
-    dispatcher->RegisterHandler(query::QueryType::SYNC_STATUS, handlers.sync_handler.get());
+  // sync_handler is guaranteed to be non-null (sync_manager_ is enforced in constructor)
+  dispatcher->RegisterHandler(query::QueryType::SYNC, handlers.sync_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::SYNC_STATUS, handlers.sync_handler.get());
 #endif
 
-    return dispatcher;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create dispatcher: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_dispatcher")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
+  return dispatcher;
 }
 
 mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Error>
 ServerLifecycleManager::InitAcceptor() {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  try {
-    auto acceptor = std::make_unique<ConnectionAcceptor>(config_);
+  auto acceptor = std::make_unique<ConnectionAcceptor>(config_);
 
-    // Start the acceptor
-    auto start_result = acceptor->Start();
-    if (!start_result) {
-      return MakeUnexpected(start_result.error());
-    }
-
-    return acceptor;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create connection acceptor: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_acceptor")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
+  // Start the acceptor
+  auto start_result = acceptor->Start();
+  if (!start_result) {
+    return MakeUnexpected(start_result.error());
   }
+
+  return acceptor;
 }
 
 mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error> ServerLifecycleManager::InitScheduler(
@@ -484,23 +390,21 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
     return std::unique_ptr<SnapshotScheduler>(nullptr);
   }
 
-  try {
-    auto scheduler = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_,
-                                                         binlog_reader_, dump_save_in_progress_);
-
-    // Start the scheduler
-    scheduler->Start();
-
-    return scheduler;
-  } catch (const std::exception& e) {
-    auto error = MakeError(ErrorCode::kInternalError, "Failed to create snapshot scheduler: " + std::string(e.what()));
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "init_scheduler")
-        .Field("error", error.to_string())
-        .Error();
-    return MakeUnexpected(error);
+  // Precondition: SnapshotScheduler dereferences table_catalog during snapshots,
+  // so we reject construction with a null catalog at the call site rather than
+  // letting it crash later. This replaces the previous null check that was
+  // silently logged inside SnapshotScheduler's constructor.
+  if (table_catalog == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kInternalError, "TableCatalog must not be null for SnapshotScheduler"));
   }
+
+  auto scheduler = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_,
+                                                       binlog_reader_, dump_save_in_progress_);
+
+  // Start the scheduler
+  scheduler->Start();
+
+  return scheduler;
 }
 
 }  // namespace mygramdb::server

@@ -279,6 +279,12 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithCacheEnabled) {
 /**
  * @test Initialize_Success_WithSchedulerEnabled
  * @brief Test initialization with snapshot scheduler enabled
+ *
+ * Regression test for the contract enforced by InitScheduler():
+ *   - When dump.interval_sec > 0 and TableCatalog is non-null, the scheduler
+ *     is constructed AND started. SnapshotScheduler's constructor no longer
+ *     silently accepts a null catalog (the precondition was hoisted up to
+ *     ServerLifecycleManager::InitScheduler).
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
   full_config_.dump.interval_sec = 60;
@@ -288,10 +294,35 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
   auto result = manager->Initialize();
 
   ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
-  EXPECT_NE(result->scheduler, nullptr);
+  ASSERT_NE(result->scheduler, nullptr);
+  // InitScheduler must Start() the scheduler after construction.
+  EXPECT_TRUE(result->scheduler->IsRunning());
 
   // Cleanup: Stop scheduler before destroying
   result->scheduler->Stop();
+  result->acceptor->Stop();
+}
+
+/**
+ * @test Initialize_SchedulerDisabledWhenIntervalZero
+ * @brief Verify scheduler stays nullptr when interval_sec is 0 (disabled).
+ *
+ * This complements Initialize_Success_WithSchedulerEnabled and documents the
+ * "scheduler is optional" branch in InitScheduler. The TableCatalog null-check
+ * branch in InitScheduler is unreachable from Initialize() (TableCatalog is
+ * always created non-null by InitTableCatalog), but exists as a defensive
+ * guard against future refactors that might bypass that step.
+ */
+TEST_F(ServerLifecycleManagerTest, Initialize_SchedulerDisabledWhenIntervalZero) {
+  full_config_.dump.interval_sec = 0;
+
+  auto manager = CreateManager();
+  auto result = manager->Initialize();
+
+  ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
+  EXPECT_EQ(result->scheduler, nullptr);
+
+  // Cleanup
   result->acceptor->Stop();
 }
 

@@ -94,8 +94,8 @@ class JapaneseSynonymPipelineTest : public ::testing::Test {
   void SetUp() override {
     // Include PID to avoid collisions across parallel ctest processes that each
     // start their own g_counter_ at 0.
-    auto dir_name = "mygramdb_syn_jp_pipeline_" + std::to_string(::getpid()) + "_" +
-                    std::to_string(g_counter_.fetch_add(1));
+    auto dir_name =
+        "mygramdb_syn_jp_pipeline_" + std::to_string(::getpid()) + "_" + std::to_string(g_counter_.fetch_add(1));
     test_dir_ = std::filesystem::temp_directory_path() / dir_name;
     std::filesystem::create_directories(test_dir_);
 

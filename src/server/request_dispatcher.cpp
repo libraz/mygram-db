@@ -58,17 +58,11 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
     return ResponseFormatter::FormatError("Unknown query type");
   }
 
-  // Dispatch to handler
-  try {
-    return handler_iter->second->Handle(*query, conn_ctx);
-  } catch (const std::exception& e) {
-    mygram::utils::StructuredLog()
-        .Event("request_dispatch_error")
-        .Field("table", query->table)
-        .Field("error", e.what())
-        .Error();
-    return ResponseFormatter::FormatError("Internal server error");
-  }
+  // Dispatch to handler. Handlers are required by contract to convert errors
+  // into ResponseFormatter::FormatError(...) strings via Expected<T, Error>,
+  // so they must not throw. Wrapping in try/catch here would violate the
+  // project's "no exceptions" policy and silently mask handler bugs.
+  return handler_iter->second->Handle(*query, conn_ctx);
 }
 
 }  // namespace mygramdb::server

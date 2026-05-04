@@ -34,13 +34,8 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader),
       dump_save_in_progress_(dump_save_in_progress) {
-  if (catalog_ == nullptr) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("component", "snapshot_scheduler")
-        .Field("error", "catalog cannot be null")
-        .Error();
-  }
+  // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
+  // which is the only production caller. Tests must also provide a non-null catalog.
 }
 
 SnapshotScheduler::~SnapshotScheduler() {
