@@ -121,16 +121,31 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   if (compression_enabled_) {
     auto decompress_result = ResultCompressor::Decompress(*compressed_ptr, original_size);
     if (!decompress_result) {
-      // Decompression failed - enqueue for cleanup and treat as miss
+      // Decompression failed - enqueue for cleanup and treat as miss.
+      //
+      // Dedup semantic: the decompression_failures counter increments per
+      // detection event per entry, NOT per Lookup call. If multiple concurrent
+      // Lookups of the same broken entry race here, only the first insert into
+      // pending_decompression_keys_ counts. Subsequent Lookups still observe
+      // a miss, but do not bump the counter again for the same entry. (Once
+      // RefreshLRU drains the set and removes the entry, a re-insert under
+      // the same key could trigger another distinct event — that is the
+      // intended behavior.)
+      bool first_detection = false;
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
         if (pending_decompression_keys_.size() < kMaxPendingKeys) {
-          pending_decompression_keys_.insert(key);
+          first_detection = pending_decompression_keys_.insert(key).second;
         }
+        // If kMaxPendingKeys cap reached and the key is not already pending,
+        // first_detection stays false and we skip the counter increment to
+        // avoid drift; the entry will still be served as a miss.
       }
 
       stats_.cache_misses++;
-      stats_.decompression_failures++;  // Count failure at detection time
+      if (first_detection) {
+        stats_.decompression_failures++;  // Count failure at detection time
+      }
       return record_miss();
     }
     result = std::move(*decompress_result);
@@ -145,6 +160,13 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   // cache_hits + cache_misses may transiently exceed total_queries in a
   // concurrent Reset() scenario, which is acceptable for monitoring counters
   // (reviewed: no correctness invariant depends on exact counter consistency).
+  //
+  // The acceptable transient drift is covered by the
+  // ConcurrentQueryCountAccuracy regression test in cache_thread_safety_test
+  // (and the StatsInvariantHitsPlusMissesEqualsTotal test for the
+  // single-threaded invariant). Do not move this increment back under the
+  // shared lock without revisiting both tests and the timing-statistics
+  // path below.
   stats_.cache_hits++;
 
   // Record hit latency and saved time
@@ -163,6 +185,11 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
                         double query_cost_ms) {
   // Check if query cost meets threshold
   if (query_cost_ms < min_query_cost_ms_.load(std::memory_order_relaxed)) {
+    // Track inserts skipped because their cost is below the configured
+    // threshold. This is the dominant Insert-rejection reason; over-size and
+    // already-present rejections below are not counted here (they have their
+    // own observability via current_memory_bytes / current_entries).
+    stats_.rejection_count.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
 
@@ -287,12 +314,29 @@ bool QueryCache::Erase(const CacheKey& key) {
 void QueryCache::Clear() {
   std::unique_lock lock(mutex_);
 
+  // Notify eviction callback for every entry before swapping. This keeps
+  // external bookkeeping (e.g. InvalidationManager) consistent with the cache:
+  // any caller that hooks SetEvictionCallback to clean up per-key metadata
+  // would otherwise leak that metadata when Clear() bypasses RemoveEntryLocked.
+  //
+  // We iterate cache_map_ and call eviction_callback_ directly (rather than
+  // looping RemoveEntryLocked, which would do per-entry list/map erase) because
+  // the swap below is O(1) and discards the containers wholesale.
+  if (eviction_callback_) {
+    for (const auto& [key, entry_pair] : cache_map_) {
+      eviction_callback_(key);
+    }
+  }
+
   // Swap with empty containers to release allocated capacity
   decltype(lru_list_)().swap(lru_list_);
   decltype(cache_map_)().swap(cache_map_);
   total_memory_bytes_ = 0;
   stats_.current_entries = 0;
   stats_.current_memory_bytes = 0;
+  // Count this whole-cache clear as a single forced_clears event (operator-
+  // initiated bulk eviction), regardless of how many entries were resident.
+  stats_.forced_clears.fetch_add(1, std::memory_order_relaxed);
 }
 
 void QueryCache::ClearTable(const std::string& table) {
@@ -314,6 +358,33 @@ void QueryCache::ClearTable(const std::string& table) {
     }
   }
   stats_.current_memory_bytes = total_memory_bytes_;
+  // Count this per-table clear as a single forced_clears event regardless of
+  // how many entries actually matched the table. This matches Clear()'s
+  // bulk-operation accounting.
+  stats_.forced_clears.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool QueryCache::CorruptEntryForTest(const CacheKey& key) {
+  std::unique_lock lock(mutex_);
+
+  auto iter = cache_map_.find(key);
+  if (iter == cache_map_.end()) {
+    return false;
+  }
+
+  // Replace compressed payload with bytes that cannot be a valid LZ4 frame
+  // for the recorded original_size. We use 0xFF-only data with a deliberate
+  // size mismatch so ResultCompressor::Decompress reports failure.
+  constexpr size_t kCorruptPayloadBytes = 8;
+  constexpr uint8_t kCorruptByte = 0xFF;
+  // Force a large original_size so even if the bytes happened to look valid,
+  // the size mismatch triggers a decompression failure (1 MiB of DocIds).
+  constexpr size_t kCorruptOriginalSize = 1024 * 1024;
+
+  auto corrupted = std::make_shared<std::vector<uint8_t>>(std::vector<uint8_t>(kCorruptPayloadBytes, kCorruptByte));
+  iter->second.first.compressed = std::shared_ptr<const std::vector<uint8_t>>(std::move(corrupted));
+  iter->second.first.original_size = kCorruptOriginalSize;
+  return true;
 }
 
 std::optional<CacheMetadata> QueryCache::GetMetadata(const CacheKey& key) const {
@@ -360,10 +431,13 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
   // Remove from LRU list
   lru_list_.erase(iter->second.second);
 
-  // Update memory tracking
+  // Update memory tracking. Sync the public-facing stats_.current_memory_bytes
+  // immediately so GetStatistics() never returns a value that is stale (higher
+  // than reality) between RemoveEntryLocked and the next RefreshLRU resync.
   const size_t entry_memory = iter->second.first.MemoryUsage();
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
+  stats_.current_memory_bytes.store(total_memory_bytes_, std::memory_order_relaxed);
 
   // Update reason-specific stats
   switch (reason) {
@@ -384,6 +458,11 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
       break;
     case RemovalReason::kTableClear:
       // No additional counter (existing behavior)
+      break;
+    case RemovalReason::kClear:
+      // No additional counter (matches kTableClear). Whole-cache Clear() is
+      // not an error condition or LRU pressure event; reason-specific stats
+      // are intentionally not incremented.
       break;
   }
 
@@ -484,8 +563,12 @@ void QueryCache::RefreshLRU() {
     }
   }
 
-  // Always sync stats with actual memory tracking
-  stats_.current_memory_bytes = total_memory_bytes_;
+  // Defensive resync: RemoveEntryLocked / Insert / Erase all keep
+  // stats_.current_memory_bytes in sync with total_memory_bytes_ on each
+  // mutation, so this assignment is normally a no-op. Kept as a belt-and-
+  // suspenders safety net in case a future code path bumps total_memory_bytes_
+  // without updating stats_.
+  stats_.current_memory_bytes.store(total_memory_bytes_, std::memory_order_relaxed);
 }
 
 }  // namespace mygramdb::cache

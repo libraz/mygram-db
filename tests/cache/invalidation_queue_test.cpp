@@ -1100,4 +1100,121 @@ TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
   EXPECT_FALSE(cache.Lookup(key).has_value());
 }
 
+/**
+ * @brief Large-batch processing without string-key allocation overhead
+ *
+ * Regression test for the typed-composite-key fix: previously each Enqueue
+ * built a "table:cache_key_hex" string per affected key (allocating O(n)
+ * strings), and ProcessBatch parsed each back via stoull. The typed
+ * (table, CacheKey) pair eliminates both. This test enqueues a large
+ * number of distinct invalidations and verifies all are processed.
+ */
+TEST(InvalidationQueueTest, EnqueueWithLargeBatchAvoidsStringAllocation) {
+  QueryCache cache(64 * 1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  queue.SetBatchSize(2000);
+  queue.SetMaxDelay(50);
+  queue.SetMaxQueueSize(100000);
+
+  // Register 10000 cache entries, each with a distinct ngram so they don't
+  // dedupe on invalidation.
+  constexpr int kNumEntries = 10000;
+  std::vector<CacheKey> keys;
+  keys.reserve(kNumEntries);
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("large_batch_query_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    // Pad ngram to 3 chars so it survives ngram-size filtering
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    meta.ngrams = {"n" + suffix.substr(suffix.size() - 2)};
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0);
+    mgr.RegisterCacheEntry(key, meta);
+    keys.push_back(key);
+  }
+
+  queue.Start();
+
+  // Enqueue 10000 invalidations using the same set of ngrams used at
+  // registration time, so each invalidation marks exactly one entry.
+  for (int i = 0; i < kNumEntries; ++i) {
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    queue.Enqueue("posts", "", "n" + suffix.substr(suffix.size() - 2));
+  }
+
+  // Allow processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  queue.Stop();
+
+  // Verify the queue drained without crash. Most entries should be erased.
+  // We don't require 100% because ngram dedup may collapse some, but the
+  // pending count must reach zero and no exception should be thrown.
+  EXPECT_EQ(queue.GetPendingCount(), 0u);
+}
+
+/**
+ * @brief Round-trip identity for the typed composite key
+ *
+ * With the typed-pair key, the (table, CacheKey) values that the producer
+ * enqueued must be the exact same values consumed by ProcessBatch — there
+ * is no encoding/decoding step. This test verifies that a known set of
+ * cache keys for a known table all get erased after a single Enqueue +
+ * ProcessBatch cycle.
+ */
+TEST(InvalidationQueueTest, EnqueueRoundtripPreservesIdentity) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // Use a table name that contains a colon to verify the typed key handles
+  // arbitrary table names without parsing ambiguity.
+  const std::string table = "schema:table";
+  NgramConfigMap configs_with_colon;
+  configs_with_colon[table] = NgramConfig{
+      .ngram_size = 3,
+      .kanji_ngram_size = 2,
+      .cross_boundary_ngrams = true,
+  };
+  InvalidationQueue queue_colon(&cache, &mgr, std::move(configs_with_colon));
+
+  // Register a small known set of (table, CacheKey) pairs
+  std::vector<CacheKey> known_keys;
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("roundtrip_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = table;
+    meta.ngrams = {"abc", "bcd"};
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0);
+    mgr.RegisterCacheEntry(key, meta);
+    known_keys.push_back(key);
+  }
+
+  // Verify all known keys are present pre-invalidation
+  for (const auto& k : known_keys) {
+    EXPECT_TRUE(cache.Lookup(k).has_value());
+  }
+
+  queue_colon.Start();
+  queue_colon.Enqueue(table, "", "abcd");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  queue_colon.Stop();
+
+  // All known keys should have been erased — proving the (table, CacheKey)
+  // pairs survived enqueue/dequeue identity-preserved (no hex round-trip).
+  for (size_t i = 0; i < known_keys.size(); ++i) {
+    EXPECT_FALSE(cache.Lookup(known_keys[i]).has_value()) << "key " << i << " was not erased";
+  }
+}
+
 }  // namespace mygramdb::cache

@@ -43,6 +43,9 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
     ngram_to_cache_keys_[stored_meta.table][ngram].insert(key);
   }
 
+  // Update table -> cache keys reverse index for O(k) ClearTable.
+  table_to_cache_keys_[stored_meta.table].insert(key);
+
   // Track per-table ngram settings for O(1) lookup during invalidation
   if (stored_meta.ngram_size > 0) {
     auto settings_key =
@@ -184,6 +187,15 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
     }
   }
 
+  // Remove from table -> cache keys reverse index.
+  auto tk_it = table_to_cache_keys_.find(metadata.table);
+  if (tk_it != table_to_cache_keys_.end()) {
+    tk_it->second.erase(key);
+    if (tk_it->second.empty()) {
+      table_to_cache_keys_.erase(tk_it);
+    }
+  }
+
   // Remove metadata
   cache_metadata_.erase(metadata_it);
 }
@@ -196,22 +208,32 @@ void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
 void InvalidationManager::ClearTable(const std::string& table_name) {
   std::unique_lock lock(mutex_);
 
-  // Find all cache keys for this table
+  // Use the reverse index (table -> cache keys) for O(k) lookup of entries
+  // belonging to this table, where k = entries in this table. Previously this
+  // scanned all cache_metadata_ entries (O(N) across all tables).
   std::vector<CacheKey> to_remove;
-  for (const auto& [key, metadata] : cache_metadata_) {
-    if (metadata.table == table_name) {
+  auto tk_it = table_to_cache_keys_.find(table_name);
+  if (tk_it != table_to_cache_keys_.end()) {
+    to_remove.reserve(tk_it->second.size());
+    for (const auto& key : tk_it->second) {
       to_remove.push_back(key);
     }
   }
 
-  // Remove entries while holding lock (use unlocked version to avoid deadlock)
+  // Remove entries while holding lock (use unlocked version to avoid deadlock).
+  // UnregisterCacheEntryUnlocked also keeps table_to_cache_keys_ in sync, so
+  // the table's set will be erased once empty.
   for (const auto& key : to_remove) {
     UnregisterCacheEntryUnlocked(key);
   }
 
-  // Remove table from reverse index and settings (already holding lock)
+  // Defensive cleanup: in case any auxiliary structure still has the table
+  // entry (e.g., entries registered with ngram_size=0 left ngram_to_cache_keys_
+  // populated even though they didn't bump table_ngram_settings_ counts), make
+  // sure the table is fully removed.
   ngram_to_cache_keys_.erase(table_name);
   table_ngram_settings_.erase(table_name);
+  table_to_cache_keys_.erase(table_name);
 }
 
 void InvalidationManager::Clear() {
@@ -220,6 +242,7 @@ void InvalidationManager::Clear() {
   decltype(ngram_to_cache_keys_)().swap(ngram_to_cache_keys_);
   decltype(cache_metadata_)().swap(cache_metadata_);
   decltype(table_ngram_settings_)().swap(table_ngram_settings_);
+  decltype(table_to_cache_keys_)().swap(table_to_cache_keys_);
 }
 
 size_t InvalidationManager::GetTrackedEntryCount() const {
@@ -281,6 +304,18 @@ size_t InvalidationManager::MemoryUsage() const {
   for (const auto& [table_name, settings_map] : table_ngram_settings_) {
     total += table_name.capacity() + sizeof(std::map<std::tuple<int, int, bool>, size_t>);
     total += settings_map.size() * (sizeof(std::tuple<int, int, bool>) + sizeof(size_t) + 3 * sizeof(void*));
+  }
+
+  // table_to_cache_keys_ overhead (reverse index for O(k) ClearTable)
+  total += table_to_cache_keys_.bucket_count() * sizeof(void*);
+  for (const auto& [table_name, key_set] : table_to_cache_keys_) {
+    total += table_name.capacity() + sizeof(void*) + sizeof(size_t);
+    total += key_set.bucket_count() * sizeof(void*);
+    // Each CacheKey membership in the set
+    for (const auto& cache_key : key_set) {
+      (void)cache_key;
+      total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+    }
   }
 
   return total;

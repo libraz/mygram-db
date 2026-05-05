@@ -51,47 +51,79 @@ TEST(QueryCacheTest, LookupMiss) {
 
 /**
  * @brief Test LRU eviction - least recently used should be evicted
+ *
+ * QueryCache uses strict LRU at the cache_map_/lru_list_ level
+ * (EvictForSpace pops from the tail of lru_list_). Lookup marks an entry
+ * "dirty" and the background RefreshLRUWorker (100ms tick) moves dirty
+ * entries to the head of the list. We sleep past one tick so that the
+ * Lookup-induced reorder is observable, then insert a new entry whose
+ * payload is large enough that the cache MUST evict to make room.
+ *
+ * With three inserts in (key1, key2, key3) order and a subsequent
+ * Lookup(key1) that is allowed to propagate, the tail is key2, so the
+ * 4th insert evicts key2 specifically.
  */
 TEST(QueryCacheTest, LRUEviction) {
-  // Small cache that can hold ~3-4 entries
-  QueryCache cache(2000, 10.0);
-
   CacheMetadata meta;
   meta.table = "posts";
   meta.ngrams = {"tes", "est"};
 
-  // Insert 4 entries
+  // Size each result large enough that 4 entries definitely don't fit but
+  // 3 do. Roughly: 4 * (kPayloadDocs * sizeof(DocId)) > kCacheBytes >=
+  // 3 * (kPayloadDocs * sizeof(DocId)). Account for per-entry overhead
+  // (CacheKey, lru_list iterator, metadata strings, atomics) by leaving
+  // generous headroom in the inequality.
+  constexpr size_t kPayloadDocs = 200;  // 800 bytes per entry payload
+  constexpr size_t kCacheBytes = 3500;  // fits ~3 entries; 4 must evict
+  QueryCache cache(kCacheBytes, /*min_query_cost_ms=*/10.0);
+
+  auto make_payload = [](DocId base) {
+    std::vector<DocId> v;
+    v.reserve(kPayloadDocs);
+    for (size_t i = 0; i < kPayloadDocs; ++i) {
+      v.push_back(static_cast<DocId>(base + i));
+    }
+    return v;
+  };
+
   auto key1 = CacheKeyGenerator::Generate("query1");
   auto key2 = CacheKeyGenerator::Generate("query2");
   auto key3 = CacheKeyGenerator::Generate("query3");
   auto key4 = CacheKeyGenerator::Generate("query4");
 
-  std::vector<DocId> result1 = {1, 2, 3};
-  std::vector<DocId> result2 = {4, 5, 6};
-  std::vector<DocId> result3 = {7, 8, 9};
-  std::vector<DocId> result4 = {10, 11, 12};
+  ASSERT_TRUE(cache.Insert(key1, make_payload(1000), meta, 15.0));
+  ASSERT_TRUE(cache.Insert(key2, make_payload(2000), meta, 15.0));
+  ASSERT_TRUE(cache.Insert(key3, make_payload(3000), meta, 15.0));
 
-  cache.Insert(key1, result1, meta, 15.0);
-  cache.Insert(key2, result2, meta, 15.0);
-  cache.Insert(key3, result3, meta, 15.0);
+  const auto evictions_before = cache.GetStatistics().evictions;
 
-  // Access key1 to make it recently used
+  // Access key1 to make it most-recently-used. Lookup marks the entry
+  // dirty; the background refresh worker reorders the LRU list.
   [[maybe_unused]] auto _ = cache.Lookup(key1);
 
-  // Wait for background LRU refresh to update the LRU list
-  // (Background thread runs every 100ms)
+  // Wait past one RefreshLRU tick (worker runs every 100ms; use 150ms for
+  // headroom on slow CI hosts).
   std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-  // Insert key4, which should evict key2 (least recently used)
-  cache.Insert(key4, result4, meta, 15.0);
+  // Insert key4. The total payload now exceeds kCacheBytes, so EvictForSpace
+  // MUST run and pop the LRU tail (key2 after the Lookup(key1) propagation).
+  ASSERT_TRUE(cache.Insert(key4, make_payload(4000), meta, 15.0));
 
-  // key1 and key3 should still be present
+  // Verify at least one eviction was recorded.
+  const auto evictions_after = cache.GetStatistics().evictions;
+  EXPECT_GT(evictions_after, evictions_before)
+      << "Inserting the 4th entry must trigger LRU eviction in a sized-down cache";
+
+  // key1 (most recently used), key3 (next), key4 (just inserted) must
+  // all remain.
   EXPECT_TRUE(cache.Lookup(key1).has_value());
   EXPECT_TRUE(cache.Lookup(key3).has_value());
   EXPECT_TRUE(cache.Lookup(key4).has_value());
-
-  // key2 may or may not be evicted depending on memory calculation
-  // Don't assert on key2 as eviction is implementation-specific
+  // key2 was the LRU victim and MUST be gone. The earlier comment on this
+  // test claimed eviction was "implementation-specific"; the implementation
+  // is in fact strict LRU (EvictForSpace pops from lru_list_.back()), so
+  // with deterministic sizing we can and should assert this.
+  EXPECT_FALSE(cache.Lookup(key2).has_value()) << "Strict LRU must evict the least-recently-used entry (key2)";
 }
 
 /**
@@ -166,6 +198,40 @@ TEST(QueryCacheTest, Clear) {
   // Both should be gone
   EXPECT_FALSE(cache.Lookup(key1).has_value());
   EXPECT_FALSE(cache.Lookup(key2).has_value());
+}
+
+/**
+ * @brief Regression test for P0-G: QueryCache::Clear() must invoke
+ *        eviction_callback_ for every removed entry.
+ *
+ * Bug: Clear() swap-discarded entries without invoking eviction_callback_,
+ * so external bookkeeping (e.g. InvalidationManager) leaked metadata.
+ * Fix: iterate entries and invoke eviction_callback_(key) before swap.
+ */
+TEST(QueryCacheTest, ClearInvokesEvictionCallbackForEveryEntry) {
+  QueryCache cache(1024 * 1024, 0.0);
+
+  std::atomic<int> callback_count{0};
+  cache.SetEvictionCallback([&callback_count](const CacheKey& /*key*/) { callback_count.fetch_add(1); });
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"abc"};
+
+  // Insert 5 entries
+  constexpr int kNumEntries = 5;
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("clear_callback_" + std::to_string(i));
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0);
+  }
+  ASSERT_EQ(cache.GetStatistics().current_entries, kNumEntries);
+  // Callback should not have been invoked during Insert
+  EXPECT_EQ(callback_count.load(), 0);
+
+  cache.Clear();
+
+  EXPECT_EQ(callback_count.load(), kNumEntries) << "Clear() must invoke eviction_callback_ for every removed entry";
+  EXPECT_EQ(cache.GetStatistics().current_entries, 0u);
 }
 
 /**
@@ -1535,6 +1601,64 @@ TEST(QueryCacheTest, TTLExpiredEntryNotReturned) {
 }
 
 /**
+ * @brief Regression test for P0-H: stats_.current_memory_bytes must be
+ *        updated immediately when entries are removed, not deferred to the
+ *        end of RefreshLRU.
+ *
+ * Bug: Insert/Erase synced stats_.current_memory_bytes inline, but
+ * RemoveEntryLocked (called by RefreshLRU when draining TTL-expired keys
+ * detected at Lookup time) only decremented total_memory_bytes_ /
+ * stats_.current_entries; stats_.current_memory_bytes was synced once at the
+ * very end of RefreshLRU. Between RemoveEntryLocked and that final sync,
+ * GetStatistics() returned stale (higher) values.
+ *
+ * Fix: store stats_.current_memory_bytes inside RemoveEntryLocked.
+ *
+ * Test scenario: insert N entries with TTL=1s, sleep past TTL, then trigger
+ * a Lookup that queues the keys into pending_expired_keys_. After RefreshLRU
+ * drains them and removes them via RemoveEntryLocked, the stats must reflect
+ * 0 bytes immediately — not after some additional grace window.
+ */
+TEST(QueryCacheTest, TTLExpiredEntryRemovalUpdatesStatsImmediately) {
+  QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+
+  std::vector<CacheKey> keys;
+  constexpr int kNumEntries = 3;
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("p0h_expire_" + std::to_string(i));
+    cache.Insert(key, {1, 2, 3}, meta, 10.0);
+    keys.push_back(key);
+  }
+  ASSERT_EQ(cache.GetStatistics().current_entries, kNumEntries);
+  ASSERT_GT(cache.GetStatistics().current_memory_bytes, 0u);
+
+  // Sleep past TTL.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+  // Lookup all keys: this enqueues them into pending_expired_keys_.
+  for (const auto& key : keys) {
+    auto result = cache.Lookup(key);
+    EXPECT_FALSE(result.has_value());
+  }
+
+  // Wait for RefreshLRU (100ms cycle) to drain the pending set and remove
+  // the entries. Two cycles = 200ms is comfortably more than enough.
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0u);
+  // Critical assertion: with the fix, RemoveEntryLocked updates
+  // current_memory_bytes inline. Without the fix, this could read a stale
+  // value if Lookup raced with RefreshLRU.
+  EXPECT_EQ(stats.current_memory_bytes, 0u)
+      << "current_memory_bytes must be synced inside RemoveEntryLocked, not deferred to the end of RefreshLRU";
+}
+
+/**
  * @brief Test memory is reclaimed after TTL expiry
  */
 TEST(QueryCacheTest, TTLExpiredMemoryReclaimed) {
@@ -1823,6 +1947,64 @@ TEST(QueryCacheTest, M5_DecompressionFailureEntryEventuallyRemoved) {
 }
 
 /**
+ * @brief Regression test for P0-E: decompression_failures counter must be
+ *        deduplicated per entry (not per Lookup call).
+ *
+ * Bug: two concurrent Lookups of the same broken entry both incremented
+ * stats_.decompression_failures, even though the entry is logically a single
+ * failure event.
+ *
+ * Fix: only increment when the key was newly inserted into
+ * pending_decompression_keys_ (i.e. unordered_set::insert returned true).
+ *
+ * Test: insert one entry, corrupt its compressed payload, fire 4 concurrent
+ * Lookups, then assert decompression_failures == 1.
+ */
+TEST(QueryCacheTest, DecompressionFailureCountedOncePerEntry) {
+  QueryCache cache(1024 * 1024, 0.0, 0, true);
+
+  auto key = CacheKeyGenerator::Generate("p0e_decomp_dedup");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+
+  // Insert a valid entry first.
+  std::vector<DocId> result = {1, 2, 3, 4, 5};
+  ASSERT_TRUE(cache.Insert(key, result, meta, 10.0));
+  ASSERT_TRUE(cache.Lookup(key).has_value());
+
+  // Corrupt the entry so subsequent Lookups will fail decompression.
+  ASSERT_TRUE(cache.CorruptEntryForTest(key));
+
+  // Fire 4 concurrent Lookups of the corrupted entry.
+  constexpr int kNumThreads = 4;
+  std::vector<std::thread> threads;
+  threads.reserve(kNumThreads);
+  std::atomic<int> miss_count{0};
+  for (int t = 0; t < kNumThreads; ++t) {
+    threads.emplace_back([&cache, &key, &miss_count]() {
+      auto looked_up = cache.Lookup(key);
+      if (!looked_up.has_value()) {
+        miss_count.fetch_add(1);
+      }
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All 4 Lookups should miss (decompression always fails on the corrupted
+  // payload), but the decompression_failures counter should reflect ONE
+  // logical failure event for this entry.
+  EXPECT_EQ(miss_count.load(), kNumThreads);
+
+  auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 1u)
+      << "decompression_failures must be deduplicated per entry, not counted per Lookup. Got "
+      << stats.decompression_failures;
+}
+
+/**
  * @brief Test TTL-expired entries increment cache_misses_ttl_expired (not cache_misses_not_found)
  *
  * Regression test for: TTL-expired entries were counted as cache_misses_not_found
@@ -2021,6 +2203,205 @@ TEST(QueryCacheTest, ConcurrentSetMinQueryCostAndSetTtlWithLookupInsert) {
   // If we reach here without crash or TSan report, the test passes
   auto stats = cache.GetStatistics();
   EXPECT_GT(stats.total_queries, 0);
+}
+
+/**
+ * @brief CacheStatisticsSnapshot must surface the configured runtime limits.
+ *
+ * Operators look at INFO/Prometheus output to correlate observed counters
+ * (rejection_count, evictions, ttl_expirations) with the limits in force.
+ * Without these fields, a sudden spike in rejections is hard to attribute
+ * to either a too-low cost threshold or a too-tight memory ceiling.
+ */
+TEST(QueryCacheTest, CacheStatsExposesConfiguredLimits) {
+  constexpr size_t kMaxBytes = 1024 * 1024;
+  constexpr double kMinCost = 12.5;
+  constexpr int kTtlSeconds = 30;
+  constexpr bool kCompression = false;
+
+  QueryCache cache(kMaxBytes, kMinCost, kTtlSeconds, kCompression);
+  auto stats = cache.GetStatistics();
+
+  EXPECT_EQ(stats.max_memory_bytes, kMaxBytes);
+  EXPECT_DOUBLE_EQ(stats.min_query_cost_ms, kMinCost);
+  EXPECT_EQ(stats.ttl_seconds, static_cast<uint64_t>(kTtlSeconds));
+  EXPECT_FALSE(stats.compression_enabled);
+
+  // SetTtl/SetMinQueryCost should be reflected in subsequent snapshots so
+  // operators can verify a configuration change took effect.
+  constexpr int kNewTtl = 60;
+  cache.SetTtl(kNewTtl);
+  cache.SetMinQueryCost(20.0);
+  auto updated = cache.GetStatistics();
+  EXPECT_EQ(updated.ttl_seconds, static_cast<uint64_t>(kNewTtl));
+  EXPECT_DOUBLE_EQ(updated.min_query_cost_ms, 20.0);
+}
+
+/**
+ * @brief rejection_count must increment when Insert() is rejected for
+ *        falling below the min_query_cost_ms threshold, and the entry must
+ *        not appear in the cache afterwards.
+ *
+ * Counts Insert calls, not entries: a single low-cost call increments by
+ * exactly one regardless of result vector size.
+ */
+TEST(QueryCacheTest, RejectionCountIncrementsForLowCostInsert) {
+  constexpr double kMinCost = 50.0;
+  QueryCache cache(1024 * 1024, kMinCost);
+
+  auto baseline = cache.GetStatistics().rejection_count;
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"foo", "bar"};
+
+  auto key = CacheKeyGenerator::Generate("low cost query");
+  std::vector<DocId> result = {1, 2, 3};
+
+  // Cost below threshold -> rejected.
+  EXPECT_FALSE(cache.Insert(key, result, meta, kMinCost - 1.0));
+  EXPECT_FALSE(cache.Lookup(key).has_value()) << "Rejected insert must not leave the entry in the cache";
+
+  auto after = cache.GetStatistics().rejection_count;
+  EXPECT_EQ(after - baseline, 1U);
+
+  // A second below-threshold insert increments again.
+  EXPECT_FALSE(cache.Insert(CacheKeyGenerator::Generate("another"), result, meta, 1.0));
+  EXPECT_EQ(cache.GetStatistics().rejection_count - baseline, 2U);
+
+  // An insert at or above the threshold succeeds and does NOT bump the
+  // rejection counter.
+  EXPECT_TRUE(cache.Insert(CacheKeyGenerator::Generate("ok query"), result, meta, kMinCost + 1.0));
+  EXPECT_EQ(cache.GetStatistics().rejection_count - baseline, 2U);
+}
+
+/**
+ * @brief forced_clears must increment per Clear()/ClearTable() invocation,
+ *        not per evicted entry.
+ *
+ * Counter semantics: bulk operations (operator-initiated CACHE CLEAR or
+ * SYNC-driven ClearTable) are observed as discrete events, not as a count
+ * of underlying entries — that role is filled by current_entries delta.
+ */
+TEST(QueryCacheTest, ForcedClearsIncrementsOnClear) {
+  QueryCache cache(1024 * 1024, 1.0);
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"x"};
+
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("entry_" + std::to_string(i));
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    EXPECT_TRUE(cache.Insert(key, result, meta, 10.0));
+  }
+  ASSERT_EQ(cache.GetStatistics().current_entries, 5U);
+  ASSERT_EQ(cache.GetStatistics().forced_clears, 0U);
+
+  cache.Clear();
+  EXPECT_EQ(cache.GetStatistics().current_entries, 0U);
+  EXPECT_EQ(cache.GetStatistics().forced_clears, 1U) << "A single Clear() must register as one bulk-clear event";
+
+  // Re-populate and exercise ClearTable; counter must still increment by one.
+  for (int i = 0; i < 3; ++i) {
+    auto key = CacheKeyGenerator::Generate("entry2_" + std::to_string(i));
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    EXPECT_TRUE(cache.Insert(key, result, meta, 10.0));
+  }
+  ASSERT_EQ(cache.GetStatistics().current_entries, 3U);
+
+  cache.ClearTable("posts");
+  EXPECT_EQ(cache.GetStatistics().forced_clears, 2U)
+      << "ClearTable() must register as a separate bulk-clear event from Clear()";
+
+  // ClearTable on a table with no entries still counts as one invocation —
+  // the metric measures operator/system intent, not match success.
+  cache.ClearTable("nonexistent_table");
+  EXPECT_EQ(cache.GetStatistics().forced_clears, 3U);
+}
+
+// =============================================================================
+// QueryCache compression-disabled path coverage
+//
+// All other tests in this file exercise the LZ4-compressed code path
+// (compression_enabled = true is the default). The fixture below pins
+// compression off so the uncompressed memcpy path in Insert/Lookup/MemoryUsage
+// is also covered. Operators sometimes disable compression to trade memory
+// for CPU on read-heavy workloads, so this path needs explicit tests.
+// =============================================================================
+
+class QueryCacheNoCompressionTest : public ::testing::Test {
+ protected:
+  // 1 MiB cap, no minimum cost gate (so trivially-cheap inserts succeed),
+  // no TTL, compression disabled.
+  QueryCache cache_{1024UL * 1024UL, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
+                    /*compression_enabled=*/false};
+
+  static CacheMetadata MakeMeta() {
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"abc", "bcd"};
+    return meta;
+  }
+};
+
+TEST_F(QueryCacheNoCompressionTest, InsertAndLookupRoundtripsWithoutCompression) {
+  auto key = CacheKeyGenerator::Generate("nc_roundtrip");
+  std::vector<DocId> result = {1, 2, 3, 4, 5, 6, 7, 8};
+  ASSERT_TRUE(cache_.Insert(key, result, MakeMeta(), 5.0));
+
+  auto cached = cache_.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(*cached, result);
+  EXPECT_FALSE(cache_.IsCompressionEnabled());
+}
+
+TEST_F(QueryCacheNoCompressionTest, MarkInvalidatedWorksWithoutCompression) {
+  auto key = CacheKeyGenerator::Generate("nc_invalidate");
+  std::vector<DocId> result = {10, 20, 30};
+  ASSERT_TRUE(cache_.Insert(key, result, MakeMeta(), 5.0));
+
+  EXPECT_TRUE(cache_.MarkInvalidated(key));
+  EXPECT_FALSE(cache_.Lookup(key).has_value());
+}
+
+TEST_F(QueryCacheNoCompressionTest, EraseWorksWithoutCompression) {
+  auto key = CacheKeyGenerator::Generate("nc_erase");
+  std::vector<DocId> result = {100, 200, 300};
+  ASSERT_TRUE(cache_.Insert(key, result, MakeMeta(), 5.0));
+
+  EXPECT_TRUE(cache_.Erase(key));
+  EXPECT_FALSE(cache_.Lookup(key).has_value());
+  EXPECT_FALSE(cache_.Erase(key)) << "Erasing a missing key must return false";
+}
+
+TEST_F(QueryCacheNoCompressionTest, MemoryAccountingMatchesUncompressedSize) {
+  // With compression disabled, the cached "compressed" buffer is the raw
+  // DocId bytes. So the total memory accounted for the entry must include
+  // sizeof(DocId) * result.size() at minimum.
+  auto key = CacheKeyGenerator::Generate("nc_memory");
+  std::vector<DocId> result;
+  constexpr size_t kSize = 256;
+  result.reserve(kSize);
+  for (size_t i = 0; i < kSize; ++i) {
+    result.push_back(static_cast<DocId>(i));
+  }
+
+  const auto before = cache_.GetStatistics().current_memory_bytes;
+  ASSERT_TRUE(cache_.Insert(key, result, MakeMeta(), 5.0));
+  const auto after = cache_.GetStatistics().current_memory_bytes;
+
+  // The delta must be at least the uncompressed payload (raw DocId bytes).
+  // It may exceed it because metadata strings/ngrams add overhead.
+  EXPECT_GE(after - before, kSize * sizeof(DocId));
+}
+
+TEST_F(QueryCacheNoCompressionTest, LookupOfMissingEntryReturnsMissNotFound) {
+  auto missing = CacheKeyGenerator::Generate("nc_never_inserted");
+  const auto before = cache_.GetStatistics();
+  EXPECT_FALSE(cache_.Lookup(missing).has_value());
+  const auto after = cache_.GetStatistics();
+  EXPECT_GT(after.cache_misses, before.cache_misses);
+  EXPECT_GT(after.cache_misses_not_found, before.cache_misses_not_found);
 }
 
 }  // namespace mygramdb::cache

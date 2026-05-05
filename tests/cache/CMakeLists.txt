@@ -88,18 +88,38 @@ target_link_libraries(query_cache_test PRIVATE
 )
 
 # Fast query_cache_test (non-TTL tests run quickly)
+#
+# SLOW filter rationale: tests that use std::this_thread::sleep_for() with
+# durations >50ms must be in the SLOW suite so they are excluded from the
+# fast (PR-CI) test pass. The patterns below match every test that sleeps:
+#   *TTL*               -- TTL expiration tests (1-3 second sleeps)
+#   *LRU*               -- LRU eviction/refresh tests (background-thread sleeps)
+#   ConcurrentLookup*   -- concurrent access stress tests with 100ms run windows
+#   ConcurrentSetMin*   -- runtime setter stress test with 200ms run window
+#   *Bug0070_Approx*    -- LRU approximation regression (200ms sleep)
+#   *Bug0070_Access*    -- access count regression (200ms sleep)
+# Keep this list in sync with sleep_for occurrences. Run:
+#   grep -nE "sleep_for" tests/cache/query_cache_test.cpp
+# whenever adding a new test that sleeps.
 gtest_discover_tests(query_cache_test
   TEST_PREFIX "QueryCache."
-  TEST_FILTER "-*TTL*"
+  # gtest --gtest_filter syntax: <positive_patterns>-<negative_patterns>,
+  # with multiple patterns colon-separated. To exclude N patterns, the
+  # filter takes the form "*-pat1:pat2:...:patN" (positive list is the
+  # explicit "*" wildcard, then a single "-" introduces the negative list).
+  # Patterns match the FULL TestSuite.TestName, so each pattern needs a
+  # leading "*" if it should match by test-name suffix only.
+  TEST_FILTER "*-*TTL*:*LRU*:*ConcurrentLookup*:*ConcurrentSetMin*:*Bug0070_Approx*:*Bug0070_Access*"
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state
 )
 
-# TTL tests use sleep-based timing (2-3 seconds each)
+# Sleep-based tests (TTL expiration, LRU refresh, concurrent stress).
+# Each can sleep from 100ms (concurrent stress) to 3s (TTL expiration).
 gtest_discover_tests(query_cache_test
   TEST_PREFIX "QueryCacheSlow."
-  TEST_FILTER "*TTL*"
+  TEST_FILTER "*TTL*:*LRU*:*ConcurrentLookup*:*ConcurrentSetMin*:*Bug0070_Approx*:*Bug0070_Access*"
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES

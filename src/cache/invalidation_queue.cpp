@@ -9,7 +9,6 @@
 
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
-#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
 
@@ -70,10 +69,12 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       } else {
         // Use emplace to preserve existing entries' original timestamps,
         // preventing oldest_timestamp_ from becoming stale after re-enqueue.
+        // Composite key uses a typed pair (table + CacheKey) to avoid the
+        // hex round-trip that the previous string-based encoding required
+        // on the invalidation hot path.
         auto now = std::chrono::steady_clock::now();
         for (const auto& key : affected_keys) {
-          const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-          pending_cache_keys_.emplace(composite_key, now);
+          pending_cache_keys_.emplace(PendingKey{table_name, key}, now);
         }
         if (now < oldest_timestamp_) {
           oldest_timestamp_ = now;
@@ -112,6 +113,13 @@ void InvalidationQueue::Start() {
 }
 
 void InvalidationQueue::Stop() {
+  // stopped_ is stored *before* acquiring queue_mutex_ on purpose: callers
+  // that already completed Phase 1 (the lockless preparation in Enqueue) will
+  // then try to acquire queue_mutex_, observe stopped_ == true, log a warning,
+  // and return without enqueueing. Moving this store inside the lock would
+  // open a window where late Phase-1 callers acquire the lock before stopped_
+  // is set and enqueue post-shutdown work into a doomed queue. This is the
+  // documented shutdown contract — do not move the store inside the lock.
   stopped_.store(true);
 
   // Atomically check and clear running_ to prevent concurrent Stop() calls
@@ -178,7 +186,7 @@ void InvalidationQueue::WorkerLoop() {
 }
 
 void InvalidationQueue::ProcessBatch() {
-  std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch;
+  std::unordered_map<PendingKey, std::chrono::steady_clock::time_point, PendingKeyHash> batch;
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -193,40 +201,12 @@ void InvalidationQueue::ProcessBatch() {
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
-  // Process batch: erase invalidated entries from cache
+  // Process batch: erase invalidated entries from cache.
+  // Typed PendingKey (table + CacheKey) is consumed directly — no string
+  // parsing, no hex round-trip.
   std::unordered_set<CacheKey> keys_to_erase;
-
-  for (const auto& [composite_key, timestamp] : batch) {
-    // Parse composite key (format: "table:cache_key_hex")
-    const size_t colon_pos = composite_key.rfind(':');
-    if (colon_pos == std::string::npos) {
-      continue;
-    }
-
-    const std::string table_name = composite_key.substr(0, colon_pos);
-    const std::string key_hex = composite_key.substr(colon_pos + 1);
-
-    // Parse cache key from hex string (128-bit MD5 = 32 hex chars)
-    constexpr size_t kMD5HexLength = 32;
-    if (key_hex.length() != kMD5HexLength) {
-      continue;
-    }
-
-    try {
-      const uint64_t hash_high = std::stoull(key_hex.substr(0, 16), nullptr, 16);
-      const uint64_t hash_low = std::stoull(key_hex.substr(16, 16), nullptr, 16);
-      const CacheKey key(hash_high, hash_low);
-
-      keys_to_erase.insert(key);
-    } catch (const std::exception& e) {
-      // Invalid hex string, skip
-      mygram::utils::StructuredLog()
-          .Event("invalidation_hex_parse_error")
-          .Field("key_hex", std::string(key_hex))
-          .Field("error", e.what())
-          .Debug();
-      continue;
-    }
+  for (const auto& [pending_key, timestamp] : batch) {
+    keys_to_erase.insert(pending_key.key);
   }
 
   // Erase entries from cache
@@ -245,10 +225,6 @@ void InvalidationQueue::ProcessBatch() {
   if (cache_ != nullptr) {
     cache_->IncrementInvalidationBatches();
   }
-}
-
-std::string InvalidationQueue::MakeCompositeKey(const std::string& table, const std::string& cache_key) {
-  return table + ":" + cache_key;
 }
 
 }  // namespace mygramdb::cache

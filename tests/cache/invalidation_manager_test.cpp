@@ -1311,4 +1311,96 @@ TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChange
       << "C-8: Entry without filters should not be invalidated by filter change alone";
 }
 
+// =============================================================================
+// Perf-1: ClearTable uses table -> cache_keys reverse index for O(k) cost
+// =============================================================================
+
+/**
+ * @brief Verify ClearTable correctly removes only the target table's entries
+ *        when many tables share the manager.
+ *
+ * The performance improvement (O(k) instead of O(N)) is verified by reading
+ * the algorithm in invalidation_manager.cpp; this test guards the functional
+ * contract that must hold under either implementation: clearing one table out
+ * of many leaves the others completely untouched.
+ */
+TEST(InvalidationManagerTest, ClearTableScalesWithTableSizeNotTotalSize) {
+  QueryCache cache(64 * 1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  constexpr int kNumTables = 10;
+  constexpr int kEntriesPerTable = 1000;
+  constexpr int kTotalEntries = kNumTables * kEntriesPerTable;
+
+  // Register kEntriesPerTable entries across kNumTables tables.
+  for (int t = 0; t < kNumTables; ++t) {
+    std::string table = "t" + std::to_string(t);
+    for (int i = 0; i < kEntriesPerTable; ++i) {
+      auto key = CacheKeyGenerator::Generate(table + "_q" + std::to_string(i));
+      CacheMetadata meta;
+      meta.table = table;
+      meta.ngrams = {"ng" + std::to_string(i)};
+      mgr.RegisterCacheEntry(key, meta);
+    }
+  }
+
+  ASSERT_EQ(static_cast<size_t>(kTotalEntries), mgr.GetTrackedEntryCount());
+
+  // Clear one table; only its entries should disappear.
+  mgr.ClearTable("t1");
+
+  EXPECT_EQ(static_cast<size_t>(kTotalEntries - kEntriesPerTable), mgr.GetTrackedEntryCount())
+      << "ClearTable must remove exactly the cleared table's entries";
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("t1")) << "Cleared table must have no ngrams left";
+
+  // Other tables must remain fully intact.
+  for (int t = 0; t < kNumTables; ++t) {
+    if (t == 1) {
+      continue;
+    }
+    std::string table = "t" + std::to_string(t);
+    EXPECT_EQ(static_cast<size_t>(kEntriesPerTable), mgr.GetTrackedNgramCount(table))
+        << "Untouched table " << table << " must retain all its ngrams";
+  }
+}
+
+/**
+ * @brief Verify the table -> cache_keys reverse index is updated by
+ *        ClearTable so subsequent invalidations against that table find
+ *        zero entries.
+ */
+TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Two tables; we only clear one.
+  for (int i = 0; i < 50; ++i) {
+    auto key_t1 = CacheKeyGenerator::Generate("t1_q" + std::to_string(i));
+    CacheMetadata meta_t1;
+    meta_t1.table = "t1";
+    meta_t1.ngrams = {"hel", "ell", "llo"};  // overlap with "hello"
+    mgr.RegisterCacheEntry(key_t1, meta_t1);
+
+    auto key_t2 = CacheKeyGenerator::Generate("t2_q" + std::to_string(i));
+    CacheMetadata meta_t2;
+    meta_t2.table = "t2";
+    meta_t2.ngrams = {"hel", "ell", "llo"};
+    mgr.RegisterCacheEntry(key_t2, meta_t2);
+  }
+
+  // Sanity: invalidating t1 with "hello" hits all 50 entries.
+  auto pre_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  EXPECT_EQ(50, pre_clear.size());
+
+  mgr.ClearTable("t1");
+
+  // After ClearTable, no t1 entries should exist in the reverse index.
+  auto post_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  EXPECT_EQ(0, post_clear.size()) << "ClearTable must remove t1 entries from the reverse index";
+
+  // t2 should be unaffected.
+  auto t2_invalidated = mgr.InvalidateAffectedEntries("t2", "", "hello", 3, 2);
+  EXPECT_EQ(50, t2_invalidated.size()) << "ClearTable on t1 must not touch t2";
+}
+
 }  // namespace mygramdb::cache

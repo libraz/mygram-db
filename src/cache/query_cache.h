@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
@@ -50,6 +51,14 @@ struct CacheStatisticsSnapshot {
   uint64_t evictions = 0;
   uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
+  uint64_t rejection_count = 0;         ///< Inserts rejected for being below min_query_cost_ms threshold
+  uint64_t forced_clears = 0;           ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
+
+  // Configuration snapshot (constants taken from QueryCache constructor)
+  size_t max_memory_bytes = 0;       ///< Configured cache memory ceiling
+  double min_query_cost_ms = 0.0;    ///< Cost threshold below which inserts are rejected
+  uint64_t ttl_seconds = 0;          ///< Configured TTL (0 = no expiration)
+  bool compression_enabled = false;  ///< Whether LZ4 compression is in use
 
   // Timing statistics
   double total_cache_hit_time_ms = 0.0;
@@ -108,6 +117,8 @@ struct CacheStatistics {
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> ttl_expirations{0};
   std::atomic<uint64_t> decompression_failures{0};
+  std::atomic<uint64_t> rejection_count{0};  ///< Inserts rejected for being below min_query_cost_ms threshold
+  std::atomic<uint64_t> forced_clears{0};    ///< Bulk Clear()/ClearTable() invocations
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
@@ -117,13 +128,14 @@ struct CacheStatistics {
 };
 
 /// Reason for cache entry removal (used by RemoveEntryLocked)
-enum class RemovalReason {
+enum class RemovalReason : std::uint8_t {
   kLRUEviction,
   kTTLExpired,
   kTTLExpiredAlreadyCounted,  ///< TTL expired, stats already counted by Lookup
   kDecompressionFailure,
   kDecompressionFailureAlreadyCounted,  ///< Decompression failed, stats already counted by Lookup
-  kTableClear
+  kTableClear,
+  kClear  ///< Whole-cache Clear() (no per-reason counter increment)
 };
 
 /**
@@ -211,6 +223,10 @@ class QueryCache {
 
   /**
    * @brief Clear all cache entries
+   *
+   * Removes all entries. Invokes eviction_callback_ for each removed entry
+   * with RemovalReason::kClear, allowing external bookkeeping (e.g.
+   * InvalidationManager) to stay consistent with the cache.
    */
   void Clear();
 
@@ -239,6 +255,16 @@ class QueryCache {
     snapshot.evictions = stats_.evictions.load();
     snapshot.ttl_expirations = stats_.ttl_expirations.load();
     snapshot.decompression_failures = stats_.decompression_failures.load();
+    snapshot.rejection_count = stats_.rejection_count.load();
+    snapshot.forced_clears = stats_.forced_clears.load();
+    // Configuration snapshot. max_memory_bytes_ and compression_enabled_ are
+    // const after construction; min_query_cost_ms_ and ttl_seconds_ are atomic
+    // and may be retuned at runtime via SetMinQueryCost/SetTtl.
+    snapshot.max_memory_bytes = max_memory_bytes_;
+    snapshot.min_query_cost_ms = min_query_cost_ms_.load(std::memory_order_relaxed);
+    const int ttl_value = ttl_seconds_.load(std::memory_order_relaxed);
+    snapshot.ttl_seconds = ttl_value < 0 ? 0 : static_cast<uint64_t>(ttl_value);
+    snapshot.compression_enabled = compression_enabled_;
     {
       std::lock_guard<std::mutex> lock(stats_.timing_mutex_);
       snapshot.total_cache_hit_time_ms = stats_.total_cache_hit_time_ms;
@@ -301,6 +327,20 @@ class QueryCache {
    * @brief Check if compression is enabled for cached results
    */
   [[nodiscard]] bool IsCompressionEnabled() const { return compression_enabled_; }
+
+  /**
+   * @brief Test-only: replace a cache entry's compressed payload with bytes
+   *        guaranteed to fail LZ4 decompression.
+   * @param key Cache key of an existing entry to corrupt
+   * @return true if the entry was found and corrupted, false otherwise
+   *
+   * Used by regression tests that verify failure-path behavior
+   * (decompression_failures counter dedup, pending-key cleanup, etc.).
+   * The corruption is observable on the next Lookup of @p key.
+   *
+   * NOTE: not part of the public API; intended for white-box tests only.
+   */
+  bool CorruptEntryForTest(const CacheKey& key);
 
  private:
   // LRU list: most recently used at front

@@ -8,6 +8,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -136,14 +139,45 @@ class InvalidationQueue {
   InvalidationManager* invalidation_mgr_;  ///< Pointer to invalidation manager
   NgramConfigMap ngram_configs_;           ///< Per-table N-gram settings for invalidation
 
-  // Pending invalidations: (table, cache_key_hex) -> first seen timestamp
-  // Using map to automatically deduplicate
-  // TODO(perf): Replace string composite key with a struct { string table; CacheKey key; }
-  // to avoid CacheKey -> hex string -> CacheKey round-trip in Enqueue/ProcessBatch.
-  // This would eliminate ToString()/stoull() overhead on the invalidation hot path.
-  std::unordered_map<std::string,  // Composite key: "table:cache_key_hex"
-                     std::chrono::steady_clock::time_point>
-      pending_cache_keys_;
+  /**
+   * @brief Typed composite key for the pending-invalidation map.
+   *
+   * Keying directly on a (table, CacheKey) pair avoids the previous
+   * CacheKey -> hex string -> CacheKey round-trip on the invalidation hot
+   * path. The previous string-based encoding allocated O(n) strings per
+   * Enqueue and parsed them back in ProcessBatch via stoull(); this typed
+   * pair eliminates both the allocation and the parsing.
+   */
+  struct PendingKey {
+    std::string table;
+    CacheKey key;
+
+    bool operator==(const PendingKey& other) const noexcept { return table == other.table && key == other.key; }
+  };
+
+  /**
+   * @brief Hash for PendingKey.
+   *
+   * Combines the table-name hash with the CacheKey hash using the same
+   * Fibonacci-mixed combiner used by std::hash<CacheKey>. Plain XOR would
+   * re-introduce the swapped-pair collision issue documented in cache_key.h.
+   */
+  struct PendingKeyHash {
+    size_t operator()(const PendingKey& pending) const noexcept {
+      constexpr std::uint64_t kFibonacci = 0x9E3779B97F4A7C15ULL;
+      constexpr unsigned int kShiftLeft = 6;
+      constexpr unsigned int kShiftRight = 2;
+      const std::uint64_t table_hash = std::hash<std::string>{}(pending.table);
+      const std::uint64_t key_hash = std::hash<CacheKey>{}(pending.key);
+      std::uint64_t combined = table_hash;
+      combined ^= key_hash + kFibonacci + (combined << kShiftLeft) + (combined >> kShiftRight);
+      return static_cast<size_t>(combined);
+    }
+  };
+
+  // Pending invalidations: (table, CacheKey) -> first seen timestamp.
+  // unordered_map automatically deduplicates by PendingKey equality.
+  std::unordered_map<PendingKey, std::chrono::steady_clock::time_point, PendingKeyHash> pending_cache_keys_;
 
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
@@ -173,11 +207,6 @@ class InvalidationQueue {
    * @brief Process batch of pending invalidations
    */
   void ProcessBatch();
-
-  /**
-   * @brief Create composite key for deduplication
-   */
-  static std::string MakeCompositeKey(const std::string& table, const std::string& cache_key);
 };
 
 }  // namespace mygramdb::cache

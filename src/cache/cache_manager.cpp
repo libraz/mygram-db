@@ -140,6 +140,11 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   metadata.last_accessed = metadata.created_at;
   metadata.access_count = 0;
 
+  // Serialize Insert with Clear/ClearTable so that we never end up with a key
+  // registered in InvalidationManager but not present in QueryCache (or vice
+  // versa). See serialize_mutex_ doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
 
@@ -166,7 +171,19 @@ void CacheManager::Clear() {
     return;
   }
 
+  // Serialize with Insert so that no key is added to InvalidationManager
+  // between query_cache_->Clear() and invalidation_mgr_->Clear() that would
+  // leave behind phantom metadata. See serialize_mutex_ doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+
   if (query_cache_) {
+    // QueryCache::Clear() invokes eviction_callback_ for every entry, which
+    // calls invalidation_mgr_->UnregisterCacheEntry and keeps the per-key
+    // metadata consistent with the cache. We still call invalidation_mgr_->
+    // Clear() afterwards because eviction callbacks only unregister keys we
+    // know about; they do not free the bucket-level allocations of
+    // ngram_to_cache_keys_/table_ngram_settings_, and Clear() additionally
+    // releases that capacity.
     query_cache_->Clear();
   }
   if (invalidation_mgr_) {
@@ -178,6 +195,10 @@ void CacheManager::ClearTable(const std::string& table_name) {
   if (!enabled_) {
     return;
   }
+
+  // Serialize with Insert; same rationale as Clear(). See serialize_mutex_
+  // doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
 
   if (query_cache_) {
     query_cache_->ClearTable(table_name);
@@ -219,12 +240,20 @@ bool CacheManager::Enable() {
 }
 
 void CacheManager::Disable() {
-  enabled_ = false;
-
-  // Stop invalidation queue
+  // Stop the invalidation queue first so no new background work can be
+  // enqueued while we tear down. Stop() drains any pending invalidations.
   if (invalidation_queue_ && invalidation_queue_->IsRunning()) {
     invalidation_queue_->Stop();
   }
+
+  // Clear all entries while the cache is still considered enabled, so that
+  // Clear() actually runs (Clear() short-circuits when !enabled_). This is
+  // the safe default: invalidation events arriving during the disabled
+  // window would be silently dropped, so we proactively flush rather than
+  // leave potentially stale entries to be served on re-enable.
+  Clear();
+
+  enabled_ = false;
 }
 
 void CacheManager::SetMinQueryCost(double min_query_cost_ms) {
@@ -239,6 +268,13 @@ void CacheManager::SetTtl(int ttl_seconds) {
   if (query_cache_) {
     query_cache_->SetTtl(ttl_seconds);
   }
+}
+
+size_t CacheManager::GetTrackedInvalidationEntries() const {
+  if (!invalidation_mgr_) {
+    return 0;
+  }
+  return invalidation_mgr_->GetTrackedEntryCount();
 }
 
 }  // namespace mygramdb::cache

@@ -141,6 +141,15 @@ class InvalidationManager {
   // Map: cache key -> minimal invalidation metadata (table + ngrams only)
   std::unordered_map<CacheKey, InvalidationMetadata> cache_metadata_;
 
+  // Reverse index: table -> set of cache keys registered for that table.
+  //
+  // Performance: This auxiliary index trades O(k) extra memory per cache entry
+  // (one set membership per table) for O(k) ClearTable cost where k is the
+  // number of entries in the affected table — instead of an O(N) scan of
+  // cache_metadata_ across all tables. Maintained alongside cache_metadata_
+  // under the same mutex_, so the two views are always consistent.
+  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_cache_keys_;
+
   // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
   // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
   std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;
