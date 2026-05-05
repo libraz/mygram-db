@@ -71,10 +71,15 @@ TEST(QueryCacheTest, LRUEviction) {
   // Size each result large enough that 4 entries definitely don't fit but
   // 3 do. Roughly: 4 * (kPayloadDocs * sizeof(DocId)) > kCacheBytes >=
   // 3 * (kPayloadDocs * sizeof(DocId)). Account for per-entry overhead
-  // (CacheKey, lru_list iterator, metadata strings, atomics) by leaving
-  // generous headroom in the inequality.
+  // (CacheKey, lru_list iterator, metadata strings, atomics, hash-map node
+  // overhead, shared_ptr control block) by leaving generous headroom in the
+  // inequality. After H-M1 (shared_ptr control block accounting, +24 B)
+  // and H-M7 (hash-map node accounting, +32 B), per-entry overhead grew by
+  // ~56 bytes, so the cache budget needed bumping to keep this test's
+  // "fits 3 entries" invariant — otherwise the third Insert evicts the
+  // first and the assertion at line ~119 fails.
   constexpr size_t kPayloadDocs = 200;  // 800 bytes per entry payload
-  constexpr size_t kCacheBytes = 3500;  // fits ~3 entries; 4 must evict
+  constexpr size_t kCacheBytes = 4096;  // fits ~3 entries; 4 must evict
   QueryCache cache(kCacheBytes, /*min_query_cost_ms=*/10.0);
 
   auto make_payload = [](DocId base) {
@@ -2502,6 +2507,228 @@ TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
   // Both keys are gone.
   EXPECT_FALSE(cache.Lookup(key_a).has_value());
   EXPECT_FALSE(cache.Lookup(key_b).has_value());
+}
+
+// =============================================================================
+// Phase 3 (HIGH): H-M3 / H-M6 / H-M7 regression tests
+// =============================================================================
+
+/**
+ * @brief H-M3: eviction_callback_ must fire AFTER QueryCache::mutex_ is released.
+ *
+ * Bug class: with the old code path, RemoveEntryLocked called eviction_callback_
+ * while holding QueryCache::mutex_. If the callback recurses into QueryCache
+ * (for example to inspect via GetMetadata or Lookup) the call would hang on
+ * a re-entrant lock acquisition.
+ *
+ * After the fix, the callback runs after mutex_ is released, so a callback
+ * that calls back into QueryCache::Lookup must succeed without deadlocking.
+ */
+TEST(QueryCacheTest, EvictionCallbackFiresWithoutHoldingCacheLock) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+
+  std::atomic<int> reentrant_lookups{0};
+  // Callback re-enters QueryCache via Lookup (a shared_lock acquisition). If
+  // the callback fired while we still held the unique_lock, this Lookup would
+  // block forever.
+  cache.SetEvictionCallback([&](const CacheKey& /*key*/) {
+    auto unrelated_key = CacheKeyGenerator::Generate("reentrant_probe");
+    (void)cache.Lookup(unrelated_key);  // must not deadlock
+    reentrant_lookups.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  // Populate a few entries, then Clear to force callbacks to run.
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(cache.Insert(CacheKeyGenerator::Generate("k" + std::to_string(i)), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+  cache.Clear();
+  EXPECT_EQ(reentrant_lookups.load(), 5);
+
+  // Same expectation for ClearTable.
+  reentrant_lookups.store(0);
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(
+        cache.Insert(CacheKeyGenerator::Generate("kt" + std::to_string(i)), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+  cache.ClearTable("posts");
+  EXPECT_EQ(reentrant_lookups.load(), 4);
+
+  // Same expectation for Erase (single-key per-key path).
+  reentrant_lookups.store(0);
+  auto solo = CacheKeyGenerator::Generate("solo");
+  ASSERT_TRUE(cache.Insert(solo, {42}, meta, 1.0));
+  EXPECT_TRUE(cache.Erase(solo));
+  EXPECT_EQ(reentrant_lookups.load(), 1);
+}
+
+/**
+ * @brief H-M7: BatchEvictionCallback fires once per bulk operation.
+ *
+ * When a batch callback is wired up, Clear/ClearTable/EvictForSpace/RefreshLRU
+ * must call it exactly once with all evicted keys instead of looping the
+ * per-key callback. This is the key amortization that lets InvalidationManager
+ * take its mutex once per bulk eviction instead of once per key.
+ */
+TEST(QueryCacheTest, BatchEvictionCallbackInvokedOncePerBulkOp) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+
+  std::atomic<int> batch_calls{0};
+  std::atomic<int> total_keys{0};
+  cache.SetBatchEvictionCallback([&](const std::vector<CacheKey>& keys) {
+    batch_calls.fetch_add(1, std::memory_order_relaxed);
+    total_keys.fetch_add(static_cast<int>(keys.size()), std::memory_order_relaxed);
+  });
+
+  // Per-key callback must NOT fire when the batch callback is set.
+  std::atomic<int> per_key_calls{0};
+  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  constexpr int kEntries = 10;
+  for (int i = 0; i < kEntries; ++i) {
+    ASSERT_TRUE(cache.Insert(CacheKeyGenerator::Generate("b" + std::to_string(i)), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+
+  cache.Clear();
+
+  EXPECT_EQ(batch_calls.load(), 1) << "Clear() must fire batch callback exactly once";
+  EXPECT_EQ(total_keys.load(), kEntries) << "Batch callback must receive every evicted key";
+  EXPECT_EQ(per_key_calls.load(), 0)
+      << "Per-key callback must NOT fire when BatchEvictionCallback is set on bulk paths";
+}
+
+/**
+ * @brief H-M7: per-key callback fallback when BatchEvictionCallback is unset.
+ *
+ * Backward-compatibility check: callers that only set the per-key callback
+ * (the original API) still receive one callback per evicted entry on bulk
+ * paths.
+ */
+TEST(QueryCacheTest, BulkPathFallsBackToPerKeyCallbackWhenBatchUnset) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+  std::atomic<int> per_key_calls{0};
+  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  for (int i = 0; i < 7; ++i) {
+    ASSERT_TRUE(cache.Insert(CacheKeyGenerator::Generate("f" + std::to_string(i)), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+
+  cache.Clear();
+  EXPECT_EQ(per_key_calls.load(), 7);
+}
+
+/**
+ * @brief H-M6: stale LRU entry detection bumps the stale_lru_entries counter.
+ *
+ * Note: this test directly exercises the defensive code path in
+ * EvictForSpace. The "stale" condition (key in lru_list_ but not in
+ * cache_map_) cannot be produced through public API mutation alone — it
+ * requires invariant violation. We use the test-only CorruptEntryForTest
+ * variant pattern, but since QueryCache does not expose a way to push a
+ * stale key into lru_list_, we instead validate the counter is initialised
+ * to 0 and never increments under normal operation. A regression that
+ * breaks the invariant elsewhere will subsequently bump this counter and be
+ * caught by a fleet alert keyed on stale_lru_entries.
+ */
+TEST(QueryCacheTest, StaleLruCounterStartsAtZeroAndStaysZeroUnderNormalOps) {
+  QueryCache cache(/*max_memory_bytes=*/4096, /*min_query_cost_ms=*/0.0);
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  // Tight budget plus repeated inserts forces many EvictForSpace iterations.
+  // None of them should observe stale LRU entries.
+  for (int i = 0; i < 200; ++i) {
+    auto key = CacheKeyGenerator::Generate("stale_probe_" + std::to_string(i));
+    // ~80 byte payload; cache holds only a handful at a time.
+    std::vector<DocId> result(20, static_cast<DocId>(i));
+    cache.Insert(key, result, meta, 1.0);
+  }
+
+  EXPECT_EQ(cache.GetStatistics().stale_lru_entries, 0U)
+      << "Normal Insert/Evict cycles must not produce stale LRU entries; "
+         "any non-zero value indicates an invariant violation upstream.";
+}
+
+/**
+ * @brief H-M7 smoke test: Clear() releases mutex_ before per-key callbacks.
+ *
+ * If Clear() were still holding mutex_ when invoking per-key callbacks, then
+ * a callback that calls cache.GetStatistics() would block on the shared_mutex
+ * (GetStatistics takes a shared_lock through stats_.timing_mutex_ — wait,
+ * actually it doesn't take mutex_; it takes only timing_mutex_. So the
+ * regression here is more subtle: we test that a callback can call
+ * GetMetadata() which DOES take a shared_lock on mutex_. Without the fix,
+ * GetMetadata under the eviction callback would deadlock on a self-held
+ * unique_lock.)
+ */
+TEST(QueryCacheTest, EvictionCallbackCanCallGetMetadataWithoutDeadlock) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+
+  std::atomic<int> callback_invocations{0};
+  cache.SetEvictionCallback([&](const CacheKey& key) {
+    // GetMetadata takes shared_lock on mutex_. If the eviction callback fires
+    // under unique_lock, this acquisition deadlocks the worker thread.
+    auto entry_meta = cache.GetMetadata(key);
+    // Whether entry_meta is empty or populated is implementation-detail (the
+    // entry is removed before/after the callback). What matters is that the
+    // call returns at all.
+    (void)entry_meta;
+    callback_invocations.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(
+        cache.Insert(CacheKeyGenerator::Generate("dl" + std::to_string(i)), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+
+  cache.Clear();
+  EXPECT_EQ(callback_invocations.load(), 3);
+}
+
+// =============================================================================
+// Phase 3 (HIGH): H-M1 memory accounting overhead
+// =============================================================================
+
+/**
+ * @brief H-M1: MemoryUsage now includes the shared_ptr control block overhead.
+ *
+ * Before the fix, MemoryUsage attributed only the heap vector for the
+ * compressed payload. With make_shared, libstdc++/libc++ allocate one
+ * additional control block (~16-24 B) per entry. We verify the reported
+ * usage strictly exceeds the old lower bound by the kSharedPtrControlBlockOverhead
+ * constant (24).
+ */
+TEST(QueryCacheTest, MemoryUsageIncludesSharedPtrControlBlockOverhead) {
+  CacheEntry entry;
+  entry.compressed = std::make_shared<const std::vector<uint8_t>>(64, 0xAB);
+  entry.metadata.table = "t";
+  entry.metadata.ngrams = {"abc"};
+
+  // Old formula (without shared_ptr control block):
+  size_t old_lower_bound = sizeof(CacheEntry) + sizeof(std::vector<uint8_t>) + entry.compressed->capacity() +
+                           entry.metadata.table.capacity() + entry.metadata.ngrams.capacity() * sizeof(std::string);
+  for (const auto& ngram : entry.metadata.ngrams) {
+    old_lower_bound += ngram.capacity();
+  }
+
+  EXPECT_GE(entry.MemoryUsage(), old_lower_bound + 24)
+      << "H-M1: MemoryUsage must include shared_ptr control block overhead (~24 bytes)";
 }
 
 }  // namespace mygramdb::cache

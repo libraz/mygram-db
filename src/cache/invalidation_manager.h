@@ -101,6 +101,23 @@ class InvalidationManager {
   void UnregisterCacheEntry(const CacheKey& key);
 
   /**
+   * @brief Unregister a batch of cache entries under a single mutex acquisition.
+   *
+   * Equivalent to calling UnregisterCacheEntry() for every key in @p keys, but
+   * with O(1) lock acquires instead of O(N). Used by QueryCache bulk-eviction
+   * paths (Clear, ClearTable, EvictForSpace, RefreshLRU) to amortize lock
+   * overhead and avoid pathological contention when emptying a full cache
+   * (H-M7).
+   *
+   * Missing keys are silently ignored — the call is idempotent on a per-key
+   * basis, matching the single-key API.
+   *
+   * @param keys Cache keys to unregister (may contain duplicates; safely
+   *             tolerated by the underlying find/erase calls).
+   */
+  void UnregisterCacheEntries(const std::vector<CacheKey>& keys);
+
+  /**
    * @brief Clear all invalidation tracking for a table
    * @param table_name Table name
    */

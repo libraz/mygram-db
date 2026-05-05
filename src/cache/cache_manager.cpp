@@ -19,10 +19,22 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
 
-    // Set eviction callback to clean up invalidation metadata
+    // Set eviction callback to clean up invalidation metadata. Per-key path
+    // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
+    // route through the batch callback below to amortize the
+    // InvalidationManager::mutex_ acquisition (H-M7).
     query_cache_->SetEvictionCallback([this](const CacheKey& key) {
       if (invalidation_mgr_) {
         invalidation_mgr_->UnregisterCacheEntry(key);
+      }
+    });
+
+    // Batch eviction callback: takes InvalidationManager::mutex_ exactly once
+    // for the whole batch instead of once per key. Bound to the same
+    // invalidation_mgr_ as the per-key callback.
+    query_cache_->SetBatchEvictionCallback([this](const std::vector<CacheKey>& keys) {
+      if (invalidation_mgr_) {
+        invalidation_mgr_->UnregisterCacheEntries(keys);
       }
     });
 
@@ -39,11 +51,12 @@ CacheManager::~CacheManager() {
   if (invalidation_queue_) {
     invalidation_queue_->Stop();
   }
-  // Clear eviction callback before destroying invalidation_mgr_ to prevent
+  // Clear eviction callbacks before destroying invalidation_mgr_ to prevent
   // use-after-free: QueryCache's LRU thread may still fire eviction callbacks
   // that reference invalidation_mgr_ during destruction.
   if (query_cache_) {
     query_cache_->SetEvictionCallback(nullptr);
+    query_cache_->SetBatchEvictionCallback(nullptr);
   }
   // Explicitly destroy query_cache_ first to join its LRU background thread
   // before invalidation_mgr_ is destroyed (member destruction order is reverse
@@ -127,7 +140,15 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   }
   const CacheKey key = resolved_key.value();
 
-  // Prepare metadata for invalidation tracking
+  // Prepare metadata for invalidation tracking.
+  //
+  // M-15: created_at / last_accessed are intentionally left default-constructed
+  // here. QueryCache::Insert() stamps them with std::chrono::steady_clock::now()
+  // immediately before the entry enters cache_map_, and that is the
+  // authoritative timestamp used for TTL accounting. InvalidationManager
+  // copies only table/ngrams/ngram_size/kanji_ngram_size/cross_boundary_ngrams/
+  // has_filters into its own InvalidationMetadata (see RegisterCacheEntry), so
+  // it does not depend on created_at on this path.
   CacheMetadata metadata;
   metadata.key = key;
   metadata.table = query.table;
@@ -136,8 +157,6 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   metadata.ngram_size = ngram_size;
   metadata.kanji_ngram_size = kanji_ngram_size;
   metadata.cross_boundary_ngrams = cross_boundary_ngrams;
-  metadata.created_at = std::chrono::steady_clock::now();
-  metadata.last_accessed = metadata.created_at;
   metadata.access_count = 0;
 
   // Serialize Insert with Clear/ClearTable so that we never end up with a key

@@ -120,10 +120,19 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
     // When filter columns changed, invalidate all cache entries for this table
     // that have filter conditions. Queries with filters may return different
     // results regardless of whether text also changed.
+    //
+    // H-M2: use the table_to_cache_keys_ reverse index to walk only the keys
+    // belonging to @p table_name (O(k) where k = entries in this table)
+    // instead of scanning every entry across every table (O(N)). For each
+    // table-local key, dereference cache_metadata_ to confirm has_filters.
     if (filter_columns_changed) {
-      for (const auto& [key, meta] : cache_metadata_) {
-        if (meta.table == table_name && meta.has_filters) {
-          affected_keys.insert(key);
+      auto tk_it = table_to_cache_keys_.find(table_name);
+      if (tk_it != table_to_cache_keys_.end()) {
+        for (const auto& cache_key : tk_it->second) {
+          auto meta_it = cache_metadata_.find(cache_key);
+          if (meta_it != cache_metadata_.end() && meta_it->second.has_filters) {
+            affected_keys.insert(cache_key);
+          }
         }
       }
     }
@@ -203,6 +212,18 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
 void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
   std::unique_lock lock(mutex_);
   UnregisterCacheEntryUnlocked(key);
+}
+
+void InvalidationManager::UnregisterCacheEntries(const std::vector<CacheKey>& keys) {
+  if (keys.empty()) {
+    return;
+  }
+  // Single lock acquisition for the whole batch (H-M7). UnregisterCacheEntryUnlocked
+  // is idempotent on missing keys, so callers do not need to deduplicate.
+  std::unique_lock lock(mutex_);
+  for (const auto& key : keys) {
+    UnregisterCacheEntryUnlocked(key);
+  }
 }
 
 void InvalidationManager::ClearTable(const std::string& table_name) {
