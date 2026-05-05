@@ -5,8 +5,6 @@
 
 #include "server/response_formatter.h"
 
-#include <spdlog/spdlog.h>
-
 #include <iomanip>
 #include <sstream>
 

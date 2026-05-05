@@ -5,8 +5,6 @@
 
 #include "server/handlers/admin_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include <filesystem>
 
 #include "config/config_help.h"

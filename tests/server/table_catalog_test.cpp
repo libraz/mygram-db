@@ -12,7 +12,9 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "index/index.h"
@@ -116,6 +118,25 @@ TEST_F(TableCatalogTest, GetTableReturnsCorrectContext) {
   EXPECT_NE(articles, comments);
   EXPECT_EQ(articles, table1_.get());
   EXPECT_EQ(comments, table2_.get());
+}
+
+// Verifies the const overload is callable through a const reference and
+// returns a pointer-to-const observing the same underlying TableContext.
+TEST_F(TableCatalogTest, GetTableConstOverloadReturnsConstPointer) {
+  TableCatalog catalog(tables_);
+  const TableCatalog& const_catalog = catalog;
+
+  const TableContext* articles = const_catalog.GetTable("articles");
+  ASSERT_NE(articles, nullptr);
+  EXPECT_EQ(articles, table1_.get());
+  EXPECT_EQ(articles->name, "articles");
+
+  const TableContext* missing = const_catalog.GetTable("nonexistent");
+  EXPECT_EQ(missing, nullptr);
+
+  // Compile-time guarantee: the const overload must yield const TableContext*.
+  static_assert(std::is_same_v<decltype(const_catalog.GetTable("articles")), const TableContext*>,
+                "GetTable() const must return const TableContext*");
 }
 
 // ===========================================================================

@@ -5,8 +5,6 @@
 
 #include "server/handlers/debug_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include <sstream>
 
 #include "server/sync_operation_manager.h"

@@ -609,8 +609,16 @@ void ConnectionAcceptor::AcceptLoop() {
           .Warn();
       static constexpr std::string_view kBusyResponse =
           "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
-      // NOLINTNEXTLINE(bugprone-unused-return-value,cert-err33-c)
-      write(client_fd, kBusyResponse.data(), kBusyResponse.size());
+      // Best-effort BUSY notification: the fd is closed immediately after, so a
+      // partial write or a peer that has already closed (EPIPE/ECONNRESET) is
+      // acceptable. MSG_NOSIGNAL prevents SIGPIPE on Linux when the peer is gone;
+      // on macOS the SO_NOSIGPIPE socket option set in SetSocketOptions handles it.
+#ifdef MSG_NOSIGNAL
+      const ssize_t sent = send(client_fd, kBusyResponse.data(), kBusyResponse.size(), MSG_NOSIGNAL);
+#else
+      const ssize_t sent = send(client_fd, kBusyResponse.data(), kBusyResponse.size(), 0);
+#endif
+      (void)sent;
       close(client_fd);
       RemoveConnection(client_fd);
     }

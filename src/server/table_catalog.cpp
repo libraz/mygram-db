@@ -24,6 +24,12 @@ TableContext* TableCatalog::GetTable(const std::string& name) {
   return iter != tables_.end() ? iter->second : nullptr;
 }
 
+const TableContext* TableCatalog::GetTable(const std::string& name) const {
+  std::shared_lock lock(mutex_);
+  auto iter = tables_.find(name);
+  return iter != tables_.end() ? iter->second : nullptr;
+}
+
 bool TableCatalog::TableExists(const std::string& name) const {
   std::shared_lock lock(mutex_);
   return tables_.find(name) != tables_.end();

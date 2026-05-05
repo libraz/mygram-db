@@ -5,8 +5,6 @@
 
 #include "server/handlers/replication_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include "mysql/binlog_reader_interface.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"

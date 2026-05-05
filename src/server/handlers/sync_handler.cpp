@@ -7,8 +7,6 @@
 
 #include "server/handlers/sync_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "server/sync_operation_manager.h"
@@ -39,7 +37,7 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
   return *result;
 }
 
-std::string SyncHandler::HandleSyncStatus(const query::Query& query) {
+std::string SyncHandler::HandleSyncStatus(const query::Query& /*query*/) {
   if (sync_manager_ == nullptr) {
     return "status=IDLE message=\"SYNC manager not initialized\"";
   }

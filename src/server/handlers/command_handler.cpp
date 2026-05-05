@@ -15,12 +15,12 @@ mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error
   using mygram::utils::MakeUnexpected;
 
   if (ctx_.table_catalog == nullptr) {
-    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kInternalError, "Table catalog not initialized"));
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kCatalogNotInitialized, "Table catalog not initialized"));
   }
 
   auto* table_ctx = ctx_.table_catalog->GetTable(table_name);
   if (table_ctx == nullptr) {
-    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kNotFound, "Table not found: " + table_name));
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kTableNotFound, "Table not found: " + table_name));
   }
 
   return TableContextResult{

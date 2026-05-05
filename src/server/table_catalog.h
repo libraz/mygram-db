@@ -63,6 +63,17 @@ class TableCatalog {
   TableContext* GetTable(const std::string& name);
 
   /**
+   * @brief Get a table context by name (const overload)
+   *
+   * Allows lookup through a `const TableCatalog&`. Returns a pointer-to-const
+   * so callers cannot mutate the table context through this path.
+   *
+   * @param name Table name
+   * @return Pointer to const table context, or nullptr if not found
+   */
+  const TableContext* GetTable(const std::string& name) const;
+
+  /**
    * @brief Check if a table exists
    * @param name Table name
    * @return true if table exists
