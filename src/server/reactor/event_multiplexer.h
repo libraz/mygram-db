@@ -148,6 +148,30 @@ class EventMultiplexer {
    */
   virtual const char* Name() const = 0;
 
+  /**
+   * @brief Force any in-progress `Poll()` to return immediately.
+   *
+   * Used by `IoReactor::Stop()` to break out of a blocked `Poll()` call as
+   * soon as `running_=false` is published, instead of waiting for the
+   * configured `poll_timeout_ms`. The wake-up mechanism is backend specific:
+   *   - epoll: write to a registered `eventfd`.
+   *   - kqueue: trigger an `EVFILT_USER` filter.
+   *   - mock: signal the internal condition variable.
+   *
+   * Backends MUST drop wake-up bookkeeping events from the `Poll()` output
+   * vector (read drain on epoll's eventfd, ignore the EVFILT_USER ident on
+   * kqueue) so callers never observe them as ReadyEvents. Calling `Wake()`
+   * while no thread is inside `Poll()` is a no-op: the next `Poll()` simply
+   * observes the latched signal and returns immediately with an empty event
+   * set.
+   *
+   * Safe to call from any thread, including concurrently with `Poll()` and
+   * `Add`/`Modify`/`Remove`. Default implementation is a no-op so that
+   * backends without a wake mechanism can opt out (the reactor falls back to
+   * waiting for the poll timeout, which is the pre-wake-up behaviour).
+   */
+  virtual mygram::utils::Expected<void, mygram::utils::Error> Wake() { return {}; }
+
  protected:
   EventMultiplexer() = default;
 };

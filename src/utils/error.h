@@ -152,6 +152,7 @@ enum class ErrorCode : std::uint16_t {
   kNetworkNullDependency = 6024,         ///< Required dependency pointer is null
   kNetworkAcceptorNoHandler = 6025,      ///< Acceptor reactor handler not installed before StartAccepting
   kServerInitMissingDependency = 6026,   ///< Server initialization missing required dependency
+  kServerShuttingDown = 6027,            ///< Server is shutting down; new long-running operations are rejected
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -404,6 +405,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Acceptor reactor handler not installed";
     case ErrorCode::kServerInitMissingDependency:
       return "Server initialization missing required dependency";
+    case ErrorCode::kServerShuttingDown:
+      return "Server is shutting down";
 
     // Client
     case ErrorCode::kClientNotConnected:

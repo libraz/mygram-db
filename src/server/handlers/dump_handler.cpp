@@ -15,6 +15,7 @@
 
 #include "cache/cache_manager.h"
 #include "server/operation_names.h"
+#include "server/replication_pause_counter.h"
 #include "server/sync_operation_manager.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
@@ -230,6 +231,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       mygram::utils::ScopeGuard([this]() { ctx_.dump_save_in_progress.store(false, std::memory_order_release); });
 
   bool replication_was_running = false;
+  bool first_pauser = false;
 
 #ifdef USE_MYSQL
   std::string gtid;
@@ -237,16 +239,28 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // Stop replication first, then capture GTID.
   // This ensures the worker thread has drained all queued events
   // before we capture the final processed GTID position.
+  //
+  // H-C3: Coordinate the actual Stop() with concurrent pause requests via
+  // the process-wide replication_pause counter. Only the first pauser
+  // calls Stop(); later pausers piggy-back on the existing pause. The
+  // ctx_.replication_paused_for_dump flag is set by the first pauser as
+  // the read-only "is paused" indicator used by REPLICATION STATUS / DUMP
+  // STATUS responses, and cleared by the last releaser below.
   if (ctx_.binlog_reader != nullptr) {
     replication_was_running = ctx_.binlog_reader->IsRunning();
 
     if (replication_was_running) {
-      ctx_.binlog_reader->Stop();
-      ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+      first_pauser = replication_pause::RequestPause();
+      if (first_pauser) {
+        ctx_.binlog_reader->Stop();
+        ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+      }
     }
   }
 
-  // Capture GTID after stopping replication (last processed position)
+  // Capture GTID after stopping replication (last processed position).
+  // If we were not the first pauser the reader is already stopped by an
+  // earlier pauser, so this still reads the last-processed position.
   if (ctx_.binlog_reader != nullptr) {
     gtid = ctx_.binlog_reader->GetCurrentGTID();
   }
@@ -258,6 +272,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
         .Field("gtid", gtid)
         .Field("filepath", filepath)
         .Field("auto_resume", "true")
+        .Field("first_pauser", first_pauser)
         .Info();
   }
 #else
@@ -312,34 +327,58 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // worse, those threads would try to call back into Index/DocumentStore
   // that may be racing their own destructors. Just clear the paused flag
   // and skip the restart.
+  //
+  // H-C3: We invoke replication_pause::ReleasePause() to undo the
+  // RequestPause() at the top of this worker, but only call binlog
+  // Start() when we are the LAST releaser (counter transitioned 1 -> 0).
+  // If a concurrent operation (auto-snapshot, DUMP LOAD) is still
+  // holding the pause, we leave the reader stopped and the paused flag
+  // asserted; the other operation's release will perform the Start().
   const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
-  if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
+  if (replication_was_running) {
+    bool last_releaser = replication_pause::ReleasePause();
+    if (!last_releaser) {
+      // Another operation is still paused — leave the reader stopped and
+      // the flag set (set by the first pauser, cleared by whoever
+      // releases last). Log so operators can correlate pause/release.
+      mygram::utils::StructuredLog()
+          .Event("replication_pause_released")
+          .Field("operation", "dump_save")
+          .Field("gtid", gtid)
+          .Field("filepath", filepath)
+          .Field("last_releaser", false)
+          .Info();
+    } else if (ctx_.binlog_reader != nullptr) {
+      ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
-    if (shutting_down) {
-      mygram::utils::StructuredLog()
-          .Event("replication_restart_skipped")
-          .Field("operation", "dump_save")
-          .Field("reason", "server_shutting_down")
-          .Field("gtid", gtid)
-          .Field("filepath", filepath)
-          .Info();
-    } else if (ctx_.binlog_reader->Start()) {
-      mygram::utils::StructuredLog()
-          .Event("replication_resumed_after_dump")
-          .Field("operation", "dump_save")
-          .Field("gtid", gtid)
-          .Field("filepath", filepath)
-          .Info();
+      if (shutting_down) {
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_skipped")
+            .Field("operation", "dump_save")
+            .Field("reason", "server_shutting_down")
+            .Field("gtid", gtid)
+            .Field("filepath", filepath)
+            .Info();
+      } else if (ctx_.binlog_reader->Start()) {
+        mygram::utils::StructuredLog()
+            .Event("replication_resumed_after_dump")
+            .Field("operation", "dump_save")
+            .Field("gtid", gtid)
+            .Field("filepath", filepath)
+            .Info();
+      } else {
+        std::string replication_error = ctx_.binlog_reader->GetLastError();
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_failed")
+            .Field("operation", "dump_save")
+            .Field("gtid", gtid)
+            .Field("filepath", filepath)
+            .Field("error", replication_error)
+            .Error();
+      }
     } else {
-      std::string replication_error = ctx_.binlog_reader->GetLastError();
-      mygram::utils::StructuredLog()
-          .Event("replication_restart_failed")
-          .Field("operation", "dump_save")
-          .Field("gtid", gtid)
-          .Field("filepath", filepath)
-          .Field("error", replication_error)
-          .Error();
+      // No reader; just clear the flag (we were the last releaser).
+      ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
     }
   }
 #endif
@@ -441,49 +480,78 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     replication_was_running = ctx_.binlog_reader->IsRunning();
   }
 
-  // Stop replication before DUMP LOAD (if running)
+  // Stop replication before DUMP LOAD (if running).
+  //
+  // H-C3: Coordinate with concurrent pausers via the process-wide
+  // replication_pause counter. Only the first pauser actually calls
+  // Stop() and asserts the observable flag; subsequent pausers piggy-
+  // back. The matching Release() lives in restore_replication / the
+  // explicit success path further down.
+  bool first_pauser = false;
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.binlog_reader->Stop();
-    ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+    first_pauser = replication_pause::RequestPause();
+    if (first_pauser) {
+      ctx_.binlog_reader->Stop();
+      ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+    }
     mygram::utils::StructuredLog()
         .Event("replication_paused")
         .Field("operation", "dump_load")
         .Field("reason", "automatic_pause_for_consistency")
+        .Field("first_pauser", first_pauser)
         .Info();
   }
 
-  // Fallback ScopeGuard that restarts replication and clears the
-  // replication_paused_for_dump flag on every error-path exit. The success
-  // path explicitly performs the restart and dismisses this guard so the
-  // restart is not duplicated. This guarantees that any early-return from
-  // here onward (validation failure inside ReadDump, exception, etc.) does
-  // not leave the server with replication permanently stopped (P0-A).
+  // Fallback ScopeGuard that releases the pause counter and (when we
+  // are the last releaser) restarts replication on every error-path
+  // exit. The success path explicitly performs the restart and dismisses
+  // this guard so the restart is not duplicated. This guarantees that
+  // any early-return from here onward (validation failure inside
+  // ReadDump, exception, etc.) does not leave the server with
+  // replication permanently stopped (P0-A).
   //
   // CR-10 shutdown check inside the lambda: if TcpServer::Stop() has
   // announced shutdown, skip the binlog Start() entirely. The reader is
-  // guaranteed alive (TcpServer::Stop joins this worker before the reader
-  // is dropped) but a Start() during teardown would just spawn threads
-  // Stop() has to immediately tear down.
+  // guaranteed alive (TcpServer::Stop joins this worker before the
+  // reader is dropped) but a Start() during teardown would just spawn
+  // threads Stop() has to immediately tear down.
   auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running]() {
+    if (!replication_was_running) {
+      // We did not enter the pause counter; nothing to release.
+      return;
+    }
+    bool last_releaser = replication_pause::ReleasePause();
+    if (!last_releaser) {
+      // Another operation still holds the pause. Leave the reader
+      // stopped and the flag asserted; the other op's release will
+      // perform the eventual Start().
+      mygram::utils::StructuredLog()
+          .Event("replication_pause_released")
+          .Field("operation", "dump_load")
+          .Field("last_releaser", false)
+          .Info();
+      return;
+    }
     ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
-    if (replication_was_running && ctx_.binlog_reader != nullptr) {
-      const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
-      if (shutting_down) {
-        mygram::utils::StructuredLog()
-            .Event("replication_restart_skipped")
-            .Field("operation", "dump_load")
-            .Field("reason", "server_shutting_down")
-            .Info();
-        return;
-      }
-      auto restart_result = ctx_.binlog_reader->Start();
-      if (!restart_result) {
-        mygram::utils::StructuredLog()
-            .Event("dump_load_replication_restart_failed")
-            .Field("operation", "dump_load")
-            .Field("error", restart_result.error().message())
-            .Error();
-      }
+    if (ctx_.binlog_reader == nullptr) {
+      return;
+    }
+    const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
+    if (shutting_down) {
+      mygram::utils::StructuredLog()
+          .Event("replication_restart_skipped")
+          .Field("operation", "dump_load")
+          .Field("reason", "server_shutting_down")
+          .Info();
+      return;
+    }
+    auto restart_result = ctx_.binlog_reader->Start();
+    if (!restart_result) {
+      mygram::utils::StructuredLog()
+          .Event("dump_load_replication_restart_failed")
+          .Field("operation", "dump_load")
+          .Field("error", restart_result.error().message())
+          .Error();
     }
   });
 #endif
@@ -531,39 +599,63 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   //
   // CR-10: skip the explicit restart when shutdown is in progress (the
   // ScopeGuard performs the same shutdown-aware skip).
-  if (result && replication_was_running && ctx_.binlog_reader != nullptr) {
-    ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
+  //
+  // H-C3: As in the ScopeGuard above, the explicit restart goes through
+  // replication_pause::ReleasePause() so concurrent pausers (auto-snapshot,
+  // DUMP SAVE) cannot have the binlog reader Start()ed under them. We
+  // only call binlog Start() when we are the LAST releaser.
+  if (result && replication_was_running) {
+    bool last_releaser = replication_pause::ReleasePause();
+    if (!last_releaser) {
+      // Another operation still holds the pause. Leave the reader
+      // stopped and the flag asserted. We still dismiss restore_replication
+      // because we have already released the counter and must not double-
+      // release in the destructor.
+      mygram::utils::StructuredLog()
+          .Event("replication_pause_released")
+          .Field("operation", "dump_load")
+          .Field("last_releaser", false)
+          .Field("gtid", gtid)
+          .Info();
+      restore_replication.Release();
+    } else if (ctx_.binlog_reader != nullptr) {
+      ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
-    const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
-    if (shutting_down) {
-      mygram::utils::StructuredLog()
-          .Event("replication_restart_skipped")
-          .Field("operation", "dump_load")
-          .Field("reason", "server_shutting_down")
-          .Field("gtid", gtid)
-          .Info();
-    } else if (ctx_.binlog_reader->Start()) {
-      mygram::utils::StructuredLog()
-          .Event("replication_resumed")
-          .Field("operation", "dump_load")
-          .Field("reason", "automatic_restart_after_completion")
-          .Field("gtid", gtid)
-          .Info();
+      const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
+      if (shutting_down) {
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_skipped")
+            .Field("operation", "dump_load")
+            .Field("reason", "server_shutting_down")
+            .Field("gtid", gtid)
+            .Info();
+      } else if (ctx_.binlog_reader->Start()) {
+        mygram::utils::StructuredLog()
+            .Event("replication_resumed")
+            .Field("operation", "dump_load")
+            .Field("reason", "automatic_restart_after_completion")
+            .Field("gtid", gtid)
+            .Info();
+      } else {
+        std::string replication_error = ctx_.binlog_reader->GetLastError();
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_failed")
+            .Field("operation", "dump_load")
+            .Field("error", replication_error)
+            .Error();
+        // Don't fail DUMP LOAD due to replication restart failure
+        // User can manually restart replication
+      }
+      restore_replication.Release();
     } else {
-      std::string replication_error = ctx_.binlog_reader->GetLastError();
-      mygram::utils::StructuredLog()
-          .Event("replication_restart_failed")
-          .Field("operation", "dump_load")
-          .Field("error", replication_error)
-          .Error();
-      // Don't fail DUMP LOAD due to replication restart failure
-      // User can manually restart replication
+      // Last releaser but no reader; just clear the flag and dismiss.
+      ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
+      restore_replication.Release();
     }
-    restore_replication.Release();
   } else if (result) {
-    // Success path with no replication to restart: clear the paused flag
-    // here and dismiss the guard so it does not redundantly clear it.
-    ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
+    // Success path with no replication to pause/restart (replication was
+    // already stopped at the start of DUMP LOAD): nothing to release on
+    // the counter, the flag was never set by us, dismiss the guard.
     restore_replication.Release();
   }
 #endif

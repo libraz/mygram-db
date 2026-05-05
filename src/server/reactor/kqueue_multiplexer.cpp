@@ -101,7 +101,42 @@ Expected<void, Error> KqueueMultiplexer::Open() {
         MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("fcntl(F_SETFD, FD_CLOEXEC)", en)));
   }
 
+  // Register the self-wake user filter. EVFILT_USER is a kqueue-specific
+  // filter that lets userspace trigger a wakeup with NOTE_TRIGGER. We add it
+  // disabled-but-armed (EV_ADD without EV_ENABLE was historically required;
+  // current macOS / *BSD documentation says EV_ADD alone arms it). The
+  // filter's ident is `kWakeIdent`, a constant chosen to be far above any
+  // realistic fd value so it cannot collide with a registered socket.
+  // Wake() then issues an EV_ENABLE | NOTE_TRIGGER kevent to fire it; Poll()
+  // drops the resulting ReadyEvent from its output so callers never see it.
+  struct kevent wake_kev {};
+  EV_SET(&wake_kev, kWakeIdent, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
+  if (::kevent(kq, &wake_kev, 1, nullptr, 0, nullptr) < 0) {
+    const int en = errno;
+    ::close(kq);
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("kevent(EV_ADD,EVFILT_USER)", en)));
+  }
+
   kqueue_fd_ = kq;
+  return {};
+}
+
+Expected<void, Error> KqueueMultiplexer::Wake() {
+  if (kqueue_fd_ < 0) {
+    // Multiplexer torn down; nothing to wake.
+    return {};
+  }
+  // Trigger the user filter registered in Open(). NOTE_TRIGGER is what fires
+  // the filter; the matching event will be delivered to the next Poll() and
+  // dropped there. EV_CLEAR (set in Open) makes the filter re-arm itself
+  // automatically, so subsequent Wake() calls keep working.
+  struct kevent kev {};
+  EV_SET(&kev, kWakeIdent, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
+  if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
+    const int en = errno;
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorPollFailed, FormatErrno("kevent(NOTE_TRIGGER)", en)));
+  }
   return {};
 }
 
@@ -365,6 +400,14 @@ Expected<void, Error> KqueueMultiplexer::Poll(int timeout_ms, std::vector<ReadyE
   out.reserve(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i) {
     const struct kevent& kev = events_[static_cast<std::size_t>(i)];
+
+    // Drop the self-wake user filter event so callers never observe it as a
+    // bogus ready fd. EV_CLEAR on the EVFILT_USER registration auto-re-arms
+    // the filter for the next Wake() call.
+    if (kev.filter == EVFILT_USER && kev.ident == kWakeIdent) {
+      continue;
+    }
+
     ReadyEvent ready{};
     ready.fd = static_cast<int>(kev.ident);
     ready.events = event::kNone;

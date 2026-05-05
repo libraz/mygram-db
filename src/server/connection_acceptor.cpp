@@ -32,6 +32,15 @@
 
 namespace mygramdb::server {
 
+namespace {
+/// Backoff duration after `accept(2)` returns EMFILE/ENFILE (file descriptor
+/// exhaustion). Long enough that we don't busy-loop on a transient FD-table
+/// shortage, short enough that operators see new connections accepted soon
+/// after fds free up. The shutdown CV makes this *upper-bound only*: Stop()
+/// notifies the accept loop and the wait returns immediately.
+constexpr int kFdExhaustionRetrySleepMs = 100;
+}  // namespace
+
 // ToSockaddr / ToSockaddrUn are provided by utils/network_utils.h
 using mygram::utils::ToSockaddr;
 using mygram::utils::ToSockaddrUn;
@@ -360,6 +369,19 @@ void ConnectionAcceptor::Stop() {
   mygram::utils::StructuredLog().Event("connection_acceptor_stopping").Debug();
   should_stop_.store(true, std::memory_order_release);
 
+  // Wake any accept-loop iteration currently sleeping on the EMFILE/ENFILE
+  // backoff CV. Held briefly to publish the predicate change before notify;
+  // the AcceptLoop's `wait_for(predicate=should_stop_)` then returns
+  // immediately instead of sleeping for the full backoff window.
+  {
+    std::lock_guard<std::mutex> lock(stop_mutex_);
+    // Empty: should_stop_ was already published above; the lock is taken
+    // only to avoid the well-known "missed notify" race where the sleeper
+    // checks the predicate, finds it false, and starts wait_for at the same
+    // moment Stop() calls notify_all().
+  }
+  stop_cv_.notify_all();
+
   // Close server socket to unblock accept(). Atomically swap the fd out so
   // the accept thread cannot re-use it after we close. Using exchange avoids
   // a load+store race where the accept thread observes the original fd
@@ -457,7 +479,16 @@ void ConnectionAcceptor::AcceptLoop() {
             .Field("error", "file_descriptor_exhaustion")
             .Field("errno", static_cast<int64_t>(err))
             .Error();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Back off so we don't busy-loop, but stay shutdown-aware: a Stop()
+        // call publishes should_stop_=true and notifies stop_cv_, which lets
+        // wait_for return immediately instead of holding the accept thread
+        // hostage for the full backoff window. The predicate captures
+        // should_stop_ by reference; the wait_for return value is ignored
+        // because either outcome (predicate true OR timeout) leads back to
+        // the loop top, which re-checks should_stop_.
+        std::unique_lock<std::mutex> lock(stop_mutex_);
+        stop_cv_.wait_for(lock, std::chrono::milliseconds(kFdExhaustionRetrySleepMs),
+                          [this]() { return should_stop_.load(std::memory_order_acquire); });
         continue;
       }
       // Other errors

@@ -9,7 +9,6 @@
 #include <array>
 #include <cctype>
 #include <chrono>
-#include <future>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -53,9 +52,6 @@ constexpr int kHttpNotFound = 404;
 constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
-
-// Server startup timeout (seconds)
-constexpr int kStartupTimeoutSec = 5;
 
 std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
   std::vector<mygram::utils::CIDR> parsed;
@@ -495,71 +491,68 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
     return MakeUnexpected(error);
   }
 
-  // Use a promise/future to safely communicate bind result from the thread
-  auto start_promise = std::make_shared<std::promise<std::string>>();
-  auto start_future = start_promise->get_future();
+  mygram::utils::StructuredLog()
+      .Event("http_server_starting")
+      .Field("bind", config_.bind)
+      .Field("port", static_cast<uint64_t>(config_.port))
+      .Info();
 
-  // Start server in separate thread
-  server_thread_ = std::make_unique<std::thread>([this, start_promise]() {
+  // Bind synchronously on the calling thread.
+  //
+  // Rationale (Fix H-N1): the previous design spawned a worker thread that
+  // called `bind_to_port` then signalled completion through a promise, with
+  // the parent waiting on `start_future.wait_for(timeout)`. That introduced
+  // a join-deadlock window: on `wait_for` timeout the parent called
+  // `server_->stop()` (a no-op when the worker had not yet reached
+  // `listen_after_bind`) and then `server_thread_->join()`, which could
+  // block indefinitely if the worker was wedged inside `bind_to_port`. The
+  // destructor's chained `Stop()` would then run `terminate()` from the
+  // joinable-thread invariant.
+  //
+  // cpp-httplib exposes `bind_to_port` as a synchronous call: it just runs
+  // the socket/bind/listen syscalls and returns. There is no benefit to
+  // hopping into a worker for that step, and doing so synchronously
+  // eliminates the timeout entirely. The worker thread only owns the
+  // long-running `listen_after_bind` accept loop, which `Stop()`'s
+  // `server_->stop()` reliably tears down via the documented
+  // shutdown(svr_sock_) path.
+  if (!server_->bind_to_port(config_.bind, config_.port)) {
+    std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
     mygram::utils::StructuredLog()
-        .Event("http_server_starting")
+        .Event("server_error")
+        .Field("operation", "http_server_listen")
         .Field("bind", config_.bind)
         .Field("port", static_cast<uint64_t>(config_.port))
-        .Info();
+        .Field("error", error_msg)
+        .Error();
+    // Release the running_ gate so subsequent Start()s can retry. Bind
+    // happened on this thread, so no worker exists to clean up.
+    running_.store(false, std::memory_order_release);
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, std::move(error_msg));
+    return MakeUnexpected(error);
+  }
 
-    // Bind first, then signal success/failure before blocking on listen.
-    // Note on running_ on failure: this thread holds the running_=true gate
-    // acquired by the parent Start() via CAS. Releasing it here with
-    // store(false, release) is safe because the parent has not yet observed
-    // the bind result — it is still blocked on start_future.wait_for(). The
-    // parent will then return the error without touching running_.
-    if (!server_->bind_to_port(config_.bind, config_.port)) {
-      std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
-      mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "http_server_listen")
-          .Field("bind", config_.bind)
-          .Field("port", static_cast<uint64_t>(config_.port))
-          .Field("error", error_msg)
-          .Error();
-      running_.store(false, std::memory_order_release);
-      start_promise->set_value(std::move(error_msg));
-      return;
-    }
-
-    // Bind succeeded, signal the caller
-    start_promise->set_value("");
-
-    // Block on accepting connections (runs until server_->stop() is called).
-    // listen_after_bind() returns false only if the server stopped abnormally.
+  // Spawn the worker thread to drive the accept loop. By the time we reach
+  // here, the listening socket is bound and ready; `server_->stop()` (called
+  // from Stop()) will reliably interrupt `listen_after_bind` by closing the
+  // listening socket — but only AFTER the worker reaches the
+  // `is_running_=true` flip inside `listen_internal()`. Pre-flip, cpp-httplib's
+  // own `Server::stop()` is a no-op (it gates on `is_running_`), so a
+  // racing Stop() right after Start() returned would leak the worker thread.
+  // We therefore call `server_->wait_until_ready()` immediately after the
+  // spawn: it spins on `is_running_` with 1ms sleeps and returns within a
+  // few milliseconds in all observed runs. By the time Start() returns,
+  // both bind_to_port and the accept-loop entry are committed.
+  server_thread_ = std::make_unique<std::thread>([this]() {
     if (!server_->listen_after_bind()) {
+      // Abnormal exit from the accept loop. Release the running_ gate so a
+      // subsequent Start() can attempt a fresh bind. Stop()'s CAS handles
+      // the case where Stop() is the one tearing us down: its CAS observes
+      // running_=false here and short-circuits.
       running_.store(false, std::memory_order_release);
     }
   });
-
-  // Wait for the thread to report bind result (with timeout)
-  auto status = start_future.wait_for(std::chrono::seconds(kStartupTimeoutSec));
-  if (status == std::future_status::timeout) {
-    // Timed out waiting for bind; stop the server and join.
-    server_->stop();
-    if (server_thread_ && server_thread_->joinable()) {
-      server_thread_->join();
-    }
-    running_.store(false, std::memory_order_release);
-    auto error = MakeError(ErrorCode::kTimeout, "HTTP server startup timed out");
-    return MakeUnexpected(error);
-  }
-
-  std::string thread_error = start_future.get();
-  if (!thread_error.empty()) {
-    // Bind failed inside the worker thread, which already called
-    // running_.store(false). Just join the thread; do not touch running_.
-    if (server_thread_ && server_thread_->joinable()) {
-      server_thread_->join();
-    }
-    auto error = MakeError(ErrorCode::kNetworkBindFailed, thread_error);
-    return MakeUnexpected(error);
-  }
+  server_->wait_until_ready();
 
   mygram::utils::StructuredLog()
       .Event("http_server_started")

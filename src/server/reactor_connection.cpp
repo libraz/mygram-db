@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cassert>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -490,7 +491,24 @@ bool ReactorConnection::DrainWriteQueueLocked() {
     ssize_t n = ::send(fd_, data, remaining, kSendFlags);
     if (n > 0) {
       front_offset_ += static_cast<size_t>(n);
-      write_queue_bytes_ -= static_cast<size_t>(n);
+      // Defensive underflow guard: a bug elsewhere that drives
+      // write_queue_bytes_ below the actually-queued byte count would wrap
+      // the size_t to ~SIZE_MAX, hiding the bug from the slow-reader gate
+      // in EnqueueResponse. assert() catches it in debug builds; the
+      // release-build clamp + structured log keeps the connection healthy
+      // and surfaces the bug to operators without crashing.
+      const auto sent_bytes = static_cast<size_t>(n);
+      assert(write_queue_bytes_ >= sent_bytes);
+      if (write_queue_bytes_ < sent_bytes) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_write_accounting_underflow")
+            .Field("fd", static_cast<int64_t>(fd_))
+            .Field("write_queue_bytes", static_cast<uint64_t>(write_queue_bytes_))
+            .Field("sent_bytes", static_cast<uint64_t>(sent_bytes))
+            .Warn();
+        write_queue_bytes_ = sent_bytes;
+      }
+      write_queue_bytes_ -= sent_bytes;
       pending_write_bytes_.store(write_queue_bytes_, std::memory_order_relaxed);
       if (front_offset_ == front.size()) {
         write_queue_.pop_front();

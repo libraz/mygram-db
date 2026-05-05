@@ -506,6 +506,104 @@ TEST(SyncOperationManagerTest, ConcurrentStartSyncThreadSafe) {
   sync_mgr.RequestShutdown();
 }
 
+/**
+ * @brief H-C4 regression: StartSync must reject any new SYNC after
+ *        RequestShutdown() has been called.
+ *
+ * Pre-fix behaviour: RequestShutdown() set shutdown_requested_ = true
+ * but StartSync()'s early checks did not consult that flag. A request
+ * dispatcher with a stale reference to the SyncOperationManager could
+ * therefore slip a new SYNC past shutdown, claim the sync slot, and
+ * spawn a worker thread that the manager destructor would try to join
+ * for up to ~30 seconds before timing out.
+ *
+ * Post-fix behaviour: StartSync()'s first action is an acquire-load on
+ * shutdown_requested_; any new request after RequestShutdown() returns
+ * an Error with code kServerShuttingDown so the dispatcher can fail
+ * fast instead of starting a doomed sync.
+ *
+ * The test does not need a real MySQL server because we do not expect
+ * StartSync to make it past the shutdown check — there is nothing for
+ * the worker thread to do.
+ */
+TEST(SyncOperationManagerTest, StartSyncAfterRequestShutdownReturnsError) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext test_ctx;
+  test_ctx.name = "test_table";
+  test_ctx.config.name = "test_table";
+  test_ctx.config.ngram_size = 2;
+  test_ctx.index = std::make_unique<index::Index>(2);
+  test_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  table_contexts["test_table"] = &test_ctx;
+
+  config::Config full_config;
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+  full_config.tables.push_back(table_config);
+
+  SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
+
+  // Trigger shutdown BEFORE starting any sync. After this returns, the
+  // contract is "no new SYNC accepted".
+  sync_mgr.RequestShutdown();
+
+  auto result = sync_mgr.StartSync("test_table");
+  ASSERT_FALSE(result) << "StartSync must fail after RequestShutdown but returned: " << (result ? *result : "");
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kServerShuttingDown)
+      << "Error code should be kServerShuttingDown (6027), got: " << static_cast<int>(result.error().code());
+  EXPECT_NE(result.error().message().find("shutting down"), std::string::npos)
+      << "Error message should mention shutdown, got: " << result.error().message();
+
+  // The error code is in the Network/Server range (6000-6999) per the
+  // CLAUDE.md error-code policy.
+  EXPECT_GE(static_cast<int>(result.error().code()), 6000);
+  EXPECT_LT(static_cast<int>(result.error().code()), 7000);
+}
+
+/**
+ * @brief H-C4 regression: shutdown rejection must be observable
+ *        immediately even if RequestShutdown() and StartSync() race.
+ *
+ * The fix uses an acquire-load in StartSync paired with a release-store
+ * in RequestShutdown so the StartSync racer that starts strictly AFTER
+ * RequestShutdown's release-store always observes the shutdown flag and
+ * fails fast. Racers that started strictly BEFORE may still proceed
+ * (they hold a still-valid claim on the sync slot); the contract is
+ * about the post-RequestShutdown ordering, not about cancelling racers
+ * mid-flight.
+ *
+ * The test runs a tight loop of (start manager, request shutdown, then
+ * StartSync) interleavings and asserts that every StartSync ordered
+ * after the matching RequestShutdown returns kServerShuttingDown.
+ */
+TEST(SyncOperationManagerTest, StartSyncAfterShutdownIsAlwaysRejected) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext test_ctx;
+  test_ctx.name = "test_table";
+  test_ctx.config.name = "test_table";
+  test_ctx.config.ngram_size = 2;
+  test_ctx.index = std::make_unique<index::Index>(2);
+  test_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  table_contexts["test_table"] = &test_ctx;
+
+  config::Config full_config;
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+  full_config.tables.push_back(table_config);
+
+  // Many iterations to widen any latent race window.
+  for (int i = 0; i < 50; ++i) {
+    SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
+    sync_mgr.RequestShutdown();
+
+    // Each StartSync issued after RequestShutdown returns must fail
+    // with the shutdown error.
+    auto result = sync_mgr.StartSync("test_table");
+    ASSERT_FALSE(result) << "iter=" << i << " StartSync unexpectedly succeeded after shutdown";
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kServerShuttingDown) << "iter=" << i;
+  }
+}
+
 }  // namespace mygramdb::server
 
 #endif  // USE_MYSQL

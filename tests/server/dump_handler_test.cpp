@@ -1681,6 +1681,124 @@ TEST_F(DumpHandlerGtidTest, DumpLoadClearsLoadingFlagOnError) {
 #endif  // USE_MYSQL
 
 // ============================================================================
+// H-C3 regression tests: replication-pause counter coordinates concurrent
+// pause requests so that binlog Stop()/Start() are not called more than once
+// across overlapping operations.
+// ============================================================================
+
+#ifdef USE_MYSQL
+
+#include "server/replication_pause_counter.h"
+
+namespace mygramdb::server {
+
+/**
+ * @brief Direct unit test of the process-wide replication-pause counter.
+ *
+ * The counter is the substrate that DumpSaveWorker, HandleDumpLoad, and
+ * SnapshotScheduler::TakeSnapshot share to dedup binlog Stop()/Start()
+ * across concurrent operations. We exercise it without touching real
+ * dump operations so the test stays fast and deterministic.
+ */
+TEST(ReplicationPauseCounterTest, FirstPauserDetectedOnce) {
+  replication_pause::ResetForTesting();
+  EXPECT_FALSE(replication_pause::IsPaused());
+
+  // First pauser sees the 0->1 transition.
+  EXPECT_TRUE(replication_pause::RequestPause());
+  EXPECT_TRUE(replication_pause::IsPaused());
+
+  // Subsequent pausers do NOT see a 0->1 transition.
+  EXPECT_FALSE(replication_pause::RequestPause());
+  EXPECT_FALSE(replication_pause::RequestPause());
+  EXPECT_TRUE(replication_pause::IsPaused());
+
+  // Only the last releaser sees the 1->0 transition.
+  EXPECT_FALSE(replication_pause::ReleasePause());
+  EXPECT_TRUE(replication_pause::IsPaused());
+  EXPECT_FALSE(replication_pause::ReleasePause());
+  EXPECT_TRUE(replication_pause::IsPaused());
+  EXPECT_TRUE(replication_pause::ReleasePause());
+  EXPECT_FALSE(replication_pause::IsPaused());
+
+  replication_pause::ResetForTesting();
+}
+
+/**
+ * @brief Counter behaves correctly under concurrent Pause/Release pairs.
+ *
+ * N threads each call RequestPause and ReleasePause in pairs. We verify
+ * that:
+ *   - Exactly one RequestPause returns true (first pauser).
+ *   - Exactly one ReleasePause returns true (last releaser).
+ *   - The counter ends at 0 (no leaks).
+ */
+TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLast) {
+  replication_pause::ResetForTesting();
+
+  constexpr int kThreads = 32;
+  std::atomic<int> first_pauser_count{0};
+  std::atomic<int> last_releaser_count{0};
+  std::atomic<bool> start{false};
+
+  std::vector<std::thread> workers;
+  workers.reserve(kThreads);
+  for (int i = 0; i < kThreads; ++i) {
+    workers.emplace_back([&]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      if (replication_pause::RequestPause()) {
+        first_pauser_count.fetch_add(1, std::memory_order_relaxed);
+      }
+      // Tiny sleep to widen the overlap window.
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      if (replication_pause::ReleasePause()) {
+        last_releaser_count.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& t : workers) {
+    t.join();
+  }
+
+  EXPECT_EQ(first_pauser_count.load(), 1) << "Exactly one thread must observe the 0->1 transition";
+  EXPECT_EQ(last_releaser_count.load(), 1) << "Exactly one thread must observe the 1->0 transition";
+  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must be drained back to 0 after all releases";
+
+  replication_pause::ResetForTesting();
+}
+
+/**
+ * @brief Defensive: an unbalanced ReleasePause does not return true.
+ *
+ * Production callers must always pair RequestPause with ReleasePause,
+ * but if a programming bug causes an unbalanced release the counter
+ * defends against persistent negative state. We verify that the
+ * defensive ReleasePause returns false (so callers will not erroneously
+ * call binlog Start) and that the counter is restored to 0.
+ */
+TEST(ReplicationPauseCounterTest, UnbalancedReleaseReturnsFalseAndKeepsCounterNonNegative) {
+  replication_pause::ResetForTesting();
+
+  EXPECT_FALSE(replication_pause::ReleasePause()) << "Unbalanced ReleasePause must not report 'last releaser'";
+  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must remain at 0 after defensive recovery";
+
+  // A normal pause/release pair after the defensive recovery still works.
+  EXPECT_TRUE(replication_pause::RequestPause());
+  EXPECT_TRUE(replication_pause::ReleasePause());
+  EXPECT_FALSE(replication_pause::IsPaused());
+
+  replication_pause::ResetForTesting();
+}
+
+}  // namespace mygramdb::server
+
+#endif  // USE_MYSQL
+
+// ============================================================================
 // Async DUMP SAVE Tests (with DumpProgress)
 // ============================================================================
 

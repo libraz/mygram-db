@@ -122,6 +122,59 @@ TEST_F(HttpServerStartupTest, StartOnOccupiedPortReturnsError) {
 }
 
 /**
+ * @brief H-N1 regression: bind-failure path returns within milliseconds and
+ *        leaves the server in a fresh state ready for reuse.
+ *
+ * Pre-fix, Start() spawned a worker thread that called bind_to_port and
+ * signalled the parent through a promise/future with a 5s timeout. If
+ * bind_to_port stalled (or was simply slow to schedule on a loaded host),
+ * the parent's wait_for could time out, then it would call
+ * server_->stop() (a no-op when listen_after_bind had not started) and
+ * server_thread_->join(), which could hang indefinitely. Now bind_to_port
+ * runs synchronously on the calling thread, so the failure path returns
+ * with no thread to join.
+ *
+ * The assertion is on wall-clock time: a synchronous bind to an occupied
+ * port returns in microseconds; if the join-deadlock regression returns,
+ * this test would block on the destructor for tens of seconds.
+ */
+TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
+  // Occupy a port so the second Start() has to fail bind.
+  int sock_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(sock_fd, 0);
+  int opt_off = 0;
+  ::setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt_off, sizeof(opt_off));
+#ifdef SO_REUSEPORT
+  ::setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &opt_off, sizeof(opt_off));
+#endif
+  struct sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(18097);
+  ASSERT_EQ(::bind(sock_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(::listen(sock_fd, 1), 0);
+
+  auto cfg = MakeConfig(18097);
+
+  // Wrap Start() in a future so we can assert on completion time without
+  // letting a regression deadlock the test process.
+  auto start_done = std::async(std::launch::async, [&]() {
+    HttpServer server(cfg, table_contexts_, config_.get());
+    auto result = server.Start();
+    return result.has_value();
+  });
+
+  // Synchronous bind should return well under a second on any reasonable
+  // platform. The previous 5-second timeout for the worker-thread design is
+  // 5x this budget, so a regression manifests as a wait_for hit.
+  auto status = start_done.wait_for(std::chrono::seconds(2));
+  ASSERT_EQ(status, std::future_status::ready) << "Start() did not return promptly on bind failure";
+  EXPECT_FALSE(start_done.get()) << "Start() unexpectedly succeeded on occupied port";
+
+  ::close(sock_fd);
+}
+
+/**
  * @brief Verify that double-start returns an appropriate error
  */
 TEST_F(HttpServerStartupTest, DoubleStartReturnsError) {

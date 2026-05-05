@@ -669,6 +669,73 @@ TEST_F(IoReactorTest, RegisterRollbackOnMuxAddFailure) {
   EXPECT_EQ(reactor_->ConnectionCount(), 1u);
 }
 
+// ---------------------------------------------------------------------------
+// Test 24: StopReturnsPromptlyWithLongPollTimeout (Fix H-N3)
+//
+// Pre-fix, Stop() set running_=false but had to wait for the in-flight
+// Poll(timeout_ms) to elapse before the event loop observed the flag. With
+// poll_timeout_ms set to several seconds, Stop() blocked the calling
+// thread (and start_stop_mutex_) for that whole duration, which made
+// rapid restart cycles (HttpServer / TcpServer reconfiguration) extremely
+// slow.
+//
+// The fix wires up EventMultiplexer::Wake() (EVFILT_USER on kqueue,
+// eventfd on epoll, cv-signal on the mock) so Stop() can interrupt the
+// blocked Poll() immediately. We assert that Stop() returns within a
+// bound that's well under the configured poll_timeout_ms.
+// ---------------------------------------------------------------------------
+TEST_F(IoReactorTest, StopReturnsPromptlyWithLongPollTimeout) {
+  // Configure a long poll timeout so the regression would manifest as a
+  // multi-second wait inside Stop().
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 5000;
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
+
+  ASSERT_TRUE(reactor->Start());
+
+  // Give the event loop a moment to actually be parked inside Poll().
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  const auto t0 = std::chrono::steady_clock::now();
+  reactor->Stop();
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+  EXPECT_FALSE(reactor->IsRunning());
+  // Allow generous slack for slow CI hosts but stay an order of magnitude
+  // below poll_timeout_ms (5000ms). Anything in this range is "wake worked".
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500))
+      << "Stop() should not wait for the configured poll_timeout_ms when Wake() is available";
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: StopReturnsPromptlyWithRealBackend (Fix H-N3)
+//
+// Same intent as the mock-backed test, but exercises the real kqueue or
+// epoll wake primitive end-to-end. The real backends arm a sentinel filter
+// (EVFILT_USER on kqueue) or eventfd (epoll) during Open(); Wake() fires
+// it, Poll() drains/drops the event before returning to the reactor.
+// ---------------------------------------------------------------------------
+TEST_F(IoReactorTest, StopReturnsPromptlyWithRealBackend) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 5000;
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  // Do NOT call SetMultiplexerFactoryForTest — use the real kernel backend.
+
+  ASSERT_TRUE(reactor->Start()) << "Real backend Start() failed";
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  const auto t0 = std::chrono::steady_clock::now();
+  reactor->Stop();
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+  EXPECT_FALSE(reactor->IsRunning());
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500))
+      << "Real backend Stop() should not wait for the full poll_timeout_ms";
+}
+
 TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
   for (int iter = 0; iter < 20; ++iter) {
     auto pool = std::make_unique<ThreadPool>(2, 64);

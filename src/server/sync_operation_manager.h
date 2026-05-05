@@ -104,6 +104,12 @@ class SyncOperationManager {
 
   /**
    * @brief Start SYNC operation for a table
+   *
+   * Returns kServerShuttingDown if RequestShutdown() has already been
+   * called: once the manager has begun shutting down, no new SYNC is
+   * accepted (and existing syncs are cancelled). Callers should not
+   * retry such errors.
+   *
    * @param table_name Table to synchronize
    * @return Expected containing success response string, or Error on failure
    */
@@ -124,6 +130,11 @@ class SyncOperationManager {
 
   /**
    * @brief Request shutdown and cancel all active syncs
+   *
+   * After this returns, StartSync() will reject any new request with
+   * kServerShuttingDown. Existing syncs are cancelled (their loaders are
+   * told to abort); the caller is expected to follow up with
+   * WaitForCompletion() to drain the worker threads before destruction.
    */
   void RequestShutdown();
 

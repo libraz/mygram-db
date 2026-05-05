@@ -48,6 +48,10 @@ class MockEventMultiplexer final : public EventMultiplexer {
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
   mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
   const char* Name() const override { return "mock"; }
+  /// @copydoc EventMultiplexer::Wake
+  /// Sets a latched flag and notifies the Poll() condition variable so an
+  /// in-flight blocking Poll() returns immediately with an empty event set.
+  mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
 
   // -------------------------------------------------------------------------
   // Test hooks (non-virtual)
@@ -107,6 +111,9 @@ class MockEventMultiplexer final : public EventMultiplexer {
   bool opened_{false};
   bool shutdown_{false};
   bool add_should_fail_{false};
+  /// One-shot Wake() flag. Cleared by Poll() once consumed so subsequent
+  /// blocking Polls revert to normal cv-wait behaviour.
+  bool wake_pending_{false};
   std::unordered_map<int, uint8_t> interest_;
   std::deque<ReadyEvent> injected_;
   int poll_call_count_{0};

@@ -97,6 +97,28 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  // H-C4: Reject any new SYNC if RequestShutdown() has been called.
+  //
+  // Prior to this check there was a narrow race window where
+  // RequestShutdown() set shutdown_requested_ = true but a concurrent
+  // StartSync() (still holding a reference to the manager from the
+  // request dispatcher) could slip past the early checks, claim the
+  // sync slot, and spawn a worker thread — only for the worker to be
+  // immediately Cancel()'d by the same RequestShutdown(). The cancelled
+  // worker would race the manager destructor's join phase (~30s timeout)
+  // and leave the dispatcher waiting on a SYNC that will never make
+  // progress. Failing fast here matches the contract documented in
+  // RequestShutdown(): once shutdown is requested no new long-running
+  // operations are accepted; existing ones are cancelled and joined.
+  //
+  // The acquire fence pairs with the release-store in RequestShutdown()
+  // so any state RequestShutdown() published before flipping the flag
+  // (e.g. cancellation of in-flight loaders) is visible here.
+  if (shutdown_requested_.load(std::memory_order_acquire)) {
+    return MakeUnexpected(MakeError(ErrorCode::kServerShuttingDown,
+                                    "Cannot start SYNC for '" + table_name + "': server is shutting down"));
+  }
+
   // Phase 1: validation + grab any stale thread under the lock.
   std::thread previous_thread;
   {
@@ -405,7 +427,11 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
 }
 
 void SyncOperationManager::RequestShutdown() {
-  shutdown_requested_ = true;
+  // Use release-store so the StartSync acquire-load (H-C4) sees this
+  // store and refuses any new SYNC after we have begun shutdown. The
+  // semantics are: once RequestShutdown returns, no new SYNC can be
+  // started and all in-flight syncs have been Cancel()ed.
+  shutdown_requested_.store(true, std::memory_order_release);
 
   // Cancel all active loaders
   std::lock_guard<std::mutex> lock(loaders_mutex_);

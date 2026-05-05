@@ -66,9 +66,23 @@ class EpollMultiplexer : public EventMultiplexer {
   mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
   const char* Name() const override;
 
+  /**
+   * @brief Trigger a self-wake so a blocked `Poll()` returns now.
+   *
+   * Implemented by `write(2)`-ing one byte to a registered `eventfd(2)`.
+   * `Poll()` drains the eventfd and drops the resulting ready entry from its
+   * output vector so callers never see the wake fd as a real ready event.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
+
  private:
   /// File descriptor returned by `epoll_create1`. -1 until `Open()` succeeds.
   int epoll_fd_{-1};
+
+  /// `eventfd(2)` used to break out of a blocked `epoll_wait`. Registered on
+  /// `epoll_fd_` during `Open()`. `Wake()` writes a token to it; `Poll()`
+  /// reads the token back and drops the ReadyEvent so callers never see it.
+  int wake_fd_{-1};
 
   /// Reusable scratch buffer for `epoll_wait`. Sized once in the constructor
   /// and doubled on demand (up to a fixed cap) whenever a Poll() fills it

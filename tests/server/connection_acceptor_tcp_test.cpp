@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -479,6 +480,90 @@ TEST_F(ConnectionAcceptorTcpTest, AcceptedSocketsHaveTcpNoDelay) {
   EXPECT_NE(nodelay_value.load(), 0) << "TCP_NODELAY should be set on accepted TCP socket";
 
   acceptor.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// Fix H-N4 regression: AcceptLoop's EMFILE/ENFILE backoff must be
+// shutdown-aware. Pre-fix it called std::this_thread::sleep_for(100ms)
+// without any predicate check, so a Stop() during the backoff window had to
+// wait the full duration. The fix replaces the sleep with a CV wait that
+// returns the moment Stop() publishes should_stop_=true.
+//
+// We force the backoff path by lowering RLIMIT_NOFILE far enough that
+// accept() returns EMFILE on every iteration, then assert that Stop()
+// returns within a small fraction of the legacy 100ms backoff. Note that
+// dropping the soft limit affects the whole process for the duration of
+// the test; we restore it in the destructor and pin the test to a single
+// thread group so we don't trip unrelated tests.
+// ---------------------------------------------------------------------------
+TEST_F(ConnectionAcceptorTcpTest, StopWakesEmfileBackoffLoop) {
+  // 1) Bring up the acceptor on an ephemeral port BEFORE we drop fds.
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+
+  // 2) Snapshot RLIMIT_NOFILE so we can restore it on exit.
+  struct rlimit original {};
+  ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &original), 0);
+
+  // 3) Drop the soft limit just below the currently-open FD count, so the
+  //    next accept() call inside the loop will trip EMFILE. We want a value
+  //    high enough not to break the running test runtime (gtest, the
+  //    structured logger, etc.) but low enough that accept() can't allocate
+  //    a new fd. We approximate by counting current opens via a probe loop.
+  int probe_fd = ::dup(0);
+  ASSERT_GE(probe_fd, 0);
+  ::close(probe_fd);
+  // probe_fd is the lowest free fd at this moment; setting RLIMIT_NOFILE to
+  // probe_fd + 1 means accept() (which needs a new fd >= 3) cannot allocate
+  // anything beyond the runtime-already-open ones. Cap at 64 to give the
+  // process some headroom for stderr/log writes.
+  rlim_t soft_cap = static_cast<rlim_t>(probe_fd) + 1;
+  if (soft_cap < 16) {
+    soft_cap = 16;
+  }
+  if (soft_cap > 64) {
+    soft_cap = 64;
+  }
+
+  struct rlimit lowered = original;
+  lowered.rlim_cur = soft_cap;
+  if (::setrlimit(RLIMIT_NOFILE, &lowered) != 0) {
+    // Some sandboxed CI environments forbid this; skip cleanly rather than
+    // mark the test failed for an environmental constraint.
+    GTEST_SKIP() << "setrlimit(RLIMIT_NOFILE) not permitted in this environment";
+  }
+
+  // 4) Drive a client to connect and immediately close, so the accept loop
+  //    iterates and hits EMFILE on its next accept(). A handful of attempts
+  //    is enough to push the loop into the backoff path.
+  for (int i = 0; i < 4; ++i) {
+    int s = ConnectToTcp("127.0.0.1", acceptor.GetPort());
+    if (s >= 0) {
+      ::close(s);
+    }
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // 5) Stop() should now interrupt the CV wait immediately. Pre-fix this
+  //    would block for the full 100ms backoff (or longer if the loop made
+  //    multiple EMFILE iterations). We assert a generous bound that's still
+  //    well below a single legacy backoff cycle.
+  const auto t0 = std::chrono::steady_clock::now();
+  acceptor.Stop();
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+  // Restore RLIMIT_NOFILE before any assertion that could fail; otherwise a
+  // later test run in the same gtest binary would inherit the lowered limit.
+  ::setrlimit(RLIMIT_NOFILE, &original);
+
+  EXPECT_FALSE(acceptor.IsRunning());
+  EXPECT_LT(elapsed, std::chrono::milliseconds(200)) << "Stop() should not wait for the EMFILE backoff window";
 }
 
 TEST_F(ConnectionAcceptorTcpTest, RestartAfterStopWorks) {

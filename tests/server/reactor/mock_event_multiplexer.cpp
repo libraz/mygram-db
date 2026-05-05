@@ -75,17 +75,22 @@ Expected<void, Error> MockEventMultiplexer::Poll(int timeout_ms, std::vector<Rea
 
   std::unique_lock<std::mutex> lock(mu_);
 
-  auto has_events_or_done = [this]() { return !injected_.empty() || shutdown_; };
+  auto has_events_or_done = [this]() { return !injected_.empty() || shutdown_ || wake_pending_; };
 
   if (timeout_ms == 0) {
     // Non-blocking: drain whatever is already queued, then return.
   } else if (timeout_ms < 0) {
-    // Infinite wait: block until events arrive or Shutdown() is called.
+    // Infinite wait: block until events arrive, Shutdown(), or Wake().
     poll_cv_.wait(lock, has_events_or_done);
   } else {
     // Timed wait.
     poll_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), has_events_or_done);
   }
+
+  // Consume the wake flag so subsequent blocking Polls revert to normal
+  // cv-wait behaviour. Mirrors the real backends, which drain their wake
+  // primitive (eventfd / EVFILT_USER) inside Poll().
+  wake_pending_ = false;
 
   // Drain the injected queue into the output buffer.
   while (!injected_.empty()) {
@@ -97,6 +102,15 @@ Expected<void, Error> MockEventMultiplexer::Poll(int timeout_ms, std::vector<Rea
   // Wake any WaitForPollCalled() callers.
   poll_cv_.notify_all();
 
+  return {};
+}
+
+Expected<void, Error> MockEventMultiplexer::Wake() {
+  {
+    std::unique_lock<std::mutex> lock(mu_);
+    wake_pending_ = true;
+  }
+  poll_cv_.notify_all();
   return {};
 }
 

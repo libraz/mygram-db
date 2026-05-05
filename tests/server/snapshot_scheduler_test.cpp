@@ -22,6 +22,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
+#include "server/replication_pause_counter.h"
 #include "server/server_types.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
@@ -552,6 +553,112 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotSkipsReplicationControlWhenStopped) {
   EXPECT_EQ(stub.StartCount(), 0) << "Must not start replication that wasn't running";
   EXPECT_FALSE(replication_paused_for_dump_.load())
       << "replication_paused_for_dump must remain false when replication wasn't running";
+}
+
+/**
+ * @brief H-C3 regression: when another operation is already holding the
+ *        replication-pause counter, the auto-snapshot must NOT call
+ *        binlog Start() at the end of its work. The other operation's
+ *        ReleasePause() is responsible for the eventual restart.
+ *
+ * Pre-fix behaviour: the auto-snapshot independently called Stop() at
+ * the start and Start() at the end. If a manual DUMP LOAD was holding
+ * the pause, the snapshot's Start() at the end would erroneously
+ * resume replication while DUMP LOAD was still iterating data —
+ * leading to inconsistent dumps and Index/DocumentStore races.
+ *
+ * Post-fix behaviour: the snapshot increments the shared counter at
+ * the start; only the FIRST pauser actually calls Stop(). At the end
+ * the snapshot decrements the counter; only the LAST releaser calls
+ * Start(). When another operation pre-incremented the counter, the
+ * snapshot's RequestPause returns false (so it must NOT call Stop)
+ * and its ReleasePause returns false (so it must NOT call Start).
+ */
+TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHoldsPause) {
+  // Simulate "DUMP LOAD already paused replication" by pre-incrementing
+  // the shared counter and stopping the stub reader.
+  replication_pause::ResetForTesting();
+  ASSERT_TRUE(replication_pause::RequestPause()) << "Test pre-condition: counter should start at 0";
+
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(false);  // The "other operation" already stopped it.
+  // The "other operation" also asserted the observable flag; mirror that
+  // so the snapshot observes a realistic "already paused" state.
+  replication_paused_for_dump_ = true;
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  scheduler.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+  scheduler.Stop();
+
+  // The snapshot was NOT the first pauser (counter was already at 1 from
+  // our pre-pause), so it must not have called Stop() — the reader was
+  // already stopped. It also must NOT have called Start() at the end,
+  // because we are still holding the pause.
+  EXPECT_EQ(stub.StopCount(), 0) << "Snapshot must not Stop() a reader the prior pauser already stopped";
+  EXPECT_EQ(stub.StartCount(), 0) << "Snapshot must not Start() while another operation still holds the pause";
+
+  // The observable flag must still be asserted because we (the
+  // simulated prior operation) are still holding the pause.
+  EXPECT_TRUE(replication_paused_for_dump_.load())
+      << "replication_paused_for_dump must remain asserted while any operation holds the pause";
+
+  // Now release our pre-held pause; counter returns to 0.
+  EXPECT_TRUE(replication_pause::ReleasePause()) << "Test should be the last releaser after the snapshot ran";
+  EXPECT_FALSE(replication_pause::IsPaused());
+
+  // Cleanup so other tests in this binary start with a clean counter.
+  replication_pause::ResetForTesting();
+  replication_paused_for_dump_ = false;
+}
+
+/**
+ * @brief H-C3 regression: independent verification that the snapshot
+ *        leaves the counter clean even when its own pause/release was a
+ *        no-op (pre-paused scenario from the previous test).
+ *
+ * After AutoSnapshotDoesNotRestartWhenAnotherOperationHoldsPause runs,
+ * a fresh snapshot cycle on a clean counter must still pause/resume
+ * normally. This guards against the snapshot accidentally leaking a
+ * counter increment when the "another operation" branch is taken.
+ */
+TEST_F(SnapshotSchedulerTest, AutoSnapshotPauseResumeStillWorksOnCleanCounter) {
+  replication_pause::ResetForTesting();
+  ASSERT_FALSE(replication_pause::IsPaused()) << "Pre-condition: counter starts at 0";
+
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(true);
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  scheduler.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+  scheduler.Stop();
+
+  // Standard pause/resume: replication was running, snapshot is the
+  // sole pauser, so Stop()/Start() are both called and the counter
+  // returns to 0.
+  EXPECT_GE(stub.StopCount(), 1);
+  EXPECT_GE(stub.StartCount(), 1);
+  EXPECT_EQ(stub.StopCount(), stub.StartCount())
+      << "Every Stop() must be matched by a Start() when the snapshot is the sole pauser";
+  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must be drained back to 0 after the snapshot finishes";
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+
+  replication_pause::ResetForTesting();
 }
 
 #endif  // USE_MYSQL

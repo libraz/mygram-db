@@ -8,10 +8,12 @@
 #if defined(__linux__)
 
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -98,6 +100,13 @@ EpollMultiplexer::EpollMultiplexer() {
 }
 
 EpollMultiplexer::~EpollMultiplexer() {
+  if (wake_fd_ >= 0) {
+    // Note: epoll_fd_ is closed below; the kernel auto-removes wake_fd_ from
+    // its interest set when the epoll instance is closed. Closing the
+    // eventfd itself releases the userspace handle.
+    ::close(wake_fd_);
+    wake_fd_ = -1;
+  }
   if (epoll_fd_ >= 0) {
     // Best-effort close; we are in a destructor and must not throw.
     ::close(epoll_fd_);
@@ -116,7 +125,52 @@ Expected<void, Error> EpollMultiplexer::Open() {
     const int en = errno;
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("epoll_create1", en)));
   }
+
+  // Create a non-blocking eventfd for self-wake, register it on the epoll
+  // instance, and stash the descriptor for Wake() to write into. EFD_CLOEXEC
+  // mirrors the epoll fd's behaviour; EFD_NONBLOCK makes the Poll() drain
+  // syscall safe to issue even if Wake() was never called (read returns
+  // EAGAIN instead of blocking).
+  const int efd = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (efd < 0) {
+    const int en = errno;
+    ::close(fd);
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("eventfd", en)));
+  }
+
+  struct epoll_event wake_ev {};
+  wake_ev.events = EPOLLIN;
+  wake_ev.data.fd = efd;
+  if (::epoll_ctl(fd, EPOLL_CTL_ADD, efd, &wake_ev) != 0) {
+    const int en = errno;
+    ::close(efd);
+    ::close(fd);
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("epoll_ctl(ADD,wake_fd)", en)));
+  }
+
   epoll_fd_ = fd;
+  wake_fd_ = efd;
+  return {};
+}
+
+Expected<void, Error> EpollMultiplexer::Wake() {
+  if (wake_fd_ < 0) {
+    // Multiplexer torn down; nothing to wake.
+    return {};
+  }
+  // Write a single token. eventfd accumulates the counter, so multiple Wake()
+  // calls collapse into one drain on the next Poll(). Ignore EAGAIN: counter
+  // saturated at UINT64_MAX-1, which still fires EPOLLIN, so the wake intent
+  // is satisfied either way.
+  const uint64_t token = 1;
+  const ssize_t n = ::write(wake_fd_, &token, sizeof(token));
+  if (n < 0) {
+    const int en = errno;
+    if (en == EAGAIN || en == EWOULDBLOCK) {
+      return {};
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorPollFailed, FormatErrno("write(wake_fd)", en)));
+  }
   return {};
 }
 
@@ -175,6 +229,19 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
   out.reserve(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i) {
     const auto& ev = events_[static_cast<std::size_t>(i)];
+
+    // Drain and drop the self-wake eventfd so callers never observe it as a
+    // bogus ready fd. The eventfd is non-blocking and registered with
+    // EPOLLIN only, so this read is safe even on spurious wakeups.
+    if (ev.data.fd == wake_fd_) {
+      uint64_t drained = 0;
+      // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - we deliberately
+      // ignore the byte count; the side-effect of clearing the counter is
+      // what matters.
+      (void)::read(wake_fd_, &drained, sizeof(drained));
+      continue;
+    }
+
     out.push_back(ReadyEvent{ev.data.fd, EpollEventsToReady(ev.events)});
   }
 

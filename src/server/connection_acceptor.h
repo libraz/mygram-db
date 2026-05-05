@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -186,6 +187,14 @@ class ConnectionAcceptor {
   std::set<int> active_fds_;
   std::mutex fds_mutex_;
   std::string unix_socket_path_;  // Non-empty when UDS mode, used for unlink on Stop
+
+  // Mutex + condition variable used to back off after `accept(2)` returns
+  // EMFILE / ENFILE. Sleeping on a plain `std::this_thread::sleep_for` would
+  // make the accept loop unresponsive to `Stop()` for the full backoff
+  // window; using a CV guarded by `should_stop_` lets `Stop()` wake the
+  // sleeper immediately. Held only while computing the wait predicate.
+  std::mutex stop_mutex_;
+  std::condition_variable stop_cv_;
 };
 
 }  // namespace mygramdb::server

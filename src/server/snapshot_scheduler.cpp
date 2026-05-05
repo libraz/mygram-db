@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "mysql/binlog_reader_interface.h"
+#include "server/replication_pause_counter.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
@@ -183,27 +184,63 @@ void SnapshotScheduler::TakeSnapshot() {
     // is iterating, producing inconsistent output and racing with concurrent
     // Index::Add() calls. This mirrors the behavior of manual DUMP SAVE in
     // DumpHandler::DumpSaveWorker.
+    //
+    // H-C3: Coordinate Stop()/Start() with concurrent dump operations via the
+    // process-wide replication_pause counter. We capture replication_was_running
+    // at the moment we decide to pause; the counter then dedupes the actual
+    // Stop()/Start() so that if a manual DUMP LOAD is also pausing replication
+    // simultaneously, exactly one of us calls Stop() and exactly one of us
+    // (the last releaser) calls Start(). The replication_paused_for_dump_ flag
+    // remains the read-only "is paused" indicator used by REPLICATION STATUS /
+    // DUMP STATUS responses; we set it on first pause and clear it on last
+    // release so the indicator tracks the counter.
     bool replication_was_running = (binlog_reader_ != nullptr) && binlog_reader_->IsRunning();
+    bool first_pauser = false;
     if (replication_was_running) {
-      binlog_reader_->Stop();
-      replication_paused_for_dump_.store(true, std::memory_order_release);
+      first_pauser = replication_pause::RequestPause();
+      if (first_pauser) {
+        // We are the first pauser: actually stop the reader and assert the
+        // observable flag. Subsequent pausers piggy-back on this Stop().
+        binlog_reader_->Stop();
+        replication_paused_for_dump_.store(true, std::memory_order_release);
+      }
       mygram::utils::StructuredLog()
           .Event("replication_paused_for_dump")
           .Field("operation", "snapshot")
           .Field("filepath", dump_path.string())
           .Field("auto_resume", "true")
+          .Field("first_pauser", first_pauser)
           .Info();
     }
 
     // RAII restore: even on exception or early return, replication is resumed
-    // and the paused flag is cleared. The lambda captures the dump_path string
-    // by value defensively; structured-log fields are formatted inside.
+    // (when we are the last releaser) and the paused flag is cleared. The
+    // lambda captures the dump_path string by value defensively; structured-
+    // log fields are formatted inside.
     const std::string dump_path_str = dump_path.string();
     auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str]() {
-      if (!replication_was_running || binlog_reader_ == nullptr) {
+      if (!replication_was_running) {
+        // We did not enter the pause counter (replication was already stopped
+        // when we started), so we have nothing to release.
+        return;
+      }
+      bool last_releaser = replication_pause::ReleasePause();
+      if (!last_releaser) {
+        // Another operation is still holding the pause. Do not Start().
+        // The flag stays asserted (set by the first pauser) until that
+        // operation releases.
+        mygram::utils::StructuredLog()
+            .Event("replication_pause_released")
+            .Field("operation", "snapshot")
+            .Field("filepath", dump_path_str)
+            .Field("last_releaser", false)
+            .Info();
         return;
       }
       replication_paused_for_dump_.store(false, std::memory_order_release);
+      if (binlog_reader_ == nullptr) {
+        return;
+      }
       auto start_result = binlog_reader_->Start();
       if (start_result) {
         mygram::utils::StructuredLog()

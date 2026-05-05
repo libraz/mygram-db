@@ -98,6 +98,15 @@ class KqueueMultiplexer final : public EventMultiplexer {
   /// Backend identifier for metrics and logging.
   const char* Name() const override { return "kqueue"; }
 
+  /**
+   * @brief Trigger a self-wake event so a blocked `Poll()` returns now.
+   *
+   * Implemented by sending an `EVFILT_USER` trigger on a sentinel ident
+   * registered during `Open()`. `Poll()` filters the resulting event out of
+   * its output vector so callers never observe it as a ready fd.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
+
  private:
   /**
    * @brief Diff `old_interest` against `new_interest` and apply the delta.
@@ -134,6 +143,12 @@ class KqueueMultiplexer final : public EventMultiplexer {
                                                                     bool is_add);
 
   int kqueue_fd_ = -1;
+
+  /// Sentinel `ident` for the self-wake `EVFILT_USER` filter. Chosen as a
+  /// large constant that cannot collide with a real fd. Registered once
+  /// during `Open()` and triggered from `Wake()` to interrupt a blocked
+  /// `Poll()`.
+  static constexpr uintptr_t kWakeIdent = 0xFFFFFFFE;
 
   /// Reusable output buffer for `kevent()`. Sized at construction and
   /// doubled on demand (up to a fixed cap) whenever a Poll() fills it

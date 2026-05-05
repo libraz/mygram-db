@@ -122,6 +122,28 @@ void IoReactor::Stop() {
     return;
   }
 
+  // Kick the event-loop thread out of any in-progress Poll() so Stop()
+  // doesn't have to wait up to `poll_timeout_ms` (default 100ms, but
+  // operators can configure it as high as several seconds) for the loop to
+  // observe `running_=false`. The Wake() failure path is logged but not
+  // fatal: the worst case is the prior behaviour of waiting for the timeout
+  // to elapse. Wake() takes the shared mux_lifecycle_ lock to read mux_;
+  // since we hold start_stop_mutex_ but not mux_lifecycle_, lock ordering
+  // (start_stop_mutex_ -> mux_lifecycle_) is preserved.
+  {
+    std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    if (mux_) {
+      auto wake_result = mux_->Wake();
+      if (!wake_result) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_stop_wake_failed")
+            .FieldError(wake_result.error())
+            .Field("note", "falling back to poll-timeout-bounded shutdown")
+            .Warn();
+      }
+    }
+  }
+
   if (event_loop_thread_.joinable()) {
     event_loop_thread_.join();
   }
@@ -225,8 +247,22 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
     if (!inserted) {
       // Lost the race against a concurrent Register with the same fd. Pull
       // our entry back out of the multiplexer to avoid leaking interest.
+      // Rollback failure is not itself fatal — the duplicate-fd error is
+      // still returned to the caller — but a kernel-level inconsistency
+      // (interest record leaked, the fd is closed but the multiplexer
+      // still has it armed) must be visible to operators so they can
+      // correlate it with later kqueue/epoll syscall failures. Logging at
+      // Error matches the severity of the kernel-state divergence.
       conn_lock.unlock();
-      (void)mux_->Remove(fd);
+      auto remove_result = mux_->Remove(fd);
+      if (!remove_result) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_register_rollback_remove_failed")
+            .Field("fd", static_cast<int64_t>(fd))
+            .FieldError(remove_result.error())
+            .Field("note", "duplicate-fd rollback could not unregister mux interest; kernel poll set may be stale")
+            .Error();
+      }
       return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd (race)"));
     }
   }
