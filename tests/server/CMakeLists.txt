@@ -203,6 +203,26 @@ gtest_discover_tests(http_server_search_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+# Cross-protocol consistency: same pipeline used by HTTP and TCP
+add_executable(http_tcp_consistency_test
+  http_tcp_consistency_test.cpp
+)
+
+target_link_libraries(http_tcp_consistency_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_tcp_consistency_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_tcp_consistency_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 add_executable(http_server_document_test
   http_server_document_test.cpp
 )

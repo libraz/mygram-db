@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <set>
 #include <string>
@@ -286,15 +287,27 @@ struct FullPipelineParams {
   bool skip_cache_lookup = false;         ///< Skip cache lookup (caller already checked)
 };
 
+/// @brief Which search path was selected during ExecuteFullPipeline
+enum class PipelinePath : std::uint8_t {
+  CACHE_HIT,  ///< Result came from cache; no search executed
+  FUZZY,      ///< Fuzzy search path (query.fuzzy_max_distance was set)
+  SYNONYM,    ///< Synonym-aware path (synonym dictionary was provided)
+  REGULAR,    ///< Standard n-gram intersection path
+};
+
 /// @brief Output from full pipeline execution
 struct FullPipelineOutput {
-  std::vector<storage::DocId> results;        ///< Full result set (before pagination)
-  std::vector<std::string> all_search_terms;  ///< All search terms (main + AND)
-  std::vector<SearchTermInfo> term_infos;     ///< Term information with n-grams
-  double query_time_ms = 0.0;                 ///< Query execution time in milliseconds
-  bool cache_hit = false;                     ///< True if results came from cache
-  bool success = true;                        ///< False if an error occurred
-  std::string error_message;                  ///< Error message (when success is false)
+  std::vector<storage::DocId> results;              ///< Full result set (before pagination)
+  std::vector<std::string> all_search_terms;        ///< All search terms (main + AND)
+  std::vector<SearchTermInfo> term_infos;           ///< Term information with n-grams
+  double query_time_ms = 0.0;                       ///< Query execution time in milliseconds
+  bool cache_hit = false;                           ///< True if results came from cache
+  double cache_age_ms = 0.0;                        ///< Age of the cache entry (only when cache_hit)
+  double cache_saved_ms = 0.0;                      ///< Time saved by the cache hit (only when cache_hit)
+  bool empty_term_detected = false;                 ///< True if a search term had zero matches (early exit)
+  PipelinePath path_taken = PipelinePath::REGULAR;  ///< Which search path was selected
+  bool success = true;                              ///< False if an error occurred
+  std::string error_message;                        ///< Error message (when success is false)
 };
 
 /// @brief Execute the full search pipeline: cache lookup, synonym/fuzzy expansion, search, cache insert

@@ -902,13 +902,18 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   }
 
   // Try cache lookup first (skip if caller already checked)
+  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
   if (params.skip_cache_lookup) {
     // Caller already performed cache lookup; skip to avoid redundant hash
     // computation and lock acquisition on every cache miss.
   } else if (auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store)) {
+    auto cache_lookup_end = std::chrono::high_resolution_clock::now();
     output.results = std::move(cache_result->results);
     output.cache_hit = true;
-    output.query_time_ms = 0.0;
+    output.cache_age_ms = cache_result->cache_age_ms;
+    output.cache_saved_ms = cache_result->cache_saved_ms;
+    output.path_taken = PipelinePath::CACHE_HIT;
+    output.query_time_ms = std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
 
     // Collect search terms for downstream use (highlighting, etc.)
     if (!query.search_text.empty()) {
@@ -931,6 +936,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
 
   // Fuzzy search path (takes precedence over synonyms)
   if (query.fuzzy_max_distance.has_value()) {
+    output.path_taken = PipelinePath::FUZZY;
     output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
                                           params.kanji_ngram_size, cross_boundary);
 
@@ -939,6 +945,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
                          params.current_index, params.current_doc_store, params.full_config, params.ngram_size,
                          params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+    output.empty_term_detected = pipeline_result.empty_term_detected;
     if (pipeline_result.empty_term_detected) {
       output.results.clear();
     } else {
@@ -948,13 +955,19 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     auto end_time = std::chrono::high_resolution_clock::now();
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
-                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    // Do not cache early-exit (empty posting list) results: a missing posting
+    // list during one query may not be missing for the next, and a cached
+    // empty entry would mask future legitimate results until invalidated.
+    if (!output.empty_term_detected) {
+      InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    }
     return output;
   }
 
   // Synonym-aware search path
   if (params.synonym_dict != nullptr) {
+    output.path_taken = PipelinePath::SYNONYM;
     auto synonym_groups = ExpandTermsWithSynonyms(output.all_search_terms, params.synonym_dict, params.current_index,
                                                   params.ngram_size, params.kanji_ngram_size, cross_boundary);
 
@@ -962,6 +975,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
         ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store, params.full_config,
                             params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+    output.empty_term_detected = pipeline_result.empty_term_detected;
     if (pipeline_result.empty_term_detected) {
       output.results.clear();
     } else {
@@ -971,19 +985,23 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     auto end_time = std::chrono::high_resolution_clock::now();
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-    // Collect all n-grams for cache invalidation
-    std::vector<SearchTermInfo> all_term_infos;
-    for (const auto& group : synonym_groups) {
-      for (const auto& variant : group.variants) {
-        all_term_infos.push_back(variant);
+    // Skip caching for early-exit (empty posting list) -- see fuzzy path comment.
+    if (!output.empty_term_detected) {
+      // Collect all n-grams for cache invalidation
+      std::vector<SearchTermInfo> all_term_infos;
+      for (const auto& group : synonym_groups) {
+        for (const auto& variant : group.variants) {
+          all_term_infos.push_back(variant);
+        }
       }
+      InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms,
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary);
     }
-    InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms, params.ngram_size,
-                  params.kanji_ngram_size, cross_boundary);
     return output;
   }
 
   // Standard search path: generate n-grams for each term and estimate result sizes
+  output.path_taken = PipelinePath::REGULAR;
   output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
                                         params.kanji_ngram_size, cross_boundary);
 
@@ -997,6 +1015,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
       Execute(query, output.term_infos, output.all_search_terms, params.current_index, params.current_doc_store,
               params.full_config, params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+  output.empty_term_detected = pipeline_result.empty_term_detected;
   if (pipeline_result.empty_term_detected) {
     output.results.clear();
   } else {
@@ -1007,9 +1026,12 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   auto end_time = std::chrono::high_resolution_clock::now();
   output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-  // Store in cache if enabled
-  InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms, params.ngram_size,
-                params.kanji_ngram_size, cross_boundary);
+  // Store in cache if enabled. Skip on early-exit (empty posting list); see
+  // the fuzzy path for the rationale.
+  if (!output.empty_term_detected) {
+    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+  }
 
   return output;
 }

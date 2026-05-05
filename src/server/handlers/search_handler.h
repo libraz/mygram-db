@@ -88,12 +88,61 @@ class SearchHandler : public CommandHandler {
 
   /**
    * @brief Execute the shared search pipeline (term generation through verify_text filter)
+   *
+   * Delegates to search_pipeline::ExecuteFullPipeline so the TCP and HTTP code
+   * paths share the same orchestration. This wrapper only adds debug-info
+   * bookkeeping that the TCP debug protocol exposes; the underlying search
+   * execution (cache lookup, fuzzy/synonym/standard paths, NOT/filter/verify
+   * application, cache insertion) lives entirely in search_pipeline.
+   *
    * @param query Parsed query
    * @param conn_ctx Connection context (for debug mode)
    * @param[out] output Pipeline output
    * @return Empty string on success, or error response string on failure
    */
   std::string ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx, PipelineOutput& output);
+
+  /**
+   * @brief Build FullPipelineParams from the connection's table context.
+   *
+   * Pure projection from PipelineOutput's table-context fields plus the
+   * shared HandlerContext members onto the params struct consumed by
+   * search_pipeline::ExecuteFullPipeline.
+   */
+  search_pipeline::FullPipelineParams BuildPipelineParams(const query::Query& query,
+                                                          const PipelineOutput& output) const;
+
+  /**
+   * @brief Populate debug_info entries that describe the search inputs.
+   *
+   * Records `search_terms`, `ngrams_used`, and `posting_list_sizes` for the
+   * fuzzy/synonym/regular paths. Synonym variant ngrams are recovered by a
+   * second call to ExpandTermsWithSynonyms because FullPipelineOutput does
+   * not expose them; this only happens in debug mode and so does not affect
+   * non-debug latency.
+   */
+  static void PopulateInputDebugInfo(search_pipeline::PipelinePath path_taken,
+                                     const search_pipeline::FullPipelineParams& params, PipelineOutput& output);
+
+  /**
+   * @brief Populate debug_info for the cache-hit path.
+   */
+  static void PopulateCacheHitDebugInfo(const search_pipeline::FullPipelineOutput& pipeline_output,
+                                        PipelineOutput& output);
+
+  /**
+   * @brief Populate debug_info for empty-term early exit (per path).
+   */
+  static void PopulateEmptyTermDebugInfo(search_pipeline::PipelinePath path_taken,
+                                         const search_pipeline::FullPipelineOutput& pipeline_output,
+                                         PipelineOutput& output);
+
+  /**
+   * @brief Populate debug_info for a successful cache-miss path (per path).
+   */
+  void PopulatePostPipelineDebugInfo(const query::Query& query,
+                                     const search_pipeline::FullPipelineOutput& pipeline_output,
+                                     PipelineOutput& output) const;
 };
 
 }  // namespace mygramdb::server
