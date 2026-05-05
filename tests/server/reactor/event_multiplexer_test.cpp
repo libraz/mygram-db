@@ -486,6 +486,175 @@ TEST(MockEventMultiplexerTest, InjectErrorDeliversKErrorBit) {
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 
+// CR-4 (audit, May 2026): kevent(2) does not report partial application of a
+// change list. The previous implementation packed up to two change records
+// (EVFILT_READ + EVFILT_WRITE) into a single kevent() call, which meant that
+// if the kernel applied the first record and then rejected the second, the
+// in-process `interest_` map would diverge from the kernel filter set: the
+// caller saw a failed Add/Modify and did not record the partial state, so a
+// subsequent Remove() emitted no EV_DELETE for the leaked filter.
+//
+// The fix is to issue one kevent() syscall per change record and update the
+// `applied_interest` running mask after each successful syscall. The tests
+// below exercise the resulting code paths.
+
+// Verify that toggling both filters via Modify never leaves a stale EVFILT_*
+// behind. This is the basic correctness invariant the per-record loop is
+// supposed to preserve. Each iteration flips both bits at once, which is
+// exactly the multi-record case CR-4 was concerned about.
+TEST(KqueueMultiplexerTest, ApplyInterestBothFiltersFlipCleanly) {
+  KqueueMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  const int r = fds[0];
+  const int w = fds[1];
+
+  // Start with both filters armed; this exercises a 2-record Add path.
+  ASSERT_TRUE(mux.Add(r, event::kReadable | event::kWritable).has_value());
+
+  // Now flip the entire interest off via Modify(kNone). This is a 2-record
+  // Modify path (EV_DELETE on EVFILT_READ + EV_DELETE on EVFILT_WRITE).
+  ASSERT_TRUE(mux.Modify(r, event::kNone).has_value());
+
+  // Poll: with no interest armed, the only thing the kernel may still
+  // surface is a hangup if the peer closed (it didn't), so out should be
+  // empty. If the previous Modify had only succeeded for one filter and the
+  // map were out of sync, a stale EVFILT_WRITE would re-fire here.
+  std::vector<ReadyEvent> out;
+  ASSERT_TRUE(mux.Poll(50, out).has_value());
+  EXPECT_TRUE(out.empty()) << "stale filter survived Modify(kNone) — applied_interest tracking broken";
+
+  // And re-arm both: the map must have correctly recorded that no filters
+  // are armed, so this should succeed cleanly without "duplicate fd" errors
+  // from the kernel.
+  ASSERT_TRUE(mux.Modify(r, event::kReadable | event::kWritable).has_value());
+
+  // Final teardown.
+  ASSERT_TRUE(mux.Remove(r).has_value());
+  ::close(r);
+  ::close(w);
+}
+
+// White-box test: after Add() on a closed fd fails, Remove() must remain a
+// strict no-op. The previous batched implementation could plausibly leave a
+// half-applied filter behind on certain kernels (a filter would survive in
+// the kqueue even though Add returned an error). With the per-record loop,
+// the failure is observed before any second filter is installed, and the
+// `applied_interest` running mask captures exactly which filters made it.
+TEST(KqueueMultiplexerTest, AddOnClosedFdFailsCleanlyAndRemoveIsNoop) {
+  KqueueMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  const int closed_fd = fds[0];
+  ::close(fds[1]);
+  ::close(closed_fd);
+
+  // Closed fd: every kevent(EV_ADD) call against it returns EBADF. With the
+  // per-record loop, the first kevent fails, applied stays 0, and the
+  // function returns an error without touching `interest_`.
+  auto add = mux.Add(closed_fd, event::kReadable | event::kWritable);
+  EXPECT_FALSE(add.has_value());
+  if (!add.has_value()) {
+    EXPECT_EQ(add.error().code(), mygram::utils::ErrorCode::kNetworkReactorRegisterFailed);
+  }
+
+  // Remove() must be a strict no-op: nothing in `interest_`, nothing to
+  // clean up. (If a future implementation regression let a stale interest_
+  // entry leak in, Remove would attempt EV_DELETE on a closed fd and either
+  // swallow EBADF — fine — or surface a different errno — bad.)
+  EXPECT_TRUE(mux.Remove(closed_fd).has_value());
+}
+
+// Partial failure of Modify: register a fd successfully with kReadable, then
+// close it from underneath the multiplexer. A subsequent Modify that wants
+// to ADD kWritable will see EBADF and fail. The fix guarantees that the
+// `interest_` map after the failure reflects exactly what's still armed in
+// the kernel — which, since the syscall failed, is the original kReadable.
+//
+// The previous batched implementation, on a partial failure, left
+// `interest_` untouched (taking the conservative "we don't know what
+// happened" path). With per-record syscalls we know exactly what got
+// through, so the post-failure state is deterministic.
+TEST(KqueueMultiplexerTest, ModifyPartialFailurePreservesArmedFilters) {
+  KqueueMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  const int r = fds[0];
+  const int w = fds[1];
+
+  // Arm kReadable cleanly first. After this call the kqueue contains an
+  // EVFILT_READ for `r` and `interest_[r] == kReadable`.
+  ASSERT_TRUE(mux.Add(r, event::kReadable).has_value());
+
+  // Close the fd from under the multiplexer. The kernel automatically drops
+  // any associated kevent filters when an fd is fully closed (kqueue manual,
+  // "Closing of file descriptors"), so EVFILT_READ for `r` is now gone too,
+  // but the multiplexer's `interest_` map still says kReadable.
+  ::close(r);
+  ::close(w);
+
+  // Now ask the multiplexer to add kWritable on top. The diff is "no change
+  // for kReadable, EV_ADD EVFILT_WRITE". The single kevent() in the per-
+  // record loop targets the closed fd and fails with EBADF.
+  auto mod = mux.Modify(r, event::kReadable | event::kWritable);
+  EXPECT_FALSE(mod.has_value());
+  if (!mod.has_value()) {
+    EXPECT_EQ(mod.error().code(), mygram::utils::ErrorCode::kNetworkReactorModifyFailed);
+  }
+
+  // Best-observable post-condition: a follow-up Remove() must succeed. With
+  // the previous batched code, any in-flight diff was untouched in
+  // `interest_`, so Remove() would re-emit a now-stale EV_DELETE list. The
+  // kqueue swallows EBADF on EV_DELETE (idempotent teardown), so this
+  // doesn't blow up either way — but with the fix, Remove() emits only the
+  // EV_DELETE entries that were actually in the kernel right before the
+  // close, which is the cleaner contract.
+  EXPECT_TRUE(mux.Remove(r).has_value());
+}
+
+// Defensive coverage: if Modify partially fails midway through a 2-record
+// diff (kReadable→kWritable for example, where we EV_DELETE the read and
+// then EV_ADD the write), the map should record the half that succeeded.
+// We can observe this only indirectly by following up with Remove() and
+// verifying the multiplexer does not return an error pointing at a
+// non-existent filter — i.e. it correctly ignores filters that were never
+// armed.
+TEST(KqueueMultiplexerTest, RemoveAfterPartialModifyTolerated) {
+  KqueueMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  const int r = fds[0];
+  const int w = fds[1];
+
+  // Add kReadable, then Modify to swap to kWritable. This generates a
+  // 2-record diff: EV_DELETE EVFILT_READ + EV_ADD EVFILT_WRITE. Both
+  // syscalls succeed in the happy path, but the per-record loop also
+  // ensures that if the second one had failed, `interest_` would correctly
+  // remember "no filters armed" rather than incorrectly remember "kReadable
+  // still armed".
+  ASSERT_TRUE(mux.Add(r, event::kReadable).has_value());
+  ASSERT_TRUE(mux.Modify(r, event::kWritable).has_value());
+
+  // Remove must emit exactly EV_DELETE EVFILT_WRITE (and nothing for
+  // EVFILT_READ, which was already deleted by the Modify). The kernel
+  // returns ENOENT if you try to delete a non-existent filter, so a stale
+  // EVFILT_READ delete attempt would either be silently swallowed (kqueue
+  // auto-suppresses ENOENT in our Remove() implementation) or surface as
+  // an error. Either way, this sequence must succeed.
+  EXPECT_TRUE(mux.Remove(r).has_value());
+
+  ::close(r);
+  ::close(w);
+}
+
 TEST(KqueueMultiplexerTest, ConcurrentModifyDoesNotRace) {
   KqueueMultiplexer mux;
   ASSERT_TRUE(mux.Open().has_value());

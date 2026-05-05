@@ -2048,4 +2048,214 @@ TEST_F(DumpHandlerTest, DumpVerifyDotDotSlashBlocked) {
   EXPECT_TRUE(response.find("ERROR") == 0) << "Should reject path traversal. Response: " << response;
 }
 
+// ============================================================================
+// CR-2 / H-C1 regression tests
+// ----------------------------------------------------------------------------
+// CR-2: HandleDumpSave / HandleDumpLoad must use compare_exchange_strong on
+//       the in-progress flag, not load() + store(true), to prevent two
+//       concurrent clients from both spawning workers / load passes.
+// H-C1: DumpSaveWorker must release dump_save_in_progress at thread EXIT
+//       (RAII), AFTER any Complete()/Fail() notification, so the slot is
+//       observably free as soon as the worker thread terminates.
+// ============================================================================
+
+/**
+ * @brief CR-2: Two threads racing into HandleDumpSave must not both succeed.
+ *
+ * We hammer HandleDumpSave from N threads simultaneously and assert exactly
+ * ONE thread takes the OK path. All others must see the busy-error response.
+ * Run multiple rounds to make sure the previous round's worker has exited
+ * cleanly (releasing the flag via H-C1) before the next round.
+ */
+TEST_F(DumpHandlerAsyncTest, ConcurrentDumpSaveRaceProducesExactlyOneSuccess) {
+  constexpr int kThreadCount = 16;
+  constexpr int kRounds = 4;
+
+  for (int round = 0; round < kRounds; ++round) {
+    std::atomic<int> success_count{0};
+    std::atomic<int> busy_count{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kThreadCount);
+
+    // Latch: only release threads after they're all spawned, so the race
+    // window is as wide as possible.
+    std::atomic<bool> go{false};
+
+    const std::string round_filepath = "race_" + std::to_string(round) + "_" + test_filepath_;
+
+    for (int i = 0; i < kThreadCount; ++i) {
+      threads.emplace_back([this, round_filepath, &success_count, &busy_count, &go]() {
+        while (!go.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        query::Query q;
+        q.type = query::QueryType::DUMP_SAVE;
+        q.filepath = round_filepath;
+        std::string resp = handler_->Handle(q, conn_ctx_);
+        if (resp.find("OK DUMP_STARTED") == 0) {
+          success_count.fetch_add(1, std::memory_order_relaxed);
+        } else if (resp.find("ERROR") == 0 && resp.find("another DUMP SAVE is in progress") != std::string::npos) {
+          busy_count.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          ADD_FAILURE() << "Unexpected response from racing DUMP SAVE: " << resp;
+        }
+      });
+    }
+
+    go.store(true, std::memory_order_release);
+    for (auto& t : threads) {
+      t.join();
+    }
+
+    EXPECT_EQ(success_count.load(), 1) << "Exactly one thread should win the DUMP SAVE race in round " << round;
+    EXPECT_EQ(busy_count.load(), kThreadCount - 1) << "All other threads should see busy in round " << round;
+
+    // Wait for the winning worker thread to fully terminate before the next
+    // round so H-C1's flag release is observable.
+    dump_progress_->JoinWorker();
+  }
+}
+
+/**
+ * @brief H-C1: Worker thread exit makes the slot immediately reusable.
+ *
+ * After the worker finishes (Complete()/Fail() returned and thread joined),
+ * a fresh DUMP SAVE from a different client must succeed on the next
+ * compare_exchange. This catches the regression where dump_save_in_progress
+ * was reset BEFORE Complete() (or via a non-RAII path that left a window).
+ */
+TEST_F(DumpHandlerAsyncTest, DumpSaveSlotImmediatelyReusableAfterWorkerExits) {
+  // First DUMP SAVE
+  query::Query q1;
+  q1.type = query::QueryType::DUMP_SAVE;
+  q1.filepath = "first_" + test_filepath_;
+  std::string resp1 = handler_->Handle(q1, conn_ctx_);
+  EXPECT_TRUE(resp1.find("OK DUMP_STARTED") == 0) << "Response: " << resp1;
+
+  // Wait for the worker to finish — H-C1 promises that once JoinWorker
+  // returns, the flag is observable as false.
+  dump_progress_->JoinWorker();
+  EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire)) << "After worker exit, flag must be released";
+
+  // Second DUMP SAVE on the same handler. Without H-C1, this could see the
+  // flag still set if Complete() raced with the flag store.
+  query::Query q2;
+  q2.type = query::QueryType::DUMP_SAVE;
+  q2.filepath = "second_" + test_filepath_;
+  std::string resp2 = handler_->Handle(q2, conn_ctx_);
+  EXPECT_TRUE(resp2.find("OK DUMP_STARTED") == 0)
+      << "Second DUMP SAVE should succeed immediately after first worker exits. Response: " << resp2;
+
+  dump_progress_->JoinWorker();
+}
+
+/**
+ * @brief CR-2: HandleDumpLoad must also use compare_exchange.
+ *
+ * Two threads racing on DUMP LOAD: exactly one should reach the load path,
+ * the other must get the busy error. We use a non-existent file so the
+ * "winner" fails ReadDump (which clears the flag via the RAII guard) — the
+ * point is to verify the test-and-set itself, not the load outcome.
+ */
+TEST_F(DumpHandlerTest, ConcurrentDumpLoadRaceProducesExactlyOneAttempt) {
+  constexpr int kThreadCount = 8;
+
+  std::atomic<int> attempt_count{0};
+  std::atomic<int> busy_count{0};
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+
+  // Use a non-existent file path inside dump_dir. ResolveSafePath will
+  // accept the syntactically valid relative path; ReadDump will then fail
+  // with file-not-found. That's fine — we're testing the busy-vs-attempt
+  // outcome, not the load itself.
+  const std::string nonexistent = "no_such_file.dmp";
+
+  for (int i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([this, nonexistent, &attempt_count, &busy_count, &go]() {
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      query::Query q;
+      q.type = query::QueryType::DUMP_LOAD;
+      q.filepath = nonexistent;
+      std::string resp = handler_->Handle(q, conn_ctx_);
+      if (resp.find("another DUMP LOAD is in progress") != std::string::npos) {
+        busy_count.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        // Either the actual load failure (file not found) or any other
+        // non-busy error counts as "this thread reached the load path".
+        attempt_count.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+
+  go.store(true, std::memory_order_release);
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // All threads must have run. The critical invariant for CR-2 is that the
+  // attempt count never exceeds 1 + (sequential retries). Since we don't
+  // hold the flag artificially, after each attempter clears it the next
+  // attempter may take the slot. So at minimum 1 attempt path; busy_count
+  // is everything else; total is kThreadCount.
+  EXPECT_EQ(attempt_count.load() + busy_count.load(), kThreadCount);
+  EXPECT_GE(attempt_count.load(), 1) << "At least one thread should reach the load path";
+
+  // After all threads exit, the flag must be observable as false (the
+  // AtomicFlagResetGuard installed in HandleDumpLoad releases on every
+  // failure path).
+  EXPECT_FALSE(dump_load_in_progress_.load(std::memory_order_acquire));
+}
+
+#ifdef USE_MYSQL
+/**
+ * @brief CR-10: DumpSaveWorker must skip binlog Start() when shutdown is
+ *               in progress.
+ *
+ * Set the shutdown flag before invoking the handler. Because IsRunning()
+ * returns true at entry, the worker captures replication_was_running=true,
+ * stops replication, writes the dump, and then SHOULD see shutdown_flag
+ * and skip the auto-restart. Verify that no Start() call appears in the
+ * mock's call log after the Stop().
+ */
+TEST_F(DumpHandlerTest, DumpSaveSkipsBinlogStartWhenShutdownInProgress) {
+  // Configure mock binlog reader to look "running" so the worker captures
+  // replication_was_running=true.
+  auto mock_reader = std::make_unique<MockBinlogReaderForDumpTest>();
+  mock_reader->SetRunningForTest(true);
+  mock_reader->SetGtidForTest("uuid:200");
+
+  // The fixture handler_ already references handler_ctx_; mutating the
+  // HandlerContext propagates to handler_ via its stored reference. We do
+  // NOT need to construct a new DumpHandler.
+  handler_ctx_->binlog_reader = mock_reader.get();
+  std::atomic<bool> shutdown_flag{true};
+  handler_ctx_->shutdown_flag = &shutdown_flag;
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  query.filepath = "shutdown_test.dmp";
+  std::string resp = handler_->Handle(query, conn_ctx_);
+  // Sync mode (no dump_progress in this fixture) returns "OK SAVED ..." on
+  // success or an ERROR. Both are acceptable here; the assertion below is
+  // about the Start() suppression, not the dump outcome.
+  EXPECT_TRUE(resp.find("OK SAVED") == 0 || resp.find("ERROR") == 0) << "Response: " << resp;
+
+  const auto& log = mock_reader->GetCallLog();
+  // Find the Stop() — that's the worker's pre-write replication stop.
+  auto stop_it = std::find(log.begin(), log.end(), "Stop");
+  ASSERT_NE(stop_it, log.end()) << "Worker must call Stop() before writing dump";
+
+  // After Stop(), there must be NO Start() call (CR-10).
+  auto start_after_stop = std::find(stop_it, log.end(), "Start");
+  EXPECT_EQ(start_after_stop, log.end()) << "DumpSaveWorker must NOT call binlog Start() when shutdown is in progress";
+
+  handler_ctx_->binlog_reader = nullptr;
+  handler_ctx_->shutdown_flag = nullptr;
+}
+#endif  // USE_MYSQL
+
 }  // namespace mygramdb::server

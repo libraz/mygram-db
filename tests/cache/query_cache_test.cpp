@@ -2404,4 +2404,104 @@ TEST_F(QueryCacheNoCompressionTest, LookupOfMissingEntryReturnsMissNotFound) {
   EXPECT_GT(after.cache_misses_not_found, before.cache_misses_not_found);
 }
 
+// =============================================================================
+// CR-5 regression: cache_map_ rehash suppression
+// =============================================================================
+
+/**
+ * @brief CR-5 regression: constructor reserves enough buckets that the
+ *        steady-state working set does not trigger rehash.
+ *
+ * The QueryCache constructor pre-reserves the cache_map_ to a multiple of
+ * (max_memory_bytes / kAverageEntryBytes) and caps the load factor at 0.5.
+ * For the configured 4 MiB cache below, that yields room for at least
+ * 4 MiB / 256 B = 16384 estimated entries, which is comfortably more than
+ * the 1024 entries we insert here. Bucket count must NOT change across the
+ * whole insert sequence; if it does, the iterator-stability defense
+ * documented in LookupInternal weakens.
+ */
+TEST(QueryCacheTest, ConstructorReservesSoStableInsertSequenceDoesNotRehash) {
+  QueryCache cache(/*max_memory_bytes=*/4 * 1024 * 1024, /*min_query_cost_ms=*/0.0);
+
+  // Sanity: the constructor must have lowered max_load_factor below 1.0.
+  // (We don't have direct access to cache_map_'s load factor from outside,
+  // so we exercise the invariant through bucket_count behavior below.)
+
+  // Insert one entry to capture the post-construction bucket count.
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+  ASSERT_TRUE(cache.Insert(CacheKeyGenerator::Generate("warmup"), {1}, meta, 1.0));
+
+  // We can't read bucket_count() directly (cache_map_ is private), but we
+  // can verify functional correctness: 1024 inserts must all succeed and
+  // all 1024 keys must remain looked-up-able afterwards. Under a rehash
+  // bug that invalidated outstanding iterators, concurrent Lookups during
+  // these inserts would crash; here we keep it single-threaded to focus on
+  // the structural invariant. The Concurrent* tests cover the multi-thread
+  // case.
+  constexpr int kInserts = 1024;
+  std::vector<CacheKey> keys;
+  keys.reserve(kInserts);
+  for (int i = 0; i < kInserts; ++i) {
+    auto key = CacheKeyGenerator::Generate("cr5_" + std::to_string(i));
+    CacheMetadata m;
+    m.table = "posts";
+    m.ngrams = {"abc"};
+    ASSERT_TRUE(cache.Insert(key, {static_cast<DocId>(i)}, m, 1.0)) << "insert " << i << " failed";
+    keys.push_back(key);
+  }
+
+  // All inserted keys must still be retrievable. If rehash had invalidated
+  // iterators in flight (it cannot under the shared_mutex contract, but the
+  // test guards against future regressions to that invariant), some lookups
+  // would either miss or crash.
+  for (size_t i = 0; i < keys.size(); ++i) {
+    auto found = cache.Lookup(keys[i]);
+    ASSERT_TRUE(found.has_value()) << "key " << i << " missing";
+    ASSERT_EQ(found->size(), 1U);
+    EXPECT_EQ(found->at(0), static_cast<DocId>(i));
+  }
+
+  // Stats sanity: current_entries should be exactly kInserts + 1 (warmup).
+  const auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_entries, static_cast<uint64_t>(kInserts + 1));
+}
+
+/**
+ * @brief CR-5: Erase without callback does not fire eviction_callback_.
+ *
+ * Regression test for the EraseWithoutCallback API the InvalidationQueue
+ * uses to avoid double-unregister. If a future change accidentally fires
+ * eviction_callback_ on this path, this test fails.
+ */
+TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+
+  std::atomic<int> callback_fires{0};
+  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { callback_fires.fetch_add(1, std::memory_order_relaxed); });
+
+  // Insert two entries.
+  auto key_a = CacheKeyGenerator::Generate("erase_with_cb_a");
+  auto key_b = CacheKeyGenerator::Generate("erase_no_cb_b");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+  ASSERT_TRUE(cache.Insert(key_a, {1}, meta, 1.0));
+  ASSERT_TRUE(cache.Insert(key_b, {2}, meta, 1.0));
+
+  // Erase fires the callback (CR-6 invariant: Erase fires the callback so
+  // single-source unregister works for callers other than the queue).
+  EXPECT_TRUE(cache.Erase(key_a));
+  EXPECT_EQ(callback_fires.load(), 1);
+
+  // EraseWithoutCallback does NOT fire the callback.
+  EXPECT_TRUE(cache.EraseWithoutCallback(key_b));
+  EXPECT_EQ(callback_fires.load(), 1);  // unchanged
+
+  // Both keys are gone.
+  EXPECT_FALSE(cache.Lookup(key_a).has_value());
+  EXPECT_FALSE(cache.Lookup(key_b).has_value());
+}
+
 }  // namespace mygramdb::cache

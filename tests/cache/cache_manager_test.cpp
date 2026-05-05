@@ -761,4 +761,180 @@ TEST(CacheManagerTest, InsertUsesPrecomputedCacheKey) {
   EXPECT_EQ(lookup.value().size(), 3u);
 }
 
+// =============================================================================
+// CR-7 regression: Disable race
+// =============================================================================
+
+/**
+ * @brief CR-7 regression: a concurrent Insert during Disable() must not leave
+ *        entries in the cache after Disable() returns.
+ *
+ * Before the fix, Disable() ran:
+ *   Stop()  -> Clear()  -> enabled_ = false
+ *
+ * That ordering left a window where Clear() released serialize_mutex_ but
+ * enabled_ was still true; an Insert that arrived between Clear's release
+ * and the enabled_ flip could re-populate the cache. After the fix, the
+ * order is:
+ *
+ *   Stop()  -> enabled_ = false  -> Clear()
+ *
+ * so any Insert observing enabled_ == false short-circuits and can't
+ * resurrect entries.
+ *
+ * This test fires concurrent Inserts during Disable() and asserts the cache
+ * contains zero entries afterwards.
+ */
+TEST(CacheManagerTest, DisableConcurrentInsertNoResidualEntries) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 16 * 1024 * 1024;
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  // Pre-populate the cache so Disable() has work to do.
+  std::vector<query::Query> queries;
+  for (int i = 0; i < 20; ++i) {
+    auto query = CreateQuery("posts", "warm_" + std::to_string(i));
+    std::vector<DocId> result = {static_cast<DocId>(i)};
+    std::vector<std::string> ngrams = {"war", "arm"};
+    ASSERT_TRUE(mgr.Insert(query, result, ngrams, 15.0));
+    queries.push_back(query);
+  }
+
+  std::atomic<bool> stop_inserts{false};
+  std::atomic<int> insert_attempts{0};
+  std::atomic<int> insert_successes{0};
+
+  // Insert thread: continually try to insert NEW queries.
+  std::thread inserter([&]() {
+    int counter = 0;
+    while (!stop_inserts.load(std::memory_order_acquire)) {
+      auto query = CreateQuery("posts", "race_" + std::to_string(counter));
+      std::vector<DocId> result = {static_cast<DocId>(counter)};
+      std::vector<std::string> ngrams = {"rac", "ace"};
+      const bool ok = mgr.Insert(query, result, ngrams, 15.0);
+      insert_attempts.fetch_add(1, std::memory_order_relaxed);
+      if (ok) {
+        insert_successes.fetch_add(1, std::memory_order_relaxed);
+      }
+      ++counter;
+    }
+  });
+
+  // Let the inserter thread get going.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  // Disable while inserts are racing.
+  mgr.Disable();
+  EXPECT_FALSE(mgr.IsEnabled());
+
+  // Stop the inserter and join.
+  stop_inserts.store(true, std::memory_order_release);
+  inserter.join();
+
+  // Sanity: at least some inserts ran (otherwise the test isn't exercising
+  // the race).
+  EXPECT_GT(insert_attempts.load(), 0);
+
+  // CR-7 invariant: after Disable() returns, the cache must be empty.
+  // No prior Insert may persist beyond Disable's Clear, regardless of the
+  // race timing.
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0U) << "Disable() left entries behind after concurrent Insert (CR-7)";
+
+  // Every pre-populated query must miss.
+  for (const auto& q : queries) {
+    EXPECT_FALSE(mgr.Lookup(q).has_value());
+  }
+
+  // Tracked invalidation entries must be zero (no phantom metadata).
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U)
+      << "Disable() left InvalidationManager metadata behind (CR-7 phantom)";
+}
+
+// =============================================================================
+// H-C2 regression: Enable order — Invalidate after Enable goes through queue
+// =============================================================================
+
+/**
+ * @brief H-C2 regression: an Invalidate() called immediately after Enable()
+ *        must not be silently dropped.
+ *
+ * Before the fix, Enable() set enabled_ = true BEFORE starting the queue.
+ * In combination with H-M5 (stopped_ not reset on Start()), an Invalidate()
+ * arriving in that window would observe running_ == false, fall into the
+ * synchronous Enqueue path — which checked stopped_ first and dropped the
+ * call. After the fix, Enable() starts the queue first (which resets
+ * stopped_) and only then flips enabled_ = true.
+ *
+ * Combined coverage of H-C2 and H-M5 via CacheManager: Disable -> Enable ->
+ * Invalidate must work end-to-end.
+ */
+TEST(CacheManagerTest, EnableThenImmediateInvalidateDelivers) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 4 * 1024 * 1024;
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  // Insert, Disable, Enable, then immediately Insert + Invalidate. The
+  // Invalidate must reach the entry and erase it.
+  auto query = CreateQuery("posts", "golang");
+  std::vector<DocId> result = {1, 2, 3};
+  std::vector<std::string> ngrams = {"gol", "ola", "lan", "ang"};
+
+  // Cycle: Disable then Enable.
+  mgr.Disable();
+  ASSERT_FALSE(mgr.IsEnabled());
+  ASSERT_TRUE(mgr.Enable());
+  ASSERT_TRUE(mgr.IsEnabled());
+
+  // Insert AFTER the Disable/Enable cycle.
+  ASSERT_TRUE(mgr.Insert(query, result, ngrams, 15.0));
+  ASSERT_TRUE(mgr.Lookup(query).has_value());
+
+  // Immediately invalidate. Under H-M5/H-C2 bugs, this would have been
+  // silently dropped (stopped_ stuck at true OR Enqueue's running_ check
+  // failing because Start hadn't run yet).
+  mgr.Invalidate("posts", "", "golang tutorial");
+
+  // Wait briefly for the worker to process the invalidation.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  EXPECT_FALSE(mgr.Lookup(query).has_value()) << "Invalidate after Disable/Enable cycle was dropped (H-C2 + H-M5)";
+}
+
+/**
+ * @brief Combined H-C2 + H-M5 regression: many Disable/Enable cycles each
+ *        leave Invalidate() functional.
+ */
+TEST(CacheManagerTest, DisableEnableCycleInvalidationStillWorks) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 4 * 1024 * 1024;
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    mgr.Disable();
+    ASSERT_TRUE(mgr.Enable());
+
+    auto query = CreateQuery("posts", "cycle_" + std::to_string(cycle));
+    std::vector<DocId> result = {static_cast<DocId>(cycle)};
+    std::vector<std::string> ngrams = {"cyc", "ycl"};
+    ASSERT_TRUE(mgr.Insert(query, result, ngrams, 15.0));
+    ASSERT_TRUE(mgr.Lookup(query).has_value());
+
+    mgr.Invalidate("posts", "", "cycle invalidation text " + std::to_string(cycle));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_FALSE(mgr.Lookup(query).has_value()) << "cycle " << cycle << " Invalidate dropped";
+  }
+}
+
 }  // namespace mygramdb::cache

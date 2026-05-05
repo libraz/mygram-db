@@ -28,7 +28,26 @@ namespace mygramdb::server::reactor {
 /**
  * @brief `EventMultiplexer` implementation backed by Linux `epoll(7)`.
  *
- * Not thread-safe: the reactor's event-loop thread is the sole owner.
+ * Thread-safety:
+ *  - `Add`, `Modify`, and `Remove` are safe to call concurrently from
+ *    multiple threads because each one is a single `epoll_ctl` syscall,
+ *    which is documented as MT-safe. Unlike the kqueue backend, this
+ *    implementation keeps no per-fd interest map in user space — `epoll_ctl`
+ *    accepts `EPOLL_CTL_MOD` directly with the desired mask — so there is
+ *    nothing to guard with a user-space mutex.
+ *  - `Poll` is **event-loop thread only**. The `events_` scratch buffer
+ *    is written without locking and IoReactor guarantees that `Poll()` is
+ *    only ever invoked from its single `EventLoop()` thread (sequenced
+ *    behind the reactor's `mux_lifecycle_` shared lock that publishes /
+ *    republishes the multiplexer pointer). It is not legal to call `Poll`
+ *    concurrently from two threads even though the epoll fd itself would
+ *    tolerate it.
+ *
+ *  Note: unlike `KqueueMultiplexer`, this backend does not need an
+ *  internal mutex because there is no shared in-process state to guard.
+ *  See `epoll_ctl` is unaffected by CR-4 because it operates on a single fd
+ *  per call; the multi-record race that motivates kqueue's serialised
+ *  ApplyInterest does not apply here.
  */
 class EpollMultiplexer : public EventMultiplexer {
  public:

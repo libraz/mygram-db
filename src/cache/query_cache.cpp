@@ -16,6 +16,25 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
       min_query_cost_ms_(min_query_cost_ms),
       ttl_seconds_(ttl_seconds),
       compression_enabled_(compression_enabled) {
+  // Lower the load factor and pre-reserve buckets to minimize cache_map_
+  // rehashing under the steady-state working set. Rehash cost aside, this is
+  // also a defense-in-depth measure for the iterator-stability contract used
+  // by Lookup/MarkInvalidated (see CR-5 note in LookupInternal): the
+  // shared_mutex contract already serializes Insert against in-flight Lookups,
+  // but keeping rehash rare also keeps invalidation checks cheap.
+  //
+  // Capacity heuristic: assume an average compressed entry occupies ~256 B
+  // including bookkeeping. This is a coarse estimate; the value is only used
+  // to size the initial bucket array and the load_factor() invariant guards
+  // correctness if it is wrong.
+  constexpr size_t kAverageEntryBytes = 256;
+  constexpr float kLoadFactor = 0.5F;
+  const size_t estimated_entries = max_memory_bytes_ > 0 ? (max_memory_bytes_ / kAverageEntryBytes) : 0;
+  cache_map_.max_load_factor(kLoadFactor);
+  if (estimated_entries > 0) {
+    cache_map_.reserve(estimated_entries);
+  }
+
   // Start background LRU refresh thread
   lru_refresh_thread_ = std::thread(&QueryCache::RefreshLRUWorker, this);
 }
@@ -55,7 +74,19 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     return std::nullopt;
   };
 
-  // Shared lock for read
+  // Shared lock for read.
+  //
+  // CR-5 (iterator validity): this lookup holds a shared_lock for the entire
+  // duration of any iterator dereference of `iter` below. Insert()/Erase() and
+  // Clear() take a unique_lock, which the std::shared_mutex contract
+  // serializes after all readers; cache_map_ rehash therefore cannot occur
+  // while we hold `iter`. The QueryCache constructor additionally caps the
+  // load factor at 0.5 and pre-reserves buckets, so steady-state inserts
+  // rarely rehash even in isolation.
+  //
+  // If you change this function to release `lock` before using `iter`, you
+  // reintroduce the CR-5 use-after-free — copy the values you need out of
+  // the entry first, then release the lock.
   std::shared_lock lock(mutex_);
 
   stats_.total_queries++;
@@ -294,6 +325,47 @@ bool QueryCache::Erase(const CacheKey& key) {
   if (iter == cache_map_.end()) {
     return false;
   }
+
+  // Notify eviction callback before structural removal so external bookkeeping
+  // (e.g. CacheManager's invalidation_mgr_ unregister) can run while the entry
+  // metadata is still accessible. Symmetric with RemoveEntryLocked.
+  //
+  // CR-6: callers that want to suppress this callback (the InvalidationQueue
+  // cleanup path performs its own UnregisterCacheEntry and must not
+  // double-unregister) should use EraseWithoutCallback() instead.
+  if (eviction_callback_) {
+    eviction_callback_(key);
+  }
+
+  // Remove from LRU list
+  lru_list_.erase(iter->second.second);
+
+  // Update memory tracking
+  const size_t entry_memory = iter->second.first.MemoryUsage();
+  total_memory_bytes_ -= entry_memory;
+  stats_.current_entries--;
+  stats_.current_memory_bytes = total_memory_bytes_;
+  stats_.invalidations_deferred++;
+
+  // Remove from cache map
+  cache_map_.erase(iter);
+
+  return true;
+}
+
+bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
+  std::unique_lock lock(mutex_);
+
+  auto iter = cache_map_.find(key);
+  if (iter == cache_map_.end()) {
+    return false;
+  }
+
+  // CR-6: deliberately does NOT invoke eviction_callback_. The
+  // InvalidationQueue cleanup path performs its own InvalidationManager
+  // unregister and must not double-unregister via the callback, which would
+  // otherwise race with concurrent Insert and corrupt the reverse indexes
+  // (table_to_cache_keys_, ngram_to_cache_keys_).
 
   // Remove from LRU list
   lru_list_.erase(iter->second.second);

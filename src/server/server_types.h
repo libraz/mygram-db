@@ -339,6 +339,14 @@ struct HandlerContext {
   cache::CacheManager* cache_manager = nullptr;
   config::RuntimeVariableManager* variable_manager = nullptr;
   DumpProgress* dump_progress = nullptr;  // Progress tracking for async dump operations
+
+  /// Optional pointer to the server's shutdown flag. When non-null and true,
+  /// long-running workers (DumpSaveWorker / DumpLoadWorker) skip
+  /// auto-restarting replication after their in-flight operation completes,
+  /// because the binlog_reader is about to be torn down by TcpServer::Stop()
+  /// (see CR-3 / CR-10 audit, May 2026). Tests may leave this null; in that
+  /// case the worker behaves as before (always attempts auto-restart).
+  std::atomic<bool>* shutdown_flag = nullptr;
 };
 
 }  // namespace mygramdb::server

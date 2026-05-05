@@ -161,6 +161,13 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Set dump progress tracking pointer
   handler_context_->dump_progress = &dump_progress_;
 
+  // Wire the shutdown flag through to handlers so that long-running workers
+  // (DumpSaveWorker, DumpLoadWorker) can skip post-operation binlog Start()
+  // when TcpServer::Stop() has been called (CR-10). Setting this BEFORE the
+  // acceptor/reactor start ensures the flag is observable by any worker
+  // started via the first DUMP SAVE request.
+  handler_context_->shutdown_flag = &shutdown_in_progress_;
+
   search_handler_ = std::move(components.search_handler);
   document_handler_ = std::move(components.document_handler);
   dump_handler_ = std::move(components.dump_handler);
@@ -286,6 +293,35 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 void TcpServer::Stop() {
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
+  // Phase 1: announce shutdown.
+  //
+  // Set shutdown_in_progress_ BEFORE joining any worker so long-running
+  // workers (DumpSaveWorker, DumpLoadWorker) observe the flag at every
+  // resumable check point and skip post-operation binlog restart. Without
+  // this, a worker that captured replication_was_running=true at entry will
+  // call binlog_reader_->Start() during shutdown, racing the binlog_reader_
+  // destructor that is about to run after Stop() returns (CR-10).
+  shutdown_in_progress_.store(true, std::memory_order_release);
+
+  // Phase 2: stop ingest paths that may touch binlog_reader_.
+  //
+  // Order rationale (CR-3 / CR-10):
+  //   (a) The dump worker may be inside DumpSaveWorker / DumpLoadWorker,
+  //       which call binlog_reader_->Stop() / Start() under
+  //       replication_paused_for_dump_. Joining the worker here — while
+  //       binlog_reader_ is still alive — guarantees those calls complete
+  //       cleanly before binlog_reader_ is torn down.
+  //   (b) sync_manager_ also calls binlog_reader_->Stop() / GetCurrentGTID
+  //       inside BuildSnapshotAsync; RequestShutdown signals cancellation
+  //       and WaitForCompletion joins each sync thread.
+  //   (c) snapshot_scheduler_ wakes its loop and joins, including any
+  //       in-flight TakeSnapshot that touches binlog_reader_.
+  //
+  // After Phase 2 completes, no caller other than Stop() itself ever calls
+  // into binlog_reader_ again, so its destructor (which fires when this
+  // TcpServer is destroyed, after Stop() returns) is race-free.
+  dump_progress_.JoinWorker();
+
 #ifdef USE_MYSQL
   // Request SYNC manager to shutdown
   if (sync_manager_) {
@@ -294,11 +330,13 @@ void TcpServer::Stop() {
   }
 #endif
 
-  // Stop snapshot scheduler
+  // Stop snapshot scheduler (also touches binlog_reader_ in TakeSnapshot)
   if (scheduler_) {
     scheduler_->Stop();
   }
 
+  // Phase 3: tear down the network stack.
+  //
   // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
   // eagerly close(2)s every fd in its active_fds_ set — which includes the
   // reactor-owned client fds, since the reactor's close_callback removes them
@@ -321,13 +359,27 @@ void TcpServer::Stop() {
     acceptor_->Stop();
   }
 
-  // Join dump worker thread if still running
-  dump_progress_.JoinWorker();
-
-  // Shutdown thread pool (completes pending tasks)
+  // Phase 4: drain remaining drain tasks.
+  //
+  // Shutdown thread pool LAST. Tasks queued on the pool may still hold
+  // shared_ptr<ReactorConnection> copies that reach into close_callback_
+  // (which captures `accept_ptr` and `close_stats_ptr` from this TcpServer);
+  // those captured pointers must remain valid for the lifetime of any
+  // in-flight callback (CR-3). Joining the pool here ensures every queued
+  // task — including the close callbacks Unregister() may have just spawned
+  // when the reactor stopped — has fully completed before the captured
+  // ServerStats / ConnectionAcceptor objects start destruction.
   if (thread_pool_) {
     thread_pool_->Shutdown();
   }
+
+  // After this point, member destruction order (reverse of declaration in
+  // tcp_server.h) tears down handlers / dispatcher / reactor / acceptor /
+  // ... / scheduler / sync_manager_ / cache_manager_ / table_catalog_ /
+  // thread_pool_ / acceptor_, and finally binlog_reader_ is dropped by the
+  // owner that constructed this TcpServer. By Phase 1+2 above, no thread
+  // managed by this server still calls into binlog_reader_, so that drop
+  // is safe.
 
   mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
 }

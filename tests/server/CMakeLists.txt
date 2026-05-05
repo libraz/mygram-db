@@ -113,6 +113,22 @@ gtest_discover_tests(tcp_server_advanced_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+# CR-3 / CR-10 lifecycle / shutdown-ordering tests
+add_executable(tcp_server_lifecycle_test
+  tcp_server_lifecycle_test.cpp
+)
+
+target_link_libraries(tcp_server_lifecycle_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(tcp_server_lifecycle_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 # Thread Pool tests
 
 add_executable(thread_pool_test

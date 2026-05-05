@@ -84,15 +84,33 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   if (process_immediately) {
-    // Process outside lock to prevent deadlock from nested lock acquisition
+    // Process outside lock to prevent deadlock from nested lock acquisition.
+    //
+    // CR-6 (single-source unregister): we used to call
+    // invalidation_mgr_->UnregisterCacheEntry(key) here directly *and* rely on
+    // QueryCache::Erase to fire eviction_callback_, which in CacheManager is
+    // wired to call UnregisterCacheEntry as well. The double-unregister was
+    // a no-op for the metadata map (the second find() returned end()) but it
+    // created a race window for the auxiliary reverse indexes
+    // (table_to_cache_keys_, ngram_to_cache_keys_) when a concurrent Insert
+    // re-registered the same key between the two unregisters.
+    //
+    // Fix: use EraseWithoutCallback so the eviction callback stays out of the
+    // picture on this path, and clean up the InvalidationManager metadata
+    // explicitly here. The invariant is:
+    //
+    //   "On the invalidation-queue cleanup path, UnregisterCacheEntry fires
+    //    exactly once per affected key — directly from the queue, never via
+    //    eviction_callback_."
+    //
+    // This also ensures cleanup works in tests that wire an InvalidationQueue
+    // to a QueryCache without CacheManager's eviction callback installed.
     for (const auto& key : affected_keys) {
-      // Unregister metadata first to prevent memory leak even if Erase fails
+      if (cache_ != nullptr) {
+        cache_->EraseWithoutCallback(key);
+      }
       if (invalidation_mgr_ != nullptr) {
         invalidation_mgr_->UnregisterCacheEntry(key);
-      }
-
-      if (cache_ != nullptr) {
-        cache_->Erase(key);
       }
     }
     return;
@@ -108,6 +126,17 @@ void InvalidationQueue::Start() {
   if (!running_.compare_exchange_strong(expected, true)) {
     return;  // Already running
   }
+
+  // H-M5: reset stopped_ on every successful Start() so that a Stop()/Start()
+  // cycle (e.g. CacheManager::Disable() followed by Enable()) does not leave
+  // stopped_ permanently set, which would cause every subsequent Enqueue to
+  // be silently dropped at the early-out below in Enqueue.
+  //
+  // Ordering: stopped_ is reset BEFORE the worker thread starts so that any
+  // Enqueue that races with Start() and observes running_ == true after the
+  // CAS above also observes stopped_ == false (release/acquire pair via the
+  // queue_mutex_ in Enqueue).
+  stopped_.store(false, std::memory_order_release);
 
   worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
 }
@@ -209,15 +238,30 @@ void InvalidationQueue::ProcessBatch() {
     keys_to_erase.insert(pending_key.key);
   }
 
-  // Erase entries from cache
+  // Erase entries from cache and clean up their metadata.
+  //
+  // CR-6 (single-source unregister): UnregisterCacheEntry must fire exactly
+  // once per affected key. Previously this loop called both
+  // invalidation_mgr_->UnregisterCacheEntry(key) AND cache_->Erase(key); when
+  // CacheManager installs an eviction callback that also calls
+  // UnregisterCacheEntry, the second call from the eviction path raced with
+  // any concurrent Insert that re-registered the same key, corrupting the
+  // auxiliary reverse indexes (table_to_cache_keys_ counts could go negative
+  // / desynchronize from cache_metadata_).
+  //
+  // Fix: call EraseWithoutCallback so the eviction callback never runs on
+  // this path, and unregister the metadata explicitly. This keeps the
+  // queue's cleanup self-contained and avoids any double-unregister.
+  //
+  // Invariant: "On the invalidation-queue cleanup path, UnregisterCacheEntry
+  // fires exactly once per affected key — directly from the queue, never via
+  // eviction_callback_."
   for (const auto& key : keys_to_erase) {
-    // Unregister metadata first, then erase from cache
-    // This ensures metadata is cleaned up even if Erase() throws
+    if (cache_ != nullptr) {
+      cache_->EraseWithoutCallback(key);
+    }
     if (invalidation_mgr_ != nullptr) {
       invalidation_mgr_->UnregisterCacheEntry(key);
-    }
-    if (cache_ != nullptr) {
-      cache_->Erase(key);
     }
   }
 

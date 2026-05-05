@@ -91,13 +91,6 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
         "Please wait for load to complete.");
   }
 
-  // Check if another DUMP SAVE is in progress (block concurrent saves)
-  if (ctx_.dump_save_in_progress.load()) {
-    return ResponseFormatter::FormatError(
-        "Cannot save dump while another DUMP SAVE is in progress. "
-        "Please wait for current save to complete or use DUMP STATUS to check progress.");
-  }
-
   // Check if full_config is available
   if (ctx_.full_config == nullptr) {
     std::string error_msg = "Cannot save dump: server configuration is not available";
@@ -122,10 +115,33 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
 
-  // Set flag to indicate save is starting.
-  // Use ScopeGuard so the flag is automatically reset if thread creation fails
-  // or if the synchronous path throws an exception.
-  ctx_.dump_save_in_progress.store(true, std::memory_order_release);
+  // Atomic test-and-set on dump_save_in_progress.
+  //
+  // CR-2: do NOT split this into a separate load() + store(true) — that race
+  // lets two concurrent DUMP SAVE clients both observe false and then both
+  // store true, spawning duplicate worker threads. compare_exchange_strong
+  // collapses the test-and-set into a single atomic step. This matches the
+  // pattern in SnapshotScheduler::TakeSnapshot, which is the other place
+  // that competes for this flag (auto-snapshot vs. manual DUMP SAVE).
+  //
+  // The acquire ordering on success ensures that any subsequent reads in
+  // this thread (filepath, table catalog snapshot for the worker) observe
+  // a state at least as fresh as the previous worker's release-store(false).
+  // The acquire ordering on failure mirrors that contract for the busy
+  // path so logging/diagnostics see consistent state.
+  bool expected = false;
+  if (!ctx_.dump_save_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+    return ResponseFormatter::FormatError(
+        "Cannot save dump while another DUMP SAVE is in progress. "
+        "Please wait for current save to complete or use DUMP STATUS to check progress.");
+  }
+
+  // Flag was successfully acquired. Use ScopeGuard so the flag is
+  // automatically reset if thread creation fails or if the synchronous path
+  // throws an exception. On the async path, ownership of the flag transfers
+  // to the worker thread (via flag_guard.Release() below) and the worker's
+  // own RAII guard resets it (H-C1).
   auto flag_guard =
       mygram::utils::ScopeGuard([this]() { ctx_.dump_save_in_progress.store(false, std::memory_order_release); });
 
@@ -190,6 +206,29 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 }
 
 bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
+  // H-C1: Release dump_save_in_progress at thread exit, AFTER Complete()/Fail()
+  // notifications and AFTER any binlog Start() restart. The previous code
+  // released the flag at a fixed `store(false)` line at the end of this
+  // function, but Complete()/Fail() were called BEFORE that store, leaving
+  // a window where:
+  //   1. worker thread runs `dump_progress_->Complete()` (unblocks waiters)
+  //   2. another client observes "completed", calls HandleDumpSave, sees
+  //      the flag still true, and gets ERROR busy.
+  // OR worse:
+  //   1. worker thread runs Complete()
+  //   2. another client observes "completed", calls HandleDumpSave,
+  //      compare_exchange_strong fails because the flag is still true,
+  //      they get a misleading busy error.
+  //
+  // Releasing via ScopeGuard at the END of the worker scope makes the flag
+  // visible-as-false strictly after every other worker side-effect, so any
+  // post-Complete() observer correctly sees the slot as free.
+  //
+  // The release still uses memory_order_release to pair with the
+  // acquire on the next compare_exchange_strong in HandleDumpSave.
+  auto flag_release =
+      mygram::utils::ScopeGuard([this]() { ctx_.dump_save_in_progress.store(false, std::memory_order_release); });
+
   bool replication_was_running = false;
 
 #ifdef USE_MYSQL
@@ -264,10 +303,28 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // misreport the dump as still in progress and a subsequent REPLICATION
   // START might be rejected by the "paused for dump" guard. Clearing the
   // flag first decouples the dump-pause state from binlog-restart errors.
+  //
+  // CR-10 shutdown check: skip the auto-restart if TcpServer::Stop() has
+  // already announced shutdown. The binlog_reader_ is guaranteed alive at
+  // this point (Stop() joins this worker BEFORE dropping binlog_reader_),
+  // but a Start() call here would just spawn replication threads that
+  // Stop() has to immediately tear down via member-destruction-order, and
+  // worse, those threads would try to call back into Index/DocumentStore
+  // that may be racing their own destructors. Just clear the paused flag
+  // and skip the restart.
+  const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
     ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
-    if (ctx_.binlog_reader->Start()) {
+    if (shutting_down) {
+      mygram::utils::StructuredLog()
+          .Event("replication_restart_skipped")
+          .Field("operation", "dump_save")
+          .Field("reason", "server_shutting_down")
+          .Field("gtid", gtid)
+          .Field("filepath", filepath)
+          .Info();
+    } else if (ctx_.binlog_reader->Start()) {
       mygram::utils::StructuredLog()
           .Event("replication_resumed_after_dump")
           .Field("operation", "dump_save")
@@ -287,7 +344,10 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   }
 #endif
 
-  // Update progress and clear flag
+  // Update progress. The dump_save_in_progress flag is released by the
+  // ScopeGuard installed at the top of this function (H-C1). Releasing
+  // AFTER Complete()/Fail() ensures any client that observed completion
+  // sees the slot as free on the next compare_exchange_strong.
   bool success = result.has_value();
   if (success) {
     mygram::utils::StructuredLog().Event("dump_save_completed").Field("filepath", filepath).Field("gtid", gtid).Info();
@@ -307,9 +367,6 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     }
   }
 
-  // Use explicit store with release semantics for consistency with
-  // the corresponding load(memory_order_acquire) in HandleDumpSave.
-  ctx_.dump_save_in_progress.store(false, std::memory_order_release);
   return success;
 }
 
@@ -338,13 +395,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         "Please wait for save to complete.");
   }
 
-  // Check if another DUMP LOAD is in progress (block concurrent loads)
-  if (ctx_.dump_load_in_progress.load()) {
-    return ResponseFormatter::FormatError(
-        "Cannot load dump while another DUMP LOAD is in progress. "
-        "Please wait for current load to complete.");
-  }
-
   // Validate filepath BEFORE mutating any replication or load-flag state.
   // Previously, the empty()/ResolveDumpFilepath check was performed AFTER
   // stopping replication, which left replication permanently paused on
@@ -358,6 +408,31 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     return ResponseFormatter::FormatError(resolved.error().message());
   }
   std::string filepath = std::move(*resolved);
+
+  // Atomic test-and-set on dump_load_in_progress.
+  //
+  // CR-2: do NOT split this into a separate load() + later AtomicFlagGuard —
+  // that race lets two concurrent DUMP LOAD clients both observe false and
+  // then both proceed to stop replication / clear data, corrupting state.
+  // compare_exchange_strong collapses the test-and-set into a single atomic
+  // step, mirroring the pattern in HandleDumpSave / TakeSnapshot.
+  //
+  // The guard below releases the flag in the failure path (before
+  // returning) and is dismissed via Release() on the success path AFTER
+  // post-load steps complete.
+  bool expected = false;
+  if (!ctx_.dump_load_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while another DUMP LOAD is in progress. "
+        "Please wait for current load to complete.");
+  }
+  // RAII reset: corresponds to the compare_exchange above. AtomicFlagResetGuard
+  // (not AtomicFlagGuard) is the right tool here because the flag is already
+  // set; the guard is only responsible for clearing it on scope exit / failure.
+  // Replaces the previous AtomicFlagGuard that was constructed AFTER the
+  // load() check, leaving a TOCTOU window.
+  mygram::utils::AtomicFlagResetGuard loading_guard(ctx_.dump_load_in_progress);
 
 #ifdef USE_MYSQL
   // Check if replication is running (need to stop it before DUMP LOAD)
@@ -383,9 +458,24 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // restart is not duplicated. This guarantees that any early-return from
   // here onward (validation failure inside ReadDump, exception, etc.) does
   // not leave the server with replication permanently stopped (P0-A).
+  //
+  // CR-10 shutdown check inside the lambda: if TcpServer::Stop() has
+  // announced shutdown, skip the binlog Start() entirely. The reader is
+  // guaranteed alive (TcpServer::Stop joins this worker before the reader
+  // is dropped) but a Start() during teardown would just spawn threads
+  // Stop() has to immediately tear down.
   auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running]() {
     ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
     if (replication_was_running && ctx_.binlog_reader != nullptr) {
+      const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
+      if (shutting_down) {
+        mygram::utils::StructuredLog()
+            .Event("replication_restart_skipped")
+            .Field("operation", "dump_load")
+            .Field("reason", "server_shutting_down")
+            .Info();
+        return;
+      }
       auto restart_result = ctx_.binlog_reader->Start();
       if (!restart_result) {
         mygram::utils::StructuredLog()
@@ -400,10 +490,10 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   mygram::utils::StructuredLog().Event("dump_load_starting").Field("path", filepath).Info();
 
-  // Set loading mode (RAII guard ensures it's cleared even on exceptions or
-  // early-return error paths in ReadDump). Release()d only on the success
-  // path, after all post-load steps complete.
-  mygram::utils::AtomicFlagGuard loading_guard(ctx_.dump_load_in_progress);
+  // The loading_guard (AtomicFlagResetGuard) was installed above immediately
+  // after compare_exchange_strong succeeded. It is Release()d only on the
+  // success path, after all post-load steps complete; on failure it falls
+  // through to the destructor and clears dump_load_in_progress.
 
   // Convert table contexts to format expected by dump API
   auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
@@ -438,10 +528,21 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // The success path performs the restart explicitly and then dismisses the
   // ScopeGuard so the restart is not duplicated. Error paths fall through to
   // the guard's destructor, which performs the same restart.
+  //
+  // CR-10: skip the explicit restart when shutdown is in progress (the
+  // ScopeGuard performs the same shutdown-aware skip).
   if (result && replication_was_running && ctx_.binlog_reader != nullptr) {
     ctx_.replication_paused_for_dump.store(false, std::memory_order_release);
 
-    if (ctx_.binlog_reader->Start()) {
+    const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
+    if (shutting_down) {
+      mygram::utils::StructuredLog()
+          .Event("replication_restart_skipped")
+          .Field("operation", "dump_load")
+          .Field("reason", "server_shutting_down")
+          .Field("gtid", gtid)
+          .Info();
+    } else if (ctx_.binlog_reader->Start()) {
       mygram::utils::StructuredLog()
           .Event("replication_resumed")
           .Field("operation", "dump_load")

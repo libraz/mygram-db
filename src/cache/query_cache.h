@@ -222,6 +222,20 @@ class QueryCache {
   bool Erase(const CacheKey& key);
 
   /**
+   * @brief Erase cache entry without firing eviction_callback_
+   * @param key Cache key
+   * @return true if entry was found and erased
+   *
+   * Identical to Erase() except the eviction callback is suppressed. Used by
+   * InvalidationQueue, which performs its own InvalidationManager cleanup and
+   * must not double-unregister via the eviction callback (CR-6).
+   *
+   * Callers that take this path are responsible for any external bookkeeping
+   * that the eviction callback would otherwise have performed.
+   */
+  bool EraseWithoutCallback(const CacheKey& key);
+
+  /**
    * @brief Clear all cache entries
    *
    * Removes all entries. Invokes eviction_callback_ for each removed entry

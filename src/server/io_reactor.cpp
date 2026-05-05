@@ -97,6 +97,21 @@ void IoReactor::Stop() {
   // while holding the lock. EventLoop only acquires mux_lifecycle_ (shared),
   // which is consistent with the global ordering
   // start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_.
+  //
+  // CR-3 caller contract: when this reactor is owned by a TcpServer, the
+  // owner MUST shut down `thread_pool_` AFTER reactor_->Stop() returns. The
+  // reactor's close_callback_ may capture pointers (`accept_ptr`,
+  // `close_stats_ptr`) that point at TcpServer-owned objects; drain tasks
+  // queued on the pool may still be executing those callbacks at the moment
+  // Stop() runs. If the pool were torn down before the reactor, the callback
+  // bodies would race their captured-pointer destruction; if the pool were
+  // torn down before connections_.clear() but after the reactor, in-flight
+  // tasks would observe a half-cleared connection map. The current order
+  // (TcpServer::Stop) is:
+  //   reactor_->Stop()  // joins event loop + clears connection map
+  //   acceptor_->Stop()
+  //   thread_pool_->Shutdown()  // joins drain tasks last
+  // Any caller that owns this reactor MUST follow the same order.
   std::lock_guard<std::mutex> lock(start_stop_mutex_);
 
   if (!running_.exchange(false, std::memory_order_acq_rel)) {
@@ -113,6 +128,11 @@ void IoReactor::Stop() {
 
   // Drop all registered connections. Drain tasks that still hold a
   // shared_ptr copy will keep their connection alive until they finish.
+  // Note: the close_callback_ is intentionally NOT invoked from this clear()
+  // path — Unregister() invokes it for naturally-closed connections, but
+  // mass-clear during Stop() leaves the callback un-invoked because
+  // the captured ServerStats / ConnectionAcceptor objects may not be in a
+  // state that tolerates being decremented (TcpServer is in shutdown).
   {
     std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
     connections_.clear();

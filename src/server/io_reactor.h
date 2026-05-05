@@ -121,6 +121,14 @@ class IoReactor {
    * Drain tasks in flight keep their own shared_ptr copies, so the actual
    * socket close happens when the last shared_ptr drops (typically after
    * the drain task finishes writing its final response).
+   *
+   * @note CR-3 caller contract: callers (e.g., TcpServer::Stop) MUST shut
+   * down their thread pool AFTER reactor_->Stop() returns. Drain tasks
+   * queued on the pool may capture pointers via close_callback_ that
+   * reference caller-owned objects (ServerStats, ConnectionAcceptor); those
+   * captures must remain valid for the lifetime of any in-flight callback.
+   * Tearing the pool down before the reactor risks UAF from drain tasks
+   * still executing close_callback_ (or the response-flush path).
    */
   void Stop();
 
