@@ -20,6 +20,7 @@
 #include "query/query_parser.h"
 #include "query/result_sorter.h"
 #include "server/handlers/search_handler.h"
+#include "server/log_field_names.h"
 #include "server/response_formatter.h"
 #include "server/search_pipeline.h"
 #include "server/statistics_service.h"
@@ -60,11 +61,7 @@ std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>&
   for (const auto& cidr_str : allow_cidrs) {
     auto cidr = mygram::utils::CIDR::Parse(cidr_str);
     if (!cidr) {
-      mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "invalid_cidr_entry")
-          .Field("cidr", cidr_str)
-          .Warn();
+      mygram::utils::StructuredLog().Event("invalid_cidr_entry").Field("cidr", cidr_str).Warn();
       continue;
     }
     parsed.push_back(*cidr);
@@ -425,9 +422,8 @@ void HttpServer::SetupAccessControl() {
     if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       RecordRequest();
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "http_request_rejected_acl")
-          .Field("remote_addr", client_ip)
+          .Event("http_request_rejected_acl")
+          .Field(log_fields::kFieldClientIp, client_ip)
           .Warn();
       SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
       return httplib::Server::HandlerResponse::Handled;
@@ -437,9 +433,8 @@ void HttpServer::SetupAccessControl() {
     if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
       RecordRequest();
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "http_rate_limit_exceeded")
-          .Field("client_ip", client_ip)
+          .Event("http_rate_limit_exceeded")
+          .Field(log_fields::kFieldClientIp, client_ip)
           .Warn();
       SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
       return httplib::Server::HandlerResponse::Handled;
@@ -484,9 +479,8 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
     mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "http_server_start")
-        .Field("error", error.to_string())
+        .Event("http_server_start_failed")
+        .Field(log_fields::kFieldError, error.to_string())
         .Error();
     return MakeUnexpected(error);
   }
@@ -519,11 +513,10 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   if (!server_->bind_to_port(config_.bind, config_.port)) {
     std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
     mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "http_server_listen")
+        .Event("http_server_listen_failed")
         .Field("bind", config_.bind)
         .Field("port", static_cast<uint64_t>(config_.port))
-        .Field("error", error_msg)
+        .Field(log_fields::kFieldError, error_msg)
         .Error();
     // Release the running_ gate so subsequent Start()s can retry. Bind
     // happened on this thread, so no worker exists to clean up.

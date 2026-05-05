@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "mysql/binlog_reader_interface.h"
+#include "server/log_field_names.h"
 #include "server/replication_pause_counter.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
@@ -60,11 +61,7 @@ void SnapshotScheduler::Start() {
   // Atomically try to set running_ from false to true to prevent TOCTOU race
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
-    mygram::utils::StructuredLog()
-        .Event("server_warning")
-        .Field("component", "snapshot_scheduler")
-        .Field("type", "already_running")
-        .Warn();
+    mygram::utils::StructuredLog().Event("snapshot_scheduler_already_running").Warn();
     return;
   }
 
@@ -176,7 +173,10 @@ void SnapshotScheduler::TakeSnapshot() {
 
     std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
 
-    mygram::utils::StructuredLog().Event("snapshot_taking").Field("path", dump_path.string()).Info();
+    mygram::utils::StructuredLog()
+        .Event("snapshot_taking")
+        .Field(log_fields::kFieldFilepath, dump_path.string())
+        .Info();
 
 #ifdef USE_MYSQL
     // Pause replication while writing the snapshot. Without this, the binlog
@@ -246,14 +246,17 @@ void SnapshotScheduler::TakeSnapshot() {
         mygram::utils::StructuredLog()
             .Event("replication_resumed_after_dump")
             .Field("operation", "snapshot")
-            .Field("filepath", dump_path_str)
+            .Field(log_fields::kFieldFilepath, dump_path_str)
             .Info();
       } else {
+        // H-D4: surface the error via FieldError(start_result.error()) instead
+        // of the legacy GetLastError() string, so the numeric error_code is
+        // included alongside the message.
         mygram::utils::StructuredLog()
             .Event("replication_restart_failed")
             .Field("operation", "snapshot")
-            .Field("filepath", dump_path_str)
-            .Field("error", binlog_reader_->GetLastError())
+            .Field(log_fields::kFieldFilepath, dump_path_str)
+            .FieldError(start_result.error())
             .Error();
       }
     });
@@ -273,13 +276,15 @@ void SnapshotScheduler::TakeSnapshot() {
     auto result = storage::dump_v2::WriteDump(dump_path.string(), gtid, *full_config_, dumpable);
 
     if (result) {
-      mygram::utils::StructuredLog().Event("snapshot_completed").Field("path", dump_path.string()).Info();
+      mygram::utils::StructuredLog()
+          .Event("snapshot_completed")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Info();
     } else {
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "snapshot_save")
-          .Field("filepath", dump_path.string())
-          .Field("error", result.error().message())
+          .Event("snapshot_save_failed")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Field(log_fields::kFieldError, result.error().message())
           .Error();
     }
 
@@ -287,12 +292,7 @@ void SnapshotScheduler::TakeSnapshot() {
     // before dump_save_guard releases the dump_save_in_progress flag.
 
   } catch (const std::exception& e) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "snapshot_save")
-        .Field("type", "exception")
-        .Field("error", e.what())
-        .Error();
+    mygram::utils::StructuredLog().Event("snapshot_save_exception").Field(log_fields::kFieldError, e.what()).Error();
   }
 }
 
@@ -327,26 +327,24 @@ void SnapshotScheduler::CleanupOldSnapshots() {
     // Delete old files beyond retain count
     const auto retain_count = static_cast<size_t>(config_.retain);
     for (size_t i = retain_count; i < dump_files.size(); ++i) {
-      mygram::utils::StructuredLog().Event("snapshot_removing_old").Field("path", dump_files[i].first.string()).Info();
+      mygram::utils::StructuredLog()
+          .Event("snapshot_removing_old")
+          .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
+          .Info();
       std::error_code ec;
       std::filesystem::remove(dump_files[i].first, ec);
       if (ec) {
         mygram::utils::StructuredLog()
             .Event("snapshot_cleanup_error")
-            .Field("path", dump_files[i].first.string())
-            .Field("error", ec.message())
+            .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
+            .Field(log_fields::kFieldError, ec.message())
             .Warn();
         // Continue with remaining files
       }
     }
 
   } catch (const std::exception& e) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "snapshot_cleanup")
-        .Field("type", "exception")
-        .Field("error", e.what())
-        .Error();
+    mygram::utils::StructuredLog().Event("snapshot_cleanup_exception").Field(log_fields::kFieldError, e.what()).Error();
   }
 }
 

@@ -7,6 +7,7 @@
 
 #include <sstream>
 
+#include "server/log_field_names.h"
 #include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/flag_guard.h"
@@ -22,7 +23,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       conn_ctx.debug_mode = true;
       mygram::utils::StructuredLog()
           .Event("debug_mode_enabled")
-          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Field(log_fields::kFieldFd, static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
       return ResponseFormatter::FormatStatus("DEBUG_ON");
     }
@@ -31,7 +32,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       conn_ctx.debug_mode = false;
       mygram::utils::StructuredLog()
           .Event("debug_mode_disabled")
-          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Field(log_fields::kFieldFd, static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
       return ResponseFormatter::FormatStatus("DEBUG_OFF");
     }
@@ -93,8 +94,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
               << " total=" << mygram::utils::FormatBytes(sys_info->total_physical_bytes);
         }
         mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "optimize_rejected")
+            .Event("optimize_rejected")
             .Field("reason", "critical_memory_status")
             .Field("details", oss.str())
             .Warn();
@@ -116,8 +116,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
           oss << " available=" << mygram::utils::FormatBytes(sys_info->available_physical_bytes);
         }
         mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "optimize_rejected")
+            .Event("optimize_rejected")
             .Field("reason", "insufficient_memory")
             .Field("details", oss.str())
             .Warn();

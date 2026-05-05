@@ -6,6 +6,7 @@
 #include "server/handlers/replication_handler.h"
 
 #include "mysql/binlog_reader_interface.h"
+#include "server/log_field_names.h"
 #include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
@@ -89,18 +90,22 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
               .Field("gtid", current_gtid)
               .Info();
 
-          if (ctx_.binlog_reader->Start()) {
+          // H-D4: use Expected<void, Error> chain rather than the legacy
+          // bool + GetLastError() pair. This matches the pattern used by
+          // dump_handler.cpp's restart paths so all replication-Start sites
+          // surface errors via the same Expected -> FieldError() flow.
+          auto start_result = ctx_.binlog_reader->Start();
+          if (start_result) {
             return ResponseFormatter::FormatReplicationStartResponse();
           }
 
-          std::string error = ctx_.binlog_reader->GetLastError();
           mygram::utils::StructuredLog()
               .Event("replication_start_failed")
               .Field("source", "user_request")
-              .Field("gtid", current_gtid)
-              .Field("error", error)
+              .Field(log_fields::kFieldGtid, current_gtid)
+              .FieldError(start_result.error())
               .Error();
-          return ResponseFormatter::FormatError("Failed to start replication: " + error);
+          return ResponseFormatter::FormatError("Failed to start replication: " + start_result.error().message());
         }
         return ResponseFormatter::FormatError("Replication is already running");
       }

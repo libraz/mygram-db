@@ -87,11 +87,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Check if already running
   if (acceptor_ && acceptor_->IsRunning()) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "tcp_server_start")
-        .Field("error", error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("tcp_server_start_failed").Field("error", error.to_string()).Error();
     return MakeUnexpected(error);
   }
 
@@ -244,11 +240,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
           if (rate_limiter_ptr != nullptr) {
             std::string client_ip = mygram::utils::GetPeerIP(client_fd);
             if (!rate_limiter_ptr->AllowRequest(client_ip)) {
-              mygram::utils::StructuredLog()
-                  .Event("server_warning")
-                  .Field("type", "rate_limit_exceeded")
-                  .Field("client_ip", client_ip)
-                  .Warn();
+              mygram::utils::StructuredLog().Event("rate_limit_exceeded").Field("client_ip", client_ip).Warn();
               return false;
             }
           }

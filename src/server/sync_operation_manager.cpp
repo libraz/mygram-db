@@ -456,8 +456,7 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
         return true;
       }
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("operation", "wait_all_sync_complete")
+          .Event("wait_all_sync_complete_timeout")
           .Field("timeout_sec", static_cast<uint64_t>(timeout_sec))
           .Warn();
       return false;
@@ -551,8 +550,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.is_running = false;
       });
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "sync")
+          .Event("sync_failed")
           .Field("table", table_name)
           .Field("error", "Configuration not available")
           .Error();
@@ -579,8 +577,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.is_running = false;
       });
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "sync")
+          .Event("sync_failed")
           .Field("table", table_name)
           .Field("error", error_msg)
           .Field("error_code", static_cast<int64_t>(connect_result.error().code()))
@@ -597,8 +594,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.is_running = false;
       });
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "sync")
+          .Event("sync_failed")
           .Field("table", table_name)
           .Field("error", "Table context not found")
           .Error();
@@ -783,8 +779,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             state.error_message = error_msg;
           });
           mygram::utils::StructuredLog()
-              .Event("server_error")
-              .Field("operation", "sync_replication")
+              .Event("sync_replication_start_failed")
               .Field("table", table_name)
               .FieldError(start_result.error())
               .Error();
@@ -838,8 +833,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         state.is_running = false;
       });
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "sync")
+          .Event("sync_failed")
           .Field("table", table_name)
           .Field("error", error_msg)
           .Field("error_code", static_cast<int64_t>(result.error().code()))
@@ -881,12 +875,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       state.error_message = error_msg;
       state.is_running = false;
     });
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "sync_exception")
-        .Field("table", table_name)
-        .Field("error", error_msg)
-        .Error();
+    mygram::utils::StructuredLog().Event("sync_exception").Field("table", table_name).Field("error", error_msg).Error();
 
     // Restart replication from the saved GTID position (before SYNC started).
     // The exception prevented SYNC completion, so we restore to the pre-SYNC state.

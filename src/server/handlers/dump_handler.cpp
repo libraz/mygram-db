@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "server/log_field_names.h"
 #include "server/operation_names.h"
 #include "server/replication_pause_counter.h"
 #include "server/sync_operation_manager.h"
@@ -96,10 +97,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (ctx_.full_config == nullptr) {
     std::string error_msg = "Cannot save dump: server configuration is not available";
     mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "dump_save")
+        .Event("dump_save_failed")
         .Field("reason", "config_not_available")
-        .Field("error", error_msg)
+        .Field(log_fields::kFieldError, error_msg)
         .Error();
     return ResponseFormatter::FormatError(error_msg);
   }
@@ -359,22 +359,29 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
             .Field("gtid", gtid)
             .Field("filepath", filepath)
             .Info();
-      } else if (ctx_.binlog_reader->Start()) {
-        mygram::utils::StructuredLog()
-            .Event("replication_resumed_after_dump")
-            .Field("operation", "dump_save")
-            .Field("gtid", gtid)
-            .Field("filepath", filepath)
-            .Info();
       } else {
-        std::string replication_error = ctx_.binlog_reader->GetLastError();
-        mygram::utils::StructuredLog()
-            .Event("replication_restart_failed")
-            .Field("operation", "dump_save")
-            .Field("gtid", gtid)
-            .Field("filepath", filepath)
-            .Field("error", replication_error)
-            .Error();
+        // H-D4: standardize on the Expected<void, Error> chain rather than
+        // the legacy bool + GetLastError() shape. The bool overload of
+        // Expected and the explicit error()-message branch are the same
+        // pattern used by the DUMP LOAD restore_replication ScopeGuard, so
+        // both restart paths now read identically.
+        auto start_result = ctx_.binlog_reader->Start();
+        if (start_result) {
+          mygram::utils::StructuredLog()
+              .Event("replication_resumed_after_dump")
+              .Field("operation", "dump_save")
+              .Field(log_fields::kFieldGtid, gtid)
+              .Field(log_fields::kFieldFilepath, filepath)
+              .Info();
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("replication_restart_failed")
+              .Field("operation", "dump_save")
+              .Field(log_fields::kFieldGtid, gtid)
+              .Field(log_fields::kFieldFilepath, filepath)
+              .FieldError(start_result.error())
+              .Error();
+        }
       }
     } else {
       // No reader; just clear the flag (we were the last releaser).
@@ -556,7 +563,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   });
 #endif
 
-  mygram::utils::StructuredLog().Event("dump_load_starting").Field("path", filepath).Info();
+  mygram::utils::StructuredLog().Event("dump_load_starting").Field(log_fields::kFieldFilepath, filepath).Info();
 
   // The loading_guard (AtomicFlagResetGuard) was installed above immediately
   // after compare_exchange_strong succeeded. It is Release()d only on the
@@ -629,22 +636,26 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
             .Field("reason", "server_shutting_down")
             .Field("gtid", gtid)
             .Info();
-      } else if (ctx_.binlog_reader->Start()) {
-        mygram::utils::StructuredLog()
-            .Event("replication_resumed")
-            .Field("operation", "dump_load")
-            .Field("reason", "automatic_restart_after_completion")
-            .Field("gtid", gtid)
-            .Info();
       } else {
-        std::string replication_error = ctx_.binlog_reader->GetLastError();
-        mygram::utils::StructuredLog()
-            .Event("replication_restart_failed")
-            .Field("operation", "dump_load")
-            .Field("error", replication_error)
-            .Error();
-        // Don't fail DUMP LOAD due to replication restart failure
-        // User can manually restart replication
+        // H-D4: use Expected<void, Error> chain (same pattern as the
+        // restore_replication ScopeGuard above).
+        auto start_result = ctx_.binlog_reader->Start();
+        if (start_result) {
+          mygram::utils::StructuredLog()
+              .Event("replication_resumed")
+              .Field("operation", "dump_load")
+              .Field("reason", "automatic_restart_after_completion")
+              .Field(log_fields::kFieldGtid, gtid)
+              .Info();
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("replication_restart_failed")
+              .Field("operation", "dump_load")
+              .FieldError(start_result.error())
+              .Error();
+          // Don't fail DUMP LOAD due to replication restart failure
+          // User can manually restart replication
+        }
       }
       restore_replication.Release();
     } else {
@@ -685,7 +696,11 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       }
     }
 
-    mygram::utils::StructuredLog().Event("dump_load_completed").Field("path", filepath).Field("gtid", gtid).Info();
+    mygram::utils::StructuredLog()
+        .Event("dump_load_completed")
+        .Field(log_fields::kFieldFilepath, filepath)
+        .Field(log_fields::kFieldGtid, gtid)
+        .Info();
     loading_guard.Release();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }
@@ -717,13 +732,13 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   }
   std::string filepath = std::move(*resolved);
 
-  mygram::utils::StructuredLog().Event("dump_verify_starting").Field("path", filepath).Info();
+  mygram::utils::StructuredLog().Event("dump_verify_starting").Field(log_fields::kFieldFilepath, filepath).Info();
 
   storage::dump_format::IntegrityError integrity_error;
   auto result = storage::dump_v2::VerifyDumpIntegrity(filepath, integrity_error);
 
   if (result) {
-    mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field("path", filepath).Info();
+    mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field(log_fields::kFieldFilepath, filepath).Info();
     return ResponseFormatter::FormatStatus("DUMP_VERIFIED " + filepath);
   }
 
@@ -751,7 +766,7 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   }
   std::string filepath = std::move(*resolved);
 
-  mygram::utils::StructuredLog().Event("dump_info_reading").Field("path", filepath).Info();
+  mygram::utils::StructuredLog().Event("dump_info_reading").Field(log_fields::kFieldFilepath, filepath).Info();
 
   storage::dump_v2::DumpV2Info info;
   auto info_result = storage::dump_v2::GetDumpInfo(filepath, info);

@@ -116,8 +116,7 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
       // Enforce hard limit: reject new clients
       blocked_requests_.fetch_add(1, std::memory_order_relaxed);
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "rate_limiter_max_clients")
+          .Event("rate_limiter_max_clients")
           .Field("max_clients", static_cast<uint64_t>(max_clients_))
           .Field("client_ip", client_ip)
           .Warn();

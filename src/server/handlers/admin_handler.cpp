@@ -62,11 +62,7 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
 std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   auto explorer_result = config::ConfigSchemaExplorer::Create();
   if (!explorer_result) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "config_help")
-        .FieldError(explorer_result.error())
-        .Error();
+    mygram::utils::StructuredLog().Event("config_help_failed").FieldError(explorer_result.error()).Error();
     return ResponseFormatter::FormatError(std::string("CONFIG HELP failed: ") + explorer_result.error().message());
   }
   auto& explorer = *explorer_result;
@@ -98,21 +94,13 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
 
 std::string AdminHandler::HandleConfigShow(const std::string& path) {
   if (ctx_.full_config == nullptr) {
-    mygram::utils::StructuredLog()
-        .Event("server_warning")
-        .Field("operation", "config_show")
-        .Field("reason", "config_not_available")
-        .Warn();
+    mygram::utils::StructuredLog().Event("config_show_warning").Field("reason", "config_not_available").Warn();
     return ResponseFormatter::FormatError("Server configuration is not available");
   }
 
   auto format_result = config::FormatConfigForDisplay(*ctx_.full_config, path);
   if (!format_result) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "config_show")
-        .FieldError(format_result.error())
-        .Error();
+    mygram::utils::StructuredLog().Event("config_show_failed").FieldError(format_result.error()).Error();
     return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + format_result.error().message());
   }
 

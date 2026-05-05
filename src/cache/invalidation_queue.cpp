@@ -5,10 +5,9 @@
 
 #include "cache/invalidation_queue.h"
 
-#include <spdlog/spdlog.h>
-
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
 
@@ -48,10 +47,10 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
 
     // Reject enqueues after Stop() to prevent use-after-free
     if (stopped_.load()) {
-      spdlog::warn(
-          "InvalidationQueue: Enqueue called after Stop(), "
-          "skipping deferred deletion for {} entries",
-          affected_keys.size());
+      mygram::utils::StructuredLog()
+          .Event("cache_invalidation_queue_enqueue_after_stop")
+          .Field("count", static_cast<uint64_t>(affected_keys.size()))
+          .Warn();
       return;
     }
 
@@ -64,8 +63,12 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       if (pending_cache_keys_.size() >= max_queue_size_) {
         // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
         // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
-        spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
-                     pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+        mygram::utils::StructuredLog()
+            .Event("cache_invalidation_queue_overflow")
+            .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
+            .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
+            .Field("dropped_count", static_cast<uint64_t>(affected_keys.size()))
+            .Warn();
       } else {
         // Use emplace to preserve existing entries' original timestamps,
         // preventing oldest_timestamp_ from becoming stale after re-enqueue.

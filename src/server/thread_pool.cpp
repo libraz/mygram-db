@@ -98,9 +98,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
     // If not graceful, clear pending tasks
     if (!graceful && pending_tasks > 0) {
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("operation", "thread_pool_shutdown")
-          .Field("type", "non_graceful_shutdown")
+          .Event("thread_pool_non_graceful_shutdown")
           .Field("pending_tasks", static_cast<uint64_t>(pending_tasks))
           .Warn();
       // Clear the queue
@@ -152,9 +150,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
         size_t remaining_tasks = GetQueueSize();
         if (remaining_tasks > 0) {
           mygram::utils::StructuredLog()
-              .Event("server_warning")
-              .Field("operation", "thread_pool_shutdown")
-              .Field("type", "timeout_reached")
+              .Event("thread_pool_shutdown_timeout")
               .Field("remaining_tasks", static_cast<uint64_t>(remaining_tasks))
               .Warn();
         }
@@ -255,19 +251,11 @@ void ThreadPool::WorkerThread() {
       try {
         task();
       } catch (const std::exception& e) {
-        mygram::utils::StructuredLog()
-            .Event("server_error")
-            .Field("type", "worker_thread_exception")
-            .Field("error", e.what())
-            .Error();
+        mygram::utils::StructuredLog().Event("worker_thread_exception").Field("error", e.what()).Error();
       } catch (...) {
         std::ostringstream tid;
         tid << std::this_thread::get_id();
-        mygram::utils::StructuredLog()
-            .Event("server_error")
-            .Field("type", "worker_thread_unknown_exception")
-            .Field("thread_id", tid.str())
-            .Error();
+        mygram::utils::StructuredLog().Event("worker_thread_unknown_exception").Field("thread_id", tid.str()).Error();
       }
       // Note: worker_guard will automatically decrement active_workers_ and
       // call NotifyIdleObservers() if the pool is now idle.
