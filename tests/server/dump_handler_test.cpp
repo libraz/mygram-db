@@ -1538,6 +1538,146 @@ TEST_F(DumpHandlerGtidTest, LoadingFlagActiveDuringReplicationRestart) {
   EXPECT_FALSE(dump_load_in_progress_);
 }
 
+// ============================================================================
+// P0-A regression tests: DUMP LOAD must restore replication on early-return
+// error paths (empty filepath, path-traversal validation, ReadDump failure)
+// and clear the dump_load_in_progress flag.
+// ============================================================================
+
+/**
+ * @brief P0-A: DUMP LOAD with empty filepath must NOT stop replication.
+ *
+ * The pre-fix behavior was: replication is stopped first, then filepath
+ * validation runs and returns an error. The function returned without
+ * restarting replication, leaving the server permanently paused.
+ *
+ * The fix moves validation BEFORE any replication state mutation, so an
+ * empty filepath fails fast with replication still running.
+ */
+TEST_F(DumpHandlerGtidTest, DumpLoadEmptyFilepathDoesNotStopReplication) {
+  // Configure: replication is running.
+  mock_binlog_reader_->SetGtidForTest("uuid:300");
+  mock_binlog_reader_->SetRunningForTest(true);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = "";  // Explicitly empty - fails validation
+
+  std::string response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Empty filepath should be rejected. Response: " << response;
+
+  // Replication must NOT have been stopped or restarted (validation runs first).
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled())
+      << "Replication must not be stopped before filepath validation succeeds";
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled()) << "Start should not be called when Stop was never called";
+
+  // Replication is still running.
+  EXPECT_TRUE(mock_binlog_reader_->IsRunning());
+  EXPECT_FALSE(replication_paused_for_dump_.load())
+      << "replication_paused_for_dump must remain false after a fast-fail validation error";
+
+  // Loading flag must not have been left set.
+  EXPECT_FALSE(dump_load_in_progress_.load()) << "dump_load_in_progress must not leak into true on validation failure";
+}
+
+/**
+ * @brief P0-A: DUMP LOAD with a path-traversal filepath must NOT stop
+ *        replication.
+ *
+ * Same pattern as the empty-filepath test but exercising the
+ * ResolveDumpPath rejection branch instead of the empty() branch.
+ */
+TEST_F(DumpHandlerGtidTest, DumpLoadInvalidFilepathDoesNotStopReplication) {
+  mock_binlog_reader_->SetGtidForTest("uuid:301");
+  mock_binlog_reader_->SetRunningForTest(true);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = "../../../etc/passwd";  // path-traversal
+
+  std::string response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Path traversal must be rejected. Response: " << response;
+
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled())
+      << "Replication must not be stopped before filepath validation succeeds";
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled());
+  EXPECT_TRUE(mock_binlog_reader_->IsRunning());
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+  EXPECT_FALSE(dump_load_in_progress_.load());
+}
+
+/**
+ * @brief P0-A: DUMP LOAD whose ReadDump fails (file does not exist) must
+ *        restart replication on the way out.
+ *
+ * Filepath validation succeeds (the path is inside dump_dir and does not
+ * traverse), but the file itself is missing so ReadDump returns an error.
+ * The fix installs a ScopeGuard that restarts replication on every error
+ * path past the validation gate.
+ */
+TEST_F(DumpHandlerGtidTest, DumpLoadRestartsReplicationOnReadFailure) {
+  mock_binlog_reader_->SetGtidForTest("uuid:302");
+  mock_binlog_reader_->SetRunningForTest(true);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  // Valid path inside dump_dir but the file does not exist on disk.
+  load_query.filepath = "definitely_not_present_" + std::to_string(getpid()) + ".dmp";
+
+  std::string response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Missing dump must produce an error. Response: " << response;
+
+  // Replication was running, so Stop() was called for consistency, and the
+  // ScopeGuard must have called Start() on the failure path.
+  EXPECT_TRUE(mock_binlog_reader_->WasStopCalled()) << "Replication should be stopped during DUMP LOAD setup";
+  EXPECT_TRUE(mock_binlog_reader_->WasStartCalled())
+      << "Replication must be restarted by the ScopeGuard on ReadDump failure";
+  EXPECT_TRUE(mock_binlog_reader_->IsRunning()) << "Mock should report running after Start() was invoked";
+
+  // Flags must be cleared by the guards.
+  EXPECT_FALSE(replication_paused_for_dump_.load())
+      << "replication_paused_for_dump must be cleared on the failure path";
+  EXPECT_FALSE(dump_load_in_progress_.load()) << "dump_load_in_progress must be cleared on the failure path";
+}
+
+/**
+ * @brief P0-A: DUMP LOAD failure must clear the loading flag.
+ *
+ * Mirrors the prior test but focuses on the dump_load_in_progress flag in
+ * isolation (the AtomicFlagGuard contract). A subsequent DUMP LOAD attempt
+ * after a failure should not be blocked by a stuck loading flag.
+ */
+TEST_F(DumpHandlerGtidTest, DumpLoadClearsLoadingFlagOnError) {
+  mock_binlog_reader_->SetGtidForTest("uuid:303");
+  mock_binlog_reader_->SetRunningForTest(false);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = "another_missing_dump_" + std::to_string(getpid()) + ".dmp";
+
+  std::string response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+
+  EXPECT_FALSE(dump_load_in_progress_.load())
+      << "Loading flag must be released so a follow-up DUMP LOAD is not blocked";
+
+  // A subsequent DUMP LOAD with another missing file should also fail with
+  // the same error class, not be blocked by a stuck flag.
+  query::Query retry_query;
+  retry_query.type = query::QueryType::DUMP_LOAD;
+  retry_query.filepath = "yet_another_missing_" + std::to_string(getpid()) + ".dmp";
+  std::string retry_response = handler_->Handle(retry_query, conn_ctx_);
+  EXPECT_TRUE(retry_response.find("ERROR") == 0)
+      << "Follow-up DUMP LOAD should produce a normal failure, not a 'load already in progress' error. Response: "
+      << retry_response;
+  EXPECT_TRUE(retry_response.find("another DUMP LOAD is in progress") == std::string::npos)
+      << "Follow-up DUMP LOAD must not be blocked by a leaked dump_load_in_progress flag";
+}
+
 #endif  // USE_MYSQL
 
 // ============================================================================

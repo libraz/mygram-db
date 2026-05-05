@@ -5,8 +5,6 @@
 
 #include "server/http_server.h"
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -312,12 +310,14 @@ using storage::DocId;
 
 HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                        const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
-                       cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats)
+                       cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats,
+                       std::shared_ptr<RateLimiter> rate_limiter)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
       binlog_reader_(binlog_reader),
       cache_manager_(cache_manager),
+      rate_limiter_(std::move(rate_limiter)),
       loading_(loading),
       tcp_stats_(tcp_stats) {
   parsed_allow_cidrs_ = ParseAllowCidrs(config_.allow_cidrs);
@@ -326,9 +326,14 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
     const auto configured_limit = full_config_->api.max_query_length;
     max_query_length_ = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
 
-    // Initialize rate limiter (if configured)
-    if (full_config_->api.rate_limiting.enable) {
-      rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+    // Rate limiter resolution:
+    //   - If the embedder injected a shared instance (ServerLifecycleManager
+    //     does this so quotas apply across TCP+HTTP), use it.
+    //   - Otherwise fall back to constructing a private one from config so
+    //     standalone HttpServer instances (and unit tests that pre-date the
+    //     shared rate limiter wiring) still rate-limit.
+    if (!rate_limiter_ && full_config_->api.rate_limiting.enable) {
+      rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                     static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
                                                     static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
       mygram::utils::StructuredLog()
@@ -345,6 +350,14 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   // Set timeouts
   server_->set_read_timeout(config_.read_timeout_sec, 0);
   server_->set_write_timeout(config_.write_timeout_sec, 0);
+
+  // Cap the maximum HTTP body size (Fix N-2). cpp-httplib rejects oversize
+  // POST bodies with 413 Payload Too Large before any handler runs, which
+  // protects /search and /count from memory-exhaustion attacks via giant
+  // JSON payloads. Default 16 MiB; configurable via api.http.max_body_bytes.
+  if (config_.max_body_bytes > 0) {
+    server_->set_payload_max_length(config_.max_body_bytes);
+  }
 
   // Setup network ACL before registering routes
   SetupAccessControl();
@@ -465,7 +478,14 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  if (running_) {
+  // Atomically transition running_ from false -> true. This replaces the prior
+  // check-then-set pattern, which let two concurrent Start() calls both pass
+  // the load and both proceed to spawn the server thread (P0-C). The CAS uses
+  // memory_order_acq_rel on success so that subsequent stores to server_thread_
+  // happen-after this acquire, and memory_order_relaxed on failure since the
+  // failure path only reads `expected` for diagnostic purposes.
+  bool expected = false;
+  if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
     mygram::utils::StructuredLog()
         .Event("server_error")
@@ -474,9 +494,6 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Error();
     return MakeUnexpected(error);
   }
-
-  // Set running flag before starting thread to avoid race condition
-  running_ = true;
 
   // Use a promise/future to safely communicate bind result from the thread
   auto start_promise = std::make_shared<std::promise<std::string>>();
@@ -490,7 +507,12 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Field("port", static_cast<uint64_t>(config_.port))
         .Info();
 
-    // Bind first, then signal success/failure before blocking on listen
+    // Bind first, then signal success/failure before blocking on listen.
+    // Note on running_ on failure: this thread holds the running_=true gate
+    // acquired by the parent Start() via CAS. Releasing it here with
+    // store(false, release) is safe because the parent has not yet observed
+    // the bind result — it is still blocked on start_future.wait_for(). The
+    // parent will then return the error without touching running_.
     if (!server_->bind_to_port(config_.bind, config_.port)) {
       std::string error_msg = "Failed to bind to " + config_.bind + ":" + std::to_string(config_.port);
       mygram::utils::StructuredLog()
@@ -500,7 +522,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
           .Field("port", static_cast<uint64_t>(config_.port))
           .Field("error", error_msg)
           .Error();
-      running_ = false;
+      running_.store(false, std::memory_order_release);
       start_promise->set_value(std::move(error_msg));
       return;
     }
@@ -508,27 +530,30 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
     // Bind succeeded, signal the caller
     start_promise->set_value("");
 
-    // Block on accepting connections (runs until server_->stop() is called)
+    // Block on accepting connections (runs until server_->stop() is called).
+    // listen_after_bind() returns false only if the server stopped abnormally.
     if (!server_->listen_after_bind()) {
-      running_ = false;
+      running_.store(false, std::memory_order_release);
     }
   });
 
   // Wait for the thread to report bind result (with timeout)
   auto status = start_future.wait_for(std::chrono::seconds(kStartupTimeoutSec));
   if (status == std::future_status::timeout) {
-    // Timed out waiting for bind; stop the server and join
+    // Timed out waiting for bind; stop the server and join.
     server_->stop();
     if (server_thread_ && server_thread_->joinable()) {
       server_thread_->join();
     }
-    running_ = false;
+    running_.store(false, std::memory_order_release);
     auto error = MakeError(ErrorCode::kTimeout, "HTTP server startup timed out");
     return MakeUnexpected(error);
   }
 
   std::string thread_error = start_future.get();
   if (!thread_error.empty()) {
+    // Bind failed inside the worker thread, which already called
+    // running_.store(false). Just join the thread; do not touch running_.
     if (server_thread_ && server_thread_->joinable()) {
       server_thread_->join();
     }
@@ -565,6 +590,33 @@ void HttpServer::Stop() {
   mygram::utils::StructuredLog().Event("http_server_stopped").Info();
 }
 
+HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
+  TableContextLookup result;
+
+  if (!IsValidTableName(table_name)) {
+    result.status = kHttpBadRequest;
+    result.message = "Invalid table name (allowed characters: letters, digits, '_', '-', '.')";
+    return result;
+  }
+
+  auto table_iter = table_contexts_.find(table_name);
+  if (table_iter == table_contexts_.end()) {
+    result.status = kHttpNotFound;
+    result.message = "Table not found: " + table_name;
+    return result;
+  }
+
+  if (!table_iter->second->index || !table_iter->second->doc_store) {
+    result.status = kHttpInternalServerError;
+    result.message = "Table context has null index or doc_store";
+    return result;
+  }
+
+  result.table_ctx = table_iter->second;
+  result.status = kHttpOk;
+  return result;
+}
+
 std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(const httplib::Request& req,
                                                                                 httplib::Response& res,
                                                                                 const std::string& command,
@@ -575,29 +627,16 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
 
-  // Extract table name from URL
+  // Validate the URL-bound table name and resolve its context. Errors are
+  // surfaced with the precise HTTP status code computed by the helper so
+  // callers do not need to know the underlying reason.
   std::string table = req.matches[1];
-
-  // Validate table name (whitelist) before any further processing.
-  // Rejecting unsafe names here prevents the value from breaking the
-  // QueryParser command grammar and turning the URL path into a query
-  // injection vector (e.g. `articles foo`).
-  if (!IsValidTableName(table)) {
-    SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
+  auto lookup = ResolveHttpTableContext(table);
+  if (lookup.table_ctx == nullptr) {
+    SendError(res, lookup.status, lookup.message);
     return std::nullopt;
   }
-
-  // Lookup table
-  auto table_iter = table_contexts_.find(table);
-  if (table_iter == table_contexts_.end()) {
-    SendError(res, kHttpNotFound, "Table not found: " + table);
-    return std::nullopt;
-  }
-  if (!table_iter->second->index || !table_iter->second->doc_store) {
-    SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
-    return std::nullopt;
-  }
-  auto* table_ctx = table_iter->second;
+  auto* table_ctx = lookup.table_ctx;
 
   // Parse JSON body
   json body;
@@ -712,23 +751,11 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     auto& query_ref = prepared->query;
     auto* query = &query_ref;
 
-    // Build pipeline parameters from table context
-    search_pipeline::FullPipelineParams params;
-    params.current_index = table_ctx->index.get();
-    params.current_doc_store = current_doc_store;
-    params.full_config = full_config_;
-    params.cache_manager = cache_manager_;
-    params.ngram_size = table_ctx->config.ngram_size;
-    params.kanji_ngram_size = table_ctx->config.kanji_ngram_size;
-    params.cross_boundary_ngrams = table_ctx->config.cross_boundary_ngrams;
-    params.filter_threshold = SearchHandler::GetFilterThreshold();
-    params.primary_key_column = table_ctx->config.primary_key;
-    params.bm25_stats = &table_ctx->bm25_stats;
-
-    // Set synonym dictionary if available
-    if (table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
-      params.synonym_dict = table_ctx->synonym_dict.get();
-    }
+    // Build pipeline parameters via the shared helper. SEARCH attaches BM25
+    // stats so the pipeline can score `_score` sorts; COUNT does not.
+    auto params = search_pipeline::BuildPipelineParamsFromContext(*table_ctx, full_config_, cache_manager_,
+                                                                  SearchHandler::GetFilterThreshold(),
+                                                                  /*attach_bm25_stats=*/true);
 
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
@@ -814,22 +841,10 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     auto& query_ref = prepared->query;
     auto* query = &query_ref;
 
-    // Build pipeline parameters from table context
-    search_pipeline::FullPipelineParams params;
-    params.current_index = table_ctx->index.get();
-    params.current_doc_store = table_ctx->doc_store.get();
-    params.full_config = full_config_;
-    params.cache_manager = cache_manager_;
-    params.ngram_size = table_ctx->config.ngram_size;
-    params.kanji_ngram_size = table_ctx->config.kanji_ngram_size;
-    params.cross_boundary_ngrams = table_ctx->config.cross_boundary_ngrams;
-    params.filter_threshold = SearchHandler::GetFilterThreshold();
-    params.primary_key_column = table_ctx->config.primary_key;
-
-    // Set synonym dictionary if available
-    if (table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
-      params.synonym_dict = table_ctx->synonym_dict.get();
-    }
+    // COUNT does not need BM25 stats (no `_score` sort), so leave them off.
+    auto params = search_pipeline::BuildPipelineParamsFromContext(*table_ctx, full_config_, cache_manager_,
+                                                                  SearchHandler::GetFilterThreshold(),
+                                                                  /*attach_bm25_stats=*/false);
 
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
@@ -864,21 +879,16 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       return;
     }
 
-    // Extract table name and ID from URL
-    std::string table = req.matches[1];
+    // Extract table name and ID from URL. Use the shared resolution helper so
+    // GET applies the same table-name whitelist and null-context guards as
+    // SEARCH and COUNT (M-6 follow-up).
     std::string id_str = req.matches[2];
-
-    // Lookup table
-    auto table_iter = table_contexts_.find(table);
-    if (table_iter == table_contexts_.end()) {
-      SendError(res, kHttpNotFound, "Table not found: " + table);
+    auto lookup = ResolveHttpTableContext(req.matches[1]);
+    if (lookup.table_ctx == nullptr) {
+      SendError(res, lookup.status, lookup.message);
       return;
     }
-    if (!table_iter->second->doc_store) {
-      SendError(res, kHttpInternalServerError, "Table context has null doc_store");
-      return;
-    }
-    auto* current_doc_store = table_iter->second->doc_store.get();
+    auto* current_doc_store = lookup.table_ctx->doc_store.get();
 
     // Parse ID
     uint64_t doc_id = 0;

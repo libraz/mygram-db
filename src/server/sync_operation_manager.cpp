@@ -2,12 +2,11 @@
  * @file sync_operation_manager.cpp
  * @brief SYNC operation manager implementation
  */
+// Logging is exclusively via mygram::utils::StructuredLog. Direct spdlog usage is prohibited in server code.
 
 #ifdef USE_MYSQL
 
 #include "server/sync_operation_manager.h"
-
-#include <spdlog/spdlog.h>
 
 #include <iomanip>
 #include <sstream>
@@ -63,85 +62,144 @@ SyncOperationManager::~SyncOperationManager() {
   }
 }
 
+// StartSync uses a two-phase locking pattern to safely reuse table-name slots
+// in sync_threads_ while never holding sync_mutex_ across a thread join.
+//
+// Phase 1 (under sync_mutex_):
+//   - Validate table existence and that no sync is currently is_running.
+//   - If a stale, non-joined std::thread is parked in sync_threads_ for this
+//     table (e.g. a previous SYNC ran to completion but its slot was never
+//     reaped), MOVE it out under the lock and tag the state as
+//     "JOINING_PREVIOUS". Concurrent StartSync/StopSync that look up this
+//     table observe is_running=false but a transitional status, which lets
+//     them give a clean error rather than racing into a partially-modified
+//     map state.
+//
+// Phase 2 (lock released): join the moved-out thread. This is purely a
+//   resource-cleanup step; no other locks are held.
+//
+// Phase 3 (under sync_mutex_ again): re-validate that no concurrent caller
+//   has flipped is_running back to true (e.g. another StartSync that ran the
+//   same dance), initialize sync_states_[table_name], publish the new thread
+//   into sync_threads_ via std::thread, and mark syncing_tables_.
+//
+// Why we cannot hold sync_mutex_ across the previous_thread.join(): the
+// background BuildSnapshotAsync's terminal update_state lambda acquires
+// sync_mutex_ to publish "COMPLETED"/"FAILED". Holding sync_mutex_ here would
+// deadlock against that.
+//
+// Why JOINING_PREVIOUS: it ensures concurrent StartSync calls observe a
+// distinct, non-IDLE state during the join window and refuse to start a new
+// sync rather than seeing is_running=false and racing into a duplicate
+// thread launch.
 mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager::StartSync(
     const std::string& table_name) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  std::unique_lock<std::mutex> lock(sync_mutex_);
-
-  // Check if table exists
-  if (table_contexts_.find(table_name) == table_contexts_.end()) {
-    return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
-  }
-
-  // Check if already running
-  if (sync_states_[table_name].is_running) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kSyncAlreadyInProgress, "SYNC already in progress for '" + table_name + "'"));
-  }
-
-  // Check memory health
-  auto health = mygram::utils::GetMemoryHealthStatus();
-  if (health == mygram::utils::MemoryHealthStatus::CRITICAL) {
-    return MakeUnexpected(MakeError(ErrorCode::kSyncMemoryCritical, "Memory critically low. Cannot start SYNC."));
-  }
-
-  // Log session timeout warning
-  uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
-  mygram::utils::StructuredLog()
-      .Event("sync_starting")
-      .Field("table", table_name)
-      .Field("session_timeout_sec", static_cast<uint64_t>(session_timeout))
-      .Field("hint", "ensure session_timeout_sec is sufficient for snapshot duration")
-      .Info();
-
-  // Mark as syncing
-  {
-    std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
-    syncing_tables_.insert(table_name);
-  }
-
-  // Initialize state
-  sync_states_[table_name].is_running = true;
-  sync_states_[table_name].status = "STARTING";
-  sync_states_[table_name].table_name = table_name;
-  sync_states_[table_name].processed_rows = 0;
-  sync_states_[table_name].error_message.clear();
-
-  // Clean up old thread if it exists and is joinable.
-  // Move out the previous thread under the lock, then release the lock and
-  // join. Holding sync_mutex_ across join() can deadlock with
-  // BuildSnapshotAsync's update_state lambda which acquires sync_mutex_ at
-  // the end of the background thread.
+  // Phase 1: validation + grab any stale thread under the lock.
   std::thread previous_thread;
-  auto thread_iter = sync_threads_.find(table_name);
-  if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
-    previous_thread = std::move(thread_iter->second);
-    sync_threads_.erase(thread_iter);
+  {
+    std::unique_lock<std::mutex> lock(sync_mutex_);
+
+    // Check if table exists
+    if (table_contexts_.find(table_name) == table_contexts_.end()) {
+      return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
+    }
+
+    // Check if already running. is_running is true while a worker thread is
+    // active OR while another StartSync is in its JOINING_PREVIOUS window.
+    if (sync_states_[table_name].is_running) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kSyncAlreadyInProgress, "SYNC already in progress for '" + table_name + "'"));
+    }
+    if (sync_states_[table_name].status == "JOINING_PREVIOUS") {
+      return MakeUnexpected(MakeError(ErrorCode::kSyncAlreadyInProgress,
+                                      "SYNC for '" + table_name + "' is being restarted; please retry shortly"));
+    }
+
+    // CRITICAL: claim the slot unconditionally before releasing the lock.
+    // Concurrent StartSync racers checking is_running above must see this
+    // claim and bail out. Earlier versions only claimed when a previous
+    // thread existed; for the first concurrent burst (no stale thread), all
+    // racers passed the check and Phase 3 spawned multiple threads -> abort
+    // (regression test ConcurrentStartSyncIsRaceFree).
+    sync_states_[table_name].is_running = true;
+    sync_states_[table_name].status = "JOINING_PREVIOUS";
+
+    // Move any stale thread out of sync_threads_ for joining outside the
+    // lock. The JOINING_PREVIOUS status is set above whether or not a stale
+    // thread exists, so concurrent racers always observe a non-IDLE state.
+    auto thread_iter = sync_threads_.find(table_name);
+    if (thread_iter != sync_threads_.end() && thread_iter->second.joinable()) {
+      previous_thread = std::move(thread_iter->second);
+      sync_threads_.erase(thread_iter);
+    }
   }
+
+  // Phase 2: join the previous thread WITHOUT holding sync_mutex_, so that
+  // its terminal update_state lambda (which itself acquires sync_mutex_) can
+  // make progress.
   if (previous_thread.joinable()) {
-    lock.unlock();
     previous_thread.join();
-    lock.lock();
   }
-  // Launch async build (store thread instead of detaching)
-  // Wrap in try/catch to rollback state if thread creation fails
-  try {
-    sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
-  } catch (const std::system_error& e) {
-    // Rollback: remove from syncing_tables_ and reset sync state
+
+  // Phase 3: re-acquire the lock and finish initialization.
+  {
+    std::unique_lock<std::mutex> lock(sync_mutex_);
+
+    // Memory health check (deferred until after join so we use fresh data).
+    auto health = mygram::utils::GetMemoryHealthStatus();
+    if (health == mygram::utils::MemoryHealthStatus::CRITICAL) {
+      // Roll back the JOINING_PREVIOUS claim if we set it.
+      if (sync_states_[table_name].status == "JOINING_PREVIOUS") {
+        sync_states_[table_name].is_running = false;
+        sync_states_[table_name].status.clear();
+      }
+      return MakeUnexpected(MakeError(ErrorCode::kSyncMemoryCritical, "Memory critically low. Cannot start SYNC."));
+    }
+
+    // Log session timeout warning
+    uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
+    mygram::utils::StructuredLog()
+        .Event("sync_starting")
+        .Field("table", table_name)
+        .Field("session_timeout_sec", static_cast<uint64_t>(session_timeout))
+        .Field("hint", "ensure session_timeout_sec is sufficient for snapshot duration")
+        .Info();
+
+    // Mark as syncing
     {
       std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
-      syncing_tables_.erase(table_name);
+      syncing_tables_.insert(table_name);
     }
-    syncing_tables_cv_.notify_all();
-    sync_states_[table_name].is_running = false;
-    sync_states_[table_name].status = "FAILED";
-    sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
-    return MakeUnexpected(
-        MakeError(ErrorCode::kSyncThreadCreationFailed, "Failed to create sync thread: " + std::string(e.what())));
+
+    // Initialize state. is_running may already be true if we set it during
+    // Phase 1 (JOINING_PREVIOUS); in either case we want it true now.
+    sync_states_[table_name].is_running = true;
+    sync_states_[table_name].status = "STARTING";
+    sync_states_[table_name].table_name = table_name;
+    sync_states_[table_name].processed_rows = 0;
+    sync_states_[table_name].error_message.clear();
+
+    // Launch async build (store thread instead of detaching)
+    // Wrap in try/catch to rollback state if thread creation fails
+    try {
+      sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+    } catch (const std::system_error& e) {
+      // Rollback: remove from syncing_tables_ and reset sync state
+      {
+        std::lock_guard<std::mutex> sync_lock(syncing_tables_mutex_);
+        syncing_tables_.erase(table_name);
+      }
+      syncing_tables_cv_.notify_all();
+      sync_states_[table_name].is_running = false;
+      sync_states_[table_name].status = "FAILED";
+      sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
+      return MakeUnexpected(
+          MakeError(ErrorCode::kSyncThreadCreationFailed, "Failed to create sync thread: " + std::string(e.what())));
+    }
   }
 
   return "OK SYNC STARTED table=" + table_name + " job_id=1";
@@ -195,7 +253,14 @@ std::string SyncOperationManager::GetSyncStatus() {
   }
 
   if (!any_active) {
-    return "status=IDLE message=\"No sync operation performed\"";
+    // Wrap the historical "status=IDLE message=..." payload with the standard
+    // OK protocol prefix produced by FormatStatus. Existing CLI clients that
+    // parse the body suffix continue to work; what changes is that all
+    // SyncStatus replies now share the same OK framing as the active-sync
+    // path produced by SendResponse upstream.
+    return ResponseFormatter::FormatStatus(R"(SYNC_STATUS)"
+                                           "\r\n"
+                                           R"(status=IDLE message="No sync operation performed")");
   }
 
   std::string result = oss.str();

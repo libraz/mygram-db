@@ -133,6 +133,49 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManager_ReturnsError) {
       << "Error should mention sync_manager, got: " << error_msg;
 }
 
+/**
+ * @brief Create() should report null sync_manager via the SYNC-domain error
+ *        code (kSyncManagerNull), not a Network-range code.
+ *
+ * Regression test for H-5: previously the factory used kNetworkNullDependency
+ * (6024), which mis-attributed a SYNC/Index-domain error to the Network
+ * range and made it harder to filter by error class in observability tools.
+ * The fix introduces kSyncManagerNull (4014) in the 4000-4999 Index/Business
+ * range so the error code matches the module that surfaces it.
+ */
+TEST_F(SyncHandlerTest, CreateWithNullSyncManagerReturnsCorrectErrorCode) {
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = nullptr,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = nullptr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto result = SyncHandler::Create(ctx, nullptr);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kSyncManagerNull)
+      << "Expected kSyncManagerNull (4014), got code=" << static_cast<int>(result.error().code());
+  // Error code must be in the 4000-4999 Index/Business range.
+  EXPECT_GE(static_cast<int>(result.error().code()), 4000);
+  EXPECT_LT(static_cast<int>(result.error().code()), 5000);
+}
+
 // ============================================================================
 // Query Parser Tests
 // ============================================================================
@@ -325,6 +368,45 @@ TEST(SyncOperationManagerTest, SyncThreadsProperlyManaged) {
 
   // If we reach this point without hanging, thread management is correct
   SUCCEED();
+}
+
+/**
+ * @brief SYNC STATUS reply when no sync is running must use the canonical
+ *        FormatStatus framing.
+ *
+ * Previously SyncOperationManager returned a bare "status=IDLE message=..."
+ * line, while every other status reply produced by the TCP protocol carries
+ * an "OK ..." prefix. Mixing the two confused log scrapers and frustrated
+ * grep-based diagnostics. After Phase 3-C the IDLE response is wrapped via
+ * ResponseFormatter::FormatStatus so the prefix matches the active-sync
+ * branch produced by SendResponse.
+ */
+TEST(SyncOperationManagerStatusFormatTest, SyncStatusIdleResponseIsFormatStatus) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext test_ctx;
+  test_ctx.name = "test_table";
+  test_ctx.config.name = "test_table";
+  test_ctx.config.ngram_size = 2;
+  test_ctx.index = std::make_unique<index::Index>(2);
+  test_ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  table_contexts["test_table"] = &test_ctx;
+
+  config::Config full_config;
+  config::TableConfig table_config;
+  table_config.name = "test_table";
+  full_config.tables.push_back(table_config);
+
+  SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
+
+  std::string idle = sync_mgr.GetSyncStatus();
+
+  // Canonical OK prefix produced by FormatStatus("SYNC_STATUS\r\n...").
+  EXPECT_EQ(idle.rfind("OK SYNC_STATUS", 0), 0U)
+      << "IDLE SYNC_STATUS must begin with the 'OK SYNC_STATUS' prefix produced by FormatStatus, got: " << idle;
+  EXPECT_NE(idle.find("status=IDLE"), std::string::npos)
+      << "IDLE SYNC_STATUS body must still carry 'status=IDLE' for client back-compat, got: " << idle;
+  EXPECT_NE(idle.find(R"(message="No sync operation performed")"), std::string::npos)
+      << "IDLE SYNC_STATUS body must preserve the historical message text, got: " << idle;
 }
 
 /**

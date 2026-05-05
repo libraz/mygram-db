@@ -1070,7 +1070,11 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
 
 TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   // tcp_stats supplied -> every handler (search/count/info/health*) must
-  // route IncrementRequests() to tcp_stats_, and stats_ must stay flat.
+  // route IncrementRequests() to tcp_stats_. After the L-6 reconciliation
+  // GetTotalRequests() reads through to the effective (tcp_stats_) source so
+  // both accessors agree on the same counter — this prevents /info from
+  // appearing to "lose" requests when callers query GetTotalRequests()
+  // directly.
   std::unordered_map<std::string, TableContext*> table_contexts;
   TableContext ctx;
   ctx.name = "test";
@@ -1122,11 +1126,54 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
 
   EXPECT_GE(tcp_after - tcp_baseline, 3U)
       << "All HTTP handlers must increment tcp_stats when provided (info + search + count)";
-  EXPECT_EQ(http_after, http_baseline)
-      << "HTTP-only stats must not be touched when tcp_stats is provided (otherwise /info would double count)";
+  // Effective stats reconciliation: GetTotalRequests() must reflect the same
+  // counter that RecordRequest() incremented. With tcp_stats injected, that
+  // is tcp_stats; the formerly-dead local stats_ is no longer exposed via
+  // the public accessor.
+  EXPECT_EQ(http_after - http_baseline, tcp_after - tcp_baseline)
+      << "GetTotalRequests() must read from the effective stats source (tcp_stats when provided)";
 
   http_server.Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+/**
+ * @test L-6: HttpServer::GetStats() must reflect the effective stats source.
+ *
+ * Constructing HttpServer with `tcp_stats` makes that instance the canonical
+ * counter sink — RecordRequest() routes there, and GetStats()/GetTotalRequests()
+ * must read from the same place. Without this guarantee, /info reports a
+ * different total than direct GetTotalRequests() calls (the old "dead stats_"
+ * behavior).
+ */
+TEST(HttpServerStatsTest, EffectiveStatsTracksConfiguredSource) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  ServerStats tcp_stats;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  // Use a port outside the range used by other tests in this file
+  // (18086/18087) and outside the bind-conflict suite range (18091) so this
+  // pure-accessor test never collides with parallel server-binding tests.
+  http_config.port = 18093;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr, &tcp_stats);
+
+  // Direct increments to the injected tcp_stats must be visible through the
+  // HTTP server's accessor — the common case for ServerLifecycleManager,
+  // which feeds the same ServerStats to TcpServer and HttpServer.
+  uint64_t baseline = http_server.GetTotalRequests();
+  tcp_stats.IncrementRequests();
+  tcp_stats.IncrementRequests();
+
+  EXPECT_EQ(http_server.GetTotalRequests() - baseline, 2U);
+  EXPECT_EQ(&http_server.GetStats(), &tcp_stats)
+      << "GetStats() must return the injected tcp_stats reference, not the dead local stats_";
 }
 
 }  // namespace server

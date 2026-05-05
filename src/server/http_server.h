@@ -46,6 +46,7 @@ namespace mygramdb::server {
 namespace defaults {
 constexpr int kHttpPort = 8080;
 constexpr int kHttpTimeoutSec = 5;
+constexpr size_t kHttpDefaultMaxBodyBytes = 16 * 1024 * 1024;  // 16 MiB
 }  // namespace defaults
 
 /**
@@ -61,6 +62,15 @@ struct HttpServerConfig {
   std::vector<std::string> allow_cidrs;
 
   /**
+   * @brief Maximum HTTP request body size in bytes.
+   *
+   * cpp-httplib rejects bodies larger than this with HTTP 413 (Payload Too
+   * Large) before invoking any handler. Default: 16 MiB. Source of truth is
+   * `config::ApiConfig::http::max_body_bytes`.
+   */
+  size_t max_body_bytes = defaults::kHttpDefaultMaxBodyBytes;
+
+  /**
    * @brief Create HttpServerConfig from application Config
    *
    * @param cfg Application configuration
@@ -73,6 +83,9 @@ struct HttpServerConfig {
     hc.enable_cors = cfg.api.http.enable_cors;
     hc.cors_allow_origin = cfg.api.http.cors_allow_origin;
     hc.allow_cidrs = cfg.network.allow_cidrs;
+    if (cfg.api.http.max_body_bytes > 0) {
+      hc.max_body_bytes = static_cast<size_t>(cfg.api.http.max_body_bytes);
+    }
     return hc;
   }
 };
@@ -100,11 +113,16 @@ class HttpServer {
    * @param cache_manager Optional CacheManager for cache statistics
    * @param loading Reference to loading flag (shared with TcpServer)
    * @param tcp_stats Optional pointer to TCP server's ServerStats (for /info and /metrics)
+   * @param rate_limiter Optional shared rate limiter. When non-null, this
+   *                     instance MUST be the same one used by TcpServer so a
+   *                     single client's quota applies across protocols. When
+   *                     null, HttpServer creates its own from `full_config`
+   *                     for backward compatibility with tests.
    */
   HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr, mysql::IBinlogReader* binlog_reader = nullptr,
              cache::CacheManager* cache_manager = nullptr, std::atomic<bool>* loading = nullptr,
-             ServerStats* tcp_stats = nullptr);
+             ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr);
 
   ~HttpServer();
 
@@ -136,14 +154,32 @@ class HttpServer {
   int GetPort() const { return config_.port; }
 
   /**
-   * @brief Get total requests handled
+   * @brief Get total requests handled.
+   *
+   * Reads through the *effective* stats source: when a `tcp_stats` pointer was
+   * supplied at construction (the embedded-server case driven by
+   * ServerLifecycleManager), the count reflects unified TCP+HTTP traffic on
+   * that shared instance. Otherwise the local `stats_` is used (the
+   * standalone HttpServer mode used by unit tests).
+   *
+   * Reconciles review finding L-6: previously `stats_` was always exposed
+   * even when it was dead (because `RecordRequest()` had already routed
+   * counter increments to the shared tcp_stats instance), causing /info to
+   * appear to "lose" requests when the dead `stats_` was queried directly.
    */
-  uint64_t GetTotalRequests() const { return stats_.GetTotalRequests(); }
+  uint64_t GetTotalRequests() const { return GetEffectiveStats().GetTotalRequests(); }
 
   /**
-   * @brief Get server statistics
+   * @brief Get server statistics (effective source).
+   *
+   * Returns the same instance that `RecordRequest()` increments — the
+   * injected `tcp_stats_` when present, otherwise the local `stats_`.
+   * Callers that need to assert on the standalone HTTP-only counters can
+   * still inject a private ServerStats and inspect it directly; this
+   * accessor never returns the dead local instance when a shared one is
+   * configured.
    */
-  const ServerStats& GetStats() const { return stats_; }
+  const ServerStats& GetStats() const { return GetEffectiveStats(); }
 
  private:
   HttpServerConfig config_;
@@ -154,6 +190,24 @@ class HttpServer {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   size_t max_query_length_{0};  // Configured max query length limit
 
+  // running_ is the canonical lifecycle gate for HttpServer.
+  //
+  // Contract:
+  //   - Start() acquires the gate via compare_exchange_strong(false -> true).
+  //     Only the thread that succeeds at this CAS owns the right to spawn the
+  //     server thread. All competing concurrent Start() calls observe the gate
+  //     as already taken and return ErrorCode::kNetworkAlreadyRunning.
+  //   - Stop() releases the gate via compare_exchange_strong(true -> false).
+  //     Only the thread that succeeds at this CAS owns the right to stop the
+  //     httplib server and join the worker thread. Subsequent Stop() calls
+  //     short-circuit.
+  //   - Internal failure paths (bind failure inside the worker thread, listen
+  //     loop returning false) call store(false) only because they are reached
+  //     while the gate is already held by the corresponding Start() invocation.
+  //     They therefore "release" the gate the same way Stop() does, which is
+  //     safe because the parent Start() has not yet returned success and
+  //     concurrent Stop() callers either observe running_=false (and bail) or
+  //     race the join via Stop()'s own CAS.
   std::atomic<bool> running_{false};
   std::chrono::steady_clock::time_point start_time_{std::chrono::steady_clock::now()};
 
@@ -168,7 +222,13 @@ class HttpServer {
   mysql::IBinlogReader* binlog_reader_;
 
   cache::CacheManager* cache_manager_;
-  std::unique_ptr<RateLimiter> rate_limiter_;
+  // Rate limiter is held as shared_ptr so the same instance can be co-owned
+  // by TcpServer and HttpServer. A single client's quota MUST apply across
+  // protocols; two independent limiters give the client effectively 2x the
+  // configured limit. When the parent (ServerLifecycleManager / TcpServer)
+  // does not provide one, HttpServer falls back to constructing its own from
+  // `full_config_->api.rate_limiting`.
+  std::shared_ptr<RateLimiter> rate_limiter_;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
@@ -195,6 +255,37 @@ class HttpServer {
     nlohmann::json body;
     query::Query query;
   };
+
+  /**
+   * @brief Resolution result for a request-bound table context.
+   *
+   * Carries the (already-validated) `TableContext*` and an HTTP status code
+   * describing the failure mode. On success the pointer is non-null and
+   * `status` is 200; on failure the pointer is null, `status` carries the
+   * intended HTTP code, and `message` is the user-facing reason.
+   */
+  struct TableContextLookup {
+    TableContext* table_ctx = nullptr;  ///< Non-null on success.
+    int status = 0;                     ///< HTTP status (0 means uninitialized).
+    std::string message;                ///< Error message for failures.
+  };
+
+  /**
+   * @brief Validate a URL-bound table name and resolve its TableContext.
+   *
+   * Centralises the trio of checks that HandleSearch / HandleCount / HandleGet
+   * each performed inline:
+   *   1. `IsValidTableName` — reject names that would break the parser
+   *      grammar (uniform across all endpoints).
+   *   2. `table_contexts_.find` — ensure the table exists.
+   *   3. Non-null `index` and `doc_store` — defensive against partially
+   *      initialised contexts.
+   *
+   * @param table_name URL-extracted table name (raw match[1]).
+   * @return `TableContextLookup` whose `table_ctx` is non-null on success and
+   *         whose `status` / `message` describe the error otherwise.
+   */
+  TableContextLookup ResolveHttpTableContext(const std::string& table_name);
 
   /**
    * @brief Run the shared HandleSearch/HandleCount preamble.
@@ -282,6 +373,17 @@ class HttpServer {
    * cross-protocol totals. Otherwise the HTTP-only `stats_` is used.
    */
   void RecordRequest() { (tcp_stats_ != nullptr ? tcp_stats_ : &stats_)->IncrementRequests(); }
+
+  /**
+   * @brief Resolve the effective stats source (shared TCP stats or local).
+   *
+   * Centralises the "tcp_stats_ if non-null else stats_" choice that
+   * RecordRequest() and the public GetStats()/GetTotalRequests() accessors
+   * make. Keeps the three call sites in lockstep so an /info request never
+   * observes a stats source different from the one RecordRequest() updated.
+   */
+  const ServerStats& GetEffectiveStats() const { return tcp_stats_ != nullptr ? *tcp_stats_ : stats_; }
+  ServerStats& GetEffectiveStats() { return tcp_stats_ != nullptr ? *tcp_stats_ : stats_; }
 
   /**
    * @brief Send JSON response

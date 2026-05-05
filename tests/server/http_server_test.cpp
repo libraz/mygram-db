@@ -11,7 +11,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <future>
 #include <nlohmann/json.hpp>
+#include <thread>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -129,6 +133,155 @@ TEST_F(HttpServerStartupTest, DoubleStartReturnsError) {
 
   auto result2 = server.Start();
   ASSERT_FALSE(result2.has_value()) << "Double-start should return an error";
+
+  server.Stop();
+}
+
+/**
+ * @brief P0-C regression: concurrent Start() calls must serialize through a
+ *        single CAS, with at most one success.
+ *
+ * Pre-fix, Start() did a relaxed `if (running_) return` followed by a relaxed
+ * `running_ = true` store. Two threads could both observe running_=false and
+ * both proceed past the gate, racing the spawning of the server thread. The
+ * fix replaces the check-then-set with compare_exchange_strong; this test
+ * spawns N threads that all call Start() at the same time and asserts that
+ * exactly one succeeds while the rest receive the "already running" error.
+ */
+TEST_F(HttpServerStartupTest, ConcurrentStartCallsNoRace) {
+  constexpr int kPort = 18093;
+  constexpr int kThreadCount = 8;
+
+  auto cfg = MakeConfig(kPort);
+  HttpServer server(cfg, table_contexts_, config_.get());
+
+  // Synchronize all worker threads on a barrier so they collide on the CAS
+  // as tightly as possible.
+  std::atomic<int> ready_count{0};
+  std::atomic<bool> go{false};
+  std::vector<std::future<bool>> futures;
+  futures.reserve(kThreadCount);
+
+  for (int i = 0; i < kThreadCount; ++i) {
+    futures.push_back(std::async(std::launch::async, [&server, &ready_count, &go]() {
+      ready_count.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      auto r = server.Start();
+      return r.has_value();
+    }));
+  }
+
+  // Wait for all threads to be parked at the barrier, then release them.
+  while (ready_count.load(std::memory_order_acquire) < kThreadCount) {
+    std::this_thread::yield();
+  }
+  go.store(true, std::memory_order_release);
+
+  int success_count = 0;
+  int already_running_count = 0;
+  for (auto& f : futures) {
+    if (f.get()) {
+      ++success_count;
+    } else {
+      ++already_running_count;
+    }
+  }
+
+  EXPECT_EQ(success_count, 1) << "Exactly one Start() should win the CAS";
+  EXPECT_EQ(already_running_count, kThreadCount - 1) << "All other Start() calls should report already-running";
+  EXPECT_TRUE(server.IsRunning());
+
+  // Sanity: server is actually responsive after the race resolves.
+  httplib::Client client("http://127.0.0.1:" + std::to_string(kPort));
+  auto res = client.Get("/health");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  server.Stop();
+  EXPECT_FALSE(server.IsRunning());
+}
+
+/**
+ * @brief Fix N-2: HttpServer caps request body size with `set_payload_max_length`.
+ *
+ * Configuring `max_body_bytes = 1024` and POSTing a 2 KiB body must elicit
+ * a 4xx response from cpp-httplib, NOT crash and NOT route into the search
+ * handler. cpp-httplib returns 413 Payload Too Large for this case.
+ */
+TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
+  auto cfg = MakeConfig(18094);
+  cfg.max_body_bytes = 1024;  // 1 KiB cap
+
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  httplib::Client client("http://127.0.0.1:18094");
+
+  // Build a 2 KiB JSON-shaped body. The actual content does not need to be
+  // valid JSON because the server should reject it before parsing.
+  std::string padding(2048, 'x');
+  std::string body = R"({"q":")" + padding + R"("})";
+  ASSERT_GT(body.size(), cfg.max_body_bytes);
+
+  auto res = client.Post("/test/search", body, "application/json");
+  ASSERT_TRUE(res) << "POST failed at the network layer";
+  EXPECT_EQ(res->status, 413) << "Expected 413 Payload Too Large for body > max_body_bytes";
+
+  server.Stop();
+}
+
+/**
+ * @brief Regression: GET /{table}/:id must apply the same table-name
+ *        whitelist as SEARCH/COUNT.
+ *
+ * Pre-fix, HandleGet only checked table_contexts_.find() for the URL-bound
+ * table name. A name containing characters outside the parser-grammar safe
+ * set (e.g. `te$st`) would fall through to a 404 ("Table not found") even
+ * though the input was syntactically invalid. Now ResolveHttpTableContext
+ * is shared, so GET returns a 400 for invalid names just like SEARCH.
+ */
+TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
+  auto cfg = MakeConfig(18096);
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  httplib::Client client("http://127.0.0.1:18096");
+
+  // `te$st` contains an ASCII punctuation character that is rejected by the
+  // table-name whitelist (only [A-Za-z0-9._-] plus non-ASCII bytes are
+  // allowed). The cpp-httplib route regex `[^/]+` still matches, so the
+  // request reaches HandleGet, where ResolveHttpTableContext rejects it.
+  auto res = client.Get("/te$st/42");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400) << "Invalid table name should produce 400, got " << res->status;
+
+  server.Stop();
+}
+
+/**
+ * @brief Fix N-2: bodies at or below the cap are still accepted.
+ *
+ * Companion to RejectsBodyExceedingMaxSize: confirms the cap doesn't break
+ * normal traffic. A small valid body should be processed normally (the
+ * search itself may yield 0 or N results depending on the test fixture, but
+ * the response status must NOT be 413).
+ */
+TEST_F(HttpServerStartupTest, AcceptsBodyWithinMaxSize) {
+  auto cfg = MakeConfig(18095);
+  cfg.max_body_bytes = 1024;
+
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  httplib::Client client("http://127.0.0.1:18095");
+  std::string body = R"({"q":"test"})";
+  ASSERT_LE(body.size(), cfg.max_body_bytes);
+
+  auto res = client.Post("/test/search", body, "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_NE(res->status, 413) << "Body within cap should not be rejected as too large";
 
   server.Stop();
 }
