@@ -176,24 +176,7 @@ class TcpServer {
    */
   std::shared_ptr<RateLimiter> GetSharedRateLimiter() const { return rate_limiter_; }
 
-#ifdef USE_MYSQL
-  /**
-   * @brief Start SYNC operation for a table
-   * @param table_name Table to synchronize
-   * @return Response string (OK or ERROR formatted)
-   */
-  std::string StartSync(const std::string& table_name);
-
-  /**
-   * @brief Get SYNC status for all tables
-   * @return Response string with sync status
-   */
-  std::string GetSyncStatus();
-#endif
-
  private:
-  friend class SyncHandler;
-
   // Configuration
   ServerConfig config_;
   const config::Config* full_config_;
@@ -246,9 +229,6 @@ class TcpServer {
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler_;
 #endif
-
-  // Shutdown flag
-  std::atomic<bool> shutdown_requested_{false};
 };
 
 }  // namespace mygramdb::server

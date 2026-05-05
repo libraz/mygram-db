@@ -534,6 +534,24 @@ TEST_F(RequestDispatcherTest, LongRequestLogIsTruncated) {
 }
 
 /**
+ * @brief Regression test for CR-8: HasHandler reports registered handlers.
+ *
+ * The startup completeness check in ServerLifecycleManager::InitDispatcher
+ * relies on RequestDispatcher::HasHandler returning true exactly when a
+ * non-null handler has been registered for the given QueryType. Pin both the
+ * positive and negative cases so future refactors of the registry can't
+ * silently skip the check.
+ */
+TEST_F(RequestDispatcherTest, HasHandlerReturnsTrueForRegisteredTypes) {
+  EXPECT_TRUE(dispatcher_->HasHandler(QueryType::SEARCH));
+  EXPECT_TRUE(dispatcher_->HasHandler(QueryType::COUNT));
+  // FACET was never registered by the test fixture; HasHandler must report it
+  // as missing so the completeness check in InitDispatcher catches the gap.
+  EXPECT_FALSE(dispatcher_->HasHandler(QueryType::FACET));
+  EXPECT_FALSE(dispatcher_->HasHandler(QueryType::INFO));
+}
+
+/**
  * @brief Regression test: dispatching commands must bump total_requests.
  *
  * Previously RequestDispatcher::Dispatch only called IncrementCommand, so the

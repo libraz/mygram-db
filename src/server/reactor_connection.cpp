@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -261,7 +262,7 @@ size_t ReactorConnection::ExtractFramesLocked() {
   }
   if (consumed > 0) {
     // Single splice at the end to avoid quadratic erase-per-frame cost.
-    read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<ssize_t>(consumed));
+    read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
   }
   return enqueued;
 }

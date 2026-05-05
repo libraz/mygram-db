@@ -289,22 +289,32 @@ TEST_F(HealthEndpointTest, ConcurrentHealthChecks) {
 }
 
 /**
- * @brief Test health check endpoints don't increment main request counters excessively
+ * @brief Health endpoints must NOT be counted in total_requests.
+ *
+ * Orchestrators (Kubernetes liveness/readiness, load balancers) hit /health/*
+ * at high frequency. Counting probes in total_requests distorts the QPS view
+ * of actual application traffic, so HandleHealth/HandleHealthLive/
+ * HandleHealthReady/HandleHealthDetail intentionally skip RecordRequest().
+ *
+ * Regression test for fix N-7: previously all four health endpoints called
+ * RecordRequest(), inflating total_requests by ~3x of probe rate.
  */
-TEST_F(HealthEndpointTest, HealthChecksTrackedSeparately) {
+TEST_F(HealthEndpointTest, HealthChecksAreNotCountedInTotalRequests) {
   httplib::Client client(base_url_);
   client.set_connection_timeout(5);
 
-  // Make multiple health check requests
+  const uint64_t before = server_->GetTotalRequests();
+
+  // Make many health check requests against every health endpoint.
   for (int i = 0; i < 10; ++i) {
+    client.Get("/health");
     client.Get("/health/live");
     client.Get("/health/ready");
     client.Get("/health/detail");
   }
 
-  // Health checks should be tracked (30 requests made)
-  auto total_requests = server_->GetTotalRequests();
-  EXPECT_GE(total_requests, 30) << "Health check requests should be counted";
+  const uint64_t after = server_->GetTotalRequests();
+  EXPECT_EQ(after, before) << "Health probes must not bump total_requests; observed delta=" << (after - before);
 }
 
 }  // namespace mygramdb::server

@@ -1089,8 +1089,11 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 }
 
 void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response& res) {
-  RecordRequest();
-
+  // Health probes are intentionally NOT counted in total_requests:
+  // they are typically driven by orchestrators (Kubernetes liveness/readiness)
+  // at high frequency and would distort QPS metrics for actual application traffic.
+  // If you need a separate counter for probe rate, add a dedicated metric instead
+  // of resurrecting RecordRequest() here.
   json response;
   response["status"] = "ok";
   response["timestamp"] =
@@ -1100,8 +1103,7 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
 }
 
 void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Response& res) {
-  RecordRequest();
-
+  // Health probe — not counted in total_requests; see HandleHealth.
   // Liveness probe: Always return 200 OK if the process is running
   // This is used by orchestrators (Kubernetes, Docker) to detect deadlocks
   json response;
@@ -1113,8 +1115,7 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
 }
 
 void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Response& res) {
-  RecordRequest();
-
+  // Health probe — not counted in total_requests; see HandleHealth.
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
   bool is_ready = (loading_ == nullptr || !loading_->load());
 
@@ -1136,8 +1137,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
 }
 
 void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Response& res) {
-  RecordRequest();
-
+  // Health probe — not counted in total_requests; see HandleHealth.
   // Detailed health: Return comprehensive component status
   json response;
 

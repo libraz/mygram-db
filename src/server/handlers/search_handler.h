@@ -44,6 +44,14 @@ class SearchHandler : public CommandHandler {
    *
    * Forwards to search_pipeline::PostFilterByText for backward compatibility.
    *
+   * This static wrapper exists for the test surface
+   * (`tests/server/search_handler_test.cpp:SearchHandlerTest.PostFilterByText_*`);
+   * production code calls `search_pipeline::PostFilterByText` directly. Do not
+   * remove without first migrating those tests to call the search_pipeline
+   * function directly — otherwise the linker will fail and the dead-code
+   * detector that flagged this method will have a true positive instead of
+   * the false positive it currently raises.
+   *
    * @param candidates Candidate DocIDs from bitmap intersection
    * @param normalized_terms Normalized search terms to verify
    * @param doc_store Document store with normalized text

@@ -248,18 +248,27 @@ TEST_F(HttpServerTest, MultipleRequests) {
 
   httplib::Client client("http://127.0.0.1:18080");
 
-  // Make multiple requests
+  // Make multiple non-health requests. Health probes are intentionally not
+  // counted in total_requests (fix N-7); use /info as the counted endpoint.
   for (int i = 0; i < 10; i++) {
+    auto res = client.Get("/info");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+  }
+
+  // Make some health requests too — these MUST NOT show up in total_requests.
+  for (int i = 0; i < 5; i++) {
     auto res = client.Get("/health");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
   }
 
-  // Check total requests increased
+  // Final /info read for the counter (this one also counts).
   auto res = client.Get("/info");
   ASSERT_TRUE(res);
   auto body = json::parse(res->body);
-  EXPECT_GE(body["total_requests"].get<int>(), 11);  // At least 10 health + 1 info
+  // 10 prior /info + 1 final /info; health probes excluded.
+  EXPECT_GE(body["total_requests"].get<int>(), 11);
 }
 
 /**

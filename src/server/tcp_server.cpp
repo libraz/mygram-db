@@ -38,7 +38,6 @@
 #include "server/handlers/sync_handler.h"
 #endif
 #include "cache/cache_manager.h"
-#include "server/response_formatter.h"
 #include "server/server_lifecycle_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
@@ -61,7 +60,6 @@ constexpr size_t kIpAddressBufferSize = 64;
 
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
-constexpr int kDefaultConnectionRecvTimeoutSec = 60;
 
 }  // namespace
 
@@ -288,9 +286,6 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 void TcpServer::Stop() {
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
-  // Signal shutdown to all connection handlers
-  shutdown_requested_ = true;
-
 #ifdef USE_MYSQL
   // Request SYNC manager to shutdown
   if (sync_manager_) {
@@ -336,30 +331,5 @@ void TcpServer::Stop() {
 
   mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
 }
-
-#ifdef USE_MYSQL
-
-std::string TcpServer::StartSync(const std::string& table_name) {
-  if (!sync_manager_) {
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
-  auto result = sync_manager_->StartSync(table_name);
-  if (!result) {
-    return ResponseFormatter::FormatError(result.error().message());
-  }
-  return *result;
-}
-
-std::string TcpServer::GetSyncStatus() {
-  if (!sync_manager_) {
-    // Same protocol-framing concern as SyncHandler::HandleSyncStatus: a null
-    // sync_manager_ is a configuration error and should be reported with
-    // ERROR framing instead of a bare "status=IDLE ..." line.
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
-  return sync_manager_->GetSyncStatus();
-}
-
-#endif  // USE_MYSQL
 
 }  // namespace mygramdb::server

@@ -5,6 +5,9 @@
 
 #include "server/server_lifecycle_manager.h"
 
+#include <array>
+#include <string>
+
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
 #include "server/handlers/admin_handler.h"
@@ -328,6 +331,10 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
 mygram::utils::Expected<std::unique_ptr<RequestDispatcher>, mygram::utils::Error>
 ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const InitializedComponents& handlers) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   auto dispatcher = std::make_unique<RequestDispatcher>(handler_context, config_);
 
   // Register all command handlers
@@ -357,10 +364,73 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
   dispatcher->RegisterHandler(query::QueryType::SET, handlers.variable_handler.get());
   dispatcher->RegisterHandler(query::QueryType::SHOW_VARIABLES, handlers.variable_handler.get());
 #ifdef USE_MYSQL
-  // sync_handler is guaranteed to be non-null (sync_manager_ is enforced in constructor)
+  // sync_handler is guaranteed to be non-null (sync_manager_ is enforced in constructor).
+  // SYNC_STOP must also be registered: query_parser produces it for "SYNC STOP [table]"
+  // and sync_handler dispatches on it. Forgetting any one of SYNC / SYNC_STATUS /
+  // SYNC_STOP would leave that command falling through to the dispatcher's
+  // "Unknown query type" error instead of reaching the handler.
   dispatcher->RegisterHandler(query::QueryType::SYNC, handlers.sync_handler.get());
   dispatcher->RegisterHandler(query::QueryType::SYNC_STATUS, handlers.sync_handler.get());
+  dispatcher->RegisterHandler(query::QueryType::SYNC_STOP, handlers.sync_handler.get());
 #endif
+
+  // Startup completeness check: verify every QueryType that callers can
+  // actually produce has a registered handler. Forgetting to RegisterHandler
+  // a newly added enum value (the historical SYNC_STOP regression) silently
+  // turns it into "Unknown query type" at runtime; surfacing it here keeps the
+  // dispatcher table in lockstep with the QueryType enum.
+  //
+  // Intentionally excluded from the required set:
+  //   - QueryType::UNKNOWN: sentinel for parser failures.
+  //   - QueryType::SAVE / QueryType::LOAD: legacy aliases retained for parser
+  //     backward compatibility; the dispatcher rejects them with a normal
+  //     "Unknown query type" so users migrate to DUMP SAVE / DUMP LOAD.
+  //   - SYNC family entries are required only when USE_MYSQL is defined.
+#ifdef USE_MYSQL
+  constexpr size_t kRequiredQueryTypeCount = 28;
+#else
+  constexpr size_t kRequiredQueryTypeCount = 25;
+#endif
+  static constexpr std::array<query::QueryType, kRequiredQueryTypeCount> kRequiredQueryTypes{{
+      query::QueryType::SEARCH,
+      query::QueryType::COUNT,
+      query::QueryType::FACET,
+      query::QueryType::GET,
+      query::QueryType::DUMP_SAVE,
+      query::QueryType::DUMP_LOAD,
+      query::QueryType::DUMP_VERIFY,
+      query::QueryType::DUMP_INFO,
+      query::QueryType::DUMP_STATUS,
+      query::QueryType::INFO,
+      query::QueryType::CONFIG_HELP,
+      query::QueryType::CONFIG_SHOW,
+      query::QueryType::CONFIG_VERIFY,
+      query::QueryType::REPLICATION_STATUS,
+      query::QueryType::REPLICATION_STOP,
+      query::QueryType::REPLICATION_START,
+      query::QueryType::DEBUG_ON,
+      query::QueryType::DEBUG_OFF,
+      query::QueryType::OPTIMIZE,
+      query::QueryType::CACHE_CLEAR,
+      query::QueryType::CACHE_STATS,
+      query::QueryType::CACHE_ENABLE,
+      query::QueryType::CACHE_DISABLE,
+      query::QueryType::SET,
+      query::QueryType::SHOW_VARIABLES,
+#ifdef USE_MYSQL
+      query::QueryType::SYNC,
+      query::QueryType::SYNC_STATUS,
+      query::QueryType::SYNC_STOP,
+#endif
+  }};
+  for (const auto qt : kRequiredQueryTypes) {
+    if (!dispatcher->HasHandler(qt)) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kServerInitMissingDependency,
+                    "RequestDispatcher missing handler for QueryType=" + std::to_string(static_cast<int>(qt)) +
+                        " (see ServerLifecycleManager::InitDispatcher)"));
+    }
+  }
 
   return dispatcher;
 }

@@ -742,6 +742,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
       if (http.contains("cors_allow_origin")) {
         config.api.http.cors_allow_origin = http["cors_allow_origin"].get<std::string>();
       }
+      if (http.contains("read_timeout_sec")) {
+        config.api.http.read_timeout_sec = http["read_timeout_sec"].get<int>();
+      }
+      if (http.contains("write_timeout_sec")) {
+        config.api.http.write_timeout_sec = http["write_timeout_sec"].get<int>();
+      }
     }
     if (api.contains("default_limit")) {
       config.api.default_limit = api["default_limit"].get<int>();

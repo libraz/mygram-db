@@ -86,6 +86,15 @@ struct HttpServerConfig {
     if (cfg.api.http.max_body_bytes > 0) {
       hc.max_body_bytes = static_cast<size_t>(cfg.api.http.max_body_bytes);
     }
+    // 0 / negative timeouts are nonsensical (cpp-httplib would never time out
+    // or behave undefined). Treat them as "not configured" and keep the
+    // struct default so an operator can opt out by simply omitting the key.
+    if (cfg.api.http.read_timeout_sec > 0) {
+      hc.read_timeout_sec = cfg.api.http.read_timeout_sec;
+    }
+    if (cfg.api.http.write_timeout_sec > 0) {
+      hc.write_timeout_sec = cfg.api.http.write_timeout_sec;
+    }
     return hc;
   }
 };

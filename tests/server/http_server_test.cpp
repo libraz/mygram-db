@@ -286,5 +286,43 @@ TEST_F(HttpServerStartupTest, AcceptsBodyWithinMaxSize) {
   server.Stop();
 }
 
+/**
+ * @brief H-N8 regression: HttpServerConfig::FromConfig must propagate the
+ *        api.http.read_timeout_sec / write_timeout_sec values from the
+ *        parsed Config struct into the HttpServerConfig used by HttpServer.
+ *
+ * Pre-fix, those fields did not exist on `ApiConfig::http` and FromConfig had
+ * no source data, so HttpServer always ran with the hardcoded 5s defaults
+ * regardless of YAML. This test verifies the wiring all the way from Config
+ * to HttpServerConfig (HttpServer itself applies the values to httplib via
+ * set_read_timeout / set_write_timeout, which is unit-tested at httplib's
+ * own layer).
+ */
+TEST_F(HttpServerStartupTest, FromConfigPropagatesHttpTimeouts) {
+  config::Config cfg;
+  cfg.api.http.read_timeout_sec = 17;
+  cfg.api.http.write_timeout_sec = 23;
+
+  HttpServerConfig hc = HttpServerConfig::FromConfig(cfg);
+  EXPECT_EQ(hc.read_timeout_sec, 17);
+  EXPECT_EQ(hc.write_timeout_sec, 23);
+}
+
+/**
+ * @brief Companion to FromConfigPropagatesHttpTimeouts: 0 / negative values
+ *        are treated as "not configured" so an operator opting out by
+ *        omitting the key keeps the struct default instead of disabling
+ *        timeouts entirely.
+ */
+TEST_F(HttpServerStartupTest, FromConfigIgnoresNonPositiveTimeouts) {
+  config::Config cfg;
+  cfg.api.http.read_timeout_sec = 0;
+  cfg.api.http.write_timeout_sec = -1;
+
+  HttpServerConfig hc = HttpServerConfig::FromConfig(cfg);
+  EXPECT_EQ(hc.read_timeout_sec, defaults::kHttpTimeoutSec);
+  EXPECT_EQ(hc.write_timeout_sec, defaults::kHttpTimeoutSec);
+}
+
 }  // namespace server
 }  // namespace mygramdb

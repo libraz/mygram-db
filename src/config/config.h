@@ -53,6 +53,7 @@ constexpr const char* kDumpDefaultFilename = "mygramdb.dmp";
 // API defaults
 constexpr int kTcpPort = 11016;
 constexpr int kHttpPort = 8080;
+constexpr int kHttpTimeoutSec = 5;  ///< Default httplib read/write timeout (seconds)
 
 // Query defaults
 constexpr int kDefaultLimit = 100;
@@ -320,6 +321,18 @@ struct ApiConfig {
     int port = defaults::kHttpPort;
     bool enable_cors = false;
     std::string cors_allow_origin;
+
+    /// Read timeout in seconds, plumbed into `httplib::Server::set_read_timeout`.
+    /// Bounds how long the HTTP server waits for the client to finish sending
+    /// a request before closing the socket. Defaults to `kHttpTimeoutSec` (5s);
+    /// matched by `HttpServerConfig::read_timeout_sec`.
+    int read_timeout_sec = defaults::kHttpTimeoutSec;
+
+    /// Write timeout in seconds, plumbed into `httplib::Server::set_write_timeout`.
+    /// Bounds how long the HTTP server waits while sending a response before
+    /// declaring the peer unresponsive. Defaults to `kHttpTimeoutSec` (5s);
+    /// matched by `HttpServerConfig::write_timeout_sec`.
+    int write_timeout_sec = defaults::kHttpTimeoutSec;
 
     /// Maximum HTTP request body size in bytes. Bodies larger than this are
     /// rejected with HTTP 413 (Payload Too Large) by cpp-httplib before any

@@ -22,6 +22,11 @@ void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* h
   handlers_[type] = handler;
 }
 
+bool RequestDispatcher::HasHandler(query::QueryType type) const {
+  auto it = handlers_.find(type);
+  return it != handlers_.end() && it->second != nullptr;
+}
+
 std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionContext& conn_ctx) {
   // Untrusted client input may contain log-injection sequences. Truncation also
   // bounds log volume on long requests. The full byte length is preserved in a

@@ -344,6 +344,34 @@ TEST_F(ServerLifecycleManagerTest, Initialize_SyncHandlerReceivesSyncManager) {
   // Cleanup
   result->acceptor->Stop();
 }
+
+/**
+ * @test Initialize_DispatcherRegistersAllSyncQueryTypes
+ * @brief Regression test for fix CR-8: SYNC, SYNC_STATUS, and SYNC_STOP must
+ *        all be wired into the RequestDispatcher.
+ *
+ * Pre-fix, SYNC_STOP was parsed by query_parser.cpp and handled inside
+ * sync_handler.cpp but never registered in ServerLifecycleManager::InitDispatcher.
+ * Clients sending "SYNC STOP <table>" therefore received "Unknown query type"
+ * even though the handler logic was reachable from the rest of the code.
+ *
+ * The completeness check inside InitDispatcher now fails fast on missing
+ * registrations; this test pins the contract for the SYNC family explicitly.
+ */
+TEST_F(ServerLifecycleManagerTest, Initialize_DispatcherRegistersAllSyncQueryTypes) {
+  auto manager = CreateManager();
+  auto result = manager->Initialize();
+  ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
+
+  ASSERT_NE(result->dispatcher, nullptr);
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC));
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STATUS));
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STOP))
+      << "SYNC_STOP must be registered in RequestDispatcher (regression CR-8)";
+
+  // Cleanup
+  result->acceptor->Stop();
+}
 #endif
 
 /**

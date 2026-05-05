@@ -24,7 +24,6 @@ namespace mygramdb::server {
 
 namespace {
 constexpr int kDefaultSyncWaitTimeoutSec = 30;
-constexpr int kSyncPollIntervalMs = 100;
 }  // namespace
 
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
