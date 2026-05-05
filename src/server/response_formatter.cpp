@@ -30,6 +30,60 @@ constexpr size_t kResponseBaseBufferSize = 32;
 constexpr size_t kEstimatedPrimaryKeySize = 12;
 
 /**
+ * @brief Write the cache section of a debug block into `oss`.
+ *
+ * Centralises the cache:hit / cache:miss / cache:disabled lines plus the
+ * accompanying age/saved/cost/key fields so SEARCH and COUNT cannot drift.
+ *
+ * Pre-unification, FormatSearchResponse used "cache: miss\r\ncache_reason:
+ * not_found\r\ncache_cost_ms: ..." while FormatCountResponse used "cache:
+ * miss (not found)\r\nquery_cost_ms: ..." for the same underlying state.
+ * The unified format follows the SEARCH wording (`cache: miss\r\n
+ * cache_reason: <reason>\r\n cache_cost_ms: ...`) because that variant
+ * carries one fact per line, which is friendlier for log parsers and matches
+ * the existing per-field debug protocol used elsewhere in the file.
+ *
+ * @param oss Stream to append to (caller owns surrounding "# DEBUG" framing).
+ * @param info Cache debug section.
+ * @param include_extended When true, emit the optional cache_age_ms /
+ *                         cache_saved_ms / cache_reason / cache_cost_ms /
+ *                         cache_key fields. When false, only the headline
+ *                         "cache: <status>" line is emitted (matches the
+ *                         abbreviated highlight-mode block).
+ */
+void WriteCacheDebugLines(std::ostream& oss, const query::CacheDebugInfo& info, bool include_extended) {
+  switch (info.status) {
+    case query::CacheDebugInfo::Status::HIT:
+      oss << "cache: hit\r\n";
+      if (include_extended) {
+        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << info.cache_age_ms << "\r\n";
+        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << info.cache_saved_ms << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
+      oss << "cache: miss\r\n";
+      if (include_extended) {
+        oss << "cache_reason: not_found\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << info.query_cost_ms << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_INVALIDATED:
+      oss << "cache: miss\r\n";
+      if (include_extended) {
+        oss << "cache_reason: invalidated\r\n";
+        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << info.query_cost_ms << "\r\n";
+      }
+      break;
+    case query::CacheDebugInfo::Status::MISS_DISABLED:
+      oss << "cache: disabled\r\n";
+      break;
+  }
+  if (include_extended && !info.cache_key.empty()) {
+    oss << "cache_key: " << info.cache_key << "\r\n";
+  }
+}
+
+/**
  * @brief Append debug information block to a response string
  *
  * Shared logic for FormatSearchResponse and FormatSearchResponseWithHighlights.
@@ -85,37 +139,11 @@ void AppendDebugBlock(std::string& response, const query::DebugInfo& debug_info,
     oss << "highlight: on\r\n";
   }
 
-  // Cache debug information
-  switch (debug_info.cache_info.status) {
-    case query::CacheDebugInfo::Status::HIT:
-      oss << "cache: hit\r\n";
-      if (include_detailed_counts) {
-        oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.cache_age_ms << "\r\n";
-        oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.cache_saved_ms
-            << "\r\n";
-      }
-      break;
-    case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
-      oss << "cache: miss\r\n";
-      if (include_detailed_counts) {
-        oss << "cache_reason: not_found\r\n";
-        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.query_cost_ms << "\r\n";
-      }
-      break;
-    case query::CacheDebugInfo::Status::MISS_INVALIDATED:
-      oss << "cache: miss\r\n";
-      if (include_detailed_counts) {
-        oss << "cache_reason: invalidated\r\n";
-        oss << "cache_cost_ms: " << std::fixed << std::setprecision(3) << debug_info.cache_info.query_cost_ms << "\r\n";
-      }
-      break;
-    case query::CacheDebugInfo::Status::MISS_DISABLED:
-      oss << "cache: disabled\r\n";
-      break;
-  }
-  if (include_detailed_counts && !debug_info.cache_info.cache_key.empty()) {
-    oss << "cache_key: " << debug_info.cache_info.cache_key << "\r\n";
-  }
+  // Cache debug information shared between SEARCH (detailed) and SEARCH-WITH-
+  // HIGHLIGHTS (abbreviated). COUNT shares the SAME formatting via
+  // FormatCountResponse, ensuring SEARCH and COUNT now agree on every line of
+  // the cache section.
+  WriteCacheDebugLines(oss, debug_info.cache_info, /*include_extended=*/include_detailed_counts);
 
   response += oss.str();
 }
@@ -226,7 +254,11 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
     return "OK COUNT " + std::to_string(count);
   }
 
-  // Debug path: use ostringstream for convenience
+  // Debug path: use ostringstream for convenience. Cache section is now
+  // produced by the same WriteCacheDebugLines helper used by SEARCH so the
+  // two response formats cannot drift (the previous implementation emitted
+  // "cache: miss (not found)\r\nquery_cost_ms: ..." here while SEARCH emitted
+  // "cache: miss\r\ncache_reason: not_found\r\ncache_cost_ms: ...").
   std::ostringstream oss;
   oss << "OK COUNT " << count;
   oss << "\r\n\r\n# DEBUG\r\n";
@@ -235,27 +267,9 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
   oss << "terms: " << debug_info->search_terms.size() << "\r\n";
   oss << "ngrams: " << debug_info->ngrams_used.size() << "\r\n";
 
-  // Cache debug information
-  switch (debug_info->cache_info.status) {
-    case query::CacheDebugInfo::Status::HIT:
-      oss << "cache: hit\r\n";
-      oss << "cache_age_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_age_ms << "\r\n";
-      oss << "cache_saved_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.cache_saved_ms
-          << "\r\n";
-      break;
-    case query::CacheDebugInfo::Status::MISS_NOT_FOUND:
-      oss << "cache: miss (not found)\r\n";
-      oss << "query_cost_ms: " << std::fixed << std::setprecision(3) << debug_info->cache_info.query_cost_ms << "\r\n";
-      break;
-    case query::CacheDebugInfo::Status::MISS_INVALIDATED:
-      oss << "cache: miss (invalidated)\r\n";
-      break;
-    case query::CacheDebugInfo::Status::MISS_DISABLED:
-      oss << "cache: disabled\r\n";
-      break;
-    default:
-      break;
-  }
+  // Emit the same extended cache section as the detailed SEARCH path so the
+  // two protocols agree on field names and line counts.
+  WriteCacheDebugLines(oss, debug_info->cache_info, /*include_extended=*/true);
 
   return oss.str();
 }
@@ -506,6 +520,8 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_memory_human: " << mygram::utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
     oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
+    oss << "cache_rejections: " << cache_stats.rejection_count << "\r\n";
+    oss << "cache_forced_clears: " << cache_stats.forced_clears << "\r\n";
     oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
     oss << "cache_invalidations_deferred: " << cache_stats.invalidations_deferred << "\r\n";
     oss << "cache_invalidations_batches: " << cache_stats.invalidations_batches << "\r\n";
@@ -515,6 +531,13 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
         << "\r\n";
     oss << "cache_total_time_saved_ms: " << std::fixed << std::setprecision(2) << cache_stats.TotalTimeSaved()
         << "\r\n";
+    // Configuration snapshot — these reflect the cache's runtime configuration
+    // so operators can correlate observed counters with the limits in force.
+    oss << "cache_max_memory_bytes: " << cache_stats.max_memory_bytes << "\r\n";
+    oss << "cache_max_memory_human: " << mygram::utils::FormatBytes(cache_stats.max_memory_bytes) << "\r\n";
+    oss << "cache_min_query_cost_ms: " << std::fixed << std::setprecision(3) << cache_stats.min_query_cost_ms << "\r\n";
+    oss << "cache_ttl_seconds: " << cache_stats.ttl_seconds << "\r\n";
+    oss << "cache_compression_enabled: " << (cache_stats.compression_enabled ? "1" : "0") << "\r\n";
   } else {
     oss << "cache_enabled: 0\r\n";
   }
@@ -866,6 +889,37 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "# HELP mygramdb_cache_ttl_expirations_total Total TTL-expired entries removed\n";
     oss << "# TYPE mygramdb_cache_ttl_expirations_total counter\n";
     oss << "mygramdb_cache_ttl_expirations_total " << cache_stats.ttl_expirations << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_rejections_total Total inserts rejected for being below the cost threshold\n";
+    oss << "# TYPE mygramdb_cache_rejections_total counter\n";
+    oss << "mygramdb_cache_rejections_total " << cache_stats.rejection_count << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_forced_clears_total Total Clear()/ClearTable() invocations\n";
+    oss << "# TYPE mygramdb_cache_forced_clears_total counter\n";
+    oss << "mygramdb_cache_forced_clears_total " << cache_stats.forced_clears << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_max_memory_bytes Configured cache memory ceiling\n";
+    oss << "# TYPE mygramdb_cache_max_memory_bytes gauge\n";
+    oss << "mygramdb_cache_max_memory_bytes " << cache_stats.max_memory_bytes << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_min_query_cost_ms Cost threshold below which inserts are rejected\n";
+    oss << "# TYPE mygramdb_cache_min_query_cost_ms gauge\n";
+    oss << "mygramdb_cache_min_query_cost_ms " << std::fixed << std::setprecision(3) << cache_stats.min_query_cost_ms
+        << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_ttl_seconds Configured TTL in seconds (0 = no expiration)\n";
+    oss << "# TYPE mygramdb_cache_ttl_seconds gauge\n";
+    oss << "mygramdb_cache_ttl_seconds " << cache_stats.ttl_seconds << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_compression_enabled Whether LZ4 compression is enabled (0/1)\n";
+    oss << "# TYPE mygramdb_cache_compression_enabled gauge\n";
+    oss << "mygramdb_cache_compression_enabled " << (cache_stats.compression_enabled ? 1 : 0) << "\n";
     oss << "\n";
 
     oss << "# HELP mygramdb_cache_invalidations_total Total number of cache invalidations\n";

@@ -5,6 +5,9 @@
 
 #include "server/handlers/admin_handler.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 
 #include "config/config_help.h"
@@ -21,6 +24,14 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
   switch (query.type) {
     case query::QueryType::INFO: {
       {
+        // INFO is the only AdminHandler command that requires table_catalog.
+        // CONFIG HELP/SHOW/VERIFY operate purely on the loaded config and intentionally
+        // do not need a catalog (verified by ConfigHandlerTest which constructs handler
+        // with table_catalog=nullptr). Keep the null-check scoped to commands that
+        // dereference the catalog so config commands remain usable in admin-only contexts.
+        if (ctx_.table_catalog == nullptr) {
+          return ResponseFormatter::FormatError("Table catalog not initialized");
+        }
         const auto& tables = ctx_.table_catalog->GetTables();
         // 1. Aggregate metrics (domain layer, pure function)
         auto metrics = StatisticsService::AggregateMetrics(tables);
@@ -177,6 +188,31 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
   }
   if (!std::filesystem::is_regular_file(canonical_path, ec)) {
     return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file");
+  }
+
+  // TOCTOU mitigation: between the canonical()/exists()/is_regular_file()
+  // checks above and LoadConfig()'s file-open below, an attacker with
+  // write access to the directory could swap canonical_path for a symlink.
+  // Probe the resolved path with O_NOFOLLOW to ensure it is still NOT a
+  // symlink at the moment of file-open. O_NOFOLLOW is portable to both
+  // Linux and macOS and causes open() to fail with ELOOP if the final
+  // path component is a symlink.
+  //
+  // Residual risk: between this open() and LoadConfig()'s open(), a path
+  // *component directory* (not the final symlink) could still be replaced.
+  // This is a much narrower window and is acceptable for an operator-facing
+  // CONFIG VERIFY command; full mitigation would require LoadConfig to
+  // accept an open fd, which is out of scope.
+  {
+    // POSIX open() is variadic; the vararg warning here is unavoidable.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    int probe_fd = ::open(canonical_path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (probe_fd < 0) {
+      // ELOOP indicates the path is now a symlink (raced); other errors
+      // (ENOENT, EACCES, ...) also defeat verification, so reject.
+      return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+    }
+    ::close(probe_fd);
   }
 
   // Try to load and validate the configuration file

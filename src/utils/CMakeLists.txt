@@ -16,6 +16,7 @@ target_include_directories(mygramdb_utils PUBLIC
 
 target_link_libraries(mygramdb_utils PUBLIC
   spdlog::spdlog
+  roaring
   ${ZLIB_LIBRARIES}
 )
 

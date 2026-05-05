@@ -111,7 +111,7 @@ std::string CacheHandler::HandleEnable() {
         "Please restart the server with cache.enabled = true in configuration.");
   }
 
-  return "OK CACHE_ENABLED";
+  return ResponseFormatter::FormatStatus("CACHE_ENABLED");
 }
 
 std::string CacheHandler::HandleDisable() {
@@ -121,7 +121,7 @@ std::string CacheHandler::HandleDisable() {
   }
 
   ctx_.cache_manager->Disable();
-  return "OK CACHE_DISABLED";
+  return ResponseFormatter::FormatStatus("CACHE_DISABLED");
 }
 
 }  // namespace mygramdb::server

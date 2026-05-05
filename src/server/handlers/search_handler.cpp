@@ -16,6 +16,7 @@
 #include "server/search_pipeline.h"
 #include "server/table_catalog.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
@@ -50,6 +51,22 @@ std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& 
 
 search_pipeline::FullPipelineParams SearchHandler::BuildPipelineParams(const query::Query& query,
                                                                        const PipelineOutput& output) const {
+  // Forward to the shared free function. The TableContext lookup must succeed
+  // here because ExecuteSearchPipeline already validated the table via
+  // GetTableContext; an unexpected null fails closed by returning a params
+  // struct with the index/doc_store wired up but no per-table data.
+  auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+  if (table_ctx != nullptr) {
+    return search_pipeline::BuildPipelineParamsFromContext(*table_ctx, ctx_.full_config, ctx_.cache_manager,
+                                                           filter_threshold_.load(std::memory_order_relaxed),
+                                                           /*attach_bm25_stats=*/true);
+  }
+
+  // Fallback for the (defensive) case where the catalog lost the entry
+  // between GetTableContext() and here. Use the data already projected onto
+  // PipelineOutput so the pipeline can still execute against the resolved
+  // index/doc_store. The pipeline will return an "Index not available" error
+  // if those are also null.
   search_pipeline::FullPipelineParams params;
   params.current_index = output.current_index;
   params.current_doc_store = output.current_doc_store;
@@ -59,22 +76,11 @@ search_pipeline::FullPipelineParams SearchHandler::BuildPipelineParams(const que
   params.kanji_ngram_size = output.current_kanji_ngram_size;
   params.cross_boundary_ngrams = output.current_cross_boundary;
   params.filter_threshold = filter_threshold_.load(std::memory_order_relaxed);
-
-  // Lookup table-specific settings
-  auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
-  if (table_ctx != nullptr) {
-    params.primary_key_column = table_ctx->config.primary_key;
-    params.bm25_stats = &table_ctx->bm25_stats;
-    if (table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
-      params.synonym_dict = table_ctx->synonym_dict.get();
-    }
-  }
   return params;
 }
 
 void SearchHandler::PopulateInputDebugInfo(search_pipeline::PipelinePath path_taken,
-                                           const search_pipeline::FullPipelineParams& params,
-                                           PipelineOutput& output) {
+                                           const search_pipeline::FullPipelineParams& params, PipelineOutput& output) {
   // search_terms reflects the terms actually fed to the search engine.
   output.debug_info.search_terms = output.all_search_terms;
 
@@ -144,16 +150,42 @@ void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
   output.debug_info.query_time_ms = pipeline_output.query_time_ms;
   output.debug_info.index_time_ms = pipeline_output.query_time_ms;
 
-  if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-    output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
-    output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
-  } else {
-    output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+  // Map the pipeline's authoritative miss reason to the debug protocol's
+  // CacheDebugInfo::Status. The pipeline distinguishes Stale vs NotFound vs
+  // Disabled; we collapse Stale and Disabled into the matching debug enums
+  // and report NotFound otherwise. Falling through to a single MISS_NOT_FOUND
+  // (the previous behaviour) hid genuinely-disabled and stale cases.
+  switch (pipeline_output.cache_miss_reason) {
+    case search_pipeline::CacheMissReason::kHit:
+      // Should not reach here: the cache-hit branch is handled by
+      // PopulateCacheHitDebugInfo. Treat as not-found to keep the field set.
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kStale:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_INVALIDATED;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kNotFound:
+    case search_pipeline::CacheMissReason::kCostBelowThreshold:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kDisabled:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+      break;
   }
 }
 
 std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx,
                                                  PipelineOutput& output) {
+  // Per-request latency: measure from handler entry through pipeline projection
+  // so both cache-hit fast paths and cache-miss paths are observable. The
+  // log event is emitted at DEBUG level — operators enable debug logging
+  // when investigating slow queries; structured-log filtering by level keeps
+  // production overhead minimal.
+  const auto request_start = std::chrono::steady_clock::now();
+
   // Pre-flight: server must not be loading.
   if (auto err = CheckNotLoading(); !err.empty()) {
     return err;
@@ -187,6 +219,11 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.all_search_terms = std::move(pipeline_output.all_search_terms);
   output.term_infos = std::move(pipeline_output.term_infos);
   output.query_time_ms = pipeline_output.query_time_ms;
+  // Mirror the authoritative cache hit signal so the caller can branch
+  // independently of debug_mode (debug_info is only populated when debug_mode
+  // is true; relying on it for control flow caused cache hits to skip the
+  // optimized early-return path in the common non-debug case).
+  output.cache_hit = pipeline_output.cache_hit;
 
   // Populate debug_info if requested. The cache-hit path produces a different
   // set of debug fields than the cache-miss paths.
@@ -203,6 +240,20 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
     }
   }
 
+  // Emit per-request structured log so operators can correlate cache_hit /
+  // result_count with end-to-end latency. Done after success projection so
+  // the fields are populated; the request_start timer captures any overhead
+  // between entry and pipeline completion.
+  const auto request_elapsed = std::chrono::steady_clock::now() - request_start;
+  const double elapsed_ms = std::chrono::duration<double, std::milli>(request_elapsed).count();
+  mygram::utils::StructuredLog()
+      .Event("search_completed")
+      .Field("table", query.table)
+      .Field("query_time_ms", elapsed_ms)
+      .Field("result_count", static_cast<int64_t>(output.results.size()))
+      .Field("cache_hit", output.cache_hit)
+      .Debug();
+
   return "";  // Success
 }
 
@@ -218,12 +269,18 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     return ResponseFormatter::FormatError("Document store not available");
   }
 
-  // Check for cache hit path - results are already final, just need pagination
-  bool is_cache_hit = (output.debug_info.cache_info.status == query::CacheDebugInfo::Status::HIT);
+  // Check for cache hit path - results are already final, just need pagination.
+  // Use the authoritative cache_hit signal that is set regardless of debug
+  // mode, instead of the debug_info status which is only populated when
+  // conn_ctx.debug_mode == true.
+  bool is_cache_hit = output.cache_hit;
 
   size_t total_results = output.results.size();
 
-  // Get primary key column name from table config
+  // Defensive null-check: GetTable() called earlier in the pipeline already
+  // validated this. The duplicate lookup is intentional during current
+  // refactor; will be eliminated once TableContext* is plumbed through
+  // PipelineOutput. See review finding M-9 / Phase 3 task.
   std::string primary_key_column = "id";  // default
   {
     auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;

@@ -11,6 +11,9 @@ namespace mygramdb::server {
 
 ServerStats::ServerStats() : start_time_(static_cast<uint64_t>(std::time(nullptr))) {}
 
+// Per-command counters cover hot-path commands; less common commands accumulate
+// in cmd_other_. Always update GetTotalCommands and aggregate stats together
+// when adding a new specific counter.
 void ServerStats::IncrementCommand(query::QueryType type) {
   // These are independent counters with no happens-before relationship.
   // relaxed ordering is sufficient (reviewed: no cross-counter invariant
@@ -48,15 +51,30 @@ void ServerStats::IncrementCommand(query::QueryType type) {
     case query::QueryType::CONFIG_VERIFY:
       cmd_config_.fetch_add(1, std::memory_order_relaxed);
       break;
-    case query::QueryType::OPTIMIZE:
-      // Optimize doesn't need a counter
-      break;
-    case query::QueryType::DEBUG_ON:
-    case query::QueryType::DEBUG_OFF:
-      // Debug commands don't need counters
-      break;
     case query::QueryType::UNKNOWN:
       cmd_unknown_.fetch_add(1, std::memory_order_relaxed);
+      break;
+    // Less-common commands aggregate into cmd_other_ so GetTotalCommands and
+    // total_requests reflect their occurrence.
+    case query::QueryType::DUMP_SAVE:
+    case query::QueryType::DUMP_LOAD:
+    case query::QueryType::DUMP_VERIFY:
+    case query::QueryType::DUMP_INFO:
+    case query::QueryType::DUMP_STATUS:
+    case query::QueryType::SYNC:
+    case query::QueryType::SYNC_STATUS:
+    case query::QueryType::SYNC_STOP:
+    case query::QueryType::OPTIMIZE:
+    case query::QueryType::DEBUG_ON:
+    case query::QueryType::DEBUG_OFF:
+    case query::QueryType::CACHE_CLEAR:
+    case query::QueryType::CACHE_STATS:
+    case query::QueryType::CACHE_ENABLE:
+    case query::QueryType::CACHE_DISABLE:
+    case query::QueryType::SET:
+    case query::QueryType::SHOW_VARIABLES:
+    case query::QueryType::FACET:
+      cmd_other_.fetch_add(1, std::memory_order_relaxed);
       break;
   }
 }
@@ -103,12 +121,13 @@ Statistics ServerStats::GetStatistics() const {
   stats.cmd_replication_stop = cmd_replication_stop_.load();
   stats.cmd_replication_start = cmd_replication_start_.load();
   stats.cmd_config = cmd_config_.load();
+  stats.cmd_other = cmd_other_.load();
   stats.cmd_unknown = cmd_unknown_.load();
 
   stats.total_commands_processed = stats.cmd_search + stats.cmd_count + stats.cmd_get + stats.cmd_info +
                                    stats.cmd_save + stats.cmd_load + stats.cmd_replication_status +
                                    stats.cmd_replication_stop + stats.cmd_replication_start + stats.cmd_config +
-                                   stats.cmd_unknown;
+                                   stats.cmd_other + stats.cmd_unknown;
 
   // Memory statistics
   stats.used_memory_bytes = current_memory_.load();
@@ -146,7 +165,7 @@ uint64_t ServerStats::GetUptimeSeconds() const {
 uint64_t ServerStats::GetTotalCommands() const {
   return cmd_search_.load() + cmd_count_.load() + cmd_get_.load() + cmd_info_.load() + cmd_save_.load() +
          cmd_load_.load() + cmd_replication_status_.load() + cmd_replication_stop_.load() +
-         cmd_replication_start_.load() + cmd_config_.load() + cmd_unknown_.load();
+         cmd_replication_start_.load() + cmd_config_.load() + cmd_other_.load() + cmd_unknown_.load();
 }
 
 uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
@@ -173,12 +192,28 @@ uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
     case query::QueryType::CONFIG_SHOW:
     case query::QueryType::CONFIG_VERIFY:
       return cmd_config_.load();
+    case query::QueryType::UNKNOWN:
+      return cmd_unknown_.load();
+    // All "other" commands share cmd_other_; per-type breakdown is not tracked.
+    case query::QueryType::DUMP_SAVE:
+    case query::QueryType::DUMP_LOAD:
+    case query::QueryType::DUMP_VERIFY:
+    case query::QueryType::DUMP_INFO:
+    case query::QueryType::DUMP_STATUS:
+    case query::QueryType::SYNC:
+    case query::QueryType::SYNC_STATUS:
+    case query::QueryType::SYNC_STOP:
     case query::QueryType::OPTIMIZE:
     case query::QueryType::DEBUG_ON:
     case query::QueryType::DEBUG_OFF:
-      return 0;  // These commands don't have counters
-    case query::QueryType::UNKNOWN:
-      return cmd_unknown_.load();
+    case query::QueryType::CACHE_CLEAR:
+    case query::QueryType::CACHE_STATS:
+    case query::QueryType::CACHE_ENABLE:
+    case query::QueryType::CACHE_DISABLE:
+    case query::QueryType::SET:
+    case query::QueryType::SHOW_VARIABLES:
+    case query::QueryType::FACET:
+      return cmd_other_.load();
   }
   return 0;
 }
@@ -199,6 +234,7 @@ void ServerStats::Reset() {
   cmd_replication_stop_.store(0);
   cmd_replication_start_.store(0);
   cmd_config_.store(0);
+  cmd_other_.store(0);
   cmd_unknown_.store(0);
 
   // Reset memory statistics (current only; peak is a cumulative high-water mark)

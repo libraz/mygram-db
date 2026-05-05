@@ -327,3 +327,17 @@ gtest_discover_tests(safe_path_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+add_executable(roaring_bitmap_ptr_test
+  roaring_bitmap_ptr_test.cpp
+)
+
+target_link_libraries(roaring_bitmap_ptr_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(roaring_bitmap_ptr_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

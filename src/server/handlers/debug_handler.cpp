@@ -7,7 +7,9 @@
 
 #include <sstream>
 
+#include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
+#include "utils/flag_guard.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -38,7 +40,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 #ifdef USE_MYSQL
       // Check if any table is currently syncing
       if (ctx_.sync_manager != nullptr) {
-        auto check = ctx_.sync_manager->CheckNoSyncInProgress("optimize");
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kOptimize);
         if (!check) {
           return ResponseFormatter::FormatError(check.error().message());
         }
@@ -61,17 +63,11 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress");
       }
 
-      // RAII guard to ensure flag is cleared even if exception occurs
-      struct OptimizationGuard {
-        std::atomic<bool>& flag;
-        explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
-        OptimizationGuard(const OptimizationGuard&) = delete;
-        OptimizationGuard& operator=(const OptimizationGuard&) = delete;
-        OptimizationGuard(OptimizationGuard&&) = delete;
-        OptimizationGuard& operator=(OptimizationGuard&&) = delete;
-        ~OptimizationGuard() { flag.store(false); }
-      };
-      OptimizationGuard guard(ctx_.optimization_in_progress);
+      // RAII guard to ensure flag is cleared even if exception occurs.
+      // The flag was already set via the compare_exchange_strong above, so we
+      // use AtomicFlagResetGuard (reset-only) rather than AtomicFlagGuard
+      // (set-on-construct, reset-on-destroy) to avoid double-setting.
+      mygram::utils::AtomicFlagResetGuard guard(ctx_.optimization_in_progress);
 
       // Get table context
       auto table_ctx = GetTableContext(query.table);
@@ -141,11 +137,11 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 
       if (started) {
         auto stats = current_index->GetStatistics();
-        std::ostringstream oss;
-        oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-            << " roaring=" << stats.roaring_bitmap_lists
-            << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
-        return oss.str();
+        std::ostringstream body;
+        body << "OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
+             << " roaring=" << stats.roaring_bitmap_lists
+             << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
+        return ResponseFormatter::FormatStatus(body.str());
       }
       return ResponseFormatter::FormatError("Failed to start optimization");
     }

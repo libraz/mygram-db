@@ -6,6 +6,7 @@
 #include "server/handlers/replication_handler.h"
 
 #include "mysql/binlog_reader_interface.h"
+#include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
 
@@ -52,7 +53,7 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 
       // Check if any table is currently syncing
       if (ctx_.sync_manager != nullptr) {
-        auto check = ctx_.sync_manager->CheckNoSyncInProgress("start replication");
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kStartReplication);
         if (!check) {
           return ResponseFormatter::FormatError(check.error().message());
         }

@@ -2,10 +2,9 @@
  * @file snapshot_scheduler.cpp
  * @brief Implementation of SnapshotScheduler
  */
+// Logging is exclusively via mygram::utils::StructuredLog. Direct spdlog usage is prohibited in server code.
 
 #include "server/snapshot_scheduler.h"
-
-#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
@@ -95,6 +94,16 @@ void SnapshotScheduler::Stop() {
 
   // Wake the scheduler loop so it exits promptly instead of sleeping
   // for up to kShutdownCheckIntervalMs.
+  //
+  // Lock-discipline note (pre-empts re-flagging by future system reviews):
+  //   - stop_cv_ is associated with stop_mutex_, not start_stop_mutex_.
+  //   - Calling notify_all without holding stop_mutex_ is permitted by the
+  //     C++ standard ([thread.condition.condvar]); the standard only requires
+  //     the wait predicate to be observed under the cv's associated mutex.
+  //   - The pattern is intentional: holding start_stop_mutex_ across notify is
+  //     required to serialize against a concurrent Start(); holding stop_mutex_
+  //     during notify would risk a recursive-acquisition pattern with the wait
+  //     predicate that already takes stop_mutex_ inside SchedulerLoop.
   stop_cv_.notify_all();
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();

@@ -68,7 +68,10 @@ class SearchHandler : public CommandHandler {
     std::vector<std::string> all_search_terms;  ///< All search terms (main + AND)
     std::vector<SearchTermInfo> term_infos;     ///< Term information with n-grams
     double query_time_ms = 0.0;                 ///< Query execution time
-    query::DebugInfo debug_info;                ///< Debug info (populated when debug_mode)
+    /// Authoritative cache hit signal (mirrored from FullPipelineOutput).
+    /// Set regardless of debug_mode; do not derive cache state from debug_info.
+    bool cache_hit = false;
+    query::DebugInfo debug_info;  ///< Debug info (populated when debug_mode)
     index::Index* current_index = nullptr;
     storage::DocumentStore* current_doc_store = nullptr;
     int current_ngram_size = 0;

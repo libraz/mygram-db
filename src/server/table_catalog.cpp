@@ -18,25 +18,24 @@ TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables
       .Debug();
 }
 
+// All accessors below are lock-free: tables_ is immutable post-construction.
+// See TableCatalog class-level Doxygen.
+
 TableContext* TableCatalog::GetTable(const std::string& name) {
-  std::shared_lock lock(mutex_);
   auto iter = tables_.find(name);
   return iter != tables_.end() ? iter->second : nullptr;
 }
 
 const TableContext* TableCatalog::GetTable(const std::string& name) const {
-  std::shared_lock lock(mutex_);
   auto iter = tables_.find(name);
   return iter != tables_.end() ? iter->second : nullptr;
 }
 
 bool TableCatalog::TableExists(const std::string& name) const {
-  std::shared_lock lock(mutex_);
   return tables_.find(name) != tables_.end();
 }
 
 std::vector<std::string> TableCatalog::GetTableNames() const {
-  std::shared_lock lock(mutex_);
   std::vector<std::string> names;
   names.reserve(tables_.size());
   for (const auto& [name, _] : tables_) {
@@ -47,7 +46,6 @@ std::vector<std::string> TableCatalog::GetTableNames() const {
 
 std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> TableCatalog::GetDumpableContexts()
     const {
-  std::shared_lock lock(mutex_);
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> result;
   for (const auto& [table_name, table_ctx] : tables_) {
     result[table_name] = {table_ctx->index.get(), table_ctx->doc_store.get()};

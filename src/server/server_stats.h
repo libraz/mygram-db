@@ -31,6 +31,7 @@ struct Statistics {
   uint64_t cmd_replication_stop = 0;
   uint64_t cmd_replication_start = 0;
   uint64_t cmd_config = 0;
+  uint64_t cmd_other = 0;  ///< Aggregate of less-common commands (DUMP_*, SYNC*, CACHE_*, FACET, SET, etc.)
   uint64_t cmd_unknown = 0;
 
   // Memory statistics (bytes)
@@ -226,6 +227,7 @@ class ServerStats {
   std::atomic<uint64_t> cmd_replication_stop_{0};
   std::atomic<uint64_t> cmd_replication_start_{0};
   std::atomic<uint64_t> cmd_config_{0};
+  std::atomic<uint64_t> cmd_other_{0};
   std::atomic<uint64_t> cmd_unknown_{0};
 
   // Memory statistics

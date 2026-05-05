@@ -251,6 +251,76 @@ TEST_F(ResponseFormatterTest, FormatCountResponseWithDebugInfo) {
   EXPECT_TRUE(response.find("DEBUG") != std::string::npos || response.find("query_time_ms") != std::string::npos);
 }
 
+namespace {
+
+// Extract the cache-debug section (lines starting with "cache" or "cache_*")
+// out of a SEARCH or COUNT debug response so two protocols can be diffed
+// directly. The section ends at the first non-cache line we encounter, which
+// is sufficient because the other debug fields are emitted in different
+// orders by the two formatters.
+std::string ExtractCacheLines(const std::string& response) {
+  std::string out;
+  size_t pos = 0;
+  while (pos < response.size()) {
+    size_t end = response.find("\r\n", pos);
+    if (end == std::string::npos) {
+      end = response.size();
+    }
+    auto line = response.substr(pos, end - pos);
+    if (line.rfind("cache", 0) == 0) {
+      out += line;
+      out += "\n";
+    }
+    if (end == response.size()) {
+      break;
+    }
+    pos = end + 2;
+  }
+  return out;
+}
+
+query::DebugInfo MakeCacheDebugInfo(query::CacheDebugInfo::Status status) {
+  query::DebugInfo debug_info;
+  debug_info.cache_info.status = status;
+  debug_info.cache_info.cache_age_ms = 1.5;
+  debug_info.cache_info.cache_saved_ms = 2.5;
+  debug_info.cache_info.query_cost_ms = 3.5;
+  return debug_info;
+}
+
+}  // namespace
+
+/**
+ * @brief Regression: SEARCH and COUNT must emit the same cache-debug lines
+ *        for any given cache state.
+ *
+ * Pre-unification, FormatSearchResponse used "cache: miss\r\ncache_reason:
+ * not_found\r\ncache_cost_ms: ..." while FormatCountResponse used
+ * "cache: miss (not found)\r\nquery_cost_ms: ...". Both responses now flow
+ * through the shared WriteCacheDebugLines helper, so the cache section
+ * extracted from the two responses must compare equal.
+ */
+TEST_F(ResponseFormatterTest, CacheDebugLinesAreConsistentBetweenSearchAndCount) {
+  using Status = query::CacheDebugInfo::Status;
+  for (auto status : {Status::HIT, Status::MISS_NOT_FOUND, Status::MISS_INVALIDATED, Status::MISS_DISABLED}) {
+    auto debug = MakeCacheDebugInfo(status);
+
+    std::vector<index::DocId> empty_results;
+    std::string search_resp =
+        ResponseFormatter::FormatSearchResponse(empty_results, 0, table_context_.doc_store.get(), &debug);
+    std::string count_resp = ResponseFormatter::FormatCountResponse(0, &debug);
+
+    auto search_cache = ExtractCacheLines(search_resp);
+    auto count_cache = ExtractCacheLines(count_resp);
+
+    EXPECT_EQ(search_cache, count_cache) << "SEARCH and COUNT cache sections diverge for status="
+                                         << static_cast<int>(status) << "\n"
+                                         << "SEARCH:\n"
+                                         << search_cache << "COUNT:\n"
+                                         << count_cache;
+  }
+}
+
 /**
  * @brief Test SAVE response
  */

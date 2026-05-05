@@ -45,9 +45,15 @@ std::string VariableHandler::HandleSet(const Query& query) {
   }
 
 #ifdef USE_MYSQL
-  // Check if trying to change MySQL connection settings during SYNC
+  // Check if trying to change any MySQL connection setting during SYNC.
+  //
+  // All mysql.* variables affect the connection used by SYNC. Changing them
+  // mid-sync would create a stale-config window where the running loader uses
+  // old values while new requests use new values. Use a prefix match so the
+  // guard catches mysql.user, mysql.password, mysql.database, etc., not just
+  // host/port.
   for (const auto& [variable_name, value] : query.variable_assignments) {
-    if (variable_name == "mysql.host" || variable_name == "mysql.port") {
+    if (variable_name.rfind("mysql.", 0) == 0) {
       if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
         return ResponseFormatter::FormatError("Cannot change '" + variable_name +
                                               "' while SYNC is in progress. "

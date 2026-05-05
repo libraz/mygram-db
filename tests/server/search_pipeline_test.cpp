@@ -21,9 +21,13 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cache/cache_manager.h"
+#include "cache/cache_types.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "query/synonym_dictionary.h"
+#include "server/server_types.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::server::search_pipeline {
@@ -895,6 +899,226 @@ TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
 
   EXPECT_TRUE(output.success);
   EXPECT_GE(output.query_time_ms, 0.0);
+}
+
+// =============================================================================
+// FullPipelineOutput::cache_hit and cache_miss_reason tests
+// =============================================================================
+// Regression coverage for the bug where SearchHandler relied on
+// debug_info.cache_info.status to detect cache hits, which is only populated
+// when conn_ctx.debug_mode == true. The non-debug fast path therefore never
+// observed a cache hit. cache_hit (and cache_miss_reason) must be set on
+// FullPipelineOutput regardless of debug mode.
+// =============================================================================
+
+class FullPipelineCacheTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    index_ = std::make_unique<index::Index>(2);
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+
+    auto d1 = doc_store_->AddDocument("pk1", {}, "machine learning basics");
+    auto d2 = doc_store_->AddDocument("pk2", {}, "deep learning techniques");
+    ASSERT_TRUE(d1.has_value());
+    ASSERT_TRUE(d2.has_value());
+
+    index_->AddDocument(*d1, "machine learning basics");
+    index_->AddDocument(*d2, "deep learning techniques");
+
+    config::CacheConfig cache_config;
+    cache_config.enabled = true;
+    cache_config.max_memory_bytes = 10 * 1024 * 1024;
+    cache_config.min_query_cost_ms = 0.0;  // Cache everything regardless of cost
+
+    cache::NgramConfigMap ngram_configs;
+    ngram_configs["test"] = cache::NgramConfig{
+        .ngram_size = 2,
+        .kanji_ngram_size = 0,
+        .cross_boundary_ngrams = false,
+    };
+
+    cache_manager_ = std::make_unique<cache::CacheManager>(cache_config, std::move(ngram_configs));
+  }
+
+  FullPipelineParams MakeParams() {
+    FullPipelineParams params;
+    params.current_index = index_.get();
+    params.current_doc_store = doc_store_.get();
+    params.cache_manager = cache_manager_.get();
+    params.ngram_size = 2;
+    params.kanji_ngram_size = 0;
+    params.cross_boundary_ngrams = false;
+    params.filter_threshold = 1000;
+    params.primary_key_column = "id";
+    return params;
+  }
+
+  std::unique_ptr<index::Index> index_;
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+  std::unique_ptr<cache::CacheManager> cache_manager_;
+};
+
+TEST_F(FullPipelineCacheTest, CacheHitFlagSetRegardlessOfDebugMode) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+
+  // First run: cache miss, populates the cache.
+  auto first_output = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first_output.success);
+  EXPECT_FALSE(first_output.cache_hit);
+  EXPECT_EQ(first_output.cache_miss_reason, CacheMissReason::kNotFound);
+
+  // Second run with the same query: must report cache_hit = true on the
+  // FullPipelineOutput itself, independent of any debug-mode flag (debug mode
+  // is not exercised here).
+  auto second_output = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(second_output.success);
+  EXPECT_TRUE(second_output.cache_hit);
+  EXPECT_EQ(second_output.cache_miss_reason, CacheMissReason::kHit);
+  EXPECT_EQ(second_output.path_taken, PipelinePath::CACHE_HIT);
+  EXPECT_EQ(second_output.results, first_output.results);
+}
+
+TEST_F(FullPipelineCacheTest, CacheMissReasonNotFoundForUnknownQuery) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "completelynovelterm";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(output.success);
+  EXPECT_FALSE(output.cache_hit);
+  EXPECT_EQ(output.cache_miss_reason, CacheMissReason::kNotFound);
+}
+
+TEST_F(FullPipelineCacheTest, CacheMissReasonDisabledWhenCacheManagerNull) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.cache_manager = nullptr;
+  auto output = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(output.success);
+  EXPECT_FALSE(output.cache_hit);
+  EXPECT_EQ(output.cache_miss_reason, CacheMissReason::kDisabled);
+}
+
+TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {
+  // 1) Unknown key -> kNotFound directly via TryCacheLookup.
+  {
+    query::Query unknown;
+    unknown.type = query::QueryType::SEARCH;
+    unknown.table = "test";
+    unknown.search_text = "uniquenotcached";
+    unknown.limit = 100;
+
+    CacheMissReason reason = CacheMissReason::kHit;
+    auto result = TryCacheLookup(unknown, cache_manager_.get(), doc_store_.get(), &reason);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(reason, CacheMissReason::kNotFound);
+  }
+
+  // 2) Insert -> hit -> remove a referenced document -> stale on next lookup.
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto first = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first.success);
+  ASSERT_FALSE(first.results.empty());
+
+  // Removing a doc that appears in the cached result set causes
+  // GetPrimaryKeysBatch to return an empty primary key for that DocId, which
+  // IsCacheStale flags as stale.
+  doc_store_->RemoveDocument(first.results.front());
+
+  CacheMissReason reason = CacheMissReason::kHit;
+  auto stale_result = TryCacheLookup(query, cache_manager_.get(), doc_store_.get(), &reason);
+  EXPECT_FALSE(stale_result.has_value());
+  EXPECT_EQ(reason, CacheMissReason::kStale);
+}
+
+// =============================================================================
+// BuildPipelineParamsFromContext tests - shared helper used by HTTP and TCP
+// =============================================================================
+
+class BuildPipelineParamsTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    table_context_.name = "articles";
+    table_context_.config.ngram_size = 3;
+    table_context_.config.kanji_ngram_size = 2;
+    table_context_.config.cross_boundary_ngrams = true;
+    table_context_.config.primary_key = "uuid";
+    table_context_.index = std::make_unique<index::Index>(3);
+    table_context_.doc_store = std::make_unique<storage::DocumentStore>();
+  }
+
+  TableContext table_context_;
+};
+
+TEST_F(BuildPipelineParamsTest, ProjectsTableContextFieldsOntoParams) {
+  // Sanity check that all per-table fields land where the pipeline expects.
+  auto params = BuildPipelineParamsFromContext(table_context_, /*full_config=*/nullptr,
+                                               /*cache_manager=*/nullptr,
+                                               /*filter_threshold=*/4096,
+                                               /*attach_bm25_stats=*/false);
+
+  EXPECT_EQ(params.current_index, table_context_.index.get());
+  EXPECT_EQ(params.current_doc_store, table_context_.doc_store.get());
+  EXPECT_EQ(params.ngram_size, 3);
+  EXPECT_EQ(params.kanji_ngram_size, 2);
+  EXPECT_TRUE(params.cross_boundary_ngrams);
+  EXPECT_EQ(params.filter_threshold, 4096u);
+  EXPECT_EQ(params.primary_key_column, "uuid");
+  // BM25 stats opt-in flag false -> nullptr.
+  EXPECT_EQ(params.bm25_stats, nullptr);
+  // Empty/null synonym dictionary -> not wired up.
+  EXPECT_EQ(params.synonym_dict, nullptr);
+}
+
+TEST_F(BuildPipelineParamsTest, BuildPipelineParamsHonorsBm25StatsArgument) {
+  // attach_bm25_stats=true should wire the per-table stats; false should not.
+  // This is the difference between SEARCH (attaches) and COUNT (does not).
+  auto params_with = BuildPipelineParamsFromContext(table_context_, /*full_config=*/nullptr,
+                                                    /*cache_manager=*/nullptr,
+                                                    /*filter_threshold=*/1000,
+                                                    /*attach_bm25_stats=*/true);
+  EXPECT_EQ(params_with.bm25_stats, &table_context_.bm25_stats);
+
+  auto params_without = BuildPipelineParamsFromContext(table_context_, /*full_config=*/nullptr,
+                                                       /*cache_manager=*/nullptr,
+                                                       /*filter_threshold=*/1000,
+                                                       /*attach_bm25_stats=*/false);
+  EXPECT_EQ(params_without.bm25_stats, nullptr);
+}
+
+TEST_F(BuildPipelineParamsTest, EmptySynonymDictionaryIsNotWired) {
+  // An empty SynonymDictionary should NOT cause the pipeline to walk the
+  // synonym path. The helper enforces this; if it ever wires an empty
+  // dictionary again, ExecuteFullPipeline would silently degrade to the
+  // synonym path on every query.
+  table_context_.synonym_dict = std::make_unique<query::SynonymDictionary>();
+  ASSERT_TRUE(table_context_.synonym_dict->IsEmpty());
+
+  auto params = BuildPipelineParamsFromContext(table_context_, /*full_config=*/nullptr,
+                                               /*cache_manager=*/nullptr,
+                                               /*filter_threshold=*/1000,
+                                               /*attach_bm25_stats=*/true);
+  EXPECT_EQ(params.synonym_dict, nullptr);
 }
 
 }  // namespace mygramdb::server::search_pipeline

@@ -107,6 +107,7 @@ enum class ErrorCode : std::uint16_t {
   kSyncAlreadyInProgress = 4011,       ///< SYNC already in progress for table
   kSyncMemoryCritical = 4012,          ///< Memory critically low, cannot start SYNC
   kSyncThreadCreationFailed = 4013,    ///< Failed to create sync thread
+  kSyncManagerNull = 4014,             ///< SyncOperationManager dependency is null
 
   // ===== Storage/Snapshot Errors (5000-5999) =====
   kStorageFileNotFound = 5000,         ///< Snapshot file not found
@@ -150,6 +151,7 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
   kNetworkNullDependency = 6024,         ///< Required dependency pointer is null
   kNetworkAcceptorNoHandler = 6025,      ///< Acceptor reactor handler not installed before StartAccepting
+  kServerInitMissingDependency = 6026,   ///< Server initialization missing required dependency
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -316,6 +318,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Memory critically low for SYNC";
     case ErrorCode::kSyncThreadCreationFailed:
       return "Failed to create sync thread";
+    case ErrorCode::kSyncManagerNull:
+      return "SyncOperationManager dependency is null";
 
     // Storage
     case ErrorCode::kStorageFileNotFound:
@@ -398,6 +402,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Required dependency is null";
     case ErrorCode::kNetworkAcceptorNoHandler:
       return "Acceptor reactor handler not installed";
+    case ErrorCode::kServerInitMissingDependency:
+      return "Server initialization missing required dependency";
 
     // Client
     case ErrorCode::kClientNotConnected:

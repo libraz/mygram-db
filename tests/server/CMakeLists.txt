@@ -442,6 +442,7 @@ target_link_libraries(sync_operation_manager_test
 gtest_discover_tests(sync_operation_manager_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
 )
 
 # RateLimiter tests
@@ -568,6 +569,57 @@ target_link_libraries(debug_handler_test
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server state conflicts
 gtest_discover_tests(debug_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# AdminHandler tests (defensive guards on INFO / CONFIG paths)
+
+add_executable(admin_handler_test
+  admin_handler_test.cpp
+)
+
+target_link_libraries(admin_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(admin_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# CacheHandler tests (response framing consistency for ENABLE/DISABLE)
+
+add_executable(cache_handler_test
+  cache_handler_test.cpp
+)
+
+target_link_libraries(cache_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(cache_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# FacetHandler tests (synonym expansion routing through ExecuteFullPipeline)
+
+add_executable(facet_handler_test
+  facet_handler_test.cpp
+)
+
+target_link_libraries(facet_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(facet_handler_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_state
@@ -780,10 +832,13 @@ target_include_directories(io_reactor_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/reactor
 )
 
+# SLOW: IdleConnectionIsReaped / ActiveConnectionIsNotReaped sleep ~2.5s each
 gtest_discover_tests(io_reactor_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
 )
 
 # ReactorConnection unit tests (Phase 2.T4)

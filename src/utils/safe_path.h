@@ -45,10 +45,16 @@ namespace mygram::utils {
  * @param allowed_extensions Optional set of permitted extensions, case-insensitive.
  *                           Each entry must include the leading dot, e.g. ".yaml".
  *                           Empty list means any extension is allowed.
+ * @param base_dir_label Optional human-readable label used when formatting the
+ *                       traversal error message ("must be within <label>").
+ *                       Defaults to "base directory" so existing callers do
+ *                       not change. Pass e.g. "dump directory" for handlers
+ *                       that need a domain-specific label.
  * @return Expected canonical (or weakly canonical) absolute path on success,
  *         or Error on failure.
  */
 Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string_view base_dir,
-                                             std::initializer_list<std::string_view> allowed_extensions = {});
+                                             std::initializer_list<std::string_view> allowed_extensions = {},
+                                             std::string_view base_dir_label = "base directory");
 
 }  // namespace mygram::utils

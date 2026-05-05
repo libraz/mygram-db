@@ -45,7 +45,8 @@ bool ExtensionAllowed(const std::string& ext, std::initializer_list<std::string_
 }  // namespace
 
 Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string_view base_dir,
-                                             std::initializer_list<std::string_view> allowed_extensions) {
+                                             std::initializer_list<std::string_view> allowed_extensions,
+                                             std::string_view base_dir_label) {
   if (input.empty()) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Empty filepath"));
   }
@@ -94,9 +95,9 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
 
     auto rel = resolved.lexically_relative(base_canonical);
     if (rel.empty() || *rel.begin() == std::filesystem::path("..")) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kInvalidArgument,
-                    "Invalid filepath: path must be within base directory (" + std::string(base_dir) + ")"));
+      return MakeUnexpected(MakeError(
+          ErrorCode::kInvalidArgument,
+          "Invalid filepath: path must be within " + std::string(base_dir_label) + " (" + std::string(base_dir) + ")"));
     }
     return resolved.string();
   } catch (const std::exception& e) {

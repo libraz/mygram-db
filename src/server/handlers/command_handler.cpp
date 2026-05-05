@@ -5,7 +5,10 @@
 
 #include "server/handlers/command_handler.h"
 
+#include "index/index.h"
+#include "query/query_parser.h"
 #include "server/table_catalog.h"
+#include "storage/document_store.h"
 
 namespace mygramdb::server {
 

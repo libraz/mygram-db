@@ -11,14 +11,28 @@
 #include <unordered_map>
 
 #include "config/config.h"
-#include "index/index.h"
-#include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
-#include "storage/document_store.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+
+// Forward declarations for types only used as pointers / references in this
+// header. NOTE: server_types.h still pulls in index/index.h and
+// storage/document_store.h because TableContext holds unique_ptr to those
+// (the implicit destructor needs the full type), so this is mostly a
+// hygiene improvement — the heavy headers are not actually shed from
+// downstream TUs until TableContext is restructured.
+namespace mygramdb::index {
+class Index;
+}  // namespace mygramdb::index
+namespace mygramdb::storage {
+class DocumentStore;
+}  // namespace mygramdb::storage
+namespace mygramdb::query {
+struct Query;
+enum class QueryType : uint8_t;
+}  // namespace mygramdb::query
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {

@@ -20,6 +20,15 @@
 namespace mygram::utils {
 
 /**
+ * @brief Maximum query / request length to log.
+ *
+ * Untrusted client input is truncated to this many characters before being
+ * placed into structured log fields. This bounds log volume on long requests
+ * and limits the blast radius of log-injection sequences embedded in queries.
+ */
+constexpr size_t kMaxQueryLogLength = 200;
+
+/**
  * @brief Log output format
  */
 enum class LogFormat : std::uint8_t {
@@ -435,9 +444,6 @@ inline void LogMySQLConnectionError(const std::string& host, int port, const std
  * @brief Log MySQL query error in structured format
  */
 inline void LogMySQLQueryError(const std::string& query, const std::string& error_msg) {
-  // Maximum query length to log (prevent log spam)
-  constexpr size_t kMaxQueryLogLength = 200;
-
   StructuredLog()
       .Event("mysql_query_error")
       .Field("query", query.substr(0, kMaxQueryLogLength))
@@ -475,9 +481,6 @@ inline void LogStorageError(const std::string& operation, const std::string& fil
  * @brief Log query parsing error in structured format
  */
 inline void LogQueryParseError(const std::string& query, const std::string& error_msg, size_t error_position = 0) {
-  // Maximum query length to log (prevent log spam)
-  constexpr size_t kMaxQueryLogLength = 200;
-
   StructuredLog()
       .Event("query_parse_error")
       .Field("query", query.substr(0, kMaxQueryLogLength))
