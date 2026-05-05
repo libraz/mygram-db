@@ -49,9 +49,12 @@ namespace mygramdb::server::reactor {
 /**
  * @brief kqueue-backed `EventMultiplexer` implementation.
  *
- * Not thread-safe. `IoReactor` owns the instance from a single event-loop
- * thread and serialises any cross-thread arm/disarm requests before calling
- * into this class.
+ * Thread-safety: Add/Modify/Remove/Poll are safe to call concurrently from
+ * different threads. `interest_mutex_` guards `interest_`; the underlying
+ * kqueue fd is itself thread-safe in the kernel for simultaneous
+ * EV_ADD/Modify/Poll. This was previously documented as "not thread-safe" —
+ * that documentation was out of date relative to the implementation. Do not
+ * revert without removing `interest_mutex_`.
  */
 class KqueueMultiplexer final : public EventMultiplexer {
  public:

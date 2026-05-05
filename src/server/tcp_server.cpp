@@ -8,7 +8,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -100,9 +99,13 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Create rate limiter (if configured). The reactor_handler lambda below
   // enforces the token bucket per peer IP on every accept.
-  // Note: RateLimiter is NOT managed by ServerLifecycleManager because it's only used in TcpServer
+  //
+  // Held as shared_ptr so HttpServer can co-own the same instance via
+  // GetSharedRateLimiter() (Fix N-4): a client's quota MUST apply across
+  // protocols. Two independent limiters give the client effectively 2x the
+  // configured limit, which silently defeats DoS protection.
   if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
-    rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+    rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
     mygram::utils::StructuredLog()
@@ -349,7 +352,10 @@ std::string TcpServer::StartSync(const std::string& table_name) {
 
 std::string TcpServer::GetSyncStatus() {
   if (!sync_manager_) {
-    return "status=IDLE message=\"SYNC manager not initialized\"";
+    // Same protocol-framing concern as SyncHandler::HandleSyncStatus: a null
+    // sync_manager_ is a configuration error and should be reported with
+    // ERROR framing instead of a bare "status=IDLE ..." line.
+    return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
   return sync_manager_->GetSyncStatus();
 }

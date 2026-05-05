@@ -91,12 +91,22 @@ class MockEventMultiplexer final : public EventMultiplexer {
    */
   void Shutdown();
 
+  /**
+   * @brief Force the next (and subsequent) Add() calls to return
+   *        kNetworkReactorRegisterFailed until cleared.
+   *
+   * Used to validate IoReactor::Register's failure path (Fix N-5):
+   * connections_ must remain untouched if mux_->Add fails.
+   */
+  void SetAddShouldFail(bool should_fail);
+
  private:
   mutable std::mutex mu_;
   std::condition_variable poll_cv_;
 
   bool opened_{false};
   bool shutdown_{false};
+  bool add_should_fail_{false};
   std::unordered_map<int, uint8_t> interest_;
   std::deque<ReadyEvent> injected_;
   int poll_call_count_{0};

@@ -164,6 +164,18 @@ class TcpServer {
    */
   RateLimiter* GetRateLimiter() { return rate_limiter_.get(); }
 
+  /**
+   * @brief Get the shared rate limiter as a shared_ptr.
+   *
+   * Returned by reference so callers can construct an HttpServer that
+   * shares the same RateLimiter instance. A client's quota MUST apply across
+   * protocols; two independent limiters give the client effectively 2x the
+   * configured limit (Fix N-4).
+   *
+   * Returns nullptr-equivalent shared_ptr if rate limiting is disabled.
+   */
+  std::shared_ptr<RateLimiter> GetSharedRateLimiter() const { return rate_limiter_; }
+
 #ifdef USE_MYSQL
   /**
    * @brief Start SYNC operation for a table
@@ -205,7 +217,10 @@ class TcpServer {
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
-  std::unique_ptr<RateLimiter> rate_limiter_;
+  // shared_ptr so the same instance can be co-owned with HttpServer (Fix N-4).
+  // ServerLifecycleManager constructs both servers and hands the same shared
+  // RateLimiter to each so a client's quota applies across protocols.
+  std::shared_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
 #endif

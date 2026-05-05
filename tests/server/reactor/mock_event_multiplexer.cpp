@@ -40,6 +40,10 @@ Expected<void, Error> MockEventMultiplexer::Open() {
 
 Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest) {
   std::unique_lock<std::mutex> lock(mu_);
+  if (add_should_fail_) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorRegisterFailed, "MockEventMultiplexer::Add: forced failure for test"));
+  }
   if (interest_.count(fd) != 0U) {
     return MakeUnexpected(
         MakeError(ErrorCode::kNetworkReactorRegisterFailed, "MockEventMultiplexer::Add: fd already registered"));
@@ -156,6 +160,11 @@ void MockEventMultiplexer::Shutdown() {
     shutdown_ = true;
   }
   poll_cv_.notify_all();
+}
+
+void MockEventMultiplexer::SetAddShouldFail(bool should_fail) {
+  std::unique_lock<std::mutex> lock(mu_);
+  add_should_fail_ = should_fail;
 }
 
 }  // namespace mygramdb::server::reactor

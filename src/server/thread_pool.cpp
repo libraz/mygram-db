@@ -113,8 +113,10 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
     shutdown_ = true;
   }
 
-  // Wake up all workers
+  // Wake up all workers (and any idle-cv waiter, since shutdown_ is observed
+  // by the wait predicate as a wake-up condition for non-graceful paths).
   condition_.notify_all();
+  NotifyIdleObservers();
 
   if (graceful && pending_tasks > 0) {
     mygram::utils::StructuredLog()
@@ -123,24 +125,24 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
         .Info();
 
     if (timeout_ms > 0) {
-      // Wait with timeout by polling queue status and active workers
+      // Wait for the queue to drain and all workers to become idle.
+      //
+      // Previously this was a 10ms polling loop; now a condition_variable is
+      // used so the waiter wakes promptly when the last in-flight task
+      // finishes. The cv lives under its own mutex (idle_cv_mutex_) and is
+      // never acquired while queue_mutex_ is held — this preserves the lock
+      // ordering invariant the worker hot path depends on.
       auto start = std::chrono::steady_clock::now();
-      auto deadline = start + std::chrono::milliseconds(timeout_ms);
+      auto timeout_duration = std::chrono::milliseconds(timeout_ms);
 
-      // Poll until timeout or all tasks complete
-      constexpr int kShutdownPollIntervalMs = 10;  // Poll interval for graceful shutdown
-      while (std::chrono::steady_clock::now() < deadline) {
-        size_t remaining = GetQueueSize();
-        size_t active = active_workers_.load();
-        if (remaining == 0 && active == 0) {
-          break;  // All tasks completed (queue empty and no workers executing)
-        }
-        // Sleep briefly before checking again
-        std::this_thread::sleep_for(std::chrono::milliseconds(kShutdownPollIntervalMs));
+      {
+        std::unique_lock<std::mutex> idle_lock(idle_cv_mutex_);
+        idle_cv_.wait_for(idle_lock, timeout_duration,
+                          [this] { return GetQueueSize() == 0 && active_workers_.load() == 0; });
       }
 
       auto elapsed = std::chrono::steady_clock::now() - start;
-      if (elapsed >= std::chrono::milliseconds(timeout_ms)) {
+      if (elapsed >= timeout_duration) {
         // Timeout reached - log warning but still wait for workers to finish
         // IMPORTANT: We do NOT detach() workers because:
         // - Detached threads may access the pool's members after destruction (use-after-free)
@@ -235,9 +237,20 @@ void ThreadPool::WorkerThread() {
     // Execute task (outside lock)
     if (task) {
       // RAII guard to ensure active_workers_ is properly managed
-      // even if task() throws an exception that escapes the catch blocks
+      // even if task() throws an exception that escapes the catch blocks.
+      // After the decrement, also notify any Shutdown() waiter so it can wake
+      // promptly when the pool fully drains, instead of relying on a polling
+      // sleep.
       active_workers_++;
-      mygram::utils::ScopeGuard worker_guard([this]() { active_workers_--; });
+      mygram::utils::ScopeGuard worker_guard([this]() {
+        active_workers_--;
+        // Cheap check: only signal when we're plausibly idle. The waiter
+        // re-checks the predicate under idle_cv_mutex_, so spurious wakeups
+        // are safe; we just want to avoid the syscall on every task.
+        if (active_workers_.load() == 0) {
+          NotifyIdleObservers();
+        }
+      });
 
       try {
         task();
@@ -256,9 +269,18 @@ void ThreadPool::WorkerThread() {
             .Field("thread_id", tid.str())
             .Error();
       }
-      // Note: worker_guard will automatically decrement active_workers_
+      // Note: worker_guard will automatically decrement active_workers_ and
+      // call NotifyIdleObservers() if the pool is now idle.
     }
   }
+}
+
+void ThreadPool::NotifyIdleObservers() {
+  // Briefly take idle_cv_mutex_ to avoid the lost-wakeup race where the
+  // waiter has just evaluated the predicate but not yet entered wait_for.
+  // Holding the lock around notify_all() is the standard pattern.
+  std::lock_guard<std::mutex> lock(idle_cv_mutex_);
+  idle_cv_.notify_all();
 }
 
 }  // namespace mygramdb::server

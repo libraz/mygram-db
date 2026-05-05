@@ -537,6 +537,138 @@ TEST_F(IoReactorTest, StartStopConcurrentNoLeak) {
 // stale entry behind.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Test 21: IdleConnectionIsReaped (Fix N-3)
+//
+// Configures a reactor with idle_timeout_sec=1 and reaper_interval_sec=1,
+// registers a connection, and waits past the idle deadline. The reactor's
+// reaper task should observe the stale connection and call Unregister(),
+// which fires the close callback. Labelled SLOW because it sleeps ~2.5s.
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, IdleConnectionIsReaped) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 50;     // tight loop so the reaper interval check fires quickly
+  cfg.idle_timeout_sec = 1;     // age out after 1s of no activity
+  cfg.reaper_interval_sec = 1;  // sweep every 1s
+  cfg.event_loop_threads = 1;
+
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+
+  std::atomic<int> close_callback_count{0};
+  std::atomic<int> closed_fd{-1};
+  reactor->SetCloseCallback([&](int fd) {
+    close_callback_count.fetch_add(1);
+    closed_fd.store(fd);
+  });
+
+  ASSERT_TRUE(reactor->Start()) << "Real backend Start() failed";
+
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor->Register(conn));
+  EXPECT_EQ(reactor->ConnectionCount(), 1u);
+
+  // Wait past the idle deadline + one reaper interval, plus slack for the
+  // event loop to actually pick up the sweep cadence.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+
+  EXPECT_EQ(reactor->ConnectionCount(), 0u) << "Reaper should have closed the idle connection";
+  EXPECT_GE(close_callback_count.load(), 1) << "Close callback should have fired for reaped connection";
+  EXPECT_EQ(closed_fd.load(), client_fd);
+
+  reactor->Stop();
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: ActiveConnectionIsNotReaped (Fix N-3)
+//
+// Same setup as IdleConnectionIsReaped but the test continuously writes
+// non-frame data to the peer end of the socket so the reactor sees
+// readable events and refreshes last_active_ without triggering a frame
+// dispatch (this fixture has a null dispatcher, so a complete frame would
+// fail ScheduleDrainTask and tear down the connection unrelated to the
+// reaper). Writing partial frames (no \r\n terminator) is sufficient to
+// fire OnReadable and bump last_active_.
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, ActiveConnectionIsNotReaped) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 50;
+  cfg.idle_timeout_sec = 2;
+  cfg.reaper_interval_sec = 1;
+  cfg.event_loop_threads = 1;
+
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+
+  std::atomic<int> close_callback_count{0};
+  reactor->SetCloseCallback([&](int) { close_callback_count.fetch_add(1); });
+
+  ASSERT_TRUE(reactor->Start());
+
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  int peer_fd = sp.Peer();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor->Register(conn));
+
+  // Drive periodic activity for 2.5s. With idle_timeout=2s, an idle peer
+  // would be reaped on the second sweep. Writing data every 200ms keeps
+  // last_active_ fresh. Use partial-frame bytes (no \r\n terminator) so
+  // OnReadable consumes them but does not try to dispatch a complete
+  // request through the null dispatcher.
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+  while (std::chrono::steady_clock::now() < deadline) {
+    const char* msg = "x";
+    ssize_t r = ::write(peer_fd, msg, 1);
+    (void)r;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  EXPECT_EQ(reactor->ConnectionCount(), 1u) << "Active connection must not be reaped";
+  EXPECT_EQ(close_callback_count.load(), 0);
+
+  reactor->Stop();
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: RegisterRollbackOnMuxAddFailure (Fix N-5)
+//
+// MockEventMultiplexer can be configured to fail Add(). The fix reorders
+// Register so that mux_->Add runs before connections_.emplace, eliminating
+// the rollback path. This test confirms that on Add failure, the
+// connections_ map is left untouched (no leftover entries to clean up).
+// ---------------------------------------------------------------------------
+
+TEST_F(IoReactorTest, RegisterRollbackOnMuxAddFailure) {
+  auto* mock = StartWithMock();
+  ASSERT_NE(mock, nullptr);
+
+  // Force the mock to fail the next Add() call.
+  mock->SetAddShouldFail(true);
+
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+
+  auto result = reactor_->Register(conn);
+  ASSERT_FALSE(result) << "Register should have failed because mux_->Add was forced to fail";
+
+  // Critical invariant: connections_ must be empty. Pre-fix this could be 1
+  // (entry inserted before the mux_->Add attempt, never rolled back if the
+  // rollback path itself raced).
+  EXPECT_EQ(reactor_->ConnectionCount(), 0u) << "connections_ must remain empty when mux_->Add fails";
+
+  // Allow re-registration after the mock recovers — confirms the failed
+  // Register did not leave any stale interest entry behind either.
+  mock->SetAddShouldFail(false);
+  ASSERT_TRUE(reactor_->Register(conn).has_value());
+  EXPECT_EQ(reactor_->ConnectionCount(), 1u);
+}
+
 TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
   for (int iter = 0; iter < 20; ++iter) {
     auto pool = std::make_unique<ThreadPool>(2, 64);

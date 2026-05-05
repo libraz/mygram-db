@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
@@ -128,6 +129,16 @@ void IoReactor::Stop() {
 }
 
 Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> conn) {
+  // Multiplexer registration happens BEFORE map insertion. This ensures that
+  // any concurrent Lookup(fd) only sees the connection after it is fully
+  // observable to the multiplexer. Reverse order would expose a window where
+  // Lookup returns a connection whose fd is not yet in the kernel poll set,
+  // which is harmless in this codepath today (DispatchEvent only calls
+  // Lookup when the kernel reports a ready event, and the kernel cannot
+  // report events for a fd that is not registered yet) but fragile against
+  // future changes. As a side benefit, this order eliminates the rollback
+  // path that the previous implementation needed: if mux_->Add fails, the
+  // map is never touched, so there is nothing to clean up.
   if (!conn) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Register called with null connection"));
   }
@@ -154,7 +165,7 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
   }
 
   // Acquire mux_lifecycle_ (shared) FIRST and perform every reactor-state
-  // mutation — running_ check, connections_ insert, mux_->Add — inside this
+  // mutation — running_ check, mux_->Add, connections_ insert — inside this
   // critical section. Stop() takes mux_lifecycle_ exclusively at the very end
   // of its shutdown sequence; while we hold this shared lock, Stop() cannot
   // proceed past `connections_.clear()` (which happens BEFORE the exclusive
@@ -168,23 +179,36 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
     return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register before Start"));
   }
 
-  // Insert into connections_ first so an event delivered between mux_->Add
-  // and the map insert never sees a missing entry.
+  // Step 1: pre-check for duplicate fd under the connections_ lock. We have
+  // to do this before mux_->Add to keep the failure path side-effect free
+  // (otherwise we'd Add then immediately Remove on duplicate detection).
   {
-    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    std::shared_lock<std::shared_mutex> conn_lock(connections_mutex_);
     if (connections_.count(fd) != 0U) {
       return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd"));
     }
-    connections_.emplace(fd, conn);
   }
 
+  // Step 2: register with the multiplexer. On failure return immediately
+  // without ever touching the connections_ map.
   auto add_result = mux_->Add(fd, reactor::event::kReadable);
   if (!add_result) {
-    // Roll back the map insert so a subsequent Register attempt with the
-    // same fd sees a clean slate.
-    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
-    connections_.erase(fd);
     return MakeUnexpected(add_result.error());
+  }
+
+  // Step 3: publish into connections_. We re-check the duplicate guard in
+  // case another Register raced us between Step 1 and Step 3; if so, undo
+  // the mux_->Add we just performed so the kernel poll set stays clean.
+  {
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    auto [it, inserted] = connections_.emplace(fd, conn);
+    if (!inserted) {
+      // Lost the race against a concurrent Register with the same fd. Pull
+      // our entry back out of the multiplexer to avoid leaking interest.
+      conn_lock.unlock();
+      (void)mux_->Remove(fd);
+      return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd (race)"));
+    }
   }
 
   return {};
@@ -283,6 +307,51 @@ void IoReactor::EventLoop() {
     for (const auto& ev : ready) {
       DispatchEvent(ev);
     }
+
+    // Reap idle connections at most once per `reaper_interval_sec`. Running
+    // in-loop avoids spawning a dedicated reaper thread; the cost is one
+    // shared-lock acquisition per interval over connections_, which is
+    // negligible compared to Poll itself.
+    if (config_.idle_timeout_sec > 0 && config_.reaper_interval_sec > 0) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_reaper_run_ >= std::chrono::seconds(config_.reaper_interval_sec)) {
+        last_reaper_run_ = now;
+        ReapIdleConnections();
+      }
+    }
+  }
+}
+
+void IoReactor::ReapIdleConnections() {
+  // Snapshot the candidate fds under a shared lock so we don't hold the
+  // mutex across Unregister(), which itself acquires both mux_lifecycle_
+  // (shared) and connections_mutex_ (unique). Holding the shared lock here
+  // and then upgrading to unique inside Unregister would deadlock.
+  const auto now = std::chrono::steady_clock::now();
+  const auto deadline = std::chrono::seconds(config_.idle_timeout_sec);
+  std::vector<std::pair<int, std::chrono::seconds>> to_close;
+  {
+    std::shared_lock<std::shared_mutex> lock(connections_mutex_);
+    to_close.reserve(connections_.size());
+    for (const auto& [fd, conn] : connections_) {
+      if (!conn) {
+        continue;
+      }
+      const auto idle_for = now - conn->LastActive();
+      if (idle_for >= deadline) {
+        to_close.emplace_back(fd, std::chrono::duration_cast<std::chrono::seconds>(idle_for));
+      }
+    }
+  }
+
+  for (const auto& [fd, idle_for] : to_close) {
+    mygram::utils::StructuredLog()
+        .Event("connection_reaped")
+        .Field("fd", static_cast<int64_t>(fd))
+        .Field("idle_seconds", static_cast<int64_t>(idle_for.count()))
+        .Field("idle_timeout_sec", static_cast<int64_t>(config_.idle_timeout_sec))
+        .Info();
+    Unregister(fd);
   }
 }
 

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <memory>
 #include <thread>
 
 using namespace mygramdb::server;
@@ -500,4 +501,104 @@ TEST_F(RateLimiterTest, IPv6FullAddressFormat) {
 
   auto stats = limiter.GetStats();
   EXPECT_EQ(stats.tracked_clients, 2);
+}
+
+/**
+ * @brief Fix N-4: a single shared RateLimiter instance enforces a unified
+ *        per-client quota across multiple call sites.
+ *
+ * The intent of the production wiring is that TcpServer and HttpServer
+ * receive shared_ptr<RateLimiter> copies of the same instance so a client's
+ * quota applies across both protocols. This test simulates that contract at
+ * the unit level: two callers ("TCP" and "HTTP") share one instance and
+ * call AllowRequest with the same client IP. After the bucket is exhausted
+ * via one caller, requests from the other caller for the same IP are also
+ * denied.
+ */
+TEST_F(RateLimiterTest, SharedInstanceAccountsAcrossCallers) {
+  // Capacity 3, no refill within the test window.
+  auto shared_limiter = std::make_shared<RateLimiter>(3, /*refill_rate=*/1);
+
+  // Pretend caller A is the TCP server.
+  auto tcp_caller = shared_limiter;
+  // Pretend caller B is the HTTP server. Same instance; quota MUST be shared.
+  auto http_caller = shared_limiter;
+  EXPECT_EQ(tcp_caller.get(), http_caller.get()) << "Test must use the same RateLimiter instance";
+
+  const std::string client_ip = "192.0.2.42";
+
+  // First two requests from TCP caller succeed.
+  EXPECT_TRUE(tcp_caller->AllowRequest(client_ip));
+  EXPECT_TRUE(tcp_caller->AllowRequest(client_ip));
+  // Third request from HTTP caller succeeds (still within capacity).
+  EXPECT_TRUE(http_caller->AllowRequest(client_ip));
+
+  // Bucket is now empty for this client. Subsequent requests from EITHER
+  // caller MUST be denied — the failure mode the fix prevents is one caller
+  // having its own private bucket, which would let the client effectively
+  // double its quota by talking to both protocols.
+  EXPECT_FALSE(tcp_caller->AllowRequest(client_ip)) << "TCP request must be denied after shared bucket exhausted";
+  EXPECT_FALSE(http_caller->AllowRequest(client_ip)) << "HTTP request must be denied after shared bucket exhausted";
+
+  // Statistics from the shared instance reflect ALL traffic regardless of
+  // which caller invoked AllowRequest.
+  auto stats = shared_limiter->GetStats();
+  EXPECT_EQ(stats.total_requests, 5);
+  EXPECT_EQ(stats.allowed_requests, 3);
+  EXPECT_EQ(stats.blocked_requests, 2);
+  EXPECT_EQ(stats.tracked_clients, 1);
+}
+
+/**
+ * @brief Perf-3 regression: the background sweeper removes expired buckets
+ *        without requiring AllowRequest to be invoked.
+ *
+ * Cleanup was previously inline inside AllowRequest, so a tracked client
+ * could only be evicted by a subsequent call. The sweeper now runs on a
+ * dedicated thread; we wait long enough for one sweep cycle and assert the
+ * bucket count drops to zero without any further AllowRequest calls.
+ */
+TEST_F(RateLimiterTest, BackgroundSweeperRemovesExpiredBuckets) {
+  // Short sweep interval (100ms) and short inactivity timeout (1s, the
+  // smallest the API exposes). 1500ms of total wait gives the sweeper at
+  // least one tick after the bucket has aged past the timeout.
+  RateLimiter limiter(/*capacity=*/10, /*refill_rate=*/10, /*max_clients=*/100,
+                      /*cleanup_interval=*/std::chrono::milliseconds(100),
+                      /*inactivity_timeout_sec=*/1);
+
+  EXPECT_TRUE(limiter.AllowRequest("clientA"));
+  EXPECT_EQ(1U, limiter.GetTrackedClientCount());
+
+  // Wait past inactivity_timeout (1s) plus a sweep tick (100ms) plus margin.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+  EXPECT_EQ(0U, limiter.GetTrackedClientCount())
+      << "Background sweeper must remove the expired bucket without an AllowRequest call";
+}
+
+/**
+ * @brief Perf-3 regression: AllowRequest no longer performs cleanup inline.
+ *
+ * This test exercises the same scenario the legacy inline-cleanup tests
+ * used (rapid bursts from many clients) but without relying on AllowRequest
+ * to trigger the sweep. After the sweeper runs, ephemeral buckets should be
+ * gone; without a sweeper, GetTrackedClientCount would remain at the burst
+ * size until the next AllowRequest call.
+ */
+TEST_F(RateLimiterTest, AllowRequestNoLongerPerformsInlineCleanup) {
+  RateLimiter limiter(/*capacity=*/5, /*refill_rate=*/5, /*max_clients=*/200,
+                      /*cleanup_interval=*/std::chrono::milliseconds(100),
+                      /*inactivity_timeout_sec=*/1);
+
+  for (int i = 0; i < 20; ++i) {
+    limiter.AllowRequest("ephemeral." + std::to_string(i));
+  }
+  EXPECT_EQ(20U, limiter.GetTrackedClientCount());
+
+  // Wait for inactivity + at least one sweeper tick. No further AllowRequest
+  // call is made — the sweeper is solely responsible for the cleanup.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+  EXPECT_EQ(0U, limiter.GetTrackedClientCount())
+      << "Sweeper must drop ephemeral buckets independently of request traffic";
 }

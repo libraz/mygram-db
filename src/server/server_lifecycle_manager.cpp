@@ -5,8 +5,6 @@
 
 #include "server/server_lifecycle_manager.h"
 
-#include <spdlog/spdlog.h>
-
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
 #include "server/handlers/admin_handler.h"
@@ -51,9 +49,12 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
   using mygram::utils::MakeUnexpected;
 
 #ifdef USE_MYSQL
-  // Contract: sync_manager must be non-null when USE_MYSQL is defined
+  // Contract: sync_manager must be non-null when USE_MYSQL is defined.
+  // Use kServerInitMissingDependency (6xxx Network/Server range) for server
+  // init-time dependency checks, distinguishing them from generic internal
+  // errors so observability tools can surface configuration mistakes.
   if (sync_manager == nullptr) {
-    return MakeUnexpected(MakeError(ErrorCode::kInternalError,
+    return MakeUnexpected(MakeError(ErrorCode::kServerInitMissingDependency,
                                     "ServerLifecycleManager: sync_manager must be non-null when USE_MYSQL is defined"));
   }
 #endif

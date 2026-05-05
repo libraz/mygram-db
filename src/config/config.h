@@ -320,6 +320,14 @@ struct ApiConfig {
     int port = defaults::kHttpPort;
     bool enable_cors = false;
     std::string cors_allow_origin;
+
+    /// Maximum HTTP request body size in bytes. Bodies larger than this are
+    /// rejected with HTTP 413 (Payload Too Large) by cpp-httplib before any
+    /// handler runs. Default: 16 MiB. This is independent from the TCP
+    /// per-connection write queue cap and from the query parser's
+    /// `max_query_length`; it is a coarse network-level guard against memory
+    /// exhaustion via giant POST bodies.
+    int64_t max_body_bytes = 16LL * 1024 * 1024;  // 16 MiB
   } http;
 
   struct {

@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -432,6 +433,50 @@ TEST_F(ConnectionAcceptorTcpTest, NormalFlowStartSetHandlerStartAccepting) {
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   EXPECT_GE(hits.load(), 1);
+
+  acceptor.Stop();
+}
+
+// --- Per-client socket options ---
+
+// Fix N-1: ConnectionAcceptor sets TCP_NODELAY on accepted TCP sockets so the
+// kernel does not delay small responses while waiting for ACK coalescing.
+// Verifies that the option is observable on the server-side fd reported to
+// the reactor handler.
+TEST_F(ConnectionAcceptorTcpTest, AcceptedSocketsHaveTcpNoDelay) {
+  auto config = MakeConfig(0);
+  ConnectionAcceptor acceptor(config);
+
+  std::atomic<int> nodelay_value{-1};
+  std::atomic<bool> handler_ran{false};
+  acceptor.SetReactorHandler([&](int fd) {
+    int val = 0;
+    socklen_t len = sizeof(val);
+    if (::getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, &len) == 0) {
+      nodelay_value.store(val);
+    }
+    handler_ran.store(true);
+    ::close(fd);
+    return true;
+  });
+
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+
+  int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
+  ASSERT_GE(client, 0) << "connect() failed: " << strerror(errno);
+
+  // Wait briefly for the handler to run on the accept thread.
+  for (int i = 0; i < 50 && !handler_ran.load(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ::close(client);
+
+  EXPECT_TRUE(handler_ran.load()) << "Reactor handler did not run for accepted connection";
+  // POSIX getsockopt(TCP_NODELAY) returns "the option is set" as a non-zero
+  // int but the exact value is implementation-defined (Linux returns 1, macOS
+  // sometimes returns the high-order bit pattern). Treat any non-zero as set.
+  EXPECT_NE(nodelay_value.load(), 0) << "TCP_NODELAY should be set on accepted TCP socket";
 
   acceptor.Stop();
 }

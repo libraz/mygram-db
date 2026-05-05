@@ -85,12 +85,26 @@ class ThreadPool {
   std::atomic<bool> shutdown_{false};
   std::atomic<size_t> active_workers_{0};  // Number of workers currently executing tasks
 
+  // Idle-state notification used by Shutdown(timeout_ms) to avoid the previous
+  // 10ms polling loop. Lives under a separate mutex so signalling never
+  // requires queue_mutex_ to be held while a waiter is blocked on this CV.
+  mutable std::mutex idle_cv_mutex_;
+  std::condition_variable idle_cv_;
+
   size_t max_queue_size_;
 
   /**
    * @brief Worker thread function
    */
   void WorkerThread();
+
+  /**
+   * @brief Notify any thread waiting on idle_cv_ that the pool may be drained.
+   *
+   * Safe to call from worker threads after they finish a task, and from
+   * Shutdown() to ensure the waiter wakes when shutdown_ flips to true.
+   */
+  void NotifyIdleObservers();
 };
 
 }  // namespace mygramdb::server

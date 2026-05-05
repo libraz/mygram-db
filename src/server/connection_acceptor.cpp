@@ -8,7 +8,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -392,6 +391,13 @@ void ConnectionAcceptor::Stop() {
   // are owned by the reactor (ReactorConnection), which closes them in its
   // destructor during IoReactor::Stop(). Closing here would cause a
   // double-close race with the reactor's teardown path.
+  //
+  // RemoveConnection is idempotent post-Stop: active_fds_.clear() runs after
+  // the reactor's close-callbacks have already drained, so any late
+  // RemoveConnection from an in-flight close is a safe no-op erase against
+  // an already-empty set. Do NOT replace clear() with a "drain via reactor
+  // callbacks" pattern -- the order here (drain first, then clear) is the
+  // intentional single source of truth.
   {
     std::lock_guard<std::mutex> lock(fds_mutex_);
     active_fds_.clear();
@@ -680,6 +686,24 @@ void ConnectionAcceptor::SetClientSocketOptions(int client_fd) const {
         .Field("fd", static_cast<uint64_t>(client_fd))
         .Field("error", strerror(errno))
         .Warn();
+  }
+
+  // TCP_NODELAY: Disable Nagle's algorithm so small responses (typical of the
+  // text protocol's request/response cadence) are not held in the kernel for
+  // up to 200ms waiting for ACK coalescing. Only meaningful on TCP; Unix
+  // domain sockets do not support TCP_NODELAY (would return EOPNOTSUPP).
+  // Failure is non-fatal — we log a WARN and keep the connection.
+  if (!IsUnixSocket()) {
+    int one = 1;
+    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+      mygram::utils::StructuredLog()
+          .Event("server_warning")
+          .Field("operation", "setsockopt")
+          .Field("option", "TCP_NODELAY")
+          .Field("fd", static_cast<uint64_t>(client_fd))
+          .Field("error", strerror(errno))
+          .Warn();
+    }
   }
 }
 

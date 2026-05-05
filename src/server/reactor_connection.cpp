@@ -63,6 +63,11 @@ ReactorConnection::~ReactorConnection() {
 }
 
 bool ReactorConnection::OnReadable() {
+  // Refresh idle-timer baseline. Any inbound event counts as activity for
+  // the reaper, even if recv() ultimately returns 0 (peer half-close): the
+  // peer just spoke to us, so we are not idle.
+  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
+
   if (closing_.load(std::memory_order_acquire)) {
     return false;
   }
@@ -176,6 +181,11 @@ bool ReactorConnection::OnReadable() {
 }
 
 bool ReactorConnection::OnWritable() {
+  // Outbound progress also resets the idle-timer (Fix N-3): a slow client
+  // that is steadily draining its socket is not "idle" even if it never
+  // sends another request.
+  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
+
   std::unique_lock<std::mutex> lock(write_mutex_);
 
   if (!DrainWriteQueueLocked()) {
@@ -294,11 +304,10 @@ void ReactorConnection::DrainTask() {
     }
 
     // Dispatch. `Dispatch` is synchronous and returns the full response.
+    // The per-request counter is incremented inside RequestDispatcher::Dispatch
+    // so all dispatch paths agree on a single canonical site; do not call
+    // stats_->IncrementRequests() here or the request count will double.
     std::string response = dispatcher_->Dispatch(frame, conn_ctx_);
-    if (stats_ != nullptr) {
-      // Mirror the blocking path's per-request counter increment.
-      stats_->IncrementRequests();
-    }
 
     // Enqueue the response for non-blocking send. The fast path in
     // EnqueueResponse attempts an inline drain before returning; only on
@@ -460,12 +469,24 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
 }
 
 bool ReactorConnection::DrainWriteQueueLocked() {
+  // MSG_NOSIGNAL is defined on all platforms we target (Linux, macOS, BSDs).
+  // Falling back to 0 in the #else preserves correctness via SO_NOSIGPIPE
+  // that the acceptor sets per-socket on macOS (see
+  // ConnectionAcceptor::SetSocketOptions). The ifdef guards an unlikely
+  // future port to a platform that lacks both MSG_NOSIGNAL and a per-socket
+  // alternative; on such a platform SIGPIPE would have to be ignored
+  // process-wide (signal_manager.cpp already does this) for correctness.
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
   while (!write_queue_.empty()) {
     const std::string& front = write_queue_.front();
     const char* data = front.data() + front_offset_;
     const size_t remaining = front.size() - front_offset_;
 
-    ssize_t n = ::send(fd_, data, remaining, MSG_NOSIGNAL);
+    ssize_t n = ::send(fd_, data, remaining, kSendFlags);
     if (n > 0) {
       front_offset_ += static_cast<size_t>(n);
       write_queue_bytes_ -= static_cast<size_t>(n);
