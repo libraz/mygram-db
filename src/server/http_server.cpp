@@ -414,7 +414,7 @@ void HttpServer::SetupAccessControl() {
 
     // Check CIDR-based access control first
     if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
-      stats_.IncrementRequests();
+      RecordRequest();
       mygram::utils::StructuredLog()
           .Event("server_warning")
           .Field("type", "http_request_rejected_acl")
@@ -426,7 +426,7 @@ void HttpServer::SetupAccessControl() {
 
     // Check rate limit (if enabled)
     if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
-      stats_.IncrementRequests();
+      RecordRequest();
       mygram::utils::StructuredLog()
           .Event("server_warning")
           .Field("type", "http_rate_limit_exceeded")
@@ -565,93 +565,94 @@ void HttpServer::Stop() {
   mygram::utils::StructuredLog().Event("http_server_stopped").Info();
 }
 
-void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
-  stats_.IncrementRequests();
+std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(const httplib::Request& req,
+                                                                                httplib::Response& res,
+                                                                                const std::string& command,
+                                                                                bool apply_pagination) {
+  // Check if server is loading
+  if (loading_ != nullptr && loading_->load()) {
+    SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+    return std::nullopt;
+  }
 
+  // Extract table name from URL
+  std::string table = req.matches[1];
+
+  // Validate table name (whitelist) before any further processing.
+  // Rejecting unsafe names here prevents the value from breaking the
+  // QueryParser command grammar and turning the URL path into a query
+  // injection vector (e.g. `articles foo`).
+  if (!IsValidTableName(table)) {
+    SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
+    return std::nullopt;
+  }
+
+  // Lookup table
+  auto table_iter = table_contexts_.find(table);
+  if (table_iter == table_contexts_.end()) {
+    SendError(res, kHttpNotFound, "Table not found: " + table);
+    return std::nullopt;
+  }
+  if (!table_iter->second->index || !table_iter->second->doc_store) {
+    SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
+    return std::nullopt;
+  }
+  auto* table_ctx = table_iter->second;
+
+  // Parse JSON body
+  json body;
   try {
-    // Check if server is loading
-    if (loading_ != nullptr && loading_->load()) {
-      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
-      return;
+    body = json::parse(req.body);
+  } catch (const json::parse_error& e) {
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
+    return std::nullopt;
+  }
+
+  // Validate required field
+  if (!body.contains("q")) {
+    SendError(res, kHttpBadRequest, "Missing required field: q");
+    return std::nullopt;
+  }
+
+  // Validate field type before extraction
+  if (!body["q"].is_string()) {
+    SendError(res, kHttpBadRequest, "Field 'q' must be a string");
+    return std::nullopt;
+  }
+
+  // Validate query text for control characters (CRLF injection prevention)
+  std::string query_text = body["q"].get<std::string>();
+  for (char c : query_text) {
+    if (c == '\r' || c == '\n' || c == '\0') {
+      SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+      return std::nullopt;
     }
+  }
 
-    // Extract table name from URL
-    std::string table = req.matches[1];
-
-    // Validate table name (whitelist) before any further processing.
-    // Rejecting unsafe names here prevents the value from breaking the
-    // QueryParser command grammar and turning the URL path into a query
-    // injection vector (e.g. `articles foo`).
-    if (!IsValidTableName(table)) {
-      SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
-      return;
+  // Reject parser clause keywords smuggled into `q`. JSON-supplied `limit`,
+  // `offset`, and `filters` would otherwise be silently overridden by tokens
+  // such as `LIMIT 0 OFFSET 999999` embedded in the search text (P1-9).
+  {
+    std::string offending;
+    if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
+      const std::string field_hint = apply_pagination ? "(limit, offset, filters)" : "(filters)";
+      SendError(res, kHttpBadRequest,
+                "Reserved keyword '" + offending + "' is not allowed in 'q'. Use the dedicated JSON fields " +
+                    field_hint + " instead.");
+      return std::nullopt;
     }
+  }
 
-    // Lookup table
-    auto table_iter = table_contexts_.find(table);
-    if (table_iter == table_contexts_.end()) {
-      SendError(res, kHttpNotFound, "Table not found: " + table);
-      return;
-    }
-    if (!table_iter->second->index || !table_iter->second->doc_store) {
-      SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
-      return;
-    }
-    auto* table_ctx = table_iter->second;
-    auto* current_doc_store = table_ctx->doc_store.get();
+  // Build query string for QueryParser
+  std::ostringstream query_str;
+  query_str << command << " " << table << " " << query_text;
 
-    // Parse JSON body
-    json body;
-    try {
-      body = json::parse(req.body);
-    } catch (const json::parse_error& e) {
-      SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
-      return;
-    }
-
-    // Validate required field
-    if (!body.contains("q")) {
-      SendError(res, kHttpBadRequest, "Missing required field: q");
-      return;
-    }
-
-    // Validate field type before extraction
-    if (!body["q"].is_string()) {
-      SendError(res, kHttpBadRequest, "Field 'q' must be a string");
-      return;
-    }
-
-    // Validate query text for control characters (CRLF injection prevention)
-    std::string query_text = body["q"].get<std::string>();
-    for (char c : query_text) {
-      if (c == '\r' || c == '\n' || c == '\0') {
-        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
-        return;
-      }
-    }
-
-    // Reject parser clause keywords smuggled into `q`. JSON-supplied `limit`,
-    // `offset`, and `filters` would otherwise be silently overridden by tokens
-    // such as `LIMIT 0 OFFSET 999999` embedded in the search text (P1-9).
-    {
-      std::string offending;
-      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
-        SendError(res, kHttpBadRequest,
-                  "Reserved keyword '" + offending +
-                      "' is not allowed in 'q'. Use the dedicated JSON fields (limit, offset, filters) instead.");
-        return;
-      }
-    }
-
-    // Build query string for QueryParser
-    std::ostringstream query_str;
-    query_str << "SEARCH " << table << " " << query_text;
-
+  if (apply_pagination) {
     // Add limit
     if (body.contains("limit")) {
       if (!body["limit"].is_number_integer()) {
         SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
-        return;
+        return std::nullopt;
       }
       query_str << " LIMIT " << body["limit"].get<int>();
     }
@@ -660,35 +661,56 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     if (body.contains("offset")) {
       if (!body["offset"].is_number_integer()) {
         SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
-        return;
+        return std::nullopt;
       }
       query_str << " OFFSET " << body["offset"].get<int>();
     }
+  }
 
-    // Parse and execute query (use per-request parser to avoid data race)
-    query::QueryParser query_parser;
-    if (max_query_length_ > 0) {
-      query_parser.SetMaxQueryLength(max_query_length_);
+  // Parse query (use per-request parser to avoid data race)
+  query::QueryParser query_parser;
+  if (max_query_length_ > 0) {
+    query_parser.SetMaxQueryLength(max_query_length_);
+  }
+  auto parsed_query = query_parser.Parse(query_str.str());
+  if (!parsed_query) {
+    SendError(res, kHttpBadRequest, "Invalid query: " + parsed_query.error().message());
+    return std::nullopt;
+  }
+
+  // Apply default limit if LIMIT was not explicitly specified in the request
+  if (apply_pagination && !parsed_query->limit_explicit && full_config_ != nullptr) {
+    parsed_query->limit = static_cast<size_t>(full_config_->api.default_limit);
+  }
+
+  // Apply filters from JSON payload
+  if (body.contains("filters") && body["filters"].is_object()) {
+    std::string filter_error;
+    if (!ParseFiltersFromJson(body["filters"], *parsed_query, filter_error)) {
+      SendError(res, kHttpBadRequest, filter_error);
+      return std::nullopt;
     }
-    auto query = query_parser.Parse(query_str.str());
-    if (!query) {
-      SendError(res, kHttpBadRequest, "Invalid query: " + query.error().message());
+  }
+
+  PreparedHttpQuery prepared;
+  prepared.table_ctx = table_ctx;
+  prepared.body = std::move(body);
+  prepared.query = std::move(*parsed_query);
+  return prepared;
+}
+
+void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
+  RecordRequest();
+
+  try {
+    auto prepared = PrepareHttpSearchQuery(req, res, "SEARCH", /*apply_pagination=*/true);
+    if (!prepared) {
       return;
     }
-
-    // Apply default limit if LIMIT was not explicitly specified in the request
-    if (!query->limit_explicit && full_config_ != nullptr) {
-      query->limit = static_cast<size_t>(full_config_->api.default_limit);
-    }
-
-    // Apply filters from JSON payload
-    if (body.contains("filters") && body["filters"].is_object()) {
-      std::string filter_error;
-      if (!ParseFiltersFromJson(body["filters"], *query, filter_error)) {
-        SendError(res, kHttpBadRequest, filter_error);
-        return;
-      }
-    }
+    auto* table_ctx = prepared->table_ctx;
+    auto* current_doc_store = table_ctx->doc_store.get();
+    auto& query_ref = prepared->query;
+    auto* query = &query_ref;
 
     // Build pipeline parameters from table context
     search_pipeline::FullPipelineParams params;
@@ -781,101 +803,16 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 }
 
 void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   try {
-    // Check if server is loading
-    if (loading_ != nullptr && loading_->load()) {
-      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+    auto prepared = PrepareHttpSearchQuery(req, res, "COUNT", /*apply_pagination=*/false);
+    if (!prepared) {
       return;
     }
-
-    // Extract table name from URL
-    std::string table = req.matches[1];
-
-    // Validate table name (whitelist) before any further processing. See
-    // HandleSearch for the rationale.
-    if (!IsValidTableName(table)) {
-      SendError(res, kHttpBadRequest, "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
-      return;
-    }
-
-    // Lookup table
-    auto table_iter = table_contexts_.find(table);
-    if (table_iter == table_contexts_.end()) {
-      SendError(res, kHttpNotFound, "Table not found: " + table);
-      return;
-    }
-    if (!table_iter->second->index || !table_iter->second->doc_store) {
-      SendError(res, kHttpInternalServerError, "Table context has null index or doc_store");
-      return;
-    }
-    auto* table_ctx = table_iter->second;
-
-    // Parse JSON body
-    json body;
-    try {
-      body = json::parse(req.body);
-    } catch (const json::parse_error& e) {
-      SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
-      return;
-    }
-
-    // Validate required field
-    if (!body.contains("q")) {
-      SendError(res, kHttpBadRequest, "Missing required field: q");
-      return;
-    }
-
-    // Validate field type before extraction
-    if (!body["q"].is_string()) {
-      SendError(res, kHttpBadRequest, "Field 'q' must be a string");
-      return;
-    }
-
-    // Validate query text for control characters (CRLF injection prevention)
-    std::string query_text = body["q"].get<std::string>();
-    for (char c : query_text) {
-      if (c == '\r' || c == '\n' || c == '\0') {
-        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
-        return;
-      }
-    }
-
-    // Reject parser clause keywords smuggled into `q` (see HandleSearch).
-    {
-      std::string offending;
-      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
-        SendError(res, kHttpBadRequest,
-                  "Reserved keyword '" + offending +
-                      "' is not allowed in 'q'. Use the dedicated JSON fields (filters) instead.");
-        return;
-      }
-    }
-
-    // Build query string for QueryParser (COUNT query)
-    std::ostringstream query_str;
-    query_str << "COUNT " << table << " " << query_text;
-
-    // Parse and execute query
-    query::QueryParser query_parser;
-    if (max_query_length_ > 0) {
-      query_parser.SetMaxQueryLength(max_query_length_);
-    }
-    auto query = query_parser.Parse(query_str.str());
-    if (!query) {
-      SendError(res, kHttpBadRequest, "Invalid query: " + query.error().message());
-      return;
-    }
-
-    // Apply filters from JSON payload (same logic as search)
-    if (body.contains("filters") && body["filters"].is_object()) {
-      std::string filter_error;
-      if (!ParseFiltersFromJson(body["filters"], *query, filter_error)) {
-        SendError(res, kHttpBadRequest, filter_error);
-        return;
-      }
-    }
+    auto* table_ctx = prepared->table_ctx;
+    auto& query_ref = prepared->query;
+    auto* query = &query_ref;
 
     // Build pipeline parameters from table context
     search_pipeline::FullPipelineParams params;
@@ -918,7 +855,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 }
 
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   try {
     // Check if server is loading
@@ -988,11 +925,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
 void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& res) {
   // Increment request counter on the effective stats instance
-  if (tcp_stats_ != nullptr) {
-    tcp_stats_->IncrementRequests();
-  } else {
-    stats_.IncrementRequests();
-  }
+  RecordRequest();
 
   try {
     json response;
@@ -1146,7 +1079,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 }
 
 void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   json response;
   response["status"] = "ok";
@@ -1157,7 +1090,7 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
 }
 
 void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   // Liveness probe: Always return 200 OK if the process is running
   // This is used by orchestrators (Kubernetes, Docker) to detect deadlocks
@@ -1170,7 +1103,7 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
 }
 
 void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
   bool is_ready = (loading_ == nullptr || !loading_->load());
@@ -1193,7 +1126,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
 }
 
 void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   // Detailed health: Return comprehensive component status
   json response;
@@ -1274,7 +1207,7 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
 }
 
 void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   if (full_config_ == nullptr) {
     SendError(res, kHttpInternalServerError, "Configuration not available");
@@ -1323,7 +1256,7 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
 }
 
 void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
 #ifdef USE_MYSQL
   if (binlog_reader_ == nullptr) {
@@ -1352,7 +1285,7 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 }
 
 void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Response& res) {
-  stats_.IncrementRequests();
+  RecordRequest();
 
   try {
     // Use TCP server's stats if available (includes all protocol stats), otherwise use HTTP-only stats

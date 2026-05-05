@@ -625,6 +625,23 @@ gtest_discover_tests(search_handler_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# CommandHandler base helper tests (shared loading-state guard)
+
+add_executable(command_handler_test
+  command_handler_test.cpp
+)
+
+target_link_libraries(command_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(command_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
 # SyncInstancePreservation tests (Bug fix: replication events not reflected in search)
 
 add_executable(sync_instance_preservation_test

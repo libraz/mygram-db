@@ -22,8 +22,8 @@
 namespace mygramdb::server {
 
 std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
   }
 
   // Get table context
@@ -49,8 +49,8 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   }
 
   // EDGE-5: Re-check dump_load_in_progress after snapshot
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
   }
 
   std::vector<std::pair<std::string, uint64_t>> value_counts;

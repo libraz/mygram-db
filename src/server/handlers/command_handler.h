@@ -72,6 +72,18 @@ class CommandHandler {
    * @return Table context result or error
    */
   mygram::utils::Expected<TableContextResult, mygram::utils::Error> GetTableContext(const std::string& table_name);
+
+  /**
+   * @brief Check whether a DUMP LOAD operation is in progress.
+   *
+   * Returns an empty string if the server is ready to handle requests, or a
+   * pre-formatted ERROR response describing the loading state. Handlers should
+   * call this helper at the start of request processing and return the result
+   * directly when it is non-empty.
+   *
+   * @return Empty string when ready, or a formatted ERROR response otherwise.
+   */
+  std::string CheckNotLoading() const;
 };
 
 }  // namespace mygramdb::server

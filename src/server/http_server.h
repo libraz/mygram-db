@@ -16,6 +16,7 @@
 #include <atomic>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -183,6 +184,42 @@ class HttpServer {
   void SetupAccessControl();
 
   /**
+   * @brief Result of a successful PrepareHttpSearchQuery call.
+   *
+   * Holds non-owning pointers and a parsed Query that callers use to drive
+   * the unified search pipeline. The pointer fields outlive the request so
+   * long as `table_contexts_` is not mutated mid-request.
+   */
+  struct PreparedHttpQuery {
+    TableContext* table_ctx = nullptr;
+    nlohmann::json body;
+    query::Query query;
+  };
+
+  /**
+   * @brief Run the shared HandleSearch/HandleCount preamble.
+   *
+   * Validates the URL table name, looks up the table context, parses the
+   * JSON body, validates the `q` field (presence, type, control characters,
+   * reserved clause keywords), invokes QueryParser, and parses the optional
+   * `filters` JSON object into the resulting query. On failure, sends an
+   * appropriately-coded HTTP error response and returns std::nullopt; the
+   * caller should return immediately. On success, the caller continues with
+   * pipeline parameter construction and execution.
+   *
+   * @param req         HTTP request (path matches and JSON body).
+   * @param res         HTTP response (populated on error).
+   * @param command     Parser command verb ("SEARCH" or "COUNT").
+   * @param apply_pagination If true, propagate `limit`/`offset` from the JSON
+   *                    body into the parser query string and apply the
+   *                    configured default limit when none was supplied.
+   * @return Prepared query on success, std::nullopt on failure (response
+   *         already populated).
+   */
+  std::optional<PreparedHttpQuery> PrepareHttpSearchQuery(const httplib::Request& req, httplib::Response& res,
+                                                          const std::string& command, bool apply_pagination);
+
+  /**
    * @brief Handle POST /{table}/search
    */
   void HandleSearch(const httplib::Request& req, httplib::Response& res);
@@ -236,6 +273,15 @@ class HttpServer {
    * @brief Handle GET /metrics (Prometheus format)
    */
   void HandleMetrics(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Increment the request counter on the effective stats instance.
+   *
+   * When a TCP server's ServerStats has been provided (`tcp_stats_`), the
+   * counter is incremented there so /info and /metrics report unified
+   * cross-protocol totals. Otherwise the HTTP-only `stats_` is used.
+   */
+  void RecordRequest() { (tcp_stats_ != nullptr ? tcp_stats_ : &stats_)->IncrementRequests(); }
 
   /**
    * @brief Send JSON response

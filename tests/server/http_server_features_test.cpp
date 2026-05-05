@@ -1010,5 +1010,124 @@ TEST(HttpServerPointerSafetyTest, NullPointerDefensiveChecks) {
   SUCCEED() << "Null pointer safety checks added to search and get handlers";
 }
 
+// ============================================================================
+// RecordRequest unification: every HTTP handler increments the same stats
+// instance (tcp_stats_ when provided, otherwise stats_). This guards against
+// the previous inconsistency where /info had its own branch and /search,
+// /count, /health* always wrote to stats_ even when tcp_stats_ was non-null.
+// ============================================================================
+
+TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
+  // No tcp_stats supplied -> RecordRequest() must increment HttpServer::stats_.
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext ctx;
+  ctx.name = "test";
+  ctx.config.ngram_size = 1;
+  ctx.index = std::make_unique<index::Index>(1);
+  ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  auto doc_id = ctx.doc_store->AddDocument("doc-1", {});
+  ctx.index->AddDocument(*doc_id, "alpha");
+  table_contexts["test"] = &ctx;
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = 18086;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr,
+                         /*tcp_stats=*/nullptr);
+  ASSERT_TRUE(http_server.Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint64_t baseline = http_server.GetTotalRequests();
+
+  httplib::Client client("127.0.0.1", 18086);
+  client.set_read_timeout(std::chrono::seconds(5));
+
+  ASSERT_TRUE(client.Get("/info"));
+
+  json search_body;
+  search_body["q"] = "alpha";
+  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+
+  json count_body;
+  count_body["q"] = "alpha";
+  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+
+  // Allow async request bookkeeping a brief moment to settle.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  uint64_t after = http_server.GetTotalRequests();
+  EXPECT_GE(after - baseline, 3U) << "info + search + count must each call RecordRequest()";
+
+  http_server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
+  // tcp_stats supplied -> every handler (search/count/info/health*) must
+  // route IncrementRequests() to tcp_stats_, and stats_ must stay flat.
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext ctx;
+  ctx.name = "test";
+  ctx.config.ngram_size = 1;
+  ctx.index = std::make_unique<index::Index>(1);
+  ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  auto doc_id = ctx.doc_store->AddDocument("doc-1", {});
+  ctx.index->AddDocument(*doc_id, "beta");
+  table_contexts["test"] = &ctx;
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  ServerStats tcp_stats;
+  uint64_t tcp_baseline = tcp_stats.GetTotalRequests();
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = 18087;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr, &tcp_stats);
+  ASSERT_TRUE(http_server.Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint64_t http_baseline = http_server.GetTotalRequests();
+
+  httplib::Client client("127.0.0.1", 18087);
+  client.set_read_timeout(std::chrono::seconds(5));
+
+  // /info historically routed to tcp_stats; verify it still does.
+  ASSERT_TRUE(client.Get("/info"));
+
+  // /search and /count used to always hit stats_, ignoring tcp_stats. After
+  // unification they must update tcp_stats too.
+  json search_body;
+  search_body["q"] = "beta";
+  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+
+  json count_body;
+  count_body["q"] = "beta";
+  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  uint64_t tcp_after = tcp_stats.GetTotalRequests();
+  uint64_t http_after = http_server.GetTotalRequests();
+
+  EXPECT_GE(tcp_after - tcp_baseline, 3U)
+      << "All HTTP handlers must increment tcp_stats when provided (info + search + count)";
+  EXPECT_EQ(http_after, http_baseline)
+      << "HTTP-only stats must not be touched when tcp_stats is provided (otherwise /info would double count)";
+
+  http_server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
 }  // namespace server
 }  // namespace mygramdb

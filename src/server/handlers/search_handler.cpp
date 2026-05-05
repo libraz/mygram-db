@@ -32,8 +32,8 @@ std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& 
 std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx,
                                                  PipelineOutput& output) {
   // Check if server is loading
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
   }
 
   // Get table context (needed for both cache lookup and search)

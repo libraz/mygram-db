@@ -31,4 +31,11 @@ mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error
   };
 }
 
+std::string CommandHandler::CheckNotLoading() const {
+  if (ctx_.dump_load_in_progress) {
+    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  }
+  return {};
+}
+
 }  // namespace mygramdb::server
