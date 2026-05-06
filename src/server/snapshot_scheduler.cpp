@@ -195,9 +195,9 @@ void SnapshotScheduler::TakeSnapshot() {
     // DUMP STATUS responses; we set it on first pause and clear it on last
     // release so the indicator tracks the counter.
     bool replication_was_running = (binlog_reader_ != nullptr) && binlog_reader_->IsRunning();
-    bool first_pauser = false;
+    replication_pause::Scope pause_scope;
     if (replication_was_running) {
-      first_pauser = replication_pause::RequestPause();
+      const bool first_pauser = pause_scope.Acquire();
       if (first_pauser) {
         // We are the first pauser: actually stop the reader and assert the
         // observable flag. Subsequent pausers piggy-back on this Stop().
@@ -216,15 +216,17 @@ void SnapshotScheduler::TakeSnapshot() {
     // RAII restore: even on exception or early return, replication is resumed
     // (when we are the last releaser) and the paused flag is cleared. The
     // lambda captures the dump_path string by value defensively; structured-
-    // log fields are formatted inside.
+    // log fields are formatted inside. The pause_scope itself releases the
+    // counter on destruction as a last-line safety net, but we Release()
+    // explicitly here so we observe the last_releaser bool.
     const std::string dump_path_str = dump_path.string();
-    auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str]() {
+    auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str, &pause_scope]() {
       if (!replication_was_running) {
         // We did not enter the pause counter (replication was already stopped
         // when we started), so we have nothing to release.
         return;
       }
-      bool last_releaser = replication_pause::ReleasePause();
+      const bool last_releaser = pause_scope.Release();
       if (!last_releaser) {
         // Another operation is still holding the pause. Do not Start().
         // The flag stays asserted (set by the first pauser) until that

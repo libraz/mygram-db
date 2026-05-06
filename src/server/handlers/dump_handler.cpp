@@ -232,6 +232,11 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   bool replication_was_running = false;
   bool first_pauser = false;
+  // RAII scope: if any path between Acquire() and the explicit Release()
+  // below early-returns or throws, the destructor drops the counter so we
+  // do not leak a pause increment. The destructor does NOT call Start();
+  // the explicit Release() path below owns that side-effect.
+  replication_pause::Scope pause_scope;
 
 #ifdef USE_MYSQL
   std::string gtid;
@@ -250,7 +255,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     replication_was_running = ctx_.binlog_reader->IsRunning();
 
     if (replication_was_running) {
-      first_pauser = replication_pause::RequestPause();
+      first_pauser = pause_scope.Acquire();
       if (first_pauser) {
         ctx_.binlog_reader->Stop();
         ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
@@ -328,15 +333,15 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // that may be racing their own destructors. Just clear the paused flag
   // and skip the restart.
   //
-  // H-C3: We invoke replication_pause::ReleasePause() to undo the
-  // RequestPause() at the top of this worker, but only call binlog
-  // Start() when we are the LAST releaser (counter transitioned 1 -> 0).
-  // If a concurrent operation (auto-snapshot, DUMP LOAD) is still
-  // holding the pause, we leave the reader stopped and the paused flag
-  // asserted; the other operation's release will perform the Start().
+  // H-C3: pause_scope.Release() undoes the Acquire() at the top of this
+  // worker, but we only call binlog Start() when we are the LAST releaser
+  // (counter transitioned 1 -> 0). If a concurrent operation (auto-
+  // snapshot, DUMP LOAD) is still holding the pause, we leave the reader
+  // stopped and the paused flag asserted; that operation's release will
+  // perform the Start().
   const bool shutting_down = (ctx_.shutdown_flag != nullptr) && ctx_.shutdown_flag->load(std::memory_order_acquire);
   if (replication_was_running) {
-    bool last_releaser = replication_pause::ReleasePause();
+    const bool last_releaser = pause_scope.Release();
     if (!last_releaser) {
       // Another operation is still paused — leave the reader stopped and
       // the flag set (set by the first pauser, cleared by whoever
@@ -493,10 +498,15 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // replication_pause counter. Only the first pauser actually calls
   // Stop() and asserts the observable flag; subsequent pausers piggy-
   // back. The matching Release() lives in restore_replication / the
-  // explicit success path further down.
+  // explicit success path further down. pause_scope is the RAII safety
+  // net: if any path between here and the success-path Release() exits
+  // without releasing, the destructor drops the counter so we do not
+  // leak the increment. The destructor itself does NOT call Start();
+  // the ScopeGuard / explicit-success branches own that side-effect.
   bool first_pauser = false;
+  replication_pause::Scope pause_scope;
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
-    first_pauser = replication_pause::RequestPause();
+    first_pauser = pause_scope.Acquire();
     if (first_pauser) {
       ctx_.binlog_reader->Stop();
       ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
@@ -522,12 +532,12 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // guaranteed alive (TcpServer::Stop joins this worker before the
   // reader is dropped) but a Start() during teardown would just spawn
   // threads Stop() has to immediately tear down.
-  auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running]() {
+  auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &pause_scope]() {
     if (!replication_was_running) {
       // We did not enter the pause counter; nothing to release.
       return;
     }
-    bool last_releaser = replication_pause::ReleasePause();
+    const bool last_releaser = pause_scope.Release();
     if (!last_releaser) {
       // Another operation still holds the pause. Leave the reader
       // stopped and the flag asserted; the other op's release will
@@ -608,11 +618,16 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // ScopeGuard performs the same shutdown-aware skip).
   //
   // H-C3: As in the ScopeGuard above, the explicit restart goes through
-  // replication_pause::ReleasePause() so concurrent pausers (auto-snapshot,
-  // DUMP SAVE) cannot have the binlog reader Start()ed under them. We
-  // only call binlog Start() when we are the LAST releaser.
+  // pause_scope.Release() so concurrent pausers (auto-snapshot, DUMP
+  // SAVE) cannot have the binlog reader Start()ed under them. We only
+  // call binlog Start() when we are the LAST releaser. After Release()
+  // returns the scope is "spent" — the ScopeGuard's lambda will see
+  // pause_scope.Release() return false and skip its branch, so we do
+  // not need to call Release() on the ScopeGuard explicitly for counter
+  // bookkeeping. We still Release() the ScopeGuard below to suppress
+  // its (now-redundant) flag-clear and Start() side-effects.
   if (result && replication_was_running) {
-    bool last_releaser = replication_pause::ReleasePause();
+    const bool last_releaser = pause_scope.Release();
     if (!last_releaser) {
       // Another operation still holds the pause. Leave the reader
       // stopped and the flag asserted. We still dismiss restore_replication

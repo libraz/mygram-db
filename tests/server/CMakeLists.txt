@@ -845,6 +845,23 @@ gtest_discover_tests(socket_utils_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Replication-pause counter tests (Scope RAII wrapper)
+add_executable(replication_pause_counter_test
+  replication_pause_counter_test.cpp
+)
+
+target_link_libraries(replication_pause_counter_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: counter is process-wide; tests must run sequentially
+gtest_discover_tests(replication_pause_counter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK replication_pause_counter
+)
+
 add_subdirectory(reactor)
 
 # IoReactor tests (Phase 2.T5)

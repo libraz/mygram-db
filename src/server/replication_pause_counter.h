@@ -143,4 +143,115 @@ inline void ResetForTesting() noexcept {
   detail::Counter().store(0, std::memory_order_release);
 }
 
+/**
+ * @brief RAII scope guard around the process-wide pause counter (Phase 4 M-6).
+ *
+ * Pairs RequestPause() with a guaranteed ReleasePause() on scope exit, so
+ * an early return / exception between Acquire() and the manual release
+ * can no longer leak counter increments. Replaces the
+ * RequestPause + ScopeGuard{ReleasePause} idiom that several handlers
+ * carried inline.
+ *
+ * Usage shape:
+ * @code
+ *   replication_pause::Scope pause;
+ *   if (replication_was_running) {
+ *     if (pause.Acquire()) {           // first pauser?
+ *       binlog_reader->Stop();          // only the first pauser stops
+ *       paused_flag.store(true, ...);
+ *     }
+ *   }
+ *   ... do work ...
+ *   if (replication_was_running) {
+ *     if (pause.Release()) {            // last releaser?
+ *       paused_flag.store(false, ...);
+ *       binlog_reader->Start();
+ *     }
+ *   }
+ *   // If Release() is omitted (early return / throw), the destructor
+ *   // still drops the counter — but does NOT call Start(): callers that
+ *   // need the Start side-effect must call Release() explicitly so they
+ *   // see the last_releaser bool.
+ * @endcode
+ *
+ * Move-only by design: the counter increment "belongs" to a single
+ * Scope instance at any time, so allowing copies would silently
+ * double-decrement on destruction.
+ *
+ * Calling Acquire() twice on the same Scope is a programming bug; the
+ * second call is a no-op that returns false (matching ReleasePause's
+ * unbalanced-call defense) so the destructor still only releases once.
+ */
+class Scope {
+ public:
+  Scope() noexcept = default;
+
+  Scope(const Scope&) = delete;
+  Scope& operator=(const Scope&) = delete;
+
+  Scope(Scope&& other) noexcept : held_(other.held_), released_(other.released_) {
+    // Transfer ownership: source must not release in its destructor.
+    other.held_ = false;
+    other.released_ = true;
+  }
+
+  // Move-assign would have to release the current state and then steal
+  // the source's, which is more rope than current call sites need. Skip
+  // until a use case appears.
+  Scope& operator=(Scope&&) = delete;
+
+  ~Scope() {
+    if (held_ && !released_) {
+      // Best-effort: drop the counter so we do not leak the increment.
+      // Intentionally ignore the last_releaser bool; callers that need
+      // to perform side-effects on the 1->0 transition (e.g. binlog
+      // Start()) MUST use the explicit Release() path so they see the
+      // bool. The destructor is the failure-safety net, not the primary
+      // release point.
+      ReleasePause();
+    }
+  }
+
+  /**
+   * @brief Increment the counter and report whether this scope is the
+   *        first pauser.
+   *
+   * @return same semantics as RequestPause(): true if 0 -> 1 transition.
+   *         A second Acquire() on the same Scope is a no-op returning
+   *         false (defensive against double-acquire bugs).
+   */
+  bool Acquire() noexcept {
+    if (held_) {
+      return false;  // Already held; do not double-increment.
+    }
+    held_ = true;
+    return RequestPause();
+  }
+
+  /**
+   * @brief Explicit release. Decrements the counter and reports whether
+   *        this scope is the last releaser.
+   *
+   * After Release() the destructor will not release again. Calling
+   * Release() without a prior Acquire(), or calling Release() more than
+   * once, is a no-op returning false.
+   *
+   * @return same semantics as ReleasePause(): true if 1 -> 0 transition.
+   */
+  bool Release() noexcept {
+    if (!held_ || released_) {
+      return false;
+    }
+    released_ = true;
+    return ReleasePause();
+  }
+
+  /// True if Acquire() has been called and Release() has not yet run.
+  bool held() const noexcept { return held_ && !released_; }
+
+ private:
+  bool held_ = false;
+  bool released_ = false;
+};
+
 }  // namespace mygramdb::server::replication_pause
