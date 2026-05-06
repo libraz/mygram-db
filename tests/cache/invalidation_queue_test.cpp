@@ -1100,4 +1100,351 @@ TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
   EXPECT_FALSE(cache.Lookup(key).has_value());
 }
 
+/**
+ * @brief Large-batch processing without string-key allocation overhead
+ *
+ * Regression test for the typed-composite-key fix: previously each Enqueue
+ * built a "table:cache_key_hex" string per affected key (allocating O(n)
+ * strings), and ProcessBatch parsed each back via stoull. The typed
+ * (table, CacheKey) pair eliminates both. This test enqueues a large
+ * number of distinct invalidations and verifies all are processed.
+ */
+TEST(InvalidationQueueTest, EnqueueWithLargeBatchAvoidsStringAllocation) {
+  QueryCache cache(64 * 1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  queue.SetBatchSize(2000);
+  queue.SetMaxDelay(50);
+  queue.SetMaxQueueSize(100000);
+
+  // Register 10000 cache entries, each with a distinct ngram so they don't
+  // dedupe on invalidation.
+  constexpr int kNumEntries = 10000;
+  std::vector<CacheKey> keys;
+  keys.reserve(kNumEntries);
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("large_batch_query_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    // Pad ngram to 3 chars so it survives ngram-size filtering
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    meta.ngrams = {"n" + suffix.substr(suffix.size() - 2)};
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0);
+    mgr.RegisterCacheEntry(key, meta);
+    keys.push_back(key);
+  }
+
+  queue.Start();
+
+  // Enqueue 10000 invalidations using the same set of ngrams used at
+  // registration time, so each invalidation marks exactly one entry.
+  for (int i = 0; i < kNumEntries; ++i) {
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    queue.Enqueue("posts", "", "n" + suffix.substr(suffix.size() - 2));
+  }
+
+  // Allow processing
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  queue.Stop();
+
+  // Verify the queue drained without crash. Most entries should be erased.
+  // We don't require 100% because ngram dedup may collapse some, but the
+  // pending count must reach zero and no exception should be thrown.
+  EXPECT_EQ(queue.GetPendingCount(), 0u);
+}
+
+/**
+ * @brief Round-trip identity for the typed composite key
+ *
+ * With the typed-pair key, the (table, CacheKey) values that the producer
+ * enqueued must be the exact same values consumed by ProcessBatch — there
+ * is no encoding/decoding step. This test verifies that a known set of
+ * cache keys for a known table all get erased after a single Enqueue +
+ * ProcessBatch cycle.
+ */
+TEST(InvalidationQueueTest, EnqueueRoundtripPreservesIdentity) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // Use a table name that contains a colon to verify the typed key handles
+  // arbitrary table names without parsing ambiguity.
+  const std::string table = "schema:table";
+  NgramConfigMap configs_with_colon;
+  configs_with_colon[table] = NgramConfig{
+      .ngram_size = 3,
+      .kanji_ngram_size = 2,
+      .cross_boundary_ngrams = true,
+  };
+  InvalidationQueue queue_colon(&cache, &mgr, std::move(configs_with_colon));
+
+  // Register a small known set of (table, CacheKey) pairs
+  std::vector<CacheKey> known_keys;
+  for (int i = 0; i < 5; ++i) {
+    auto key = CacheKeyGenerator::Generate("roundtrip_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = table;
+    meta.ngrams = {"abc", "bcd"};
+    cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0);
+    mgr.RegisterCacheEntry(key, meta);
+    known_keys.push_back(key);
+  }
+
+  // Verify all known keys are present pre-invalidation
+  for (const auto& k : known_keys) {
+    EXPECT_TRUE(cache.Lookup(k).has_value());
+  }
+
+  queue_colon.Start();
+  queue_colon.Enqueue(table, "", "abcd");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  queue_colon.Stop();
+
+  // All known keys should have been erased — proving the (table, CacheKey)
+  // pairs survived enqueue/dequeue identity-preserved (no hex round-trip).
+  for (size_t i = 0; i < known_keys.size(); ++i) {
+    EXPECT_FALSE(cache.Lookup(known_keys[i]).has_value()) << "key " << i << " was not erased";
+  }
+}
+
+// =============================================================================
+// CR-6 regression: single-source UnregisterCacheEntry contract
+// =============================================================================
+
+/**
+ * @brief CR-6 regression: ProcessBatch + concurrent Erase does not corrupt
+ *        InvalidationManager reverse indexes.
+ *
+ * Before the CR-6 fix, ProcessBatch called UnregisterCacheEntry directly AND
+ * cache_->Erase() — but with a CacheManager-style eviction callback wired to
+ * UnregisterCacheEntry, that meant double-unregister. The double-unregister
+ * was a no-op for the metadata map (find() returned end()) but the auxiliary
+ * reverse indexes (table_to_cache_keys_, ngram_to_cache_keys_) could
+ * desynchronize from cache_metadata_ when a concurrent Insert re-registered
+ * the same key between the two unregisters.
+ *
+ * Fix: ProcessBatch now uses EraseWithoutCallback + explicit
+ * UnregisterCacheEntry, so cleanup fires exactly once per affected key.
+ *
+ * This test wires an eviction callback that ALSO calls UnregisterCacheEntry
+ * (mirroring the CacheManager configuration) and verifies the manager's
+ * tracked entry count and ngram count are correct after a batch process.
+ */
+TEST(InvalidationQueueTest, ProcessBatchWithEvictionCallbackNoDoubleUnregister) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // Wire eviction callback to call UnregisterCacheEntry (mirrors
+  // CacheManager). With the CR-6 fix, ProcessBatch uses EraseWithoutCallback
+  // so this callback never fires for queue-driven cleanup.
+  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+
+  // Register cache entries with distinct ngrams.
+  constexpr int kNumEntries = 50;
+  std::vector<CacheKey> keys;
+  keys.reserve(kNumEntries);
+  for (int i = 0; i < kNumEntries; ++i) {
+    auto key = CacheKeyGenerator::Generate("cr6_" + std::to_string(i));
+    CacheMetadata meta;
+    meta.table = "posts";
+    // Each entry uses a distinct ngram so invalidation hits exactly one entry.
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    meta.ngrams = {"n" + suffix.substr(suffix.size() - 2)};
+    ASSERT_TRUE(cache.Insert(key, {static_cast<DocId>(i)}, meta, 10.0));
+    mgr.RegisterCacheEntry(key, meta);
+    keys.push_back(key);
+  }
+
+  ASSERT_EQ(mgr.GetTrackedEntryCount(), static_cast<size_t>(kNumEntries));
+  const size_t initial_ngrams = mgr.GetTrackedNgramCount("posts");
+  EXPECT_EQ(initial_ngrams, static_cast<size_t>(kNumEntries));
+
+  queue.SetBatchSize(10);
+  queue.SetMaxDelay(50);
+  queue.Start();
+
+  // Enqueue invalidations for every entry.
+  for (int i = 0; i < kNumEntries; ++i) {
+    std::string suffix = std::to_string(i);
+    while (suffix.size() < 3) {
+      suffix.insert(suffix.begin(), '0');
+    }
+    queue.Enqueue("posts", "", "n" + suffix.substr(suffix.size() - 2));
+  }
+
+  // Drain: Stop() processes any remaining items synchronously after joining
+  // the worker.
+  queue.Stop();
+
+  // After processing, all entries must be erased AND the InvalidationManager
+  // must reflect zero tracked entries / zero tracked ngrams. Under the bug,
+  // the double-unregister could leave dangling refs in
+  // table_to_cache_keys_ / ngram_to_cache_keys_ if a re-registration raced
+  // between the two unregisters; even without a race, a single-threaded
+  // run must end with consistent counts.
+  for (const auto& k : keys) {
+    EXPECT_FALSE(cache.Lookup(k).has_value());
+  }
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedNgramCount("posts"), 0U);
+}
+
+/**
+ * @brief CR-6 regression: ProcessBatch concurrent with re-registration keeps
+ *        tracked-entry count consistent.
+ *
+ * Stress variant of the above: while the worker is processing batches,
+ * another thread re-registers cache entries with the same keys (simulating
+ * a hot key being repeatedly cached). Under the old double-unregister bug,
+ * the auxiliary reverse indexes could desync. After the fix, GetTrackedEntryCount
+ * must always equal the number of currently-cached entries — this is the
+ * fundamental invariant.
+ */
+TEST(InvalidationQueueTest, ProcessBatchConcurrentWithReRegisterTrackedCountConsistent) {
+  QueryCache cache(8 * 1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // CacheManager-style eviction callback.
+  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+
+  queue.SetBatchSize(5);
+  queue.SetMaxDelay(20);
+  queue.Start();
+
+  std::atomic<bool> stop_flag{false};
+
+  // Producer: continually insert + register + enqueue invalidation for a
+  // small set of hot keys.
+  std::thread producer([&]() {
+    int counter = 0;
+    while (!stop_flag.load()) {
+      const int slot = counter % 8;
+      auto key = CacheKeyGenerator::Generate("cr6_hot_" + std::to_string(slot));
+      CacheMetadata meta;
+      meta.table = "posts";
+      meta.ngrams = {"hot"};
+      cache.Insert(key, {static_cast<DocId>(slot)}, meta, 10.0);
+      mgr.RegisterCacheEntry(key, meta);
+      queue.Enqueue("posts", "", "hot");
+      ++counter;
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  stop_flag.store(true);
+  producer.join();
+  queue.Stop();
+
+  // After draining, the tracked entry count must match the number of cache
+  // entries currently in QueryCache (could be 0 or up to 8 depending on
+  // timing). Under the bug, the manager could end up with more or fewer
+  // tracked entries than the cache actually holds.
+  const auto stats = cache.GetStatistics();
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), stats.current_entries);
+}
+
+// =============================================================================
+// H-M5 regression: Stop()/Start() cycle restores Enqueue functionality
+// =============================================================================
+
+/**
+ * @brief H-M5 regression: Start() resets stopped_ so that Enqueue works
+ *        after a Stop()/Start() cycle.
+ *
+ * Before the fix, InvalidationQueue::Stop() set stopped_ = true and
+ * Start() did not reset it. A Stop()/Start() pair therefore left stopped_
+ * permanently true, and every subsequent Enqueue was silently dropped at
+ * the early-out in Enqueue. CacheManager's Disable()/Enable() cycle hit
+ * exactly this bug.
+ */
+TEST(InvalidationQueueTest, StartAfterStopReenablesEnqueue) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  // Wire eviction callback (mirrors CacheManager).
+  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+
+  // First Start/Stop cycle: queue is functional.
+  queue.Start();
+  queue.Stop();
+
+  // Insert + register a fresh entry AFTER the first Stop.
+  auto key = CacheKeyGenerator::Generate("hm5_query_after_stop");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"foo", "bar"};
+  ASSERT_TRUE(cache.Insert(key, {1, 2, 3}, meta, 10.0));
+  mgr.RegisterCacheEntry(key, meta);
+  ASSERT_TRUE(cache.Lookup(key).has_value());
+
+  // Restart the queue (mimics CacheManager::Enable).
+  queue.Start();
+  ASSERT_TRUE(queue.IsRunning());
+
+  // Enqueue an invalidation — under the bug, stopped_ would still be true
+  // and the call would be silently dropped, leaving the entry intact.
+  queue.Enqueue("posts", "", "foo bar");
+
+  // Allow the worker to drain and stop again.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  queue.Stop();
+
+  // Entry must have been erased; if Enqueue had been dropped, this fails.
+  EXPECT_FALSE(cache.Lookup(key).has_value()) << "Enqueue after Stop()/Start() cycle was silently dropped (H-M5)";
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+}
+
+/**
+ * @brief H-M5 regression: multiple Stop/Start cycles each leave Enqueue
+ *        functional.
+ */
+TEST(InvalidationQueueTest, MultipleStopStartCyclesEachReenableEnqueue) {
+  QueryCache cache(1024 * 1024, 1.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+
+  for (int cycle = 0; cycle < 3; ++cycle) {
+    auto key = CacheKeyGenerator::Generate("hm5_cycle_" + std::to_string(cycle));
+    CacheMetadata meta;
+    meta.table = "posts";
+    meta.ngrams = {"baz"};
+    ASSERT_TRUE(cache.Insert(key, {static_cast<DocId>(cycle)}, meta, 10.0));
+    mgr.RegisterCacheEntry(key, meta);
+
+    queue.Start();
+    ASSERT_TRUE(queue.IsRunning());
+    queue.Enqueue("posts", "", "baz");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    queue.Stop();
+
+    EXPECT_FALSE(cache.Lookup(key).has_value()) << "cycle " << cycle << " Enqueue dropped";
+  }
+
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+}
+
 }  // namespace mygramdb::cache

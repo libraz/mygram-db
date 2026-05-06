@@ -11,14 +11,28 @@
 #include <unordered_map>
 
 #include "config/config.h"
-#include "index/index.h"
-#include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
-#include "storage/document_store.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+
+// Forward declarations for types only used as pointers / references in this
+// header. NOTE: server_types.h still pulls in index/index.h and
+// storage/document_store.h because TableContext holds unique_ptr to those
+// (the implicit destructor needs the full type), so this is mostly a
+// hygiene improvement — the heavy headers are not actually shed from
+// downstream TUs until TableContext is restructured.
+namespace mygramdb::index {
+class Index;
+}  // namespace mygramdb::index
+namespace mygramdb::storage {
+class DocumentStore;
+}  // namespace mygramdb::storage
+namespace mygramdb::query {
+struct Query;
+enum class QueryType : uint8_t;
+}  // namespace mygramdb::query
 
 #ifdef USE_MYSQL
 namespace mygramdb::mysql {
@@ -72,6 +86,18 @@ class CommandHandler {
    * @return Table context result or error
    */
   mygram::utils::Expected<TableContextResult, mygram::utils::Error> GetTableContext(const std::string& table_name);
+
+  /**
+   * @brief Check whether a DUMP LOAD operation is in progress.
+   *
+   * Returns an empty string if the server is ready to handle requests, or a
+   * pre-formatted ERROR response describing the loading state. Handlers should
+   * call this helper at the start of request processing and return the result
+   * directly when it is non-empty.
+   *
+   * @return Empty string when ready, or a formatted ERROR response otherwise.
+   */
+  std::string CheckNotLoading() const;
 };
 
 }  // namespace mygramdb::server

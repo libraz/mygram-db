@@ -41,7 +41,11 @@ class SyncHandler : public CommandHandler {
   static mygram::utils::Expected<std::unique_ptr<SyncHandler>, mygram::utils::Error> Create(
       HandlerContext& ctx, SyncOperationManager* sync_manager) {
     if (sync_manager == nullptr) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kNetworkNullDependency,
+      // SyncHandler is a SYNC/Index-domain component (its operations live in
+      // the 4000-4999 Index/Business range). Reporting the null-dependency
+      // error with kSyncManagerNull (4014) keeps the error code aligned with
+      // the module that surfaces it, instead of borrowing a 6xxx Network code.
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kSyncManagerNull,
                                                                     "SyncHandler: sync_manager must be non-null"));
     }
     return std::unique_ptr<SyncHandler>(new SyncHandler(ctx, sync_manager));

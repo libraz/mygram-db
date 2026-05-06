@@ -279,6 +279,12 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithCacheEnabled) {
 /**
  * @test Initialize_Success_WithSchedulerEnabled
  * @brief Test initialization with snapshot scheduler enabled
+ *
+ * Regression test for the contract enforced by InitScheduler():
+ *   - When dump.interval_sec > 0 and TableCatalog is non-null, the scheduler
+ *     is constructed AND started. SnapshotScheduler's constructor no longer
+ *     silently accepts a null catalog (the precondition was hoisted up to
+ *     ServerLifecycleManager::InitScheduler).
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
   full_config_.dump.interval_sec = 60;
@@ -288,10 +294,35 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
   auto result = manager->Initialize();
 
   ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
-  EXPECT_NE(result->scheduler, nullptr);
+  ASSERT_NE(result->scheduler, nullptr);
+  // InitScheduler must Start() the scheduler after construction.
+  EXPECT_TRUE(result->scheduler->IsRunning());
 
   // Cleanup: Stop scheduler before destroying
   result->scheduler->Stop();
+  result->acceptor->Stop();
+}
+
+/**
+ * @test Initialize_SchedulerDisabledWhenIntervalZero
+ * @brief Verify scheduler stays nullptr when interval_sec is 0 (disabled).
+ *
+ * This complements Initialize_Success_WithSchedulerEnabled and documents the
+ * "scheduler is optional" branch in InitScheduler. The TableCatalog null-check
+ * branch in InitScheduler is unreachable from Initialize() (TableCatalog is
+ * always created non-null by InitTableCatalog), but exists as a defensive
+ * guard against future refactors that might bypass that step.
+ */
+TEST_F(ServerLifecycleManagerTest, Initialize_SchedulerDisabledWhenIntervalZero) {
+  full_config_.dump.interval_sec = 0;
+
+  auto manager = CreateManager();
+  auto result = manager->Initialize();
+
+  ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
+  EXPECT_EQ(result->scheduler, nullptr);
+
+  // Cleanup
   result->acceptor->Stop();
 }
 
@@ -309,6 +340,34 @@ TEST_F(ServerLifecycleManagerTest, Initialize_SyncHandlerReceivesSyncManager) {
 
   // The fact that initialization succeeded means SyncHandler was constructed correctly
   // with the sync_manager pointer (verified by compilation and no crashes)
+
+  // Cleanup
+  result->acceptor->Stop();
+}
+
+/**
+ * @test Initialize_DispatcherRegistersAllSyncQueryTypes
+ * @brief Regression test for fix CR-8: SYNC, SYNC_STATUS, and SYNC_STOP must
+ *        all be wired into the RequestDispatcher.
+ *
+ * Pre-fix, SYNC_STOP was parsed by query_parser.cpp and handled inside
+ * sync_handler.cpp but never registered in ServerLifecycleManager::InitDispatcher.
+ * Clients sending "SYNC STOP <table>" therefore received "Unknown query type"
+ * even though the handler logic was reachable from the rest of the code.
+ *
+ * The completeness check inside InitDispatcher now fails fast on missing
+ * registrations; this test pins the contract for the SYNC family explicitly.
+ */
+TEST_F(ServerLifecycleManagerTest, Initialize_DispatcherRegistersAllSyncQueryTypes) {
+  auto manager = CreateManager();
+  auto result = manager->Initialize();
+  ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
+
+  ASSERT_NE(result->dispatcher, nullptr);
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC));
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STATUS));
+  EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STOP))
+      << "SYNC_STOP must be registered in RequestDispatcher (regression CR-8)";
 
   // Cleanup
   result->acceptor->Stop();

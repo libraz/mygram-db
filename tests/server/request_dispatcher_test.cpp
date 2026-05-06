@@ -6,8 +6,11 @@
 #include "server/request_dispatcher.h"
 
 #include <gtest/gtest.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -18,6 +21,7 @@
 #include "server/server_stats.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
+#include "utils/structured_log.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb::query;
@@ -455,4 +459,118 @@ TEST_F(RequestDispatcherTest, DispatchWhitespaceQuery) {
   std::string response = dispatcher_->Dispatch("   ", conn_ctx);
 
   EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+}
+
+/**
+ * @brief Regression test: long requests must be truncated in the dispatch log.
+ *
+ * The debug log emitted at the start of Dispatch() includes the raw request
+ * string. Untrusted client input may contain log-injection sequences and
+ * pathological lengths, so the dispatcher must truncate the logged string to
+ * kMaxQueryLogLength characters (with "..." appended) and emit the original
+ * byte length in a separate numeric field.
+ */
+TEST_F(RequestDispatcherTest, LongRequestLogIsTruncated) {
+  // Capture spdlog output via an ostream sink. Save the previous default
+  // logger and restore it before returning to avoid bleed-through between
+  // tests. set_level/flush_on are needed because Dispatch() uses Debug() and
+  // the default test logger may have a higher level.
+  auto previous_logger = spdlog::default_logger();
+  auto previous_level = spdlog::get_level();
+
+  std::ostringstream log_stream;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_stream);
+  auto capture_logger = std::make_shared<spdlog::logger>("dispatch_capture", sink);
+  capture_logger->set_pattern("%v");
+  capture_logger->set_level(spdlog::level::debug);
+  capture_logger->flush_on(spdlog::level::debug);
+  spdlog::set_default_logger(capture_logger);
+  spdlog::set_level(spdlog::level::debug);
+
+  // Build a request of 10000 characters. The dispatcher's max_query_length is
+  // 10000 in this fixture, so the parser will reject it with an error, but the
+  // dispatch_log emit happens BEFORE parsing and is what we care about here.
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+  const size_t kRequestSize = 10000;
+  std::string long_request(kRequestSize, 'a');
+  // Force at least one parser-recognizable token so the early log is exercised.
+  long_request.replace(0, 13, "SEARCH posts ");
+
+  (void)dispatcher_->Dispatch(long_request, conn_ctx);
+
+  capture_logger->flush();
+  std::string output = log_stream.str();
+
+  // Restore logger before assertions so a failure does not break later tests.
+  spdlog::set_default_logger(previous_logger);
+  spdlog::set_level(previous_level);
+
+  // The log line should contain the request_dispatching event.
+  ASSERT_NE(output.find("request_dispatching"), std::string::npos)
+      << "Did not capture request_dispatching log; full output: " << output;
+
+  // Locate the "request":"..." field and assert its content length is bounded.
+  const std::string field_marker = "\"request\":\"";
+  size_t marker_pos = output.find(field_marker);
+  ASSERT_NE(marker_pos, std::string::npos) << "Could not find request field; output: " << output;
+  size_t value_start = marker_pos + field_marker.size();
+  size_t value_end = output.find('"', value_start);
+  ASSERT_NE(value_end, std::string::npos);
+  size_t value_len = value_end - value_start;
+
+  // Truncated length is at most kMaxQueryLogLength + 3 ("..." suffix).
+  EXPECT_LE(value_len, mygram::utils::kMaxQueryLogLength + 3)
+      << "Logged request was not truncated; length=" << value_len;
+  EXPECT_LT(value_len, kRequestSize) << "Truncation did not reduce request size below original.";
+
+  // Ellipsis must be present because the request exceeded kMaxQueryLogLength.
+  EXPECT_NE(output.find("..."), std::string::npos) << "Expected ... ellipsis suffix; output: " << output;
+
+  // request_full_length must be present and equal to the original byte length.
+  std::string expected_full_length_field = "\"request_full_length\":" + std::to_string(kRequestSize);
+  EXPECT_NE(output.find(expected_full_length_field), std::string::npos)
+      << "Expected " << expected_full_length_field << "; output: " << output;
+}
+
+/**
+ * @brief Regression test for CR-8: HasHandler reports registered handlers.
+ *
+ * The startup completeness check in ServerLifecycleManager::InitDispatcher
+ * relies on RequestDispatcher::HasHandler returning true exactly when a
+ * non-null handler has been registered for the given QueryType. Pin both the
+ * positive and negative cases so future refactors of the registry can't
+ * silently skip the check.
+ */
+TEST_F(RequestDispatcherTest, HasHandlerReturnsTrueForRegisteredTypes) {
+  EXPECT_TRUE(dispatcher_->HasHandler(QueryType::SEARCH));
+  EXPECT_TRUE(dispatcher_->HasHandler(QueryType::COUNT));
+  // FACET was never registered by the test fixture; HasHandler must report it
+  // as missing so the completeness check in InitDispatcher catches the gap.
+  EXPECT_FALSE(dispatcher_->HasHandler(QueryType::FACET));
+  EXPECT_FALSE(dispatcher_->HasHandler(QueryType::INFO));
+}
+
+/**
+ * @brief Regression test: dispatching commands must bump total_requests.
+ *
+ * Previously RequestDispatcher::Dispatch only called IncrementCommand, so the
+ * INFO total_requests field stayed pinned at 0 even under heavy load.
+ */
+TEST_F(RequestDispatcherTest, DispatchIncrementsTotalRequests) {
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  EXPECT_EQ(stats_->GetTotalRequests(), 0u);
+
+  // A successful dispatch must bump total_requests.
+  std::string response = dispatcher_->Dispatch("SEARCH posts hello", conn_ctx);
+  EXPECT_TRUE(response.find("OK") == 0 || response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_GT(stats_->GetTotalRequests(), 0u);
+  uint64_t after_one = stats_->GetTotalRequests();
+
+  // A second dispatch (even if it returns an error) must also bump it; the
+  // counter tracks attempted requests, not successful ones.
+  dispatcher_->Dispatch("SEARCH posts hello LIMIT 1", conn_ctx);
+  EXPECT_GT(stats_->GetTotalRequests(), after_one);
 }

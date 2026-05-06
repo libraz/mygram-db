@@ -5,8 +5,6 @@
 
 #include "cache/invalidation_queue.h"
 
-#include <spdlog/spdlog.h>
-
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "utils/structured_log.h"
@@ -49,10 +47,10 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
 
     // Reject enqueues after Stop() to prevent use-after-free
     if (stopped_.load()) {
-      spdlog::warn(
-          "InvalidationQueue: Enqueue called after Stop(), "
-          "skipping deferred deletion for {} entries",
-          affected_keys.size());
+      mygram::utils::StructuredLog()
+          .Event("cache_invalidation_queue_enqueue_after_stop")
+          .Field("count", static_cast<uint64_t>(affected_keys.size()))
+          .Warn();
       return;
     }
 
@@ -65,15 +63,21 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       if (pending_cache_keys_.size() >= max_queue_size_) {
         // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
         // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
-        spdlog::warn("InvalidationQueue: queue size {} reached max {}, dropping {} new entries",
-                     pending_cache_keys_.size(), max_queue_size_, affected_keys.size());
+        mygram::utils::StructuredLog()
+            .Event("cache_invalidation_queue_overflow")
+            .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
+            .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
+            .Field("dropped_count", static_cast<uint64_t>(affected_keys.size()))
+            .Warn();
       } else {
         // Use emplace to preserve existing entries' original timestamps,
         // preventing oldest_timestamp_ from becoming stale after re-enqueue.
+        // Composite key uses a typed pair (table + CacheKey) to avoid the
+        // hex round-trip that the previous string-based encoding required
+        // on the invalidation hot path.
         auto now = std::chrono::steady_clock::now();
         for (const auto& key : affected_keys) {
-          const std::string composite_key = MakeCompositeKey(table_name, key.ToString());
-          pending_cache_keys_.emplace(composite_key, now);
+          pending_cache_keys_.emplace(PendingKey{table_name, key}, now);
         }
         if (now < oldest_timestamp_) {
           oldest_timestamp_ = now;
@@ -83,15 +87,33 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   if (process_immediately) {
-    // Process outside lock to prevent deadlock from nested lock acquisition
+    // Process outside lock to prevent deadlock from nested lock acquisition.
+    //
+    // CR-6 (single-source unregister): we used to call
+    // invalidation_mgr_->UnregisterCacheEntry(key) here directly *and* rely on
+    // QueryCache::Erase to fire eviction_callback_, which in CacheManager is
+    // wired to call UnregisterCacheEntry as well. The double-unregister was
+    // a no-op for the metadata map (the second find() returned end()) but it
+    // created a race window for the auxiliary reverse indexes
+    // (table_to_cache_keys_, ngram_to_cache_keys_) when a concurrent Insert
+    // re-registered the same key between the two unregisters.
+    //
+    // Fix: use EraseWithoutCallback so the eviction callback stays out of the
+    // picture on this path, and clean up the InvalidationManager metadata
+    // explicitly here. The invariant is:
+    //
+    //   "On the invalidation-queue cleanup path, UnregisterCacheEntry fires
+    //    exactly once per affected key — directly from the queue, never via
+    //    eviction_callback_."
+    //
+    // This also ensures cleanup works in tests that wire an InvalidationQueue
+    // to a QueryCache without CacheManager's eviction callback installed.
     for (const auto& key : affected_keys) {
-      // Unregister metadata first to prevent memory leak even if Erase fails
+      if (cache_ != nullptr) {
+        cache_->EraseWithoutCallback(key);
+      }
       if (invalidation_mgr_ != nullptr) {
         invalidation_mgr_->UnregisterCacheEntry(key);
-      }
-
-      if (cache_ != nullptr) {
-        cache_->Erase(key);
       }
     }
     return;
@@ -108,10 +130,28 @@ void InvalidationQueue::Start() {
     return;  // Already running
   }
 
+  // H-M5: reset stopped_ on every successful Start() so that a Stop()/Start()
+  // cycle (e.g. CacheManager::Disable() followed by Enable()) does not leave
+  // stopped_ permanently set, which would cause every subsequent Enqueue to
+  // be silently dropped at the early-out below in Enqueue.
+  //
+  // Ordering: stopped_ is reset BEFORE the worker thread starts so that any
+  // Enqueue that races with Start() and observes running_ == true after the
+  // CAS above also observes stopped_ == false (release/acquire pair via the
+  // queue_mutex_ in Enqueue).
+  stopped_.store(false, std::memory_order_release);
+
   worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
 }
 
 void InvalidationQueue::Stop() {
+  // stopped_ is stored *before* acquiring queue_mutex_ on purpose: callers
+  // that already completed Phase 1 (the lockless preparation in Enqueue) will
+  // then try to acquire queue_mutex_, observe stopped_ == true, log a warning,
+  // and return without enqueueing. Moving this store inside the lock would
+  // open a window where late Phase-1 callers acquire the lock before stopped_
+  // is set and enqueue post-shutdown work into a doomed queue. This is the
+  // documented shutdown contract — do not move the store inside the lock.
   stopped_.store(true);
 
   // Atomically check and clear running_ to prevent concurrent Stop() calls
@@ -178,7 +218,7 @@ void InvalidationQueue::WorkerLoop() {
 }
 
 void InvalidationQueue::ProcessBatch() {
-  std::unordered_map<std::string, std::chrono::steady_clock::time_point> batch;
+  std::unordered_map<PendingKey, std::chrono::steady_clock::time_point, PendingKeyHash> batch;
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -193,51 +233,38 @@ void InvalidationQueue::ProcessBatch() {
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
-  // Process batch: erase invalidated entries from cache
+  // Process batch: erase invalidated entries from cache.
+  // Typed PendingKey (table + CacheKey) is consumed directly — no string
+  // parsing, no hex round-trip.
   std::unordered_set<CacheKey> keys_to_erase;
-
-  for (const auto& [composite_key, timestamp] : batch) {
-    // Parse composite key (format: "table:cache_key_hex")
-    const size_t colon_pos = composite_key.rfind(':');
-    if (colon_pos == std::string::npos) {
-      continue;
-    }
-
-    const std::string table_name = composite_key.substr(0, colon_pos);
-    const std::string key_hex = composite_key.substr(colon_pos + 1);
-
-    // Parse cache key from hex string (128-bit MD5 = 32 hex chars)
-    constexpr size_t kMD5HexLength = 32;
-    if (key_hex.length() != kMD5HexLength) {
-      continue;
-    }
-
-    try {
-      const uint64_t hash_high = std::stoull(key_hex.substr(0, 16), nullptr, 16);
-      const uint64_t hash_low = std::stoull(key_hex.substr(16, 16), nullptr, 16);
-      const CacheKey key(hash_high, hash_low);
-
-      keys_to_erase.insert(key);
-    } catch (const std::exception& e) {
-      // Invalid hex string, skip
-      mygram::utils::StructuredLog()
-          .Event("invalidation_hex_parse_error")
-          .Field("key_hex", std::string(key_hex))
-          .Field("error", e.what())
-          .Debug();
-      continue;
-    }
+  for (const auto& [pending_key, timestamp] : batch) {
+    keys_to_erase.insert(pending_key.key);
   }
 
-  // Erase entries from cache
+  // Erase entries from cache and clean up their metadata.
+  //
+  // CR-6 (single-source unregister): UnregisterCacheEntry must fire exactly
+  // once per affected key. Previously this loop called both
+  // invalidation_mgr_->UnregisterCacheEntry(key) AND cache_->Erase(key); when
+  // CacheManager installs an eviction callback that also calls
+  // UnregisterCacheEntry, the second call from the eviction path raced with
+  // any concurrent Insert that re-registered the same key, corrupting the
+  // auxiliary reverse indexes (table_to_cache_keys_ counts could go negative
+  // / desynchronize from cache_metadata_).
+  //
+  // Fix: call EraseWithoutCallback so the eviction callback never runs on
+  // this path, and unregister the metadata explicitly. This keeps the
+  // queue's cleanup self-contained and avoids any double-unregister.
+  //
+  // Invariant: "On the invalidation-queue cleanup path, UnregisterCacheEntry
+  // fires exactly once per affected key — directly from the queue, never via
+  // eviction_callback_."
   for (const auto& key : keys_to_erase) {
-    // Unregister metadata first, then erase from cache
-    // This ensures metadata is cleaned up even if Erase() throws
+    if (cache_ != nullptr) {
+      cache_->EraseWithoutCallback(key);
+    }
     if (invalidation_mgr_ != nullptr) {
       invalidation_mgr_->UnregisterCacheEntry(key);
-    }
-    if (cache_ != nullptr) {
-      cache_->Erase(key);
     }
   }
 
@@ -245,10 +272,6 @@ void InvalidationQueue::ProcessBatch() {
   if (cache_ != nullptr) {
     cache_->IncrementInvalidationBatches();
   }
-}
-
-std::string InvalidationQueue::MakeCompositeKey(const std::string& table, const std::string& cache_key) {
-  return table + ":" + cache_key;
 }
 
 }  // namespace mygramdb::cache

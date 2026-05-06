@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
@@ -40,6 +41,13 @@ IoReactor::~IoReactor() {
 }
 
 Expected<void, Error> IoReactor::Start() {
+  // Serialise against Stop() and any concurrent Start() invocation. Without
+  // this lock, a Stop() racing with Start can observe running_=true after
+  // Start sets it, exchange it back to false, attempt to join() the
+  // event_loop_thread_ before Start assigns it, and silently leak the
+  // worker thread Start subsequently spawns.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   if (running_.load(std::memory_order_acquire)) {
     return {};
   }
@@ -64,7 +72,12 @@ Expected<void, Error> IoReactor::Start() {
     return MakeUnexpected(r.error());
   }
 
-  mux_ = std::move(mux);
+  // Take mux_lifecycle_ exclusively to publish mux_ atomically with
+  // running_=true. Lock order: start_stop_mutex_ -> mux_lifecycle_.
+  {
+    std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    mux_ = std::move(mux);
+  }
   running_.store(true, std::memory_order_release);
   event_loop_thread_ = std::thread([this]() { EventLoop(); });
 
@@ -77,6 +90,30 @@ Expected<void, Error> IoReactor::Start() {
 }
 
 void IoReactor::Stop() {
+  // Serialise against Start() and any concurrent Stop(). See start_stop_mutex_
+  // commentary in the header for the race this guards.
+  //
+  // The event-loop thread MUST NOT take start_stop_mutex_ — Stop() joins it
+  // while holding the lock. EventLoop only acquires mux_lifecycle_ (shared),
+  // which is consistent with the global ordering
+  // start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_.
+  //
+  // CR-3 caller contract: when this reactor is owned by a TcpServer, the
+  // owner MUST shut down `thread_pool_` AFTER reactor_->Stop() returns. The
+  // reactor's close_callback_ may capture pointers (`accept_ptr`,
+  // `close_stats_ptr`) that point at TcpServer-owned objects; drain tasks
+  // queued on the pool may still be executing those callbacks at the moment
+  // Stop() runs. If the pool were torn down before the reactor, the callback
+  // bodies would race their captured-pointer destruction; if the pool were
+  // torn down before connections_.clear() but after the reactor, in-flight
+  // tasks would observe a half-cleared connection map. The current order
+  // (TcpServer::Stop) is:
+  //   reactor_->Stop()  // joins event loop + clears connection map
+  //   acceptor_->Stop()
+  //   thread_pool_->Shutdown()  // joins drain tasks last
+  // Any caller that owns this reactor MUST follow the same order.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   if (!running_.exchange(false, std::memory_order_acq_rel)) {
     // Never started, or already stopped.
     if (event_loop_thread_.joinable()) {
@@ -85,21 +122,48 @@ void IoReactor::Stop() {
     return;
   }
 
+  // Kick the event-loop thread out of any in-progress Poll() so Stop()
+  // doesn't have to wait up to `poll_timeout_ms` (default 100ms, but
+  // operators can configure it as high as several seconds) for the loop to
+  // observe `running_=false`. The Wake() failure path is logged but not
+  // fatal: the worst case is the prior behaviour of waiting for the timeout
+  // to elapse. Wake() takes the shared mux_lifecycle_ lock to read mux_;
+  // since we hold start_stop_mutex_ but not mux_lifecycle_, lock ordering
+  // (start_stop_mutex_ -> mux_lifecycle_) is preserved.
+  {
+    std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    if (mux_) {
+      auto wake_result = mux_->Wake();
+      if (!wake_result) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_stop_wake_failed")
+            .FieldError(wake_result.error())
+            .Field("note", "falling back to poll-timeout-bounded shutdown")
+            .Warn();
+      }
+    }
+  }
+
   if (event_loop_thread_.joinable()) {
     event_loop_thread_.join();
   }
 
   // Drop all registered connections. Drain tasks that still hold a
   // shared_ptr copy will keep their connection alive until they finish.
+  // Note: the close_callback_ is intentionally NOT invoked from this clear()
+  // path — Unregister() invokes it for naturally-closed connections, but
+  // mass-clear during Stop() leaves the callback un-invoked because
+  // the captured ServerStats / ConnectionAcceptor objects may not be in a
+  // state that tolerates being decremented (TcpServer is in shutdown).
   {
-    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
     connections_.clear();
   }
   {
     // Exclusive lock: wait for any in-flight Register/Unregister/ArmWrite to
     // finish before destroying the multiplexer. The event-loop thread has
     // already been joined, so the only contenders are other threads.
-    std::unique_lock<std::shared_mutex> lock(mux_lifecycle_);
+    std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
     mux_.reset();
   }
 
@@ -107,11 +171,18 @@ void IoReactor::Stop() {
 }
 
 Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> conn) {
+  // Multiplexer registration happens BEFORE map insertion. This ensures that
+  // any concurrent Lookup(fd) only sees the connection after it is fully
+  // observable to the multiplexer. Reverse order would expose a window where
+  // Lookup returns a connection whose fd is not yet in the kernel poll set,
+  // which is harmless in this codepath today (DispatchEvent only calls
+  // Lookup when the kernel reports a ready event, and the kernel cannot
+  // report events for a fd that is not registered yet) but fragile against
+  // future changes. As a side benefit, this order eliminates the rollback
+  // path that the previous implementation needed: if mux_->Add fails, the
+  // map is never touched, so there is nothing to clean up.
   if (!conn) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Register called with null connection"));
-  }
-  if (!running_.load(std::memory_order_acquire)) {
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register before Start"));
   }
 
   const int fd = conn->Fd();
@@ -121,6 +192,8 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
 
   // Put the socket in non-blocking mode before handing it to the event loop.
   // Without this, a recv() inside OnReadable would block the entire reactor.
+  // This is done outside any reactor lock because fcntl(2) is independent of
+  // reactor state.
   const int flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
     return MakeUnexpected(MakeError(ErrorCode::kNetworkSocketCreationFailed,
@@ -133,41 +206,64 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
     }
   }
 
+  // Acquire mux_lifecycle_ (shared) FIRST and perform every reactor-state
+  // mutation — running_ check, mux_->Add, connections_ insert — inside this
+  // critical section. Stop() takes mux_lifecycle_ exclusively at the very end
+  // of its shutdown sequence; while we hold this shared lock, Stop() cannot
+  // proceed past `connections_.clear()` (which happens BEFORE the exclusive
+  // mux_lifecycle_ acquisition in Stop). That eliminates the window where
+  // Register's connections_.emplace could leak past Stop's clear().
+  //
+  // Lock ordering: mux_lifecycle_ (shared) -> connections_mutex_ (unique).
+  std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+
+  if (!running_.load(std::memory_order_acquire) || !mux_) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register before Start"));
+  }
+
+  // Step 1: pre-check for duplicate fd under the connections_ lock. We have
+  // to do this before mux_->Add to keep the failure path side-effect free
+  // (otherwise we'd Add then immediately Remove on duplicate detection).
   {
-    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    std::shared_lock<std::shared_mutex> conn_lock(connections_mutex_);
     if (connections_.count(fd) != 0U) {
       return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd"));
     }
-    connections_.emplace(fd, conn);
   }
 
-  {
-    std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
-    if (!mux_) {
-      // Racing with Stop(): undo the insert.
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register during shutdown"));
-    }
-    auto r = mux_->Add(fd, reactor::event::kReadable);
-    if (!r) {
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);
-      return MakeUnexpected(r.error());
-    }
+  // Step 2: register with the multiplexer. On failure return immediately
+  // without ever touching the connections_ map.
+  auto add_result = mux_->Add(fd, reactor::event::kReadable);
+  if (!add_result) {
+    return MakeUnexpected(add_result.error());
+  }
 
-    // Narrow race: Stop() sets running_=false and clears connections_
-    // *before* blocking on mux_lifecycle_ exclusive. If that sequence
-    // interleaved between our initial running_ check and this point, our
-    // emplace is already gone from the map and the about-to-be-destroyed
-    // multiplexer will never deliver events for this fd. Detect that window
-    // by re-checking running_ while we still hold mux_lifecycle_ shared,
-    // and roll back the Add so the caller sees a clean failure.
-    if (!running_.load(std::memory_order_acquire)) {
-      (void)mux_->Remove(fd);
-      std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-      connections_.erase(fd);  // no-op if Stop() already cleared the map
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "IoReactor::Register raced with Stop"));
+  // Step 3: publish into connections_. We re-check the duplicate guard in
+  // case another Register raced us between Step 1 and Step 3; if so, undo
+  // the mux_->Add we just performed so the kernel poll set stays clean.
+  {
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    auto [it, inserted] = connections_.emplace(fd, conn);
+    if (!inserted) {
+      // Lost the race against a concurrent Register with the same fd. Pull
+      // our entry back out of the multiplexer to avoid leaking interest.
+      // Rollback failure is not itself fatal — the duplicate-fd error is
+      // still returned to the caller — but a kernel-level inconsistency
+      // (interest record leaked, the fd is closed but the multiplexer
+      // still has it armed) must be visible to operators so they can
+      // correlate it with later kqueue/epoll syscall failures. Logging at
+      // Error matches the severity of the kernel-state divergence.
+      conn_lock.unlock();
+      auto remove_result = mux_->Remove(fd);
+      if (!remove_result) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_register_rollback_remove_failed")
+            .Field("fd", static_cast<int64_t>(fd))
+            .FieldError(remove_result.error())
+            .Field("note", "duplicate-fd rollback could not unregister mux interest; kernel poll set may be stale")
+            .Error();
+      }
+      return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd (race)"));
     }
   }
 
@@ -258,15 +354,60 @@ void IoReactor::EventLoop() {
       poll_result = mux_->Poll(config_.poll_timeout_ms, ready);
     }
     if (!poll_result) {
-      mygram::utils::StructuredLog()
-          .Event("reactor_poll_failed")
-          .Field("error", poll_result.error().to_string())
-          .Warn();
+      // Promoted from Warn to Error: a poll syscall failure indicates a real
+      // I/O multiplexer fault that should raise operator alerts; the reactor
+      // continues but events may be dropped until the next successful poll.
+      mygram::utils::StructuredLog().Event("reactor_poll_failed").FieldError(poll_result.error()).Error();
       continue;
     }
     for (const auto& ev : ready) {
       DispatchEvent(ev);
     }
+
+    // Reap idle connections at most once per `reaper_interval_sec`. Running
+    // in-loop avoids spawning a dedicated reaper thread; the cost is one
+    // shared-lock acquisition per interval over connections_, which is
+    // negligible compared to Poll itself.
+    if (config_.idle_timeout_sec > 0 && config_.reaper_interval_sec > 0) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_reaper_run_ >= std::chrono::seconds(config_.reaper_interval_sec)) {
+        last_reaper_run_ = now;
+        ReapIdleConnections();
+      }
+    }
+  }
+}
+
+void IoReactor::ReapIdleConnections() {
+  // Snapshot the candidate fds under a shared lock so we don't hold the
+  // mutex across Unregister(), which itself acquires both mux_lifecycle_
+  // (shared) and connections_mutex_ (unique). Holding the shared lock here
+  // and then upgrading to unique inside Unregister would deadlock.
+  const auto now = std::chrono::steady_clock::now();
+  const auto deadline = std::chrono::seconds(config_.idle_timeout_sec);
+  std::vector<std::pair<int, std::chrono::seconds>> to_close;
+  {
+    std::shared_lock<std::shared_mutex> lock(connections_mutex_);
+    to_close.reserve(connections_.size());
+    for (const auto& [fd, conn] : connections_) {
+      if (!conn) {
+        continue;
+      }
+      const auto idle_for = now - conn->LastActive();
+      if (idle_for >= deadline) {
+        to_close.emplace_back(fd, std::chrono::duration_cast<std::chrono::seconds>(idle_for));
+      }
+    }
+  }
+
+  for (const auto& [fd, idle_for] : to_close) {
+    mygram::utils::StructuredLog()
+        .Event("connection_reaped")
+        .Field("fd", static_cast<int64_t>(fd))
+        .Field("idle_seconds", static_cast<int64_t>(idle_for.count()))
+        .Field("idle_timeout_sec", static_cast<int64_t>(config_.idle_timeout_sec))
+        .Info();
+    Unregister(fd);
   }
 }
 

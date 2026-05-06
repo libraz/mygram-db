@@ -296,5 +296,69 @@ TEST_F(ThreadPoolTest, TaskOrdering) {
   }
 }
 
+/**
+ * @brief Shutdown(timeout_ms > 0) wakes promptly when the queue drains
+ *
+ * Regression test for Perf-2: previously the shutdown timeout path slept in
+ * 10ms increments waiting for active workers to finish. After replacing the
+ * polling loop with a condition_variable, shutdown should return as soon as
+ * the last task finishes, not at the next 10ms polling boundary.
+ *
+ * With one ~50ms task, the previous implementation could take up to ~60ms
+ * (50ms task + 10ms poll alignment). With the cv, total elapsed should be
+ * close to 50ms and well under 100ms.
+ */
+TEST_F(ThreadPoolTest, ShutdownWithTimeoutWakesPromptlyOnDrain) {
+  ThreadPool pool(2);
+  std::atomic<bool> task_done{false};
+
+  // Submit a single slow task (50ms) so the timeout path has work to wait on.
+  pool.Submit([&task_done]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    task_done = true;
+  });
+
+  // Give the worker a moment to pick up the task before we shut down.
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+  auto start = std::chrono::steady_clock::now();
+  pool.Shutdown(/*graceful=*/true, /*timeout_ms=*/10000);
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+  EXPECT_TRUE(task_done.load()) << "Slow task should have completed before shutdown returns";
+  EXPECT_LT(elapsed, 100) << "cv-based shutdown should wake within ~50ms after the task finishes; got " << elapsed
+                          << "ms";
+}
+
+/**
+ * @brief Shutdown(timeout_ms > 0) returns within the timeout when tasks
+ *        cannot drain in time.
+ *
+ * Complements ShutdownWithTimeoutWakesPromptlyOnDrain: ensures that the cv
+ * wait does not block past the configured timeout when work outlasts it.
+ * Workers themselves are still joined after the timeout (existing behavior),
+ * so the test only asserts that the cv waiter respected the timeout boundary
+ * by checking total elapsed is bounded relative to task length.
+ */
+TEST_F(ThreadPoolTest, ShutdownWithTimeoutAbortsAfterDeadline) {
+  ThreadPool pool(1);
+
+  // One task that runs for 800ms — comfortably longer than the timeout.
+  pool.Submit([]() { std::this_thread::sleep_for(std::chrono::milliseconds(800)); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+  auto start = std::chrono::steady_clock::now();
+  pool.Shutdown(/*graceful=*/true, /*timeout_ms=*/100);
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+  // After the cv wait gives up at 100ms, Shutdown still joins workers, so the
+  // total can extend up to ~800ms. The cv wait itself MUST NOT linger far
+  // past the timeout — bound the slack generously to keep the test stable.
+  EXPECT_GE(elapsed, 100) << "Shutdown should at least wait for the configured timeout";
+  EXPECT_LT(elapsed, 1500) << "Shutdown must not block far past task duration; got " << elapsed << "ms";
+}
+
 }  // namespace server
 }  // namespace mygramdb

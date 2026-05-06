@@ -24,6 +24,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -62,6 +63,23 @@ struct ReactorConfig {
   /// Poll timeout in milliseconds. Short enough to react to `Stop()`
   /// promptly, long enough to keep the event loop idle-efficient.
   int poll_timeout_ms = 100;
+
+  /// Application-level idle-connection timeout (seconds). A connection that
+  /// performs no read or write activity for this duration is forcibly closed
+  /// by the reactor's reaper. 0 disables reaping. Default: 300s (5 minutes).
+  ///
+  /// Rationale: SO_KEEPALIVE detects half-open sockets but its defaults are
+  /// measured in hours, and even the tightened settings in
+  /// `ServerConfig::keepalive` only catch dead-peer scenarios — they do
+  /// nothing about a client that completes the handshake and then sits on
+  /// the connection forever. The reaper enforces an application-level
+  /// deadline that complements (does not replace) keepalive.
+  int idle_timeout_sec = 300;
+
+  /// How often the reaper sweeps the connection table (seconds). Tuned for
+  /// the typical idle_timeout of minutes: scanning every 5s gives a worst-
+  /// case extra dwell of 5s before a stale connection is closed.
+  int reaper_interval_sec = 5;
 };
 
 /**
@@ -103,6 +121,14 @@ class IoReactor {
    * Drain tasks in flight keep their own shared_ptr copies, so the actual
    * socket close happens when the last shared_ptr drops (typically after
    * the drain task finishes writing its final response).
+   *
+   * @note CR-3 caller contract: callers (e.g., TcpServer::Stop) MUST shut
+   * down their thread pool AFTER reactor_->Stop() returns. Drain tasks
+   * queued on the pool may capture pointers via close_callback_ that
+   * reference caller-owned objects (ServerStats, ConnectionAcceptor); those
+   * captures must remain valid for the lifetime of any in-flight callback.
+   * Tearing the pool down before the reactor risks UAF from drain tasks
+   * still executing close_callback_ (or the response-flush path).
    */
   void Stop();
 
@@ -192,6 +218,19 @@ class IoReactor {
   void EventLoop();
   void DispatchEvent(const reactor::ReadyEvent& ev);
 
+  /// Sweep the connection table and close any connection whose
+  /// `LastActive()` is older than `config_.idle_timeout_sec`. Called from
+  /// the event loop on a `reaper_interval_sec` cadence so it runs without
+  /// any extra threads. The reaper takes a shared lock on
+  /// `connections_mutex_`, copies the candidate fds into a local vector, and
+  /// then drops the lock before invoking `Unregister(fd)` so the close
+  /// callback runs without nested locking.
+  ///
+  /// This complements (does NOT replace) `SO_KEEPALIVE`: keepalive's
+  /// defaults are measured in hours, so the reaper is the actual enforcement
+  /// of the application-level idle deadline.
+  void ReapIdleConnections();
+
   /// Look up a connection under a shared lock and return a shared_ptr copy
   /// (or nullptr). The copy is released outside the lock so user code runs
   /// without holding the connections_mutex_.
@@ -213,9 +252,21 @@ class IoReactor {
   // The backends (epoll/kqueue) are kernel-level thread-safe for concurrent
   // poll + ctl/kevent from different threads; KqueueMultiplexer uses its own
   // internal mutex to protect its interest_ map.
+  //
+  // Lock ordering (must be acquired in this order to avoid deadlock):
+  //   start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_
+  // The event-loop thread NEVER takes start_stop_mutex_ (it would deadlock
+  // against its own joiner in Stop()).
   mutable std::shared_mutex mux_lifecycle_;
   std::thread event_loop_thread_;
   std::atomic<bool> running_{false};
+
+  // Serialises Start() and Stop() against each other. Without this, a Stop()
+  // racing with the body of Start() can observe `running_=true` set by
+  // Start, exchange it back to false, attempt to join the event_loop_thread_
+  // before Start has assigned to it, and silently leak the worker thread
+  // that Start eventually spawns.
+  std::mutex start_stop_mutex_;
 
   mutable std::shared_mutex connections_mutex_;
   std::unordered_map<int, std::shared_ptr<ReactorConnection>> connections_;
@@ -226,6 +277,11 @@ class IoReactor {
   // TEST-ONLY: overrides reactor::CreateEventMultiplexer() when set.
   // Null in production; set by SetMultiplexerFactoryForTest() before Start().
   MultiplexerFactory mux_factory_;
+
+  // Tracks when the reaper last ran, so the event loop only sweeps once per
+  // `reaper_interval_sec` regardless of poll cadence. Touched only by the
+  // event-loop thread, so no synchronization is required.
+  std::chrono::steady_clock::time_point last_reaper_run_{std::chrono::steady_clock::now()};
 };
 
 }  // namespace mygramdb::server

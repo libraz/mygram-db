@@ -19,10 +19,22 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
     // Create invalidation manager
     invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
 
-    // Set eviction callback to clean up invalidation metadata
+    // Set eviction callback to clean up invalidation metadata. Per-key path
+    // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
+    // route through the batch callback below to amortize the
+    // InvalidationManager::mutex_ acquisition (H-M7).
     query_cache_->SetEvictionCallback([this](const CacheKey& key) {
       if (invalidation_mgr_) {
         invalidation_mgr_->UnregisterCacheEntry(key);
+      }
+    });
+
+    // Batch eviction callback: takes InvalidationManager::mutex_ exactly once
+    // for the whole batch instead of once per key. Bound to the same
+    // invalidation_mgr_ as the per-key callback.
+    query_cache_->SetBatchEvictionCallback([this](const std::vector<CacheKey>& keys) {
+      if (invalidation_mgr_) {
+        invalidation_mgr_->UnregisterCacheEntries(keys);
       }
     });
 
@@ -39,11 +51,12 @@ CacheManager::~CacheManager() {
   if (invalidation_queue_) {
     invalidation_queue_->Stop();
   }
-  // Clear eviction callback before destroying invalidation_mgr_ to prevent
+  // Clear eviction callbacks before destroying invalidation_mgr_ to prevent
   // use-after-free: QueryCache's LRU thread may still fire eviction callbacks
   // that reference invalidation_mgr_ during destruction.
   if (query_cache_) {
     query_cache_->SetEvictionCallback(nullptr);
+    query_cache_->SetBatchEvictionCallback(nullptr);
   }
   // Explicitly destroy query_cache_ first to join its LRU background thread
   // before invalidation_mgr_ is destroyed (member destruction order is reverse
@@ -127,7 +140,15 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   }
   const CacheKey key = resolved_key.value();
 
-  // Prepare metadata for invalidation tracking
+  // Prepare metadata for invalidation tracking.
+  //
+  // M-15: created_at / last_accessed are intentionally left default-constructed
+  // here. QueryCache::Insert() stamps them with std::chrono::steady_clock::now()
+  // immediately before the entry enters cache_map_, and that is the
+  // authoritative timestamp used for TTL accounting. InvalidationManager
+  // copies only table/ngrams/ngram_size/kanji_ngram_size/cross_boundary_ngrams/
+  // has_filters into its own InvalidationMetadata (see RegisterCacheEntry), so
+  // it does not depend on created_at on this path.
   CacheMetadata metadata;
   metadata.key = key;
   metadata.table = query.table;
@@ -136,9 +157,12 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   metadata.ngram_size = ngram_size;
   metadata.kanji_ngram_size = kanji_ngram_size;
   metadata.cross_boundary_ngrams = cross_boundary_ngrams;
-  metadata.created_at = std::chrono::steady_clock::now();
-  metadata.last_accessed = metadata.created_at;
   metadata.access_count = 0;
+
+  // Serialize Insert with Clear/ClearTable so that we never end up with a key
+  // registered in InvalidationManager but not present in QueryCache (or vice
+  // versa). See serialize_mutex_ doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
 
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
@@ -166,7 +190,19 @@ void CacheManager::Clear() {
     return;
   }
 
+  // Serialize with Insert so that no key is added to InvalidationManager
+  // between query_cache_->Clear() and invalidation_mgr_->Clear() that would
+  // leave behind phantom metadata. See serialize_mutex_ doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+
   if (query_cache_) {
+    // QueryCache::Clear() invokes eviction_callback_ for every entry, which
+    // calls invalidation_mgr_->UnregisterCacheEntry and keeps the per-key
+    // metadata consistent with the cache. We still call invalidation_mgr_->
+    // Clear() afterwards because eviction callbacks only unregister keys we
+    // know about; they do not free the bucket-level allocations of
+    // ngram_to_cache_keys_/table_ngram_settings_, and Clear() additionally
+    // releases that capacity.
     query_cache_->Clear();
   }
   if (invalidation_mgr_) {
@@ -178,6 +214,10 @@ void CacheManager::ClearTable(const std::string& table_name) {
   if (!enabled_) {
     return;
   }
+
+  // Serialize with Insert; same rationale as Clear(). See serialize_mutex_
+  // doc in cache_manager.h.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
 
   if (query_cache_) {
     query_cache_->ClearTable(table_name);
@@ -208,22 +248,64 @@ bool CacheManager::Enable() {
     return false;
   }
 
-  enabled_ = true;
-
-  // Start invalidation queue if not already running
+  // H-C2 (Enable order): start the invalidation queue BEFORE flipping
+  // enabled_ to true. Otherwise an Invalidate() observing enabled_ == true
+  // would call invalidation_queue_->Enqueue while running_ is still false;
+  // Enqueue would either fall through to its synchronous fallback (an
+  // inconsistency vs. the async contract) or, worse, observe a stale
+  // stopped_ == true (set by the previous Stop() and reset by Start()) and
+  // silently drop the event entirely (H-M5).
+  //
+  // Symmetric with Disable(), which stops the queue first and then flips
+  // enabled_ to false.
   if (!invalidation_queue_->IsRunning()) {
     invalidation_queue_->Start();
   }
+
+  enabled_.store(true, std::memory_order_release);
 
   return true;
 }
 
 void CacheManager::Disable() {
-  enabled_ = false;
-
-  // Stop invalidation queue
+  // Stop the invalidation queue first so no new background work can be
+  // enqueued while we tear down. Stop() drains any pending invalidations.
   if (invalidation_queue_ && invalidation_queue_->IsRunning()) {
     invalidation_queue_->Stop();
+  }
+
+  // CR-7 (Disable race): flip enabled_ to false BEFORE Clear() so that any
+  // concurrent Insert observing the post-flip state short-circuits at the
+  // enabled_ check and never inserts after Clear() has finished. The previous
+  // ordering (Clear() then enabled_ = false) left a window where Insert and
+  // Clear serialized on serialize_mutex_; once Clear released the mutex,
+  // Insert could acquire it (with enabled_ still true) and re-populate the
+  // cache that Disable() had just emptied.
+  //
+  // We use std::memory_order_release so the flip happens-before the Clear
+  // call below from this thread's perspective and is visible to readers that
+  // pair it with an acquire load on enabled_.
+  //
+  // Clear() short-circuits when !enabled_, so we run query_cache_->Clear()
+  // and invalidation_mgr_->Clear() directly here. This is the safe default:
+  // invalidation events arriving during the disabled window would be
+  // silently dropped, so we proactively flush rather than leave potentially
+  // stale entries to be served on re-enable.
+  enabled_.store(false, std::memory_order_release);
+
+  // Run the same body as CacheManager::Clear() but bypass the enabled_ guard.
+  // We still take serialize_mutex_ to serialize against any in-flight Insert
+  // that already passed the enabled_ check before we flipped it; that Insert
+  // either finishes before us (and gets cleared here) or finishes after us
+  // (and finds invalidation_mgr_ / query_cache_ ready to accept the entry,
+  // but a subsequent Lookup will short-circuit on !enabled_ and the entry
+  // will be wiped on the next Disable/Enable cycle).
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  if (query_cache_) {
+    query_cache_->Clear();
+  }
+  if (invalidation_mgr_) {
+    invalidation_mgr_->Clear();
   }
 }
 
@@ -239,6 +321,13 @@ void CacheManager::SetTtl(int ttl_seconds) {
   if (query_cache_) {
     query_cache_->SetTtl(ttl_seconds);
   }
+}
+
+size_t CacheManager::GetTrackedInvalidationEntries() const {
+  if (!invalidation_mgr_) {
+    return 0;
+  }
+  return invalidation_mgr_->GetTrackedEntryCount();
 }
 
 }  // namespace mygramdb::cache

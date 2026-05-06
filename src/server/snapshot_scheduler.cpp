@@ -2,10 +2,9 @@
  * @file snapshot_scheduler.cpp
  * @brief Implementation of SnapshotScheduler
  */
+// Logging is exclusively via mygram::utils::StructuredLog. Direct spdlog usage is prohibited in server code.
 
 #include "server/snapshot_scheduler.h"
-
-#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
@@ -15,9 +14,12 @@
 #include <sstream>
 
 #include "mysql/binlog_reader_interface.h"
+#include "server/log_field_names.h"
+#include "server/replication_pause_counter.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
+#include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
 
@@ -27,20 +29,17 @@ constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every se
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
-                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress)
+                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
+                                     std::atomic<bool>& replication_paused_for_dump)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader),
-      dump_save_in_progress_(dump_save_in_progress) {
-  if (catalog_ == nullptr) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("component", "snapshot_scheduler")
-        .Field("error", "catalog cannot be null")
-        .Error();
-  }
+      dump_save_in_progress_(dump_save_in_progress),
+      replication_paused_for_dump_(replication_paused_for_dump) {
+  // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
+  // which is the only production caller. Tests must also provide a non-null catalog.
 }
 
 SnapshotScheduler::~SnapshotScheduler() {
@@ -53,14 +52,16 @@ void SnapshotScheduler::Start() {
     return;
   }
 
+  // Hold start_stop_mutex_ across the entire Start sequence so that a
+  // concurrent Stop() cannot observe running_ == true and skip joining
+  // before scheduler_thread_ has been constructed. SchedulerLoop never
+  // acquires this mutex, so there is no risk of self-deadlock.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   // Atomically try to set running_ from false to true to prevent TOCTOU race
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
-    mygram::utils::StructuredLog()
-        .Event("server_warning")
-        .Field("component", "snapshot_scheduler")
-        .Field("type", "already_running")
-        .Warn();
+    mygram::utils::StructuredLog().Event("snapshot_scheduler_already_running").Warn();
     return;
   }
 
@@ -74,6 +75,13 @@ void SnapshotScheduler::Start() {
 }
 
 void SnapshotScheduler::Stop() {
+  // Hold start_stop_mutex_ across the entire Stop sequence to serialize
+  // with Start(). Without this, Stop() could observe running_ == true while
+  // Start() is still mid-construction (compare_exchange has succeeded but the
+  // thread has not yet been created), leak the not-yet-created thread, and
+  // race Start() to completion. SchedulerLoop never acquires this mutex.
+  std::lock_guard<std::mutex> lock(start_stop_mutex_);
+
   // Use compare_exchange to ensure only one thread performs the stop sequence.
   // Without this, two concurrent Stop() calls could both pass the running_
   // check and double-join the thread, causing std::terminate.
@@ -84,6 +92,16 @@ void SnapshotScheduler::Stop() {
 
   // Wake the scheduler loop so it exits promptly instead of sleeping
   // for up to kShutdownCheckIntervalMs.
+  //
+  // Lock-discipline note (pre-empts re-flagging by future system reviews):
+  //   - stop_cv_ is associated with stop_mutex_, not start_stop_mutex_.
+  //   - Calling notify_all without holding stop_mutex_ is permitted by the
+  //     C++ standard ([thread.condition.condvar]); the standard only requires
+  //     the wait predicate to be observed under the cv's associated mutex.
+  //   - The pattern is intentional: holding start_stop_mutex_ across notify is
+  //     required to serialize against a concurrent Start(); holding stop_mutex_
+  //     during notify would risk a recursive-acquisition pattern with the wait
+  //     predicate that already takes stop_mutex_ inside SchedulerLoop.
   stop_cv_.notify_all();
 
   mygram::utils::StructuredLog().Event("snapshot_scheduler_stopping").Info();
@@ -131,20 +149,18 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
-    // Atomically try to acquire the dump_save_in_progress flag
-    // This prevents TOCTOU race between checking and setting the flag
-    bool expected = false;
-    if (!dump_save_in_progress_.compare_exchange_strong(expected, true)) {
-      // Another dump operation (manual or auto) is already in progress
+    // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire
+    // (Phase 4 H-D1). Prevents TOCTOU race between checking and setting the
+    // flag — same contract as HandleDumpSave / HandleDumpLoad in DumpHandler.
+    auto dump_save_guard = mygram::utils::OperationGuard::TryAcquire(dump_save_in_progress_);
+    if (!dump_save_guard.engaged()) {
+      // Another dump operation (manual or auto) is already in progress.
       mygram::utils::StructuredLog()
           .Event("auto_snapshot_skipped")
           .Field("reason", "another DUMP operation is in progress")
           .Info();
       return;
     }
-
-    // Flag successfully acquired, use RAII guard to ensure it's reset on exit
-    mygram::utils::AtomicFlagResetGuard dump_save_guard(dump_save_in_progress_);
 
     // Generate timestamp-based filename
     auto timestamp = std::time(nullptr);
@@ -155,9 +171,100 @@ void SnapshotScheduler::TakeSnapshot() {
 
     std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
 
-    mygram::utils::StructuredLog().Event("snapshot_taking").Field("path", dump_path.string()).Info();
+    mygram::utils::StructuredLog()
+        .Event("snapshot_taking")
+        .Field(log_fields::kFieldFilepath, dump_path.string())
+        .Info();
 
-    // Get current GTID
+#ifdef USE_MYSQL
+    // Pause replication while writing the snapshot. Without this, the binlog
+    // worker thread may concurrently mutate Index/DocumentStore while WriteDump
+    // is iterating, producing inconsistent output and racing with concurrent
+    // Index::Add() calls. This mirrors the behavior of manual DUMP SAVE in
+    // DumpHandler::DumpSaveWorker.
+    //
+    // H-C3: Coordinate Stop()/Start() with concurrent dump operations via the
+    // process-wide replication_pause counter. We capture replication_was_running
+    // at the moment we decide to pause; the counter then dedupes the actual
+    // Stop()/Start() so that if a manual DUMP LOAD is also pausing replication
+    // simultaneously, exactly one of us calls Stop() and exactly one of us
+    // (the last releaser) calls Start(). The replication_paused_for_dump_ flag
+    // remains the read-only "is paused" indicator used by REPLICATION STATUS /
+    // DUMP STATUS responses; we set it on first pause and clear it on last
+    // release so the indicator tracks the counter.
+    bool replication_was_running = (binlog_reader_ != nullptr) && binlog_reader_->IsRunning();
+    replication_pause::Scope pause_scope;
+    if (replication_was_running) {
+      const bool first_pauser = pause_scope.Acquire();
+      if (first_pauser) {
+        // We are the first pauser: actually stop the reader and assert the
+        // observable flag. Subsequent pausers piggy-back on this Stop().
+        binlog_reader_->Stop();
+        replication_paused_for_dump_.store(true, std::memory_order_release);
+      }
+      mygram::utils::StructuredLog()
+          .Event("replication_paused_for_dump")
+          .Field("operation", "snapshot")
+          .Field("filepath", dump_path.string())
+          .Field("auto_resume", "true")
+          .Field("first_pauser", first_pauser)
+          .Info();
+    }
+
+    // RAII restore: even on exception or early return, replication is resumed
+    // (when we are the last releaser) and the paused flag is cleared. The
+    // lambda captures the dump_path string by value defensively; structured-
+    // log fields are formatted inside. The pause_scope itself releases the
+    // counter on destruction as a last-line safety net, but we Release()
+    // explicitly here so we observe the last_releaser bool.
+    const std::string dump_path_str = dump_path.string();
+    auto restore_replication =
+        mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str, &pause_scope]() {
+          if (!replication_was_running) {
+            // We did not enter the pause counter (replication was already stopped
+            // when we started), so we have nothing to release.
+            return;
+          }
+          const bool last_releaser = pause_scope.Release();
+          if (!last_releaser) {
+            // Another operation is still holding the pause. Do not Start().
+            // The flag stays asserted (set by the first pauser) until that
+            // operation releases.
+            mygram::utils::StructuredLog()
+                .Event("replication_pause_released")
+                .Field("operation", "snapshot")
+                .Field("filepath", dump_path_str)
+                .Field("last_releaser", false)
+                .Info();
+            return;
+          }
+          replication_paused_for_dump_.store(false, std::memory_order_release);
+          if (binlog_reader_ == nullptr) {
+            return;
+          }
+          auto start_result = binlog_reader_->Start();
+          if (start_result) {
+            mygram::utils::StructuredLog()
+                .Event("replication_resumed_after_dump")
+                .Field("operation", "snapshot")
+                .Field(log_fields::kFieldFilepath, dump_path_str)
+                .Info();
+          } else {
+            // H-D4: surface the error via FieldError(start_result.error()) instead
+            // of the legacy GetLastError() string, so the numeric error_code is
+            // included alongside the message.
+            mygram::utils::StructuredLog()
+                .Event("replication_restart_failed")
+                .Field("operation", "snapshot")
+                .Field(log_fields::kFieldFilepath, dump_path_str)
+                .FieldError(start_result.error())
+                .Error();
+          }
+        });
+#endif
+
+    // Get current GTID (after stopping replication so we record the last
+    // processed position, matching DumpSaveWorker's ordering).
     std::string gtid;
     if (binlog_reader_ != nullptr) {
       gtid = binlog_reader_->GetCurrentGTID();
@@ -170,23 +277,23 @@ void SnapshotScheduler::TakeSnapshot() {
     auto result = storage::dump_v2::WriteDump(dump_path.string(), gtid, *full_config_, dumpable);
 
     if (result) {
-      mygram::utils::StructuredLog().Event("snapshot_completed").Field("path", dump_path.string()).Info();
+      mygram::utils::StructuredLog()
+          .Event("snapshot_completed")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Info();
     } else {
       mygram::utils::StructuredLog()
-          .Event("server_error")
-          .Field("operation", "snapshot_save")
-          .Field("filepath", dump_path.string())
-          .Field("error", result.error().message())
+          .Event("snapshot_save_failed")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Field(log_fields::kFieldError, result.error().message())
           .Error();
     }
 
+    // restore_replication runs here (when in scope), resuming replication
+    // before dump_save_guard releases the dump_save_in_progress flag.
+
   } catch (const std::exception& e) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "snapshot_save")
-        .Field("type", "exception")
-        .Field("error", e.what())
-        .Error();
+    mygram::utils::StructuredLog().Event("snapshot_save_exception").Field(log_fields::kFieldError, e.what()).Error();
   }
 }
 
@@ -221,26 +328,24 @@ void SnapshotScheduler::CleanupOldSnapshots() {
     // Delete old files beyond retain count
     const auto retain_count = static_cast<size_t>(config_.retain);
     for (size_t i = retain_count; i < dump_files.size(); ++i) {
-      mygram::utils::StructuredLog().Event("snapshot_removing_old").Field("path", dump_files[i].first.string()).Info();
+      mygram::utils::StructuredLog()
+          .Event("snapshot_removing_old")
+          .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
+          .Info();
       std::error_code ec;
       std::filesystem::remove(dump_files[i].first, ec);
       if (ec) {
         mygram::utils::StructuredLog()
             .Event("snapshot_cleanup_error")
-            .Field("path", dump_files[i].first.string())
-            .Field("error", ec.message())
+            .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
+            .Field(log_fields::kFieldError, ec.message())
             .Warn();
         // Continue with remaining files
       }
     }
 
   } catch (const std::exception& e) {
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "snapshot_cleanup")
-        .Field("type", "exception")
-        .Field("error", e.what())
-        .Error();
+    mygram::utils::StructuredLog().Event("snapshot_cleanup_exception").Field(log_fields::kFieldError, e.what()).Error();
   }
 }
 

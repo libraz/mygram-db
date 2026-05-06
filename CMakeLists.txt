@@ -137,91 +137,6 @@ endif()
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 
-# MySQL Client Library detection
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-  pkg_check_modules(MYSQL mysqlclient)
-  if(MYSQL_FOUND)
-    message(STATUS "Found MySQL client via pkg-config")
-    message(STATUS "  Include dirs: ${MYSQL_INCLUDE_DIRS}")
-    message(STATUS "  Libraries: ${MYSQL_LINK_LIBRARIES}")
-    # Use LINK_LIBRARIES which includes full link flags
-    set(MYSQL_LIBRARIES ${MYSQL_LINK_LIBRARIES})
-  endif()
-endif()
-
-# Fallback to manual detection if pkg-config didn't work
-if(NOT MYSQL_FOUND)
-  if(APPLE)
-    # macOS-specific paths - prioritize mysql-client@8.4
-    execute_process(
-      COMMAND brew --prefix mysql-client@8.4
-      OUTPUT_VARIABLE BREW_MYSQL_PREFIX
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_QUIET
-      RESULT_VARIABLE BREW_MYSQL_RESULT
-    )
-
-    if(BREW_MYSQL_RESULT EQUAL 0 AND BREW_MYSQL_PREFIX)
-      message(STATUS "Found Homebrew mysql-client@8.4 at: ${BREW_MYSQL_PREFIX}")
-      set(MYSQL_BREW_INCLUDE "${BREW_MYSQL_PREFIX}/include/mysql")
-      set(MYSQL_BREW_LIB "${BREW_MYSQL_PREFIX}/lib")
-    endif()
-
-    find_path(MYSQL_INCLUDE_DIRS mysql.h
-      HINTS
-        ${MYSQL_BREW_INCLUDE}
-        /opt/homebrew/opt/mysql-client@8.4/include/mysql
-        /opt/homebrew/opt/mysql-client/include/mysql
-        /usr/local/opt/mysql-client/include/mysql
-        /opt/homebrew/include/mysql
-        /usr/local/include/mysql
-    )
-
-    find_library(MYSQL_LIBRARY
-      NAMES mysqlclient
-      HINTS
-        ${MYSQL_BREW_LIB}
-        /opt/homebrew/opt/mysql-client@8.4/lib
-        /opt/homebrew/opt/mysql-client/lib
-        /usr/local/opt/mysql-client/lib
-        /opt/homebrew/lib
-        /usr/local/lib
-    )
-  else()
-    # Linux-specific paths
-    find_path(MYSQL_INCLUDE_DIRS mysql.h
-      HINTS
-        /usr/include/mysql
-        /usr/local/include/mysql
-    )
-
-    find_library(MYSQL_LIBRARY
-      NAMES mysqlclient
-      HINTS
-        /usr/lib
-        /usr/lib64
-        /usr/local/lib
-        /usr/lib/x86_64-linux-gnu
-    )
-  endif()
-
-  if(MYSQL_LIBRARY AND MYSQL_INCLUDE_DIRS)
-    set(MYSQL_LIBRARIES ${MYSQL_LIBRARY})
-    set(MYSQL_FOUND TRUE)
-    message(STATUS "Found MySQL client: ${MYSQL_LIBRARIES}")
-    message(STATUS "  Include dirs: ${MYSQL_INCLUDE_DIRS}")
-  else()
-    message(FATAL_ERROR "MySQL client library not found. Please install it:")
-    message(FATAL_ERROR "  macOS:  brew install mysql-client@8.4")
-    message(FATAL_ERROR "  Linux:  sudo apt-get install libmysqlclient-dev")
-  endif()
-endif()
-
-if(MYSQL_FOUND)
-  include_directories(SYSTEM ${MYSQL_INCLUDE_DIRS})
-endif()
-
 # ICU detection (similar to suzume-feedmill)
 if(USE_ICU)
   find_package(PkgConfig QUIET)
@@ -339,24 +254,40 @@ if(USE_MYSQL)
   # Try pkg-config first
   find_package(PkgConfig QUIET)
 
-  if(PKG_CONFIG_FOUND)
+  if(PkgConfig_FOUND)
     pkg_check_modules(MYSQL mysqlclient)
+    if(MYSQL_FOUND)
+      set(MYSQL_LIBRARIES ${MYSQL_LINK_LIBRARIES})
+      message(STATUS "Found MySQL client via pkg-config")
+      message(STATUS "  Include dirs: ${MYSQL_INCLUDE_DIRS}")
+      message(STATUS "  Libraries: ${MYSQL_LIBRARIES}")
+    endif()
   endif()
 
   # If pkg-config didn't find it, try manual detection
   if(NOT MYSQL_FOUND)
     if(APPLE)
-      # Check Homebrew paths for MySQL on macOS
+      # Check Homebrew paths for MySQL on macOS. Prefer mysql-client@8.4
+      # because that is the documented development dependency.
       execute_process(
-        COMMAND brew --prefix mysql-client
+        COMMAND brew --prefix mysql-client@8.4
         OUTPUT_VARIABLE BREW_MYSQL_PREFIX
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
         RESULT_VARIABLE BREW_MYSQL_RESULT
       )
+      if(NOT BREW_MYSQL_RESULT EQUAL 0 OR NOT BREW_MYSQL_PREFIX)
+        execute_process(
+          COMMAND brew --prefix mysql-client
+          OUTPUT_VARIABLE BREW_MYSQL_PREFIX
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET
+          RESULT_VARIABLE BREW_MYSQL_RESULT
+        )
+      endif()
 
       if(BREW_MYSQL_RESULT EQUAL 0 AND BREW_MYSQL_PREFIX)
-        message(STATUS "Found Homebrew mysql-client at: ${BREW_MYSQL_PREFIX}")
+        message(STATUS "Found Homebrew MySQL client at: ${BREW_MYSQL_PREFIX}")
         set(MYSQL_BREW_INCLUDE "${BREW_MYSQL_PREFIX}/include/mysql")
         set(MYSQL_BREW_LIB "${BREW_MYSQL_PREFIX}/lib")
       endif()
@@ -364,10 +295,13 @@ if(USE_MYSQL)
       find_path(MYSQL_INCLUDE_DIRS mysql.h
         HINTS
           ${MYSQL_BREW_INCLUDE}
+          /opt/homebrew/opt/mysql-client@8.4/include/mysql
           /opt/homebrew/opt/mysql-client/include/mysql
+          /usr/local/opt/mysql-client@8.4/include/mysql
           /usr/local/opt/mysql-client/include/mysql
           /opt/homebrew/opt/mysql/include/mysql
           /usr/local/opt/mysql/include/mysql
+          /opt/homebrew/include/mysql
           /usr/local/include/mysql
       )
 
@@ -375,10 +309,13 @@ if(USE_MYSQL)
         NAMES mysqlclient
         HINTS
           ${MYSQL_BREW_LIB}
+          /opt/homebrew/opt/mysql-client@8.4/lib
           /opt/homebrew/opt/mysql-client/lib
+          /usr/local/opt/mysql-client@8.4/lib
           /usr/local/opt/mysql-client/lib
           /opt/homebrew/opt/mysql/lib
           /usr/local/opt/mysql/lib
+          /opt/homebrew/lib
           /usr/local/lib
       )
     else()
@@ -412,10 +349,9 @@ if(USE_MYSQL)
       include_directories(SYSTEM ${MYSQL_INCLUDE_DIRS})
     endif()
   else()
-    message(WARNING "MySQL client not found. MySQL integration will be disabled.")
-    message(WARNING "To install MySQL client:")
-    message(WARNING "  macOS:  brew install mysql-client")
-    message(WARNING "  Linux:  sudo apt-get install libmysqlclient-dev")
+    message(FATAL_ERROR "MySQL client library not found. Set -DUSE_MYSQL=OFF to build without MySQL support, or install it:\n"
+                        "  macOS:  brew install mysql-client@8.4\n"
+                        "  Linux:  sudo apt-get install libmysqlclient-dev")
   endif()
 endif()
 

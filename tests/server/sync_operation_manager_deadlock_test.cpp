@@ -11,7 +11,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "config/config.h"
@@ -260,6 +263,87 @@ TEST_F(SyncOperationManagerDeadlockTest, WaitForCompletionReturnsPromptly) {
                                  << "ms for empty syncing_tables_, expected < 50ms";
 
   manager.reset();
+}
+
+/**
+ * @brief Regression test: StartSync must not deadlock while joining a previous sync thread
+ *
+ * Bug: StartSync used to hold sync_mutex_ via std::lock_guard while calling
+ * thread.join() on the previous sync thread. BuildSnapshotAsync's terminal
+ * update_state lambda also acquires sync_mutex_, so if StartSync is invoked
+ * while the previous thread is waiting for sync_mutex_ inside update_state,
+ * the two threads deadlock.
+ *
+ * This test exercises the "join previous thread" code path by calling
+ * StartSync twice for the same table. Without MySQL available, the first
+ * BuildSnapshotAsync exits via the connection-failure path; the second
+ * StartSync then joins the (already-finished) previous thread. The test
+ * runs StartSync on a separate task with a bounded timeout so a deadlock
+ * surfaces as a timeout failure instead of hanging the test runner.
+ */
+TEST_F(SyncOperationManagerDeadlockTest, StartSyncDoesNotDeadlockWhenJoiningPreviousThread) {
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), nullptr);
+
+  // First StartSync: launches a BuildSnapshotAsync thread. With no MySQL
+  // server reachable, the background thread exits via the failure path,
+  // which acquires sync_mutex_ in update_state before returning.
+  auto first = manager->StartSync("test_table");
+  ASSERT_TRUE(first) << "First StartSync should succeed";
+
+  // Wait for the first sync to fully finish so the previous thread is
+  // joinable when we invoke StartSync again. WaitForCompletion returns once
+  // syncing_tables_ is empty (set by the SyncGuard at thread exit).
+  ASSERT_TRUE(manager->WaitForCompletion(10)) << "First sync did not complete in time";
+
+  // Run the second StartSync on a worker thread guarded by a condition
+  // variable timeout. With the deadlock bug, StartSync would hang while
+  // attempting to join the previous thread under sync_mutex_; this surfaces
+  // as a timeout instead of an indefinite freeze.
+  std::mutex done_mutex;
+  std::condition_variable done_cv;
+  bool done = false;
+  bool start_ok = false;
+
+  std::thread worker([&]() {
+    auto second = manager->StartSync("test_table");
+    {
+      std::lock_guard<std::mutex> guard(done_mutex);
+      start_ok = static_cast<bool>(second);
+      done = true;
+    }
+    done_cv.notify_all();
+  });
+
+  {
+    std::unique_lock<std::mutex> guard(done_mutex);
+    const bool finished_in_time = done_cv.wait_for(guard, std::chrono::seconds(5), [&]() { return done; });
+    EXPECT_TRUE(finished_in_time) << "StartSync deadlocked while joining the previous sync thread";
+    if (finished_in_time) {
+      EXPECT_TRUE(start_ok) << "Second StartSync should succeed";
+    }
+  }
+
+  // Detach the worker only if the call deadlocked, otherwise join it.
+  // We cannot safely destroy the manager while a worker is stuck inside it,
+  // so on timeout we leak the worker intentionally to surface the failure
+  // instead of hanging the entire test process.
+  if (worker.joinable()) {
+    bool worker_done;
+    {
+      std::lock_guard<std::mutex> guard(done_mutex);
+      worker_done = done;
+    }
+    if (worker_done) {
+      worker.join();
+      // Allow the second sync to settle before destruction.
+      manager->WaitForCompletion(10);
+      manager.reset();
+    } else {
+      // Deadlock case: detach to avoid std::terminate on destruction. The
+      // EXPECT_TRUE above has already failed the test.
+      worker.detach();
+    }
+  }
 }
 
 #endif  // USE_MYSQL

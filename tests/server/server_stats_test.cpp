@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include "query/query_parser.h"
+
 using namespace mygramdb::server;
 
 /**
@@ -261,4 +263,86 @@ TEST_F(ServerStatsTest, CombinedStatisticsScenario) {
   uint64_t total_skipped = stats_->GetReplInsertsSkipped() + stats_->GetReplUpdatesSkipped() +
                            stats_->GetReplDeletesSkipped() + stats_->GetReplEventsSkippedOtherTables();
   EXPECT_EQ(total_skipped, 50);  // 20 + 5 + 10 + 15
+}
+
+/**
+ * @brief Every QueryType increments GetTotalCommands exactly once.
+ *
+ * Regression test for the bug where IncrementCommand only handled SEARCH /
+ * COUNT / GET / INFO / SAVE / LOAD / REPLICATION_* / CONFIG_* / UNKNOWN, and
+ * silently no-op'd for DUMP_*, SYNC*, OPTIMIZE, DEBUG_*, CACHE_*, SET,
+ * SHOW_VARIABLES, FACET. GetTotalCommands therefore undercounted.
+ *
+ * All values of QueryType must be covered by either a specific counter or the
+ * cmd_other_ aggregate counter.
+ */
+TEST_F(ServerStatsTest, AllQueryTypesAreCounted) {
+  using mygramdb::query::QueryType;
+  // List every value of QueryType (mirrors src/query/query_parser.h).
+  constexpr QueryType kAllTypes[] = {
+      QueryType::SEARCH,
+      QueryType::COUNT,
+      QueryType::GET,
+      QueryType::INFO,
+      QueryType::DUMP_SAVE,
+      QueryType::DUMP_LOAD,
+      QueryType::DUMP_VERIFY,
+      QueryType::DUMP_INFO,
+      QueryType::DUMP_STATUS,
+      QueryType::SAVE,
+      QueryType::LOAD,
+      QueryType::REPLICATION_STATUS,
+      QueryType::REPLICATION_STOP,
+      QueryType::REPLICATION_START,
+      QueryType::SYNC,
+      QueryType::SYNC_STATUS,
+      QueryType::SYNC_STOP,
+      QueryType::CONFIG_HELP,
+      QueryType::CONFIG_SHOW,
+      QueryType::CONFIG_VERIFY,
+      QueryType::OPTIMIZE,
+      QueryType::DEBUG_ON,
+      QueryType::DEBUG_OFF,
+      QueryType::CACHE_CLEAR,
+      QueryType::CACHE_STATS,
+      QueryType::CACHE_ENABLE,
+      QueryType::CACHE_DISABLE,
+      QueryType::SET,
+      QueryType::SHOW_VARIABLES,
+      QueryType::FACET,
+      QueryType::UNKNOWN,
+  };
+
+  uint64_t expected_total = 0;
+  for (QueryType type : kAllTypes) {
+    uint64_t before = stats_->GetTotalCommands();
+    stats_->IncrementCommand(type);
+    uint64_t after = stats_->GetTotalCommands();
+    EXPECT_EQ(after, before + 1) << "IncrementCommand did not increment GetTotalCommands "
+                                    "for QueryType value "
+                                 << static_cast<int>(type);
+    ++expected_total;
+  }
+
+  EXPECT_EQ(stats_->GetTotalCommands(), expected_total);
+  // Sanity check via the snapshot path too.
+  Statistics snapshot = stats_->GetStatistics();
+  EXPECT_EQ(snapshot.total_commands_processed, expected_total);
+}
+
+/**
+ * @brief IncrementRequests bumps total_requests in the GetStatistics snapshot.
+ */
+TEST_F(ServerStatsTest, IncrementRequestsBumpsTotalRequests) {
+  EXPECT_EQ(stats_->GetTotalRequests(), 0u);
+
+  stats_->IncrementRequests();
+  EXPECT_EQ(stats_->GetTotalRequests(), 1u);
+
+  stats_->IncrementRequests();
+  stats_->IncrementRequests();
+  EXPECT_EQ(stats_->GetTotalRequests(), 3u);
+
+  Statistics snapshot = stats_->GetStatistics();
+  EXPECT_EQ(snapshot.total_requests, 3u);
 }

@@ -10,6 +10,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-05-07
+
+### Added
+
+- **HTTP JSON search API: sort, fuzzy, highlight** — `/search` accepts `{"sort": {...}}`, `{"fuzzy": 1|2}`, and `{"highlight": {...}}` matching the TCP protocol; highlight tags capped at 256 bytes; synonym expansion applied before snippet generation
+- **Network hardening** — `TCP_NODELAY` on accepted sockets, configurable HTTP body size (`api.http.max_body_bytes`, returns 413 for oversize), idle-connection reaper, `api.http.read_timeout_sec`/`write_timeout_sec`
+- **Shared RateLimiter** — TcpServer and HttpServer share one limiter so a client cannot get 2x the quota by spreading load across protocols
+- **Synonym dictionary diagnostics** — Startup `synonym_variant_unreachable` warning for terms shorter than `ngram_size`/`kanji_ngram_size`; loader emits `synonym_group_collapsed` and `synonym_group_term_conflict` events with raw token preview and source line number
+- **`utils::PeriodicWorker`** — Generic background-thread helper; migrated `RateLimiter::SweeperLoop` and `QueryCache::RefreshLRUWorker`
+- **`replication_pause::Scope`** — Move-only RAII wrapper around process-wide replication-pause counter
+- **`utils::OperationGuard::TryAcquire()`** — Atomic test-and-set + RAII release with `Release()` / `Dismiss()` semantics
+- **`utils::ResolveSafePath`** — Unified path validation API
+- **New error codes** — `kTableNotFound` (4007), `kCatalogNotInitialized` (4008), `kNetworkAcceptorNoHandler` (6025), `kServerShuttingDown` (6027)
+
+### Fixed
+
+- **DUMP LOAD always restores replication** — Filepath validation runs before binlog stop; ScopeGuard ensures replication restart and flag clearance on every error path (P0-A)
+- **HttpServer::Start race** — `compare_exchange_strong` replaces check-then-set; eliminates double-spawn and skipped-join (P0-C)
+- **SyncOperationManager three-phase StartSync** — Slot claimed unconditionally during validate-and-claim phase; closes the window where a fresh burst all reached spawn (P0-D)
+- **SnapshotScheduler lifecycle** — `start_stop_mutex_` serializes Start/Stop; `replication_paused_for_dump` flag pulses around `WriteDump`
+- **TcpServer four-phase Stop** — Set `shutdown_in_progress_` → join dump worker / stop sync manager / scheduler → stop reactor / acceptor → drain thread pool last
+- **Cache lock-order deadlock** — `RemoveEntryLocked` defers eviction callbacks; `FireEvictionCallbacks()` runs after releasing `mutex_`
+- **Cache phantom metadata** — `CacheManager::Clear`/`ClearTable` serialize via `mutex_` (P0-B); `QueryCache::Clear` invokes `eviction_callback_` for every entry (P0-G)
+- **Cache double-unregister race** — `EraseWithoutCallback` used in `InvalidationQueue::ProcessBatch` to prevent corruption of `table_to_cache_keys_` and `ngram_to_cache_keys_`
+- **Reactor stranded entries** — `IoReactor::Register` holds `mux_lifecycle_` (shared) and `connections_mutex_` (unique) across running check, map insert, and mux Add
+- **ReactorConnection close race** — `OnReadable` holds `frame_mutex_` and `write_mutex_` for atomic empty-and-eof close transition
+- **DrainTask invariant** — `drain_scheduled_` kept true while task decides to reschedule
+- **IoReactor Start/Stop slot race** — `start_stop_mutex_` serializes both phases; documented lock order
+- **KqueueMultiplexer interest race** — `interest_mutex_` held across kevent syscall and map update; per-filter serialization in `Add`/`Modify`/`Remove`
+- **ConnectionAcceptor `server_fd_` data race** — Promoted to `std::atomic<int>` with exchange-on-Stop
+- **ConnectionAcceptor `reactor_handler_` data race** — `Start()` split into `Start()` (bind/listen) and `StartAccepting()` (spawn thread)
+- **DumpProgress::StartWorker data race** — `worker_thread` assignment moved inside `DumpProgress::mutex`
+- **PeriodicWorker post-unlock recheck** — `should_stop_.load(acquire)` after unlock prevents one extra callback after Stop
+- **HttpServer::Start join-deadlock** — Promise/future startup handshake removed; `bind_to_port` synchronous on calling thread
+- **IoReactor wakeup** — `EventMultiplexer::Wake()` (epoll: eventfd, kqueue: EVFILT_USER) wakes sleeping `Poll()` immediately on Stop
+- **ConnectionAcceptor EMFILE backoff** — `condition_variable::wait_for` instead of `sleep_for`; Stop returns in microseconds
+- **HTTP search input validation** — `IsValidTableName` and `ValidateQueryTextNoReservedClauses` reject smuggled clauses (LIMIT/OFFSET/etc.) and unsafe table names with HTTP 400
+- **HTTP search raw error response** — Sort/pagination failures now route through `ResponseFormatter::FormatError` for the standard ERROR prefix
+- **HTTP `/health/*` not counted in `total_requests`** — Probes no longer distort QPS metrics (H-N7)
+- **SYNC_STOP registration** — `SYNC_STOP` was missing from `InitDispatcher`, causing `"Unknown query type"`; fail-fast handler-table validation added (CR-8)
+- **`sync_mutex_` released before `join()`** — `StartSync` switched to `unique_lock` to avoid deadlock with `BuildSnapshotAsync`'s terminal `update_state` lambda
+- **CacheManager Disable/Enable order** — `enabled_=false` set before `Clear`; queue started before `enabled_=true`
+- **InvalidationQueue restart** — `Start()` resets `stopped_=false` so Stop/Start cycles do not silently drop Enqueues
+- **Decompression failure dedup** — `LookupInternal` dedupes via pending-keys set (P0-E)
+- **MygramClient correctness (8 categories)** — DEBUG response parsing (colon-vs-equals), GetReplicationStatus parsing, INFO key mapping (`active_connections`/`index_size_bytes`), connect timeout (poll-based `ConnectWithTimeout`), identifier validation, OFFSET-only emission, mutex serialization (`Impl` was missing one despite thread-safe header), C API NULL array guard
+- **mygram-cli rewrite on MygramClient** — Hostname resolution (getaddrinfo replaces inet_pton), response truncation (full-response loop), REPLICATION CRLF, port range validation, SIGPIPE handling, whitespace arg quoting; ~500 LOC duplicate implementation removed
+- **`SimplifySearchExpression`** — OR-only and parenthesized expressions now produce valid `main_term` instead of returning false
+- **Protocol detection END markers** — `CACHE_STATS`, `DUMP_INFO`, `DUMP_STATUS` recognized so client no longer hangs until socket timeout
+- **CLI bogus DEBUG OPTIMIZE completion** — Removed; OPTIMIZE is a top-level command
+- **TOCTOU on dump-save in-progress** — `compare_exchange_strong` replaces load+store(true) in `HandleDumpSave`/`HandleDumpLoad`
+- **`replication_paused_for_dump` reference counter** — Process-wide atomic; first-pauser stops binlog, last-releaser starts; migrated DumpSaveWorker, HandleDumpLoad, SnapshotScheduler::TakeSnapshot
+- **CONFIG VERIFY symlink TOCTOU** — `O_NOFOLLOW` probe narrows the window between symlink check and `LoadConfig`
+- **CacheKey hash collisions** — Switched from XOR to Fibonacci-mixed step
+- **HighlightTag size limit** — Reject `open_tag`/`close_tag` longer than 256 bytes with HTTP 400
+- **`IsSafeJsonColumnName`** — Use unsigned-char comparison for `$`; remove redundant `isspace`/`iscntrl` guards already covered by ascii_safe whitelist
+
+### Performance
+
+- **Cache memory accuracy** — `kSharedPtrControlBlockOverhead` (24 B) + `kHashMapNodeOverhead` (32 B) added to memory accounting; addresses ~5–10% RSS under-report
+- **Batch eviction callback** — `Clear`/`ClearTable`/`EvictForSpace`/`RefreshLRU` take `InvalidationManager::mutex_` once per bulk operation instead of once per key (H-M7)
+- **`UnregisterCacheEntries(vector)`** — Single mutex acquisition for batch unregister
+- **`filter_columns_changed` O(k)** — `InvalidateAffectedEntries` uses `table_to_cache_keys_` reverse index instead of O(N) walk (H-M2)
+- **`InvalidationManager::ClearTable` O(k)** — Reverse index instead of full metadata scan
+- **PendingKey typed pair** — Removes per-event O(k) hex-string allocation on the invalidation hot path
+- **`RateLimiter` background sweep** — Dedicated thread eliminates O(n) latency spikes on the request hot path
+- **`ThreadPool` shutdown** — Condition variable instead of 10ms sleep polling
+
+### Changed
+
+- **Unified HTTP/TCP search pipeline** — `ExecuteSearchPipeline` (290 LOC) split into a 53-line orchestrator plus four small helpers; both protocols route through `search_pipeline::ExecuteFullPipeline`
+- **`FacetHandler`** routes through `ExecuteFullPipeline` so synonym/fuzzy/cache apply identically to facet-scoped searches
+- **`PrepareHttpSearchQuery`** — Extracts ~100-line shared preamble between HandleSearch and HandleCount
+- **`CommandHandler::CheckNotLoading()`** — Single-line replacement for open-coded loading checks
+- **`HttpServer::ResolveHttpTableContext`** — Consolidates table-name validation + lookup + null-check
+- **Structured log event names** — 60+ sites normalized to `<module>_<verb>_<outcome>`; `server_error` / `server_warning` catch-all events replaced with dedicated names
+- **`log_field_names.h`** — Canonical field-name constants (`kFieldFilepath`, `kFieldFd`, `kFieldClientIp`, etc.)
+- **`StructuredLog::FieldError(const Error&)`** — Emits message and error_code together; applied across dump/admin/io_reactor/sync_operation_manager
+- **`ResponseFormatter::FormatOk` / `FormatStatus`** — Replace hand-rolled `+OK` / `OK ...` literals across handlers
+- **`Expected<void, Error>` for `IBinlogReader::Start()`** — Replaces bool + `GetLastError()` at four call sites
+- **`reactor_poll_failed`** promoted from Warn to Error
+- **`config_verify_failed`** downgraded from Error to Warn (client-input mistake)
+- **Request log truncation** — `RequestDispatcher` truncates request field at `kMaxQueryLogLength`; emits separate `request_full_length` to bound log volume
+- **Build system** — `mygramdb_runtime_config` extracted to break circular dep; consolidated MySQL detection; portable `NPROC` for macOS
+- **TableCatalog** — Mutex removed (immutable post-construction); const overload added
+
+### Removed
+
+- Dead code: `FormatConfigResponse`, `kOkInfoPrefixLen`/`kOkReplicationPrefixLen`, `TcpServer::StartSync`/`GetSyncStatus`, `TcpServer::shutdown_requested_`, `kDefaultConnectionRecvTimeoutSec`, `kSyncPollIntervalMs`, pointless try/catch wrappers around `make_unique` in `ServerLifecycleManager::Init*` and `RequestDispatcher::Dispatch`
+
+### Testing
+
+- E2E test ports shifted: MySQL `13306` → `23306`, HTTP `18080` → `20080` to avoid conflicts
+- New test files: `socket_utils_test`, `periodic_worker_test` (SLOW), `replication_pause_counter_test`, `binlog_reader_stop_contract_test`, `search_pipeline_synonym_jp_test`, `roaring_bitmap_ptr_test`, `facet_handler_test`, `cache_handler_test`, `admin_handler_test`, `tcp_server_lifecycle_test`
+- ~50 new/rewritten cases in `mygram_cli_test.cpp` and `mygramclient_test.cpp`
+
+**Detailed Release Notes**: [docs/releases/v1.6.1.md](docs/releases/v1.6.1.md)
+
 ## [1.6.0] - 2026-04-15
 
 ### Added
@@ -556,7 +653,10 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/libraz/mygram-db/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/libraz/mygram-db/compare/v1.5.4...v1.6.0
+[1.5.4]: https://github.com/libraz/mygram-db/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/libraz/mygram-db/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/libraz/mygram-db/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/libraz/mygram-db/compare/v1.5.0...v1.5.1

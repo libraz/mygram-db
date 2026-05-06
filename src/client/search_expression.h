@@ -12,11 +12,11 @@
  * - `(expr)` - Grouping
  * - `OR` - Logical OR between terms
  *
- * Examples:
+ * Examples (after ToQueryString()):
  * - `golang tutorial` → `golang AND tutorial` (implicit AND)
  * - `"machine learning" tutorial` → `"machine learning" AND tutorial` (phrase search)
  * - `golang -old` → `golang AND NOT old`
- * - `python OR ruby` → `(python OR ruby)`
+ * - `python OR ruby` → `(python OR ruby)` (raw OR sub-expressions are always wrapped in parens)
  * - `golang +(tutorial OR guide)` → `golang AND (tutorial OR guide)`
  * - `機械学習　チュートリアル` → `機械学習 AND チュートリアル` (full-width space)
  */
@@ -98,9 +98,9 @@ mygram::utils::Expected<SearchExpression, mygram::utils::Error> ParseSearchExpre
  * and ToQueryString() in one call.
  *
  * Examples:
- * - `+golang tutorial` → `golang AND (tutorial)`
+ * - `+golang tutorial` → `golang AND tutorial`
  * - `+golang -old` → `golang AND NOT old`
- * - `python OR ruby` → `python OR ruby`
+ * - `python OR ruby` → `(python OR ruby)` (raw OR sub-expressions are wrapped in parens)
  * - `+golang +(tutorial OR guide)` → `golang AND (tutorial OR guide)`
  *
  * @param expression Web-style search expression

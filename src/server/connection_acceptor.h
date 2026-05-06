@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -69,10 +70,37 @@ class ConnectionAcceptor {
   ~ConnectionAcceptor();
 
   /**
-   * @brief Start accepting connections
+   * @brief Bind/listen on the configured endpoint.
+   *
+   * Creates the listening socket, applies socket options, binds, and listens.
+   * The accept loop thread is **not** started here — the caller must invoke
+   * `StartAccepting()` after `SetReactorHandler()` is wired up. This split
+   * exists to fix a data race on `reactor_handler_`: previously the accept
+   * thread could read the handler before the embedder finished writing it.
+   *
+   * After a successful return, `IsRunning()` reports true and `GetPort()`
+   * reports the actual bound port. Calling `Start()` again before `Stop()`
+   * returns `kNetworkAlreadyRunning`.
+   *
    * @return Expected<void, Error> - Success or error details
    */
   mygram::utils::Expected<void, mygram::utils::Error> Start();
+
+  /**
+   * @brief Spawn the accept loop thread.
+   *
+   * Preconditions:
+   *  - `Start()` has been called and returned success (i.e. `IsRunning()`)
+   *  - `SetReactorHandler()` has been called with a non-null handler
+   *
+   * The handler must already be installed at this point so the accept thread
+   * observes a fully-published `std::function` via the thread-creation
+   * happens-before edge. Calling this twice on the same instance returns
+   * `kNetworkAlreadyRunning`.
+   *
+   * @return Expected<void, Error> - Success or error details
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> StartAccepting();
 
   /**
    * @brief Stop accepting connections
@@ -84,8 +112,10 @@ class ConnectionAcceptor {
   /**
    * @brief Set reactor handler callback.
    *
-   * The handler is invoked inline on the accept thread and must take
-   * ownership of the fd on true return.
+   * Must be called **before** `StartAccepting()`. The handler is then invoked
+   * inline on the accept thread and must take ownership of the fd on true
+   * return. This setter is not thread-safe by design: the contract is that
+   * the embedder publishes the handler before spawning the accept thread.
    *
    * @param handler Callback that takes ownership of the fd on true return.
    */
@@ -144,7 +174,11 @@ class ConnectionAcceptor {
   ServerConfig config_;
   ReactorHandler reactor_handler_;
 
-  int server_fd_ = -1;
+  // The listening socket fd. Atomic because Stop() (called from any thread)
+  // closes the fd and resets it to -1 to unblock the accept loop, which is
+  // concurrently reading the same field on the accept thread. A plain int
+  // would race under the C++ memory model.
+  std::atomic<int> server_fd_{-1};
   uint16_t actual_port_ = 0;
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
@@ -153,6 +187,14 @@ class ConnectionAcceptor {
   std::set<int> active_fds_;
   std::mutex fds_mutex_;
   std::string unix_socket_path_;  // Non-empty when UDS mode, used for unlink on Stop
+
+  // Mutex + condition variable used to back off after `accept(2)` returns
+  // EMFILE / ENFILE. Sleeping on a plain `std::this_thread::sleep_for` would
+  // make the accept loop unresponsive to `Stop()` for the full backoff
+  // window; using a CV guarded by `should_stop_` lets `Stop()` wake the
+  // sleeper immediately. Held only while computing the wait predicate.
+  std::mutex stop_mutex_;
+  std::condition_variable stop_cv_;
 };
 
 }  // namespace mygramdb::server

@@ -39,12 +39,12 @@ std::string CacheHandler::HandleClear(const query::Query& query) {
   if (query.table.empty()) {
     // CACHE CLEAR - clear all cache
     ctx_.cache_manager->Clear();
-    return "OK CACHE_CLEARED";
+    return ResponseFormatter::FormatStatus("CACHE_CLEARED");
   }
 
   // CACHE CLEAR <table> - clear table-specific cache
   ctx_.cache_manager->ClearTable(query.table);
-  return "OK CACHE_CLEARED table=" + query.table;
+  return ResponseFormatter::FormatStatus("CACHE_CLEARED table=" + query.table);
 }
 
 std::string CacheHandler::HandleStats() {
@@ -111,7 +111,7 @@ std::string CacheHandler::HandleEnable() {
         "Please restart the server with cache.enabled = true in configuration.");
   }
 
-  return "OK CACHE_ENABLED";
+  return ResponseFormatter::FormatStatus("CACHE_ENABLED");
 }
 
 std::string CacheHandler::HandleDisable() {
@@ -121,7 +121,7 @@ std::string CacheHandler::HandleDisable() {
   }
 
   ctx_.cache_manager->Disable();
-  return "OK CACHE_DISABLED";
+  return ResponseFormatter::FormatStatus("CACHE_DISABLED");
 }
 
 }  // namespace mygramdb::server

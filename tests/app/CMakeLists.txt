@@ -3,10 +3,6 @@ add_executable(configuration_manager_test configuration_manager_test.cpp)
 target_link_libraries(configuration_manager_test
     PRIVATE
     mygramdb_app
-    mygramdb_config
-    mygramdb_utils
-    spdlog::spdlog
-    GTest::gtest
     GTest::gtest_main
 )
 
@@ -20,7 +16,6 @@ add_executable(command_line_parser_test command_line_parser_test.cpp)
 target_link_libraries(command_line_parser_test
     PRIVATE
     mygramdb_app
-    GTest::gtest
     GTest::gtest_main
 )
 
@@ -33,7 +28,6 @@ gtest_discover_tests(command_line_parser_test
 add_executable(application_test application_test.cpp)
 target_link_libraries(application_test
     PRIVATE
-    GTest::gtest
     GTest::gtest_main
 )
 
@@ -47,8 +41,6 @@ add_executable(signal_manager_test signal_manager_test.cpp)
 target_link_libraries(signal_manager_test
     PRIVATE
     mygramdb_app
-    mygramdb_utils
-    GTest::gtest
     GTest::gtest_main
 )
 

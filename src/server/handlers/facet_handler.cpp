@@ -5,25 +5,25 @@
 
 #include "server/handlers/facet_handler.h"
 
-#include <roaring/roaring.h>
-
 #include <algorithm>
 #include <chrono>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "query/synonym_dictionary.h"
 #include "server/handlers/search_handler.h"
 #include "server/search_pipeline.h"
+#include "server/table_catalog.h"
 #include "storage/filter_index.h"
+#include "utils/roaring_bitmap_ptr.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::server {
 
 std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
   }
 
   // Get table context
@@ -48,9 +48,17 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     return ResponseFormatter::FormatError("Filter index not available");
   }
 
-  // EDGE-5: Re-check dump_load_in_progress after snapshot
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+  // EDGE-5: Re-check dump_load_in_progress after snapshot.
+  //
+  // Re-check after acquiring resources is intentional defensive: the
+  // `dump_load_in_progress` flag could flip during the resource acquisition
+  // window between the first CheckNotLoading() at the top of Handle() and
+  // here. Even though the load operation is largely synchronous, this guard
+  // ensures we never proceed past resource setup if a load began in the
+  // meantime. The check is a single relaxed atomic load -- cheap. Keep
+  // both calls; do not "deduplicate" them.
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
   }
 
   std::vector<std::pair<std::string, uint64_t>> value_counts;
@@ -65,24 +73,39 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     bool cross_boundary = current_index->GetCrossBoundaryNgrams();
 
     if (has_search) {
-      // Run search pipeline (handles search_text + and_terms + NOT + filters)
-      std::vector<std::string> all_search_terms;
-      if (!query.search_text.empty()) {
-        all_search_terms.push_back(query.search_text);
+      // Use ExecuteFullPipeline so synonym expansion, fuzzy matching, and
+      // result caching apply identically to facet-scoped searches. Mismatched
+      // semantics between SEARCH and FACET on the same query was a documented
+      // inconsistency (FACET previously called search_pipeline::Execute
+      // directly and bypassed the cache and synonym/fuzzy paths entirely).
+      //
+      // Facets benefit from the search-result cache: keep skip_cache_lookup
+      // false (default) so FACET and SEARCH share cached posting-list
+      // resolutions.
+      auto* facet_table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+      search_pipeline::FullPipelineParams params;
+      if (facet_table_ctx != nullptr) {
+        params = search_pipeline::BuildPipelineParamsFromContext(*facet_table_ctx, ctx_.full_config, ctx_.cache_manager,
+                                                                 SearchHandler::GetFilterThreshold(),
+                                                                 /*attach_bm25_stats=*/true);
+      } else {
+        // Defensive fallback: catalog evicted the entry between GetTable and
+        // here. Wire the locals so the pipeline can still execute.
+        params.current_index = current_index;
+        params.current_doc_store = current_doc_store;
+        params.full_config = ctx_.full_config;
+        params.cache_manager = ctx_.cache_manager;
+        params.ngram_size = ngram_size;
+        params.kanji_ngram_size = kanji_ngram_size;
+        params.cross_boundary_ngrams = cross_boundary;
+        params.filter_threshold = SearchHandler::GetFilterThreshold();
       }
-      all_search_terms.insert(all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
-      auto term_infos = search_pipeline::GenerateTermInfos(all_search_terms, current_index, ngram_size,
-                                                           kanji_ngram_size, cross_boundary);
-
-      // Sort by estimated size for faster intersection
-      std::sort(term_infos.begin(), term_infos.end(),
-                [](const SearchTermInfo& a, const SearchTermInfo& b) { return a.estimated_size < b.estimated_size; });
-
-      auto pipeline_result = search_pipeline::Execute(query, term_infos, all_search_terms, current_index,
-                                                      current_doc_store, ctx_.full_config, ngram_size, kanji_ngram_size,
-                                                      cross_boundary, SearchHandler::GetFilterThreshold());
-      results = std::move(pipeline_result.results);
+      auto pipeline_output = search_pipeline::ExecuteFullPipeline(query, params);
+      if (!pipeline_output.success) {
+        return ResponseFormatter::FormatError(pipeline_output.error_message);
+      }
+      results = std::move(pipeline_output.results);
     } else {
       // No search text and no and_terms — start with all docs
       results = current_doc_store->GetAllDocIds();
@@ -102,11 +125,12 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     if (results.empty()) {
       value_counts = {};
     } else {
-      // Convert results to Roaring bitmap for efficient facet counting
-      // Use unique_ptr with custom deleter for RAII
-      std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)> result_bitmap(roaring_bitmap_create(),
-                                                                                      roaring_bitmap_free);
-      roaring_bitmap_add_many(result_bitmap.get(), results.size(), results.data());
+      // Convert results to Roaring bitmap for efficient facet counting using
+      // the shared RAII helper. Note: this duplicates the bitmap-construction
+      // step performed inside ExecuteFullPipeline; Phase 3 will eliminate the
+      // duplication once the pipeline exposes its working bitmap via the
+      // output struct.
+      auto result_bitmap = mygram::utils::MakeRoaringFromVector(results);
 
       // Free the results vector before bitmap operations (reduce peak memory)
       results.clear();

@@ -230,6 +230,40 @@ int mygramclient_save(MygramClient_C* client, const char* filepath, char** saved
 int mygramclient_load(MygramClient_C* client, const char* filepath, char** loaded_path);
 
 /**
+ * @brief Replication status (C-compatible mirror of ReplicationStatus)
+ */
+typedef struct {
+  int running;                // 1 if replication is active, 0 otherwise
+  char* gtid;                 // Current GTID position (caller must NOT free directly;
+                              // free the whole struct via mygramclient_free_replication_status)
+  uint64_t processed_events;  // Number of binlog events processed since start
+  uint64_t queue_size;        // Pending events waiting to be applied
+  char* status_str;           // Raw status string ("running", "stopped", ...)
+} MygramReplicationStatus_C;
+
+/**
+ * @brief Get replication status
+ *
+ * @param client Client handle
+ * @param status Output replication status (caller must free with mygramclient_free_replication_status)
+ * @return 0 on success, -1 on error
+ *
+ * @note A structured C API for SEARCH debug info is not provided in this
+ *       release; callers that need debug fields should use
+ *       mygramclient_send_command() and parse the raw "# DEBUG" block.
+ *       A typed wrapper can be added when there is concrete demand from
+ *       FFI consumers.
+ */
+int mygramclient_replication_status(MygramClient_C* client, MygramReplicationStatus_C** status);
+
+/**
+ * @brief Free replication status struct
+ *
+ * @param status Replication status to free
+ */
+void mygramclient_free_replication_status(MygramReplicationStatus_C* status);
+
+/**
  * @brief Stop replication
  *
  * @param client Client handle
@@ -313,6 +347,11 @@ void mygramclient_free_string(char* str);
 
 /**
  * @brief Parsed search expression components
+ *
+ * Note: the optional_terms / optional_count fields are deprecated and
+ * are always emitted as NULL / 0 since the implicit-AND parser change.
+ * They are retained here for ABI compatibility only — new code should
+ * use and_terms (required terms) and not_terms (excluded terms).
  */
 typedef struct {
   char* main_term;        // Main search term (first required or optional term)
@@ -320,9 +359,10 @@ typedef struct {
   size_t and_count;       // Number of AND terms
   char** not_terms;       // Array of excluded terms (NOT)
   size_t not_count;       // Number of NOT terms
-  char** optional_terms;  // Array of optional terms (OR) — deprecated, always empty
-                          // (all terms placed in required_terms since implicit-AND change)
-  size_t optional_count;  // Number of optional terms (always 0 since implicit-AND change)
+  char** optional_terms;  // Deprecated: always NULL since the implicit-AND change.
+                          // Reserved for ABI compatibility.
+  size_t optional_count;  // Deprecated: always 0 since the implicit-AND change.
+                          // Reserved for ABI compatibility.
 } MygramParsedExpression_C;
 
 /**

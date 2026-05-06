@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.6.0](v1.6.0.md) - Latest release (2026-04-15) - BM25 Scoring, Synonyms, Highlighting, Fuzzy Search, FACET, V2 Dump, MariaDB Support
+- [v1.6.1](v1.6.1.md) - Latest release (2026-05-07) - Lifecycle & Concurrency Hardening, HTTP Search Extensions (sort/fuzzy/highlight), CLI Rewrite
+- [v1.6.0](v1.6.0.md) - 2026-04-15 - BM25 Scoring, Synonyms, Highlighting, Fuzzy Search, FACET, V2 Dump, MariaDB Support
 - [v1.5.4](v1.5.4.md) - 2026-04-13 - CRC32 Binlog Checksum, Correctness & Security Hardening, Module Split
 - [v1.5.3](v1.5.3.md) - 2026-04-12 - Reactor I/O Model (epoll/kqueue), Half-close Fix, Rate Limit & UDS Hardening
 - [v1.5.2](v1.5.2.md) - 2026-04-09 - MySQL 9.x compatibility, VECTOR type support, Auth fix

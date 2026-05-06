@@ -60,6 +60,16 @@ class RequestDispatcher {
   void RegisterHandler(query::QueryType type, CommandHandler* handler);
 
   /**
+   * @brief Test whether a handler is registered for the given QueryType.
+   *
+   * Used by ServerLifecycleManager::InitDispatcher's startup completeness
+   * check to detect handler-table drift when a new QueryType enum value is
+   * added without a matching RegisterHandler call. Returns true when both
+   * the entry exists and the registered pointer is non-null.
+   */
+  [[nodiscard]] bool HasHandler(query::QueryType type) const;
+
+  /**
    * @brief Dispatch a request to appropriate handler
    * @param request Request string
    * @param conn_ctx Connection context

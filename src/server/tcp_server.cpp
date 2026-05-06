@@ -8,7 +8,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <spdlog/spdlog.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -39,7 +38,6 @@
 #include "server/handlers/sync_handler.h"
 #endif
 #include "cache/cache_manager.h"
-#include "server/response_formatter.h"
 #include "server/server_lifecycle_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
@@ -62,7 +60,6 @@ constexpr size_t kIpAddressBufferSize = 64;
 
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
-constexpr int kDefaultConnectionRecvTimeoutSec = 60;
 
 }  // namespace
 
@@ -90,19 +87,21 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Check if already running
   if (acceptor_ && acceptor_->IsRunning()) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
-    mygram::utils::StructuredLog()
-        .Event("server_error")
-        .Field("operation", "tcp_server_start")
-        .Field("error", error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("tcp_server_start_failed").Field("error", error.to_string()).Error();
     return MakeUnexpected(error);
   }
 
+  shutdown_in_progress_.store(false, std::memory_order_release);
+
   // Create rate limiter (if configured). The reactor_handler lambda below
   // enforces the token bucket per peer IP on every accept.
-  // Note: RateLimiter is NOT managed by ServerLifecycleManager because it's only used in TcpServer
+  //
+  // Held as shared_ptr so HttpServer can co-own the same instance via
+  // GetSharedRateLimiter() (Fix N-4): a client's quota MUST apply across
+  // protocols. Two independent limiters give the client effectively 2x the
+  // configured limit, which silently defeats DoS protection.
   if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
-    rate_limiter_ = std::make_unique<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+    rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
     mygram::utils::StructuredLog()
@@ -160,6 +159,13 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Set dump progress tracking pointer
   handler_context_->dump_progress = &dump_progress_;
 
+  // Wire the shutdown flag through to handlers so that long-running workers
+  // (DumpSaveWorker, DumpLoadWorker) can skip post-operation binlog Start()
+  // when TcpServer::Stop() has been called (CR-10). Setting this BEFORE the
+  // acceptor/reactor start ensures the flag is observable by any worker
+  // started via the first DUMP SAVE request.
+  handler_context_->shutdown_flag = &shutdown_in_progress_;
+
   search_handler_ = std::move(components.search_handler);
   document_handler_ = std::move(components.document_handler);
   dump_handler_ = std::move(components.dump_handler);
@@ -204,6 +210,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   {
     auto r = reactor_->Start();
     if (!r) {
+      Stop();
       return MakeUnexpected(r.error());
     }
   }
@@ -236,11 +243,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
           if (rate_limiter_ptr != nullptr) {
             std::string client_ip = mygram::utils::GetPeerIP(client_fd);
             if (!rate_limiter_ptr->AllowRequest(client_ip)) {
-              mygram::utils::StructuredLog()
-                  .Event("server_warning")
-                  .Field("type", "rate_limit_exceeded")
-                  .Field("client_ip", client_ip)
-                  .Warn();
+              mygram::utils::StructuredLog().Event("rate_limit_exceeded").Field("client_ip", client_ip).Warn();
               return false;
             }
           }
@@ -261,6 +264,19 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
         });
   }
 
+  // Spawn the accept loop AFTER SetReactorHandler so the new thread observes a
+  // fully-published handler via the std::thread constructor's happens-before
+  // edge. Previously the acceptor started its thread inside Start() (during
+  // ServerLifecycleManager::InitAcceptor) and then the handler was installed
+  // afterwards, which was a documented data race on reactor_handler_.
+  {
+    auto accept_result = acceptor_->StartAccepting();
+    if (!accept_result) {
+      Stop();
+      return MakeUnexpected(accept_result.error());
+    }
+  }
+
   mygram::utils::StructuredLog()
       .Event("tcp_server_started")
       .Field("host", config_.host)
@@ -273,8 +289,34 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 void TcpServer::Stop() {
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
-  // Signal shutdown to all connection handlers
-  shutdown_requested_ = true;
+  // Phase 1: announce shutdown.
+  //
+  // Set shutdown_in_progress_ BEFORE joining any worker so long-running
+  // workers (DumpSaveWorker, DumpLoadWorker) observe the flag at every
+  // resumable check point and skip post-operation binlog restart. Without
+  // this, a worker that captured replication_was_running=true at entry will
+  // call binlog_reader_->Start() during shutdown, racing the binlog_reader_
+  // destructor that is about to run after Stop() returns (CR-10).
+  shutdown_in_progress_.store(true, std::memory_order_release);
+
+  // Phase 2: stop ingest paths that may touch binlog_reader_.
+  //
+  // Order rationale (CR-3 / CR-10):
+  //   (a) The dump worker may be inside DumpSaveWorker / DumpLoadWorker,
+  //       which call binlog_reader_->Stop() / Start() under
+  //       replication_paused_for_dump_. Joining the worker here — while
+  //       binlog_reader_ is still alive — guarantees those calls complete
+  //       cleanly before binlog_reader_ is torn down.
+  //   (b) sync_manager_ also calls binlog_reader_->Stop() / GetCurrentGTID
+  //       inside BuildSnapshotAsync; RequestShutdown signals cancellation
+  //       and WaitForCompletion joins each sync thread.
+  //   (c) snapshot_scheduler_ wakes its loop and joins, including any
+  //       in-flight TakeSnapshot that touches binlog_reader_.
+  //
+  // After Phase 2 completes, no caller other than Stop() itself ever calls
+  // into binlog_reader_ again, so its destructor (which fires when this
+  // TcpServer is destroyed, after Stop() returns) is race-free.
+  dump_progress_.JoinWorker();
 
 #ifdef USE_MYSQL
   // Request SYNC manager to shutdown
@@ -284,11 +326,13 @@ void TcpServer::Stop() {
   }
 #endif
 
-  // Stop snapshot scheduler
+  // Stop snapshot scheduler (also touches binlog_reader_ in TakeSnapshot)
   if (scheduler_) {
     scheduler_->Stop();
   }
 
+  // Phase 3: tear down the network stack.
+  //
   // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
   // eagerly close(2)s every fd in its active_fds_ set — which includes the
   // reactor-owned client fds, since the reactor's close_callback removes them
@@ -311,37 +355,29 @@ void TcpServer::Stop() {
     acceptor_->Stop();
   }
 
-  // Join dump worker thread if still running
-  dump_progress_.JoinWorker();
-
-  // Shutdown thread pool (completes pending tasks)
+  // Phase 4: drain remaining drain tasks.
+  //
+  // Shutdown thread pool LAST. Tasks queued on the pool may still hold
+  // shared_ptr<ReactorConnection> copies that reach into close_callback_
+  // (which captures `accept_ptr` and `close_stats_ptr` from this TcpServer);
+  // those captured pointers must remain valid for the lifetime of any
+  // in-flight callback (CR-3). Joining the pool here ensures every queued
+  // task — including the close callbacks Unregister() may have just spawned
+  // when the reactor stopped — has fully completed before the captured
+  // ServerStats / ConnectionAcceptor objects start destruction.
   if (thread_pool_) {
     thread_pool_->Shutdown();
   }
 
+  // After this point, member destruction order (reverse of declaration in
+  // tcp_server.h) tears down handlers / dispatcher / reactor / acceptor /
+  // ... / scheduler / sync_manager_ / cache_manager_ / table_catalog_ /
+  // thread_pool_ / acceptor_, and finally binlog_reader_ is dropped by the
+  // owner that constructed this TcpServer. By Phase 1+2 above, no thread
+  // managed by this server still calls into binlog_reader_, so that drop
+  // is safe.
+
   mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
 }
-
-#ifdef USE_MYSQL
-
-std::string TcpServer::StartSync(const std::string& table_name) {
-  if (!sync_manager_) {
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
-  auto result = sync_manager_->StartSync(table_name);
-  if (!result) {
-    return ResponseFormatter::FormatError(result.error().message());
-  }
-  return *result;
-}
-
-std::string TcpServer::GetSyncStatus() {
-  if (!sync_manager_) {
-    return "status=IDLE message=\"SYNC manager not initialized\"";
-  }
-  return sync_manager_->GetSyncStatus();
-}
-
-#endif  // USE_MYSQL
 
 }  // namespace mygramdb::server

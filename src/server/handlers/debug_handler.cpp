@@ -5,11 +5,12 @@
 
 #include "server/handlers/debug_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include <sstream>
 
+#include "server/log_field_names.h"
+#include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
+#include "utils/flag_guard.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -22,27 +23,28 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       conn_ctx.debug_mode = true;
       mygram::utils::StructuredLog()
           .Event("debug_mode_enabled")
-          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Field(log_fields::kFieldFd, static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
-      return "OK DEBUG_ON";
+      return ResponseFormatter::FormatStatus("DEBUG_ON");
     }
 
     case query::QueryType::DEBUG_OFF: {
       conn_ctx.debug_mode = false;
       mygram::utils::StructuredLog()
           .Event("debug_mode_disabled")
-          .Field("connection_fd", static_cast<int64_t>(conn_ctx.client_fd))
+          .Field(log_fields::kFieldFd, static_cast<int64_t>(conn_ctx.client_fd))
           .Debug();
-      return "OK DEBUG_OFF";
+      return ResponseFormatter::FormatStatus("DEBUG_OFF");
     }
 
     case query::QueryType::OPTIMIZE: {
 #ifdef USE_MYSQL
       // Check if any table is currently syncing
-      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        return ResponseFormatter::FormatError(
-            "Cannot optimize while SYNC is in progress. "
-            "Please wait for SYNC to complete.");
+      if (ctx_.sync_manager != nullptr) {
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kOptimize);
+        if (!check) {
+          return ResponseFormatter::FormatError(check.error().message());
+        }
       }
 #endif
 
@@ -56,23 +58,14 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       // Note: DUMP SAVE (dump_save_in_progress flag) is allowed during OPTIMIZE
       // to support auto-save functionality that runs in background
 
-      // Check if another OPTIMIZE is already running globally
-      bool expected = false;
-      if (!ctx_.optimization_in_progress.compare_exchange_strong(expected, true)) {
+      // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire
+      // (Phase 4 H-D1). Same contract as DUMP SAVE / DUMP LOAD: prevents
+      // two concurrent OPTIMIZE callers from both observing the flag false
+      // and racing each other inside the index-rebuild critical section.
+      auto guard = mygram::utils::OperationGuard::TryAcquire(ctx_.optimization_in_progress);
+      if (!guard.engaged()) {
         return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress");
       }
-
-      // RAII guard to ensure flag is cleared even if exception occurs
-      struct OptimizationGuard {
-        std::atomic<bool>& flag;
-        explicit OptimizationGuard(std::atomic<bool>& flag_ref) : flag(flag_ref) {}
-        OptimizationGuard(const OptimizationGuard&) = delete;
-        OptimizationGuard& operator=(const OptimizationGuard&) = delete;
-        OptimizationGuard(OptimizationGuard&&) = delete;
-        OptimizationGuard& operator=(OptimizationGuard&&) = delete;
-        ~OptimizationGuard() { flag.store(false); }
-      };
-      OptimizationGuard guard(ctx_.optimization_in_progress);
 
       // Get table context
       auto table_ctx = GetTableContext(query.table);
@@ -98,8 +91,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
               << " total=" << mygram::utils::FormatBytes(sys_info->total_physical_bytes);
         }
         mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "optimize_rejected")
+            .Event("optimize_rejected")
             .Field("reason", "critical_memory_status")
             .Field("details", oss.str())
             .Warn();
@@ -121,8 +113,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
           oss << " available=" << mygram::utils::FormatBytes(sys_info->available_physical_bytes);
         }
         mygram::utils::StructuredLog()
-            .Event("server_warning")
-            .Field("type", "optimize_rejected")
+            .Event("optimize_rejected")
             .Field("reason", "insufficient_memory")
             .Field("details", oss.str())
             .Warn();
@@ -142,11 +133,11 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 
       if (started) {
         auto stats = current_index->GetStatistics();
-        std::ostringstream oss;
-        oss << "OK OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
-            << " roaring=" << stats.roaring_bitmap_lists
-            << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
-        return oss.str();
+        std::ostringstream body;
+        body << "OPTIMIZED terms=" << stats.total_terms << " delta=" << stats.delta_encoded_lists
+             << " roaring=" << stats.roaring_bitmap_lists
+             << " memory=" << mygram::utils::FormatBytes(stats.memory_usage_bytes);
+        return ResponseFormatter::FormatStatus(body.str());
       }
       return ResponseFormatter::FormatError("Failed to start optimization");
     }

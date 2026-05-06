@@ -7,8 +7,6 @@
 
 #include "server/handlers/sync_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "server/sync_operation_manager.h"
@@ -39,9 +37,13 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
   return *result;
 }
 
-std::string SyncHandler::HandleSyncStatus(const query::Query& query) {
+std::string SyncHandler::HandleSyncStatus(const query::Query& /*query*/) {
   if (sync_manager_ == nullptr) {
-    return "status=IDLE message=\"SYNC manager not initialized\"";
+    // Null sync_manager_ is a configuration error, not an idle state — emit
+    // a proper protocol error rather than masking it as IDLE. The earlier
+    // raw "status=IDLE message=..." payload also lacked the OK/ERROR
+    // framing prefix that downstream parsers rely on.
+    return ResponseFormatter::FormatError("SYNC manager not initialized");
   }
   return sync_manager_->GetSyncStatus();
 }

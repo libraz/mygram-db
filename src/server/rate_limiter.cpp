@@ -5,8 +5,6 @@
 
 #include "server/rate_limiter.h"
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 
 #include "utils/constants.h"
@@ -65,22 +63,35 @@ void TokenBucket::Refill() {
 // RateLimiter implementation
 //
 
-RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, std::chrono::seconds cleanup_interval,
-                         uint32_t inactivity_timeout_sec)
+RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients,
+                         std::chrono::milliseconds cleanup_interval, uint32_t inactivity_timeout_sec)
     : capacity_(capacity),
       refill_rate_(refill_rate),
       max_clients_(max_clients),
       cleanup_interval_(cleanup_interval),
-      inactivity_timeout_(inactivity_timeout_sec),
-      last_cleanup_time_(std::chrono::steady_clock::now()) {
+      inactivity_timeout_(inactivity_timeout_sec) {
   mygram::utils::StructuredLog()
       .Event("rate_limiter_created")
       .Field("capacity", static_cast<uint64_t>(capacity))
       .Field("refill_rate", static_cast<uint64_t>(refill_rate))
       .Field("max_clients", static_cast<uint64_t>(max_clients))
-      .Field("cleanup_interval_sec", static_cast<uint64_t>(cleanup_interval.count()))
+      .Field("cleanup_interval_ms", static_cast<uint64_t>(cleanup_interval.count()))
       .Field("inactivity_timeout_sec", static_cast<uint64_t>(inactivity_timeout_sec))
       .Debug();
+
+  // Start background sweeper. Started last so all members are fully
+  // initialized before the worker observes them. Start failure here is
+  // logged by PeriodicWorker itself; we deliberately ignore the
+  // Expected return because (a) failure modes are interval<=0 (compile-
+  // time guarded by kDefaultCleanupInterval) or already-running (a
+  // fresh PeriodicWorker can never be), so the only realistic failure
+  // is OOM during std::thread construction, which we cannot recover
+  // from at this layer.
+  (void)sweeper_.Start([this] { SweepExpiredBuckets(); }, cleanup_interval_);
+}
+
+RateLimiter::~RateLimiter() {
+  sweeper_.Stop();
 }
 
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
@@ -89,32 +100,11 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   // Update statistics
   total_requests_.fetch_add(1, std::memory_order_relaxed);
 
-  // Time-based cleanup to prevent memory leak
-  // Note: We do this while holding mutex_ to avoid race conditions
+  // Cleanup is offloaded to a background thread to avoid O(n) latency spikes
+  // on the request hot path. The previous implementation swept inside
+  // AllowRequest under mutex_, blocking all rate-limit checks during the
+  // sweep. AllowRequest is now strictly O(1) on the bucket count.
   auto now = std::chrono::steady_clock::now();
-  bool should_cleanup = (now - last_cleanup_time_ >= cleanup_interval_);
-
-  if (should_cleanup) {
-    last_cleanup_time_ = now;
-    size_t removed = 0;
-
-    for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
-      if (now - it->second->last_access > inactivity_timeout_) {
-        it = client_buckets_.erase(it);
-        removed++;
-      } else {
-        ++it;
-      }
-    }
-
-    if (removed > 0) {
-      mygram::utils::StructuredLog()
-          .Event("rate_limiter_cleanup")
-          .Field("removed_clients", static_cast<uint64_t>(removed))
-          .Field("total_tracked", static_cast<uint64_t>(client_buckets_.size()))
-          .Debug();
-    }
-  }
 
   // Get or create bucket for this client
   auto bucket_iter = client_buckets_.find(client_ip);
@@ -124,8 +114,7 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
       // Enforce hard limit: reject new clients
       blocked_requests_.fetch_add(1, std::memory_order_relaxed);
       mygram::utils::StructuredLog()
-          .Event("server_warning")
-          .Field("type", "rate_limiter_max_clients")
+          .Event("rate_limiter_max_clients")
           .Field("max_clients", static_cast<uint64_t>(max_clients_))
           .Field("client_ip", client_ip)
           .Warn();
@@ -152,16 +141,76 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   return allowed;
 }
 
-RateLimiter::Stats RateLimiter::GetStats() const {
+void RateLimiter::SweepExpiredBuckets() {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  return Stats{.total_requests = total_requests_.load(std::memory_order_relaxed),
-               .allowed_requests = allowed_requests_.load(std::memory_order_relaxed),
-               .blocked_requests = blocked_requests_.load(std::memory_order_relaxed),
-               .tracked_clients = client_buckets_.size()};
+  auto now = std::chrono::steady_clock::now();
+  size_t removed = 0;
+
+  for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
+    if (now - it->second->last_access > inactivity_timeout_) {
+      it = client_buckets_.erase(it);
+      removed++;
+    } else {
+      ++it;
+    }
+  }
+
+  if (removed > 0) {
+    mygram::utils::StructuredLog()
+        .Event("rate_limiter_cleanup")
+        .Field("removed_clients", static_cast<uint64_t>(removed))
+        .Field("total_tracked", static_cast<uint64_t>(client_buckets_.size()))
+        .Debug();
+  }
+}
+
+size_t RateLimiter::GetTrackedClientCount() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return client_buckets_.size();
+}
+
+RateLimiter::Stats RateLimiter::GetStats() const {
+  // Acquire `mutex_` only long enough to snapshot `client_buckets_.size()`
+  // (the one piece of data not already exposed via atomics). The atomic
+  // counter loads happen outside the lock so /info, /metrics, and similar
+  // observability endpoints do not contend with the AllowRequest hot path.
+  //
+  // Consistency note: AllowRequest unconditionally increments
+  // total_requests_ AND exactly one of {allowed_requests_, blocked_requests_}
+  // under `mutex_`, so the invariant `total == allowed + blocked` holds
+  // post-write. To preserve that invariant on the lock-free GetStats path,
+  // we read allowed/blocked first and derive total as their sum rather than
+  // loading total directly. Reading the three counters independently across
+  // a concurrent fetch_add can otherwise expose a momentary `total > allowed
+  // + blocked` skew in a way the strict equality check in tests treats as a
+  // bug. ResetStats still holds `mutex_` to keep its three zeros mutually
+  // atomic w.r.t. AllowRequest.
+  size_t tracked = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tracked = client_buckets_.size();
+  }
+  const uint64_t allowed = allowed_requests_.load(std::memory_order_relaxed);
+  const uint64_t blocked = blocked_requests_.load(std::memory_order_relaxed);
+  return Stats{.total_requests = allowed + blocked,
+               .allowed_requests = allowed,
+               .blocked_requests = blocked,
+               .tracked_clients = tracked};
 }
 
 void RateLimiter::ResetStats() {
+  // Holds `mutex_` to keep the {allowed, blocked, total} reset atomic with
+  // respect to AllowRequest, which performs its three counter mutations
+  // under the same lock. Without this, a ResetStats can interleave between
+  // an AllowRequest's `total_requests_++` and the matching
+  // `allowed_requests_++` / `blocked_requests_++`, leaving the post-reset
+  // counters in the inconsistent state `total > allowed + blocked` --
+  // exactly what `ResetStatsConcurrentConsistency` regresses against.
+  // GetStats() reads atomics outside this lock; that is safe because each
+  // load is independent and there are no inter-counter invariants the
+  // observability path needs (callers that care about consistency derive it
+  // from a single atomic).
   std::lock_guard<std::mutex> lock(mutex_);
   total_requests_.store(0, std::memory_order_relaxed);
   allowed_requests_.store(0, std::memory_order_relaxed);

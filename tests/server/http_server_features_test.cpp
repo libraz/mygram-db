@@ -1010,5 +1010,171 @@ TEST(HttpServerPointerSafetyTest, NullPointerDefensiveChecks) {
   SUCCEED() << "Null pointer safety checks added to search and get handlers";
 }
 
+// ============================================================================
+// RecordRequest unification: every HTTP handler increments the same stats
+// instance (tcp_stats_ when provided, otherwise stats_). This guards against
+// the previous inconsistency where /info had its own branch and /search,
+// /count, /health* always wrote to stats_ even when tcp_stats_ was non-null.
+// ============================================================================
+
+TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
+  // No tcp_stats supplied -> RecordRequest() must increment HttpServer::stats_.
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext ctx;
+  ctx.name = "test";
+  ctx.config.ngram_size = 1;
+  ctx.index = std::make_unique<index::Index>(1);
+  ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  auto doc_id = ctx.doc_store->AddDocument("doc-1", {});
+  ctx.index->AddDocument(*doc_id, "alpha");
+  table_contexts["test"] = &ctx;
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = 18086;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr,
+                         /*tcp_stats=*/nullptr);
+  ASSERT_TRUE(http_server.Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint64_t baseline = http_server.GetTotalRequests();
+
+  httplib::Client client("127.0.0.1", 18086);
+  client.set_read_timeout(std::chrono::seconds(5));
+
+  ASSERT_TRUE(client.Get("/info"));
+
+  json search_body;
+  search_body["q"] = "alpha";
+  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+
+  json count_body;
+  count_body["q"] = "alpha";
+  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+
+  // Allow async request bookkeeping a brief moment to settle.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  uint64_t after = http_server.GetTotalRequests();
+  EXPECT_GE(after - baseline, 3U) << "info + search + count must each call RecordRequest()";
+
+  http_server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
+  // tcp_stats supplied -> every handler (search/count/info/health*) must
+  // route IncrementRequests() to tcp_stats_. After the L-6 reconciliation
+  // GetTotalRequests() reads through to the effective (tcp_stats_) source so
+  // both accessors agree on the same counter — this prevents /info from
+  // appearing to "lose" requests when callers query GetTotalRequests()
+  // directly.
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext ctx;
+  ctx.name = "test";
+  ctx.config.ngram_size = 1;
+  ctx.index = std::make_unique<index::Index>(1);
+  ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  auto doc_id = ctx.doc_store->AddDocument("doc-1", {});
+  ctx.index->AddDocument(*doc_id, "beta");
+  table_contexts["test"] = &ctx;
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  ServerStats tcp_stats;
+  uint64_t tcp_baseline = tcp_stats.GetTotalRequests();
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = 18087;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr, &tcp_stats);
+  ASSERT_TRUE(http_server.Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  uint64_t http_baseline = http_server.GetTotalRequests();
+
+  httplib::Client client("127.0.0.1", 18087);
+  client.set_read_timeout(std::chrono::seconds(5));
+
+  // /info historically routed to tcp_stats; verify it still does.
+  ASSERT_TRUE(client.Get("/info"));
+
+  // /search and /count used to always hit stats_, ignoring tcp_stats. After
+  // unification they must update tcp_stats too.
+  json search_body;
+  search_body["q"] = "beta";
+  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+
+  json count_body;
+  count_body["q"] = "beta";
+  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  uint64_t tcp_after = tcp_stats.GetTotalRequests();
+  uint64_t http_after = http_server.GetTotalRequests();
+
+  EXPECT_GE(tcp_after - tcp_baseline, 3U)
+      << "All HTTP handlers must increment tcp_stats when provided (info + search + count)";
+  // Effective stats reconciliation: GetTotalRequests() must reflect the same
+  // counter that RecordRequest() incremented. With tcp_stats injected, that
+  // is tcp_stats; the formerly-dead local stats_ is no longer exposed via
+  // the public accessor.
+  EXPECT_EQ(http_after - http_baseline, tcp_after - tcp_baseline)
+      << "GetTotalRequests() must read from the effective stats source (tcp_stats when provided)";
+
+  http_server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+/**
+ * @test L-6: HttpServer::GetStats() must reflect the effective stats source.
+ *
+ * Constructing HttpServer with `tcp_stats` makes that instance the canonical
+ * counter sink — RecordRequest() routes there, and GetStats()/GetTotalRequests()
+ * must read from the same place. Without this guarantee, /info reports a
+ * different total than direct GetTotalRequests() calls (the old "dead stats_"
+ * behavior).
+ */
+TEST(HttpServerStatsTest, EffectiveStatsTracksConfiguredSource) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  ServerStats tcp_stats;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  // Use a port outside the range used by other tests in this file
+  // (18086/18087) and outside the bind-conflict suite range (18091) so this
+  // pure-accessor test never collides with parallel server-binding tests.
+  http_config.port = 18093;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr, &tcp_stats);
+
+  // Direct increments to the injected tcp_stats must be visible through the
+  // HTTP server's accessor — the common case for ServerLifecycleManager,
+  // which feeds the same ServerStats to TcpServer and HttpServer.
+  uint64_t baseline = http_server.GetTotalRequests();
+  tcp_stats.IncrementRequests();
+  tcp_stats.IncrementRequests();
+
+  EXPECT_EQ(http_server.GetTotalRequests() - baseline, 2U);
+  EXPECT_EQ(&http_server.GetStats(), &tcp_stats)
+      << "GetStats() must return the injected tcp_stats reference, not the dead local stats_";
+}
+
 }  // namespace server
 }  // namespace mygramdb

@@ -94,12 +94,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   }
 
 #ifdef USE_MYSQL
+  bool binlog_started = false;
+
   // Start BinlogReader (if GTID available and replication enabled)
   if (binlog_reader_ && !snapshot_gtid_.empty()) {
     auto start_result = binlog_reader_->Start();
     if (!start_result) {
       return mygram::utils::MakeUnexpected(start_result.error());
     }
+    binlog_started = true;
     mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
   }
 #endif
@@ -107,6 +110,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   // Start TCP server
   auto tcp_start = tcp_server_->Start();
   if (!tcp_start) {
+#ifdef USE_MYSQL
+    if (binlog_started && binlog_reader_ && binlog_reader_->IsRunning()) {
+      binlog_reader_->Stop();
+    }
+#endif
     return mygram::utils::MakeUnexpected(tcp_start.error());
   }
 
@@ -114,8 +122,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   if (http_server_) {
     auto http_start = http_server_->Start();
     if (!http_start) {
-      // Cleanup: stop TCP server
+      // Cleanup in reverse start order. Start() must be transactional: callers
+      // either get a fully-running orchestrator or no background workers left
+      // behind after a partial startup failure.
       tcp_server_->Stop();
+#ifdef USE_MYSQL
+      if (binlog_started && binlog_reader_ && binlog_reader_->IsRunning()) {
+        binlog_reader_->Stop();
+      }
+#endif
       return mygram::utils::MakeUnexpected(http_start.error());
     }
     mygram::utils::StructuredLog()
@@ -219,6 +234,26 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
             .Field("groups", static_cast<uint64_t>(ctx->synonym_dict->GroupCount()))
             .Field("terms", static_cast<uint64_t>(ctx->synonym_dict->TermCount()))
             .Info();
+
+        // Diagnostic: warn about terms that can't produce any n-grams given
+        // the configured ngram_size/kanji_ngram_size. Such terms are silently
+        // unreachable at search time, which is surprising for operators.
+        const int effective_kanji_size =
+            table_config.kanji_ngram_size > 0 ? table_config.kanji_ngram_size : table_config.ngram_size;
+        ctx->synonym_dict->ForEachTerm([&](const std::string& term) {
+          auto ngrams = mygram::utils::GenerateQueryNgrams(term, table_config.ngram_size, effective_kanji_size,
+                                                           table_config.cross_boundary_ngrams);
+          if (ngrams.empty()) {
+            mygram::utils::StructuredLog()
+                .Event("synonym_variant_unreachable")
+                .Field("table", table_config.name)
+                .Field("term", term)
+                .Field("ngram_size", static_cast<int64_t>(table_config.ngram_size))
+                .Field("kanji_ngram_size", static_cast<int64_t>(effective_kanji_size))
+                .Field("reason", "term_too_short_for_configured_ngram_sizes")
+                .Warn();
+          }
+        });
       }
     }
 

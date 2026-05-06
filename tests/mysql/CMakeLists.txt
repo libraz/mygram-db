@@ -21,7 +21,7 @@ add_executable(runtime_variable_manager_mysql_test
 )
 
 target_link_libraries(runtime_variable_manager_mysql_test
-  mygramdb_config
+  mygramdb_runtime_config
   GTest::gtest_main
 )
 
@@ -56,6 +56,21 @@ target_link_libraries(null_binlog_reader_test
 )
 
 gtest_discover_tests(null_binlog_reader_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# IBinlogReader::Stop() synchronous-contract tests (CR-9, no MySQL dependency)
+add_executable(binlog_reader_stop_contract_test
+  binlog_reader_stop_contract_test.cpp
+)
+
+target_link_libraries(binlog_reader_stop_contract_test
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(binlog_reader_stop_contract_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )

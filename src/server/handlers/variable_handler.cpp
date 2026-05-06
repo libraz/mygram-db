@@ -45,9 +45,15 @@ std::string VariableHandler::HandleSet(const Query& query) {
   }
 
 #ifdef USE_MYSQL
-  // Check if trying to change MySQL connection settings during SYNC
+  // Check if trying to change any MySQL connection setting during SYNC.
+  //
+  // All mysql.* variables affect the connection used by SYNC. Changing them
+  // mid-sync would create a stale-config window where the running loader uses
+  // old values while new requests use new values. Use a prefix match so the
+  // guard catches mysql.user, mysql.password, mysql.database, etc., not just
+  // host/port.
   for (const auto& [variable_name, value] : query.variable_assignments) {
-    if (variable_name == "mysql.host" || variable_name == "mysql.port") {
+    if (variable_name.rfind("mysql.", 0) == 0) {
       if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
         return ResponseFormatter::FormatError("Cannot change '" + variable_name +
                                               "' while SYNC is in progress. "
@@ -70,14 +76,14 @@ std::string VariableHandler::HandleSet(const Query& query) {
   // Success
   if (query.variable_assignments.size() == 1) {
     const auto& [variable_name, value] = query.variable_assignments[0];
-    std::ostringstream oss;
-    oss << "+OK Variable '" << variable_name << "' set to '" << value << "'\r\n";
-    return oss.str();
+    std::ostringstream body;
+    body << "Variable '" << variable_name << "' set to '" << value << "'";
+    return ResponseFormatter::FormatOk(body.str()) + "\r\n";
   }
 
-  std::ostringstream oss;
-  oss << "+OK " << query.variable_assignments.size() << " variables set\r\n";
-  return oss.str();
+  std::ostringstream body;
+  body << query.variable_assignments.size() << " variables set";
+  return ResponseFormatter::FormatOk(body.str()) + "\r\n";
 }
 
 std::string VariableHandler::HandleShowVariables(const Query& query) {
@@ -118,7 +124,7 @@ std::string VariableHandler::HandleShowVariables(const Query& query) {
 
 std::string VariableHandler::FormatVariablesTable(const std::map<std::string, config::VariableInfo>& variables) {
   if (variables.empty()) {
-    return "+OK 0 rows\r\n";
+    return ResponseFormatter::FormatOk("0 rows") + "\r\n";
   }
 
   // Calculate column widths

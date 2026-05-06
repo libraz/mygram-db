@@ -113,6 +113,22 @@ gtest_discover_tests(tcp_server_advanced_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
+# CR-3 / CR-10 lifecycle / shutdown-ordering tests
+add_executable(tcp_server_lifecycle_test
+  tcp_server_lifecycle_test.cpp
+)
+
+target_link_libraries(tcp_server_lifecycle_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(tcp_server_lifecycle_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 # Thread Pool tests
 
 add_executable(thread_pool_test
@@ -198,6 +214,26 @@ target_link_libraries(http_server_search_test
 target_include_directories(http_server_search_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
 gtest_discover_tests(http_server_search_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# Cross-protocol consistency: same pipeline used by HTTP and TCP
+add_executable(http_tcp_consistency_test
+  http_tcp_consistency_test.cpp
+)
+
+target_link_libraries(http_tcp_consistency_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_tcp_consistency_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+gtest_discover_tests(http_tcp_consistency_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_port
@@ -408,6 +444,23 @@ gtest_discover_tests(sync_operation_manager_deadlock_test
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 
+# SyncOperationManager API tests (idle-state helpers)
+
+add_executable(sync_operation_manager_test
+  sync_operation_manager_test.cpp
+)
+
+target_link_libraries(sync_operation_manager_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(sync_operation_manager_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK thread_resources
+)
+
 # RateLimiter tests
 
 add_executable(rate_limiter_test
@@ -537,6 +590,57 @@ gtest_discover_tests(debug_handler_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# AdminHandler tests (defensive guards on INFO / CONFIG paths)
+
+add_executable(admin_handler_test
+  admin_handler_test.cpp
+)
+
+target_link_libraries(admin_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(admin_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# CacheHandler tests (response framing consistency for ENABLE/DISABLE)
+
+add_executable(cache_handler_test
+  cache_handler_test.cpp
+)
+
+target_link_libraries(cache_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(cache_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
+# FacetHandler tests (synonym expansion routing through ExecuteFullPipeline)
+
+add_executable(facet_handler_test
+  facet_handler_test.cpp
+)
+
+target_link_libraries(facet_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(facet_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
 # VariableHandler tests (SET/SHOW VARIABLES commands)
 
 add_executable(variable_handler_test
@@ -609,6 +713,23 @@ gtest_discover_tests(search_handler_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# CommandHandler base helper tests (shared loading-state guard)
+
+add_executable(command_handler_test
+  command_handler_test.cpp
+)
+
+target_link_libraries(command_handler_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(command_handler_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)
+
 # SyncInstancePreservation tests (Bug fix: replication events not reflected in search)
 
 add_executable(sync_instance_preservation_test
@@ -616,7 +737,6 @@ add_executable(sync_instance_preservation_test
 )
 
 target_link_libraries(sync_instance_preservation_test
-  mygramdb_index
   mygramdb_storage
   GTest::gtest_main
 )
@@ -677,6 +797,21 @@ gtest_discover_tests(search_pipeline_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
+# SearchPipeline Japanese synonym E2E tests
+add_executable(search_pipeline_synonym_jp_test
+  search_pipeline_synonym_jp_test.cpp
+)
+
+target_link_libraries(search_pipeline_synonym_jp_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_synonym_jp_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # ConnectionAcceptor TCP socket tests
 
 add_executable(connection_acceptor_tcp_test
@@ -692,6 +827,38 @@ gtest_discover_tests(connection_acceptor_tcp_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_socket
+)
+
+# Socket utilities tests (TrySetSockOpt helper)
+add_executable(socket_utils_test
+  socket_utils_test.cpp
+)
+
+target_link_libraries(socket_utils_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(socket_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# Replication-pause counter tests (Scope RAII wrapper)
+add_executable(replication_pause_counter_test
+  replication_pause_counter_test.cpp
+)
+
+target_link_libraries(replication_pause_counter_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# RESOURCE_LOCK: counter is process-wide; tests must run sequentially
+gtest_discover_tests(replication_pause_counter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK replication_pause_counter
 )
 
 add_subdirectory(reactor)
@@ -712,10 +879,13 @@ target_include_directories(io_reactor_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/reactor
 )
 
+# SLOW: IdleConnectionIsReaped / ActiveConnectionIsNotReaped sleep ~2.5s each
 gtest_discover_tests(io_reactor_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK thread_resources
 )
 
 # ReactorConnection unit tests (Phase 2.T4)

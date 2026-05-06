@@ -36,7 +36,24 @@ class IBinlogReader {
   virtual mygram::utils::Expected<void, mygram::utils::Error> Start() = 0;
 
   /**
-   * @brief Stop reading binlog events
+   * @brief Stop reading binlog events.
+   *
+   * @note SYNCHRONOUS contract: Stop() MUST NOT return until the reader's
+   * internal worker thread(s) have fully terminated and are guaranteed to
+   * make no further calls into the index/document store. Implementations
+   * MUST join their worker thread(s) (or otherwise verify quiescence)
+   * before returning.
+   *
+   * Callers (DumpHandler::DumpSaveWorker, DumpHandler::HandleDumpLoad,
+   * SyncOperationManager::BuildSnapshotAsync, SnapshotScheduler::TakeSnapshot)
+   * rely on this synchronous contract to safely Clear()/rebuild downstream
+   * state immediately after Stop(). A non-synchronous Stop would leave a
+   * window where binlog worker threads continue mutating the index and
+   * document store while the caller assumes quiescence — a data race that
+   * silently corrupts dumps and SYNC rebuilds (see CR-9 audit, May 2026).
+   *
+   * @note Stop() MUST be idempotent: calling Stop() on an already-stopped
+   * reader is a no-op success.
    */
   virtual void Stop() = 0;
 

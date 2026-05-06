@@ -6,7 +6,6 @@
 #pragma once
 
 #include <memory>
-#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -36,7 +35,9 @@ namespace mygramdb::server {
  *
  * Design principles:
  * - Single source of truth for table operations
- * - Thread-safe access using shared_mutex
+ * - Immutable post-construction: the table map is built once at startup and
+ *   never mutated, so read access requires no synchronization. Mutating
+ *   per-catalog state (read-only / loading flags) uses std::atomic.
  * - Consistent state management
  */
 class TableCatalog {
@@ -61,6 +62,17 @@ class TableCatalog {
    * @return Pointer to table context, or nullptr if not found
    */
   TableContext* GetTable(const std::string& name);
+
+  /**
+   * @brief Get a table context by name (const overload)
+   *
+   * Allows lookup through a `const TableCatalog&`. Returns a pointer-to-const
+   * so callers cannot mutate the table context through this path.
+   *
+   * @param name Table name
+   * @return Pointer to const table context, or nullptr if not found
+   */
+  const TableContext* GetTable(const std::string& name) const;
 
   /**
    * @brief Check if a table exists
@@ -124,20 +136,21 @@ class TableCatalog {
    * This method is provided for cases where direct iteration is needed.
    * Prefer using the other methods when possible for better encapsulation.
    *
-   * @note Thread-safe: the table map is immutable after construction.
-   *       No entries are added or removed post-construction, so returning
-   *       a reference without holding mutex_ is safe. If table hot-add/remove
-   *       is ever implemented, this must return a snapshot copy instead.
+   * @note Immutable post-construction; no synchronization needed for read
+   *       access. If table hot-add/remove is ever implemented, this must
+   *       return a snapshot copy instead, and the catalog must reintroduce
+   *       a mutex (or other synchronization mechanism).
    *
    * @return Const reference to table map
    */
   const std::unordered_map<std::string, TableContext*>& GetTables() const { return tables_; }
 
  private:
+  // tables_ is immutable post-construction. Access is safe without locking
+  // from any thread; see class-level Doxygen.
   std::unordered_map<std::string, TableContext*> tables_;
   std::atomic<bool> read_only_{false};
   std::atomic<bool> loading_{false};
-  mutable std::shared_mutex mutex_;
 };
 
 }  // namespace mygramdb::server

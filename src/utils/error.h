@@ -101,10 +101,13 @@ enum class ErrorCode : std::uint16_t {
   kIndexDocumentNotFound = 4004,       ///< Document not found in index
   kIndexInvalidDocID = 4005,           ///< Invalid document ID
   kIndexFull = 4006,                   ///< Index capacity exceeded
+  kTableNotFound = 4007,               ///< Table not found in catalog
+  kCatalogNotInitialized = 4008,       ///< Table catalog has not been initialized
   kSyncTableNotFound = 4010,           ///< Table not found for SYNC operation
   kSyncAlreadyInProgress = 4011,       ///< SYNC already in progress for table
   kSyncMemoryCritical = 4012,          ///< Memory critically low, cannot start SYNC
   kSyncThreadCreationFailed = 4013,    ///< Failed to create sync thread
+  kSyncManagerNull = 4014,             ///< SyncOperationManager dependency is null
 
   // ===== Storage/Snapshot Errors (5000-5999) =====
   kStorageFileNotFound = 5000,         ///< Snapshot file not found
@@ -147,6 +150,9 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReactorQueueFull = 6022,       ///< Per-connection write queue cap exceeded (slow reader)
   kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
   kNetworkNullDependency = 6024,         ///< Required dependency pointer is null
+  kNetworkAcceptorNoHandler = 6025,      ///< Acceptor reactor handler not installed before StartAccepting
+  kServerInitMissingDependency = 6026,   ///< Server initialization missing required dependency
+  kServerShuttingDown = 6027,            ///< Server is shutting down; new long-running operations are rejected
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,      ///< Client not connected
@@ -301,6 +307,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Invalid document ID";
     case ErrorCode::kIndexFull:
       return "Index full";
+    case ErrorCode::kTableNotFound:
+      return "Table not found";
+    case ErrorCode::kCatalogNotInitialized:
+      return "Table catalog not initialized";
     case ErrorCode::kSyncTableNotFound:
       return "Table not found for SYNC";
     case ErrorCode::kSyncAlreadyInProgress:
@@ -309,6 +319,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Memory critically low for SYNC";
     case ErrorCode::kSyncThreadCreationFailed:
       return "Failed to create sync thread";
+    case ErrorCode::kSyncManagerNull:
+      return "SyncOperationManager dependency is null";
 
     // Storage
     case ErrorCode::kStorageFileNotFound:
@@ -389,6 +401,12 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Event multiplexer already opened";
     case ErrorCode::kNetworkNullDependency:
       return "Required dependency is null";
+    case ErrorCode::kNetworkAcceptorNoHandler:
+      return "Acceptor reactor handler not installed";
+    case ErrorCode::kServerInitMissingDependency:
+      return "Server initialization missing required dependency";
+    case ErrorCode::kServerShuttingDown:
+      return "Server is shutting down";
 
     // Client
     case ErrorCode::kClientNotConnected:

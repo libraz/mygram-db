@@ -450,3 +450,74 @@ TEST(SearchExpressionTest, EmojiToQueryString) {
   EXPECT_TRUE(query.find("tutorial") != std::string::npos);
   EXPECT_TRUE(query.find("NOT 🎉") != std::string::npos);
 }
+
+/**
+ * @brief Test SimplifySearchExpression with OR-only expression
+ *
+ * Regression test: previously this returned false because there were no
+ * required terms, even though raw_expression contained the OR sub-expression.
+ */
+TEST(SearchExpressionTest, SimplifyOrOnly) {
+  std::string main_term;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+
+  bool success = SimplifySearchExpression("python OR ruby", main_term, and_terms, not_terms);
+  EXPECT_TRUE(success);
+  EXPECT_FALSE(main_term.empty());
+  EXPECT_NE(main_term.find("python"), std::string::npos);
+  EXPECT_NE(main_term.find("ruby"), std::string::npos);
+  EXPECT_NE(main_term.find("OR"), std::string::npos);
+  EXPECT_TRUE(and_terms.empty());
+  EXPECT_TRUE(not_terms.empty());
+}
+
+/**
+ * @brief Test SimplifySearchExpression with parenthesized OR expression
+ */
+TEST(SearchExpressionTest, SimplifyParenthesizedOnly) {
+  std::string main_term;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+
+  bool success = SimplifySearchExpression("(python OR ruby)", main_term, and_terms, not_terms);
+  EXPECT_TRUE(success);
+  EXPECT_FALSE(main_term.empty());
+  // main_term should already be parenthesized.
+  EXPECT_EQ(main_term.front(), '(');
+  EXPECT_EQ(main_term.back(), ')');
+  EXPECT_NE(main_term.find("python"), std::string::npos);
+  EXPECT_NE(main_term.find("ruby"), std::string::npos);
+}
+
+/**
+ * @brief Test SimplifySearchExpression with mixed required + OR sub-expression
+ */
+TEST(SearchExpressionTest, SimplifyMixed) {
+  std::string main_term;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+
+  bool success = SimplifySearchExpression("+golang (tutorial OR guide)", main_term, and_terms, not_terms);
+  EXPECT_TRUE(success);
+  EXPECT_EQ(main_term, "golang");
+  // The OR sub-expression is preserved on the SearchExpression's raw_expression
+  // but is not currently surfaced through SimplifySearchExpression's outputs.
+  // Just verify the simplification didn't fail and main_term/not_terms behave.
+  EXPECT_TRUE(not_terms.empty());
+}
+
+/**
+ * @brief Test ToQueryString wraps OR sub-expressions in parentheses
+ *
+ * Doc-vs-behavior regression: docstring used to claim no parens were added,
+ * but the implementation always wrapped raw_expression in parens. Lock the
+ * actual behaviour with a test so future doc/code drift is caught.
+ */
+TEST(SearchExpressionTest, ToQueryStringWrapsOrInParens) {
+  auto result = ConvertSearchExpression("python OR ruby");
+  ASSERT_TRUE(result);
+
+  std::string query = *result;
+  EXPECT_EQ(query, "(python OR ruby)");
+}

@@ -17,10 +17,12 @@
 #include "cache/cache_manager.h"
 #include "config/config.h"
 #include "query/synonym_dictionary.h"
+#include "server/server_types.h"
 #include "storage/filter_index.h"
 #include "utils/comparison_utils.h"
 #include "utils/constants.h"
 #include "utils/edit_distance.h"
+#include "utils/roaring_bitmap_ptr.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::server::search_pipeline {
@@ -241,14 +243,11 @@ inline std::string_view FilterOpToString(query::FilterOp op) {
   }
 }
 
-/// @brief RAII deleter for raw roaring_bitmap_t pointers
-struct RoaringBitmapDeleter {
-  void operator()(roaring_bitmap_t* p) const {
-    if (p)
-      roaring_bitmap_free(p);
-  }
-};
-using RoaringBitmapPtr = std::unique_ptr<roaring_bitmap_t, RoaringBitmapDeleter>;
+// Reuse the shared RAII bitmap pointer from utils so this TU does not need
+// a private copy of the deleter.
+using mygram::utils::MakeEmptyRoaring;
+using mygram::utils::MakeRoaringFromVector;
+using mygram::utils::RoaringBitmapPtr;
 
 // Pre-parsed filter values to avoid repeated string parsing in the inner loop
 struct ParsedFilterValue {
@@ -316,7 +315,7 @@ bool AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filt
 /// Build a bitmap union of all type interpretations of a filter value string
 RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, const std::string& column,
                                       const std::string& value) {
-  RoaringBitmapPtr union_bm(roaring_bitmap_create());
+  RoaringBitmapPtr union_bm = MakeEmptyRoaring();
 
   auto try_add = [&](const storage::FilterValue& fv) {
     std::string key = storage::FilterIndex::SerializeFilterValue(fv);
@@ -496,8 +495,7 @@ std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::Do
   }
 
   // Convert results vector to a temporary Roaring bitmap
-  RoaringBitmapPtr result_bm(roaring_bitmap_create());
-  roaring_bitmap_add_many(result_bm.get(), results.size(), results.data());
+  RoaringBitmapPtr result_bm = MakeRoaringFromVector(results);
 
   for (const auto& filter : filters) {
     if (filter.op == query::FilterOp::EQ) {
@@ -566,13 +564,21 @@ std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> re
 }
 
 std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache::CacheManager* cache_manager,
-                                                storage::DocumentStore* doc_store) {
+                                                storage::DocumentStore* doc_store, CacheMissReason* miss_reason) {
+  auto set_reason = [&](CacheMissReason r) {
+    if (miss_reason != nullptr) {
+      *miss_reason = r;
+    }
+  };
+
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
+    set_reason(CacheMissReason::kDisabled);
     return std::nullopt;
   }
 
   auto cached_lookup = cache_manager->LookupWithMetadata(query);
   if (!cached_lookup.has_value()) {
+    set_reason(CacheMissReason::kNotFound);
     return std::nullopt;
   }
 
@@ -581,6 +587,7 @@ std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache
   // since cached_lookup owns the data until the function returns).
   const auto& cached_entry = cached_lookup.value();
   if (IsCacheStale(cached_entry.results, doc_store)) {
+    set_reason(CacheMissReason::kStale);
     return std::nullopt;
   }
 
@@ -589,6 +596,7 @@ std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache
   auto now = std::chrono::steady_clock::now();
   result.cache_age_ms = std::chrono::duration<double, std::milli>(now - cached_entry.created_at).count();
   result.cache_saved_ms = cached_entry.query_cost_ms;
+  set_reason(CacheMissReason::kHit);
   return result;
 }
 
@@ -902,20 +910,33 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   }
 
   // Try cache lookup first (skip if caller already checked)
+  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
   if (params.skip_cache_lookup) {
     // Caller already performed cache lookup; skip to avoid redundant hash
-    // computation and lock acquisition on every cache miss.
-  } else if (auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store)) {
-    output.results = std::move(cache_result->results);
-    output.cache_hit = true;
-    output.query_time_ms = 0.0;
+    // computation and lock acquisition on every cache miss. Treat as
+    // "disabled" from this pipeline's perspective: the lookup outcome is
+    // owned by the caller and not represented here.
+    output.cache_miss_reason = CacheMissReason::kDisabled;
+  } else {
+    CacheMissReason miss_reason = CacheMissReason::kDisabled;
+    auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store, &miss_reason);
+    output.cache_miss_reason = miss_reason;
+    if (cache_result) {
+      auto cache_lookup_end = std::chrono::high_resolution_clock::now();
+      output.results = std::move(cache_result->results);
+      output.cache_hit = true;
+      output.cache_age_ms = cache_result->cache_age_ms;
+      output.cache_saved_ms = cache_result->cache_saved_ms;
+      output.path_taken = PipelinePath::CACHE_HIT;
+      output.query_time_ms = std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
 
-    // Collect search terms for downstream use (highlighting, etc.)
-    if (!query.search_text.empty()) {
-      output.all_search_terms.push_back(query.search_text);
+      // Collect search terms for downstream use (highlighting, etc.)
+      if (!query.search_text.empty()) {
+        output.all_search_terms.push_back(query.search_text);
+      }
+      output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
+      return output;
     }
-    output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-    return output;
   }
 
   // Start timing
@@ -931,6 +952,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
 
   // Fuzzy search path (takes precedence over synonyms)
   if (query.fuzzy_max_distance.has_value()) {
+    output.path_taken = PipelinePath::FUZZY;
     output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
                                           params.kanji_ngram_size, cross_boundary);
 
@@ -939,6 +961,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
                          params.current_index, params.current_doc_store, params.full_config, params.ngram_size,
                          params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+    output.empty_term_detected = pipeline_result.empty_term_detected;
     if (pipeline_result.empty_term_detected) {
       output.results.clear();
     } else {
@@ -948,13 +971,19 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     auto end_time = std::chrono::high_resolution_clock::now();
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
-                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    // Do not cache early-exit (empty posting list) results: a missing posting
+    // list during one query may not be missing for the next, and a cached
+    // empty entry would mask future legitimate results until invalidated.
+    if (!output.empty_term_detected) {
+      InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    }
     return output;
   }
 
   // Synonym-aware search path
   if (params.synonym_dict != nullptr) {
+    output.path_taken = PipelinePath::SYNONYM;
     auto synonym_groups = ExpandTermsWithSynonyms(output.all_search_terms, params.synonym_dict, params.current_index,
                                                   params.ngram_size, params.kanji_ngram_size, cross_boundary);
 
@@ -962,6 +991,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
         ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store, params.full_config,
                             params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+    output.empty_term_detected = pipeline_result.empty_term_detected;
     if (pipeline_result.empty_term_detected) {
       output.results.clear();
     } else {
@@ -971,19 +1001,23 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     auto end_time = std::chrono::high_resolution_clock::now();
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-    // Collect all n-grams for cache invalidation
-    std::vector<SearchTermInfo> all_term_infos;
-    for (const auto& group : synonym_groups) {
-      for (const auto& variant : group.variants) {
-        all_term_infos.push_back(variant);
+    // Skip caching for early-exit (empty posting list) -- see fuzzy path comment.
+    if (!output.empty_term_detected) {
+      // Collect all n-grams for cache invalidation
+      std::vector<SearchTermInfo> all_term_infos;
+      for (const auto& group : synonym_groups) {
+        for (const auto& variant : group.variants) {
+          all_term_infos.push_back(variant);
+        }
       }
+      InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms,
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary);
     }
-    InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms, params.ngram_size,
-                  params.kanji_ngram_size, cross_boundary);
     return output;
   }
 
   // Standard search path: generate n-grams for each term and estimate result sizes
+  output.path_taken = PipelinePath::REGULAR;
   output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
                                         params.kanji_ngram_size, cross_boundary);
 
@@ -997,6 +1031,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
       Execute(query, output.term_infos, output.all_search_terms, params.current_index, params.current_doc_store,
               params.full_config, params.ngram_size, params.kanji_ngram_size, cross_boundary, params.filter_threshold);
 
+  output.empty_term_detected = pipeline_result.empty_term_detected;
   if (pipeline_result.empty_term_detected) {
     output.results.clear();
   } else {
@@ -1007,11 +1042,45 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   auto end_time = std::chrono::high_resolution_clock::now();
   output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-  // Store in cache if enabled
-  InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms, params.ngram_size,
-                params.kanji_ngram_size, cross_boundary);
+  // Store in cache if enabled. Skip on early-exit (empty posting list); see
+  // the fuzzy path for the rationale.
+  if (!output.empty_term_detected) {
+    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
+  }
 
   return output;
+}
+
+FullPipelineParams BuildPipelineParamsFromContext(const TableContext& table_ctx, const config::Config* full_config,
+                                                  cache::CacheManager* cache_manager, size_t filter_threshold,
+                                                  bool attach_bm25_stats) {
+  FullPipelineParams params;
+  params.current_index = table_ctx.index.get();
+  params.current_doc_store = table_ctx.doc_store.get();
+  params.full_config = full_config;
+  params.cache_manager = cache_manager;
+  params.ngram_size = table_ctx.config.ngram_size;
+  params.kanji_ngram_size = table_ctx.config.kanji_ngram_size;
+  params.cross_boundary_ngrams = table_ctx.config.cross_boundary_ngrams;
+  params.filter_threshold = filter_threshold;
+  params.primary_key_column = table_ctx.config.primary_key;
+
+  // BM25 stats are only relevant to the SEARCH path (used for `_score`
+  // sorting). COUNT-style callers leave them null to keep params minimal and
+  // surface accidental wiring at compile time.
+  if (attach_bm25_stats) {
+    params.bm25_stats = &table_ctx.bm25_stats;
+  }
+
+  // Skip empty synonym dictionaries: passing one would force
+  // ExecuteFullPipeline down the synonym path even when there's nothing to
+  // expand, costing a redundant traversal.
+  if (table_ctx.synonym_dict && !table_ctx.synonym_dict->IsEmpty()) {
+    params.synonym_dict = table_ctx.synonym_dict.get();
+  }
+
+  return params;
 }
 
 }  // namespace mygramdb::server::search_pipeline

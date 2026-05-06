@@ -251,6 +251,76 @@ TEST_F(ResponseFormatterTest, FormatCountResponseWithDebugInfo) {
   EXPECT_TRUE(response.find("DEBUG") != std::string::npos || response.find("query_time_ms") != std::string::npos);
 }
 
+namespace {
+
+// Extract the cache-debug section (lines starting with "cache" or "cache_*")
+// out of a SEARCH or COUNT debug response so two protocols can be diffed
+// directly. The section ends at the first non-cache line we encounter, which
+// is sufficient because the other debug fields are emitted in different
+// orders by the two formatters.
+std::string ExtractCacheLines(const std::string& response) {
+  std::string out;
+  size_t pos = 0;
+  while (pos < response.size()) {
+    size_t end = response.find("\r\n", pos);
+    if (end == std::string::npos) {
+      end = response.size();
+    }
+    auto line = response.substr(pos, end - pos);
+    if (line.rfind("cache", 0) == 0) {
+      out += line;
+      out += "\n";
+    }
+    if (end == response.size()) {
+      break;
+    }
+    pos = end + 2;
+  }
+  return out;
+}
+
+query::DebugInfo MakeCacheDebugInfo(query::CacheDebugInfo::Status status) {
+  query::DebugInfo debug_info;
+  debug_info.cache_info.status = status;
+  debug_info.cache_info.cache_age_ms = 1.5;
+  debug_info.cache_info.cache_saved_ms = 2.5;
+  debug_info.cache_info.query_cost_ms = 3.5;
+  return debug_info;
+}
+
+}  // namespace
+
+/**
+ * @brief Regression: SEARCH and COUNT must emit the same cache-debug lines
+ *        for any given cache state.
+ *
+ * Pre-unification, FormatSearchResponse used "cache: miss\r\ncache_reason:
+ * not_found\r\ncache_cost_ms: ..." while FormatCountResponse used
+ * "cache: miss (not found)\r\nquery_cost_ms: ...". Both responses now flow
+ * through the shared WriteCacheDebugLines helper, so the cache section
+ * extracted from the two responses must compare equal.
+ */
+TEST_F(ResponseFormatterTest, CacheDebugLinesAreConsistentBetweenSearchAndCount) {
+  using Status = query::CacheDebugInfo::Status;
+  for (auto status : {Status::HIT, Status::MISS_NOT_FOUND, Status::MISS_INVALIDATED, Status::MISS_DISABLED}) {
+    auto debug = MakeCacheDebugInfo(status);
+
+    std::vector<index::DocId> empty_results;
+    std::string search_resp =
+        ResponseFormatter::FormatSearchResponse(empty_results, 0, table_context_.doc_store.get(), &debug);
+    std::string count_resp = ResponseFormatter::FormatCountResponse(0, &debug);
+
+    auto search_cache = ExtractCacheLines(search_resp);
+    auto count_cache = ExtractCacheLines(count_resp);
+
+    EXPECT_EQ(search_cache, count_cache) << "SEARCH and COUNT cache sections diverge for status="
+                                         << static_cast<int>(status) << "\n"
+                                         << "SEARCH:\n"
+                                         << search_cache << "COUNT:\n"
+                                         << count_cache;
+  }
+}
+
 /**
  * @brief Test SAVE response
  */
@@ -323,18 +393,38 @@ TEST_F(ResponseFormatterTest, FormatErrorEmpty) {
 }
 
 /**
- * @brief Test CONFIG response
+ * @brief FormatOk with no body returns the bare "+OK" status reply
  */
-TEST_F(ResponseFormatterTest, FormatConfigResponse) {
-  // Create minimal config for testing
-  config::Config test_config;
-  test_config.api.tcp.port = 9999;
+TEST_F(ResponseFormatterTest, FormatOkNoBody) {
+  EXPECT_EQ(ResponseFormatter::FormatOk(), "+OK");
+  EXPECT_EQ(ResponseFormatter::FormatOk(""), "+OK");
+}
 
-  std::string response = ResponseFormatter::FormatConfigResponse(&test_config, 5, 100, false, 3600);
+/**
+ * @brief FormatOk with body produces "+OK <body>" with no trailing CRLF
+ */
+TEST_F(ResponseFormatterTest, FormatOkWithBody) {
+  EXPECT_EQ(ResponseFormatter::FormatOk("hello"), "+OK hello");
+  EXPECT_EQ(ResponseFormatter::FormatOk("Variable 'x' set to '1'"), "+OK Variable 'x' set to '1'");
+}
 
-  EXPECT_TRUE(response.find("OK") != std::string::npos || response.find("CONFIG") != std::string::npos);
-  EXPECT_TRUE(response.find("9999") != std::string::npos || response.find("port") != std::string::npos);
-  EXPECT_TRUE(response.find("100") != std::string::npos || response.find("max_connections") != std::string::npos);
+/**
+ * @brief FormatOk preserves bytes for combined "+OK\r\n<body>" call sites
+ */
+TEST_F(ResponseFormatterTest, FormatOkComposesWithCRLF) {
+  // Mirrors the admin_handler.cpp pattern: FormatOk() + "\r\n" + body
+  std::string composed = ResponseFormatter::FormatOk() + "\r\n" + "payload\r\n";
+  EXPECT_EQ(composed, "+OK\r\npayload\r\n");
+}
+
+/**
+ * @brief FormatStatus produces "OK <body>" without leading "+"
+ */
+TEST_F(ResponseFormatterTest, FormatStatusBasic) {
+  EXPECT_EQ(ResponseFormatter::FormatStatus("CACHE_CLEARED"), "OK CACHE_CLEARED");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("DEBUG_ON"), "OK DEBUG_ON");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("SAVED /tmp/dump.bin"), "OK SAVED /tmp/dump.bin");
+  EXPECT_EQ(ResponseFormatter::FormatStatus("DUMP_STARTED /tmp/x"), "OK DUMP_STARTED /tmp/x");
 }
 
 /**
@@ -384,32 +474,4 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   EXPECT_TRUE(response.find("mygramdb_cache_invalidations_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_hit_rate") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_misses_total") != std::string::npos);
-}
-
-// Line ending tests for TCP protocol compatibility
-
-/**
- * @brief Test FormatConfigResponse uses CRLF line endings
- */
-TEST_F(ResponseFormatterTest, FormatConfigResponseUsesCRLFLineEndings) {
-  config::Config test_config;
-  test_config.api.tcp.port = 9999;
-  test_config.mysql.host = "127.0.0.1";
-  test_config.mysql.port = 3306;
-
-  std::string response = ResponseFormatter::FormatConfigResponse(&test_config, 5, 100, false, 3600);
-
-  // Verify response uses CRLF line endings
-  EXPECT_TRUE(response.find("\r\n") != std::string::npos) << "Response should contain CRLF line endings";
-
-  // Verify no bare LF (LF not preceded by CR) - prevents mixed line ending issues
-  for (size_t i = 0; i < response.size(); ++i) {
-    if (response[i] == '\n' && (i == 0 || response[i - 1] != '\r')) {
-      FAIL() << "Found bare LF at position " << i;
-    }
-  }
-
-  // Verify response does not end with trailing CRLF (SendResponse adds it)
-  EXPECT_FALSE(response.size() >= 2 && response[response.size() - 2] == '\r' && response[response.size() - 1] == '\n')
-      << "Response should not end with CRLF (SendResponse adds it)";
 }

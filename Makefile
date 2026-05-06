@@ -16,6 +16,7 @@ CLANG_FORMAT ?= clang-format
 TEST_JOBS ?= 4          # Parallel jobs for tests (make test TEST_JOBS=2)
 TEST_VERBOSE ?= 0       # Verbose output (make test TEST_VERBOSE=1)
 TEST_DEBUG ?= 0         # Debug output (make test TEST_DEBUG=1)
+NPROC ?= $(shell command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 # MySQL password for benchmark (can be overridden: make MYSQL_PASSWORD=secret bench-run)
 MYSQL_PASSWORD ?= mygramdb
@@ -132,7 +133,7 @@ configure:
 # Build the project
 build: configure
 	@echo "Building MygramDB..."
-	$(MAKE) -C $(BUILD_DIR) -j$$(nproc)
+	$(MAKE) -C $(BUILD_DIR) -j$(NPROC)
 	@echo "Build complete!"
 
 # Run tests with configurable options (excludes SLOW tests by default)
@@ -179,7 +180,7 @@ test-load: build
 
 # Convenience aliases for common test scenarios
 test-full:
-	@$(MAKE) test-all TEST_JOBS=$$(nproc)
+	@$(MAKE) test-all TEST_JOBS=$(NPROC)
 
 test-sequential:
 	@$(MAKE) test TEST_JOBS=1

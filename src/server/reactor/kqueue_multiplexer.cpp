@@ -101,27 +101,87 @@ Expected<void, Error> KqueueMultiplexer::Open() {
         MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("fcntl(F_SETFD, FD_CLOEXEC)", en)));
   }
 
+  // Register the self-wake user filter. EVFILT_USER is a kqueue-specific
+  // filter that lets userspace trigger a wakeup with NOTE_TRIGGER. We add it
+  // disabled-but-armed (EV_ADD without EV_ENABLE was historically required;
+  // current macOS / *BSD documentation says EV_ADD alone arms it). The
+  // filter's ident is `kWakeIdent`, a constant chosen to be far above any
+  // realistic fd value so it cannot collide with a registered socket.
+  // Wake() then issues an EV_ENABLE | NOTE_TRIGGER kevent to fire it; Poll()
+  // drops the resulting ReadyEvent from its output so callers never see it.
+  struct kevent wake_kev {};
+  EV_SET(&wake_kev, kWakeIdent, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
+  if (::kevent(kq, &wake_kev, 1, nullptr, 0, nullptr) < 0) {
+    const int en = errno;
+    ::close(kq);
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorInitFailed, FormatErrno("kevent(EV_ADD,EVFILT_USER)", en)));
+  }
+
   kqueue_fd_ = kq;
   return {};
 }
 
-Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_interest, uint8_t old_interest,
-                                                       bool is_add) {
+Expected<void, Error> KqueueMultiplexer::Wake() {
+  if (kqueue_fd_ < 0) {
+    // Multiplexer torn down; nothing to wake.
+    return {};
+  }
+  // Trigger the user filter registered in Open(). NOTE_TRIGGER is what fires
+  // the filter; the matching event will be delivered to the next Poll() and
+  // dropped there. EV_CLEAR (set in Open) makes the filter re-arm itself
+  // automatically, so subsequent Wake() calls keep working.
+  struct kevent kev {};
+  EV_SET(&kev, kWakeIdent, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
+  if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
+    const int en = errno;
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorPollFailed, FormatErrno("kevent(NOTE_TRIGGER)", en)));
+  }
+  return {};
+}
+
+Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_interest, uint8_t* applied_interest,
+                                                       uint8_t old_interest, bool is_add) {
   // kqueue has no single-call "set the interest set of this fd to X" primitive
   // the way `epoll_ctl(MOD)` does, so we diff the new interest against the
   // previously-armed interest and emit at most two change records: one per
   // filter (EVFILT_READ, EVFILT_WRITE).
-  std::array<struct kevent, 2> changes{};
+  //
+  // CR-4 (audit, May 2026): kevent(2) does not report partial application of
+  // the change list. If the syscall is invoked with two change records and
+  // the first succeeds while the second fails, the kernel returns -1 with
+  // `errno` set from the failing entry but the first entry remains armed in
+  // the kernel. Batching both filters into a single kevent() call therefore
+  // risks the in-process `interest_` map drifting out of sync with the
+  // kernel's filter set on partial failures.
+  //
+  // We could detect this by passing the change list as `eventlist` with
+  // `EV_RECEIPT` and parsing per-entry `EV_ERROR` results, but that adds
+  // non-trivial complexity for a path that is not on the steady-state hot
+  // loop. Instead we serialise the changes: one kevent() call per change
+  // record. After each successful entry we update `*applied_interest`
+  // immediately so that on a mid-list failure the caller's record of which
+  // filters are armed in the kernel matches reality. The performance impact
+  // is bounded at most at two syscalls per Add/Modify, and Add/Modify is
+  // already off the per-Poll hot path. In practice both filters changing
+  // simultaneously is uncommon (Modify() typically toggles only kWritable
+  // for the ArmWrite/DisarmWrite pattern).
+  struct Change {
+    int16_t filter;
+    uint16_t flags;
+    uint8_t bit;  // event::kReadable or event::kWritable
+  };
+  std::array<Change, 2> changes{};
   int nchanges = 0;
 
   // --- EVFILT_READ ---
   const bool want_read = (new_interest & event::kReadable) != 0U;
   const bool had_read = (old_interest & event::kReadable) != 0U;
   if (want_read && (is_add || !had_read)) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_READ, EV_ADD, 0, 0, nullptr);
+    changes[nchanges] = {EVFILT_READ, EV_ADD, event::kReadable};
     ++nchanges;
   } else if (!want_read && !is_add && had_read) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+    changes[nchanges] = {EVFILT_READ, EV_DELETE, event::kReadable};
     ++nchanges;
   }
 
@@ -129,26 +189,51 @@ Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_inter
   const bool want_write = (new_interest & event::kWritable) != 0U;
   const bool had_write = (old_interest & event::kWritable) != 0U;
   if (want_write && (is_add || !had_write)) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_WRITE, EV_ADD, 0, 0, nullptr);
+    changes[nchanges] = {EVFILT_WRITE, EV_ADD, event::kWritable};
     ++nchanges;
   } else if (!want_write && !is_add && had_write) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    changes[nchanges] = {EVFILT_WRITE, EV_DELETE, event::kWritable};
     ++nchanges;
+  }
+
+  // Initialise the running record of "what's currently armed in the kernel".
+  // For a fresh Add() we know the kernel knows nothing about this fd yet, so
+  // we start from zero. For Modify() we start from the caller-supplied prior
+  // interest, then patch each entry as its kevent() syscall succeeds.
+  if (applied_interest != nullptr) {
+    *applied_interest = is_add ? 0U : old_interest;
   }
 
   // Nothing to flush is not an error: e.g. Modify() with the same interest
   // set, or Add() with `kNone`. Note the deliberate absence of `EV_CLEAR` on
-  // every EV_SET above: kqueue defaults to level-triggered, which matches the
+  // every EV_SET below: kqueue defaults to level-triggered, which matches the
   // EventMultiplexer contract and the reactor's expectations.
   if (nchanges == 0) {
     return {};
   }
 
-  if (::kevent(kqueue_fd_, changes.data(), nchanges, nullptr, 0, nullptr) < 0) {
-    const int en = errno;
-    const ErrorCode code = is_add ? ErrorCode::kNetworkReactorRegisterFailed : ErrorCode::kNetworkReactorModifyFailed;
-    return MakeUnexpected(
-        MakeError(code, FormatErrno(is_add ? "kevent(EV_ADD)" : "kevent(modify)", en), "fd=" + std::to_string(fd)));
+  for (int i = 0; i < nchanges; ++i) {
+    struct kevent kev {};
+    EV_SET(&kev, static_cast<uintptr_t>(fd), changes[i].filter, changes[i].flags, 0, 0, nullptr);
+    if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
+      const int en = errno;
+      const ErrorCode code = is_add ? ErrorCode::kNetworkReactorRegisterFailed : ErrorCode::kNetworkReactorModifyFailed;
+      const char* label =
+          (changes[i].flags == EV_ADD)
+              ? (changes[i].filter == EVFILT_READ ? "kevent(EV_ADD,EVFILT_READ)" : "kevent(EV_ADD,EVFILT_WRITE)")
+              : (changes[i].filter == EVFILT_READ ? "kevent(EV_DELETE,EVFILT_READ)" : "kevent(EV_DELETE,EVFILT_WRITE)");
+      return MakeUnexpected(MakeError(code, FormatErrno(label, en), "fd=" + std::to_string(fd)));
+    }
+    if (applied_interest != nullptr) {
+      // Patch the running record to reflect that this filter is now in the
+      // requested state in the kernel. On a subsequent iteration's failure,
+      // the caller can use this value to keep `interest_` in lockstep.
+      if (changes[i].flags == EV_ADD) {
+        *applied_interest = static_cast<uint8_t>(*applied_interest | changes[i].bit);
+      } else {
+        *applied_interest = static_cast<uint8_t>(*applied_interest & ~changes[i].bit);
+      }
+    }
   }
 
   return {};
@@ -160,14 +245,26 @@ Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest) {
                                     "KqueueMultiplexer::Add called before Open", "fd=" + std::to_string(fd)));
   }
 
-  auto result = ApplyInterest(fd, interest, /*old_interest=*/0U, /*is_add=*/true);
+  // Hold interest_mutex_ across both the kevent() syscall and the map update
+  // so the in-memory `interest_` view never diverges from the kernel's filter
+  // set. ApplyInterest() does not take any other mutex (verified), so there
+  // is no lock-order cycle. The syscall is short and only happens on
+  // connection register / arm-write / disarm-write paths, which are well
+  // outside the steady-state hot loop.
+  std::lock_guard<std::mutex> lock(interest_mutex_);
+  uint8_t applied = 0U;
+  auto result = ApplyInterest(fd, interest, &applied, /*old_interest=*/0U, /*is_add=*/true);
   if (!result.has_value()) {
+    // CR-4: a partial Add can leave one filter armed in the kernel while the
+    // other failed. Record exactly what the kernel knows about so a follow-up
+    // Remove() can clean it up. If nothing was applied we omit the entry
+    // entirely so Remove() remains a no-op.
+    if (applied != 0U) {
+      interest_[fd] = applied;
+    }
     return result;
   }
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    interest_[fd] = interest;
-  }
+  interest_[fd] = interest;
   return {};
 }
 
@@ -177,74 +274,90 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest) {
                                     "KqueueMultiplexer::Modify called before Open", "fd=" + std::to_string(fd)));
   }
 
-  uint8_t old_interest = 0;
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    const auto it = interest_.find(fd);
-    if (it == interest_.end()) {
-      return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
-                                      "KqueueMultiplexer::Modify called with unknown fd", "fd=" + std::to_string(fd)));
-    }
-    old_interest = it->second;
+  // Hold interest_mutex_ across the read of the previous interest, the
+  // kevent() diff syscall, and the in-memory write. Previously the syscall
+  // happened outside the lock, which let two concurrent Modify(fd, ...)
+  // callers each compute their delta from the same `old_interest` snapshot
+  // and race to publish their result, leaving `interest_` and the kernel
+  // filter set divergent. The race manifested at Remove() time as residual
+  // EVFILT_WRITE filters (see P1-1).
+  std::lock_guard<std::mutex> lock(interest_mutex_);
+  const auto it = interest_.find(fd);
+  if (it == interest_.end()) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
+                                    "KqueueMultiplexer::Modify called with unknown fd", "fd=" + std::to_string(fd)));
+  }
+  const uint8_t old_interest = it->second;
+  if (old_interest == interest) {
+    // Fast path: caller asked for the already-installed interest set, no
+    // syscall needed and no map update needed.
+    return {};
   }
 
-  auto result = ApplyInterest(fd, interest, old_interest, /*is_add=*/false);
+  uint8_t applied = old_interest;
+  auto result = ApplyInterest(fd, interest, &applied, old_interest, /*is_add=*/false);
   if (!result.has_value()) {
+    // CR-4: serialised kevent() calls mean we know exactly which filters were
+    // updated before the failure. Persist that partial state so `interest_`
+    // matches the kernel; otherwise a follow-up Remove() would emit the wrong
+    // EV_DELETE set and leak a filter (or invent a phantom one).
+    it->second = applied;
     return result;
   }
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    interest_[fd] = interest;
-  }
+  it->second = interest;
   return {};
 }
 
 Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
-  // Drop our interest-tracking entry before touching the kernel state, so
-  // that even if the kevent teardown syscall below races with connection
-  // close we leave the map consistent.
-  uint8_t old_interest = 0;
-  {
-    std::lock_guard<std::mutex> lock(interest_mutex_);
-    const auto it = interest_.find(fd);
-    if (it == interest_.end()) {
-      // Idempotent: never-added or already-removed fds are a no-op success.
-      return {};
-    }
-    old_interest = it->second;
-    interest_.erase(it);
+  // Hold the lock across the kevent() teardown so that nothing else can
+  // re-register the fd in between erasing from `interest_` and clearing the
+  // kernel filters. This matches the new locking discipline in Add/Modify.
+  std::lock_guard<std::mutex> lock(interest_mutex_);
+  const auto it = interest_.find(fd);
+  if (it == interest_.end()) {
+    // Idempotent: never-added or already-removed fds are a no-op success.
+    return {};
   }
+  const uint8_t old_interest = it->second;
+  interest_.erase(it);
 
   if (kqueue_fd_ < 0) {
     // Multiplexer already torn down; nothing to unregister.
     return {};
   }
 
-  std::array<struct kevent, 2> changes{};
-  int nchanges = 0;
-  if ((old_interest & event::kReadable) != 0U) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-    ++nchanges;
-  }
-  if ((old_interest & event::kWritable) != 0U) {
-    EV_SET(&changes[nchanges], static_cast<uintptr_t>(fd), EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-    ++nchanges;
-  }
+  // CR-4: emit each EV_DELETE in its own kevent() call so a mid-list failure
+  // cannot leave one filter still armed in the kernel while we believe the fd
+  // is fully removed. The number of syscalls here is bounded at two and only
+  // happens on connection teardown — well off the hot path.
+  struct DeleteRec {
+    int16_t filter;
+    bool present;
+  };
+  const std::array<DeleteRec, 2> deletes{
+      DeleteRec{EVFILT_READ, (old_interest & event::kReadable) != 0U},
+      DeleteRec{EVFILT_WRITE, (old_interest & event::kWritable) != 0U},
+  };
 
-  if (nchanges == 0) {
-    return {};
-  }
-
-  if (::kevent(kqueue_fd_, changes.data(), nchanges, nullptr, 0, nullptr) < 0) {
-    const int en = errno;
-    // Idempotent teardown race: kqueue auto-removes filters on close (EBADF),
-    // and the filter may already be gone from an earlier path (ENOENT).
-    // Everything else is a real failure.
-    if (en == ENOENT || en == EBADF) {
-      return {};
+  for (const auto& d : deletes) {
+    if (!d.present) {
+      continue;
     }
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("kevent(EV_DELETE)", en),
-                                    "fd=" + std::to_string(fd)));
+    struct kevent kev {};
+    EV_SET(&kev, static_cast<uintptr_t>(fd), d.filter, EV_DELETE, 0, 0, nullptr);
+    if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
+      const int en = errno;
+      // Idempotent teardown race: kqueue auto-removes filters on close (EBADF),
+      // and the filter may already be gone from an earlier path (ENOENT).
+      // Everything else is a real failure.
+      if (en == ENOENT || en == EBADF) {
+        continue;
+      }
+      const char* label =
+          (d.filter == EVFILT_READ) ? "kevent(EV_DELETE,EVFILT_READ)" : "kevent(EV_DELETE,EVFILT_WRITE)";
+      return MakeUnexpected(
+          MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno(label, en), "fd=" + std::to_string(fd)));
+    }
   }
 
   return {};
@@ -287,6 +400,14 @@ Expected<void, Error> KqueueMultiplexer::Poll(int timeout_ms, std::vector<ReadyE
   out.reserve(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i) {
     const struct kevent& kev = events_[static_cast<std::size_t>(i)];
+
+    // Drop the self-wake user filter event so callers never observe it as a
+    // bogus ready fd. EV_CLEAR on the EVFILT_USER registration auto-re-arms
+    // the filter for the next Wake() call.
+    if (kev.filter == EVFILT_USER && kev.ident == kWakeIdent) {
+      continue;
+    }
+
     ReadyEvent ready{};
     ready.fd = static_cast<int>(kev.ident);
     ready.events = event::kNone;

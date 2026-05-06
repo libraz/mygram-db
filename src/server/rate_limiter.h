@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "utils/periodic_worker.h"
+
 namespace mygramdb::server {
 
 /**
@@ -62,8 +64,13 @@ class TokenBucket {
    */
   void Refill();
 
-  size_t capacity_;                                    ///< Maximum tokens
-  size_t refill_rate_;                                 ///< Tokens per second
+  size_t capacity_;     ///< Maximum tokens
+  size_t refill_rate_;  ///< Tokens per second
+  // tokens_ is double precision intentionally. The fractional component
+  // represents partial token accumulation between refills. Tests should NOT
+  // assert exact equality on token counts -- floating-point determinism is
+  // not guaranteed across compilers/platforms. Use approximate comparisons
+  // (e.g. EXPECT_NEAR) where token counts matter.
   double tokens_;                                      ///< Current tokens (float for fractional refill)
   std::chrono::steady_clock::time_point last_refill_;  ///< Last refill time
 };
@@ -76,21 +83,35 @@ class TokenBucket {
  */
 class RateLimiter {
  public:
-  static constexpr size_t kDefaultMaxClients = 10000;                 ///< Default maximum number of tracked clients
-  static constexpr std::chrono::seconds kDefaultCleanupInterval{60};  ///< Default cleanup interval (time)
-  static constexpr uint32_t kDefaultInactivityTimeout = 300;          ///< Default inactivity timeout (seconds)
+  static constexpr size_t kDefaultMaxClients = 10000;  ///< Default maximum number of tracked clients
+  static constexpr std::chrono::milliseconds kDefaultCleanupInterval{60000};  ///< Default cleanup interval (60s)
+  static constexpr uint32_t kDefaultInactivityTimeout = 300;                  ///< Default inactivity timeout (seconds)
 
   /**
    * @brief Construct rate limiter
    * @param capacity Maximum tokens per client (burst size)
    * @param refill_rate Tokens added per second per client
    * @param max_clients Maximum number of tracked clients (for memory management)
-   * @param cleanup_interval Cleanup check interval (time between cleanup sweeps)
+   * @param cleanup_interval Cleanup check interval (time between cleanup sweeps).
+   *        Accepts millisecond resolution so tests can run a faster sweep
+   *        cycle; production callers may continue to pass `std::chrono::seconds`
+   *        which converts implicitly.
    * @param inactivity_timeout Client inactivity timeout in seconds
    */
   RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients = kDefaultMaxClients,
-              std::chrono::seconds cleanup_interval = kDefaultCleanupInterval,
+              std::chrono::milliseconds cleanup_interval = kDefaultCleanupInterval,
               uint32_t inactivity_timeout_sec = kDefaultInactivityTimeout);
+
+  /**
+   * @brief Destructor - stops the background sweeper thread.
+   */
+  ~RateLimiter();
+
+  // Non-copyable, non-movable (owns a background thread).
+  RateLimiter(const RateLimiter&) = delete;
+  RateLimiter& operator=(const RateLimiter&) = delete;
+  RateLimiter(RateLimiter&&) = delete;
+  RateLimiter& operator=(RateLimiter&&) = delete;
 
   /**
    * @brief Check if request from client_ip is allowed
@@ -134,13 +155,20 @@ class RateLimiter {
    */
   void Clear();
 
+  /**
+   * @brief Number of clients currently tracked (for tests / observability).
+   *
+   * Equivalent to `GetStats().tracked_clients` but exposed directly so tests
+   * can introspect cleanup behavior without copying the full Stats struct.
+   */
+  [[nodiscard]] size_t GetTrackedClientCount() const;
+
  private:
-  size_t capacity_;                                          ///< Token bucket capacity
-  size_t refill_rate_;                                       ///< Refill rate (tokens/sec)
-  size_t max_clients_;                                       ///< Maximum tracked clients
-  std::chrono::seconds cleanup_interval_;                    ///< Cleanup check interval (time)
-  std::chrono::seconds inactivity_timeout_;                  ///< Client inactivity timeout
-  std::chrono::steady_clock::time_point last_cleanup_time_;  ///< Last cleanup timestamp
+  size_t capacity_;                             ///< Token bucket capacity
+  size_t refill_rate_;                          ///< Refill rate (tokens/sec)
+  size_t max_clients_;                          ///< Maximum tracked clients
+  std::chrono::milliseconds cleanup_interval_;  ///< Cleanup check interval (time)
+  std::chrono::seconds inactivity_timeout_;     ///< Client inactivity timeout
 
   struct ClientBucket {
     std::unique_ptr<TokenBucket> bucket;
@@ -157,6 +185,23 @@ class RateLimiter {
   std::atomic<uint64_t> total_requests_{0};
   std::atomic<uint64_t> allowed_requests_{0};
   std::atomic<uint64_t> blocked_requests_{0};
+
+  // Background sweeper. Cleanup is offloaded to a dedicated thread to avoid
+  // O(n) latency spikes on the request hot path. The previous implementation
+  // swept inside AllowRequest under mutex_, blocking all rate-limit checks
+  // (including for unrelated clients) while every expired bucket was removed.
+  // Now AllowRequest is strictly O(1) on the bucket count. M-8 unified the
+  // hand-rolled cv-loop with the rest of MygramDB's periodic-task plumbing
+  // via PeriodicWorker; the worker calls SweepExpiredBuckets() on its own
+  // thread and respects stop signals via its internal cv.
+  mygram::utils::PeriodicWorker sweeper_{"rate_limiter_sweeper"};
+
+  /**
+   * @brief Single sweep over client_buckets_, removing expired entries.
+   *
+   * Caller must NOT hold `mutex_`. Acquires `mutex_` internally.
+   */
+  void SweepExpiredBuckets();
 };
 
 }  // namespace mygramdb::server

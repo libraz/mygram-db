@@ -46,6 +46,7 @@
 #include <sys/types.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -105,10 +106,12 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    *        `std::enable_shared_from_this` requires the object to live inside
    *        a `shared_ptr` from the moment it is born.
    *
-   * @param stats  Optional non-owning pointer to `ServerStats`. If non-null,
-   *               the drain task calls `stats->IncrementRequests()` after
-   *               each successful Dispatch, matching the blocking path's
-   *               per-request counter. May be null in unit tests.
+   * @param stats  Optional non-owning pointer to `ServerStats`. Currently
+   *               unused for per-request bookkeeping (the request counter is
+   *               incremented inside `RequestDispatcher::Dispatch` so all
+   *               dispatch paths converge on a single site). Retained for
+   *               future per-connection stats and parity with other
+   *               connection adapters; may be null in unit tests.
    */
   static std::shared_ptr<ReactorConnection> Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
                                                    ThreadPool* thread_pool, ServerStats* stats = nullptr,
@@ -167,6 +170,15 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   /// Whether `closing_` has been set. Exposed for tests.
   [[nodiscard]] bool IsClosing() const { return closing_.load(std::memory_order_acquire); }
+
+  /// Timestamp of the last inbound socket event (read or write activity).
+  /// Used by `IoReactor`'s idle-connection reaper. Updated by `OnReadable`
+  /// and `OnWritable`. Atomic load is sufficient — relaxed ordering is fine
+  /// because the reaper compares against `now()` and a slightly stale value
+  /// only delays reaping by one tick.
+  [[nodiscard]] std::chrono::steady_clock::time_point LastActive() const {
+    return last_active_.load(std::memory_order_relaxed);
+  }
 
   /// Returns the number of frames currently in `pending_frames_`. Exposed for tests only.
   [[nodiscard]] size_t PendingFrameCountForTest() const {
@@ -310,6 +322,13 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   // Mirror of `write_queue_bytes_` for lock-free metric readers.
   std::atomic<size_t> pending_write_bytes_{0};
+
+  // Last-activity timestamp for idle reaping (Fix N-3). Initialised to
+  // construction time; refreshed at the start of OnReadable/OnWritable so a
+  // connection that is actively performing I/O is never reaped, while a
+  // connection that connected but never sent or read a byte ages out after
+  // `IoReactor::idle_timeout_`.
+  std::atomic<std::chrono::steady_clock::time_point> last_active_{std::chrono::steady_clock::now()};
 };
 
 }  // namespace mygramdb::server

@@ -6,7 +6,9 @@ add_library(mygramdb_utils STATIC
   memory_utils.cpp
   daemon_utils.cpp
   datetime_converter.cpp
+  safe_path.cpp
   sql_utils.cpp
+  periodic_worker.cpp
 )
 
 target_include_directories(mygramdb_utils PUBLIC
@@ -15,6 +17,7 @@ target_include_directories(mygramdb_utils PUBLIC
 
 target_link_libraries(mygramdb_utils PUBLIC
   spdlog::spdlog
+  roaring
   ${ZLIB_LIBRARIES}
 )
 

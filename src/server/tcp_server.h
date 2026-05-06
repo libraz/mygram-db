@@ -164,24 +164,19 @@ class TcpServer {
    */
   RateLimiter* GetRateLimiter() { return rate_limiter_.get(); }
 
-#ifdef USE_MYSQL
   /**
-   * @brief Start SYNC operation for a table
-   * @param table_name Table to synchronize
-   * @return Response string (OK or ERROR formatted)
+   * @brief Get the shared rate limiter as a shared_ptr.
+   *
+   * Returned by reference so callers can construct an HttpServer that
+   * shares the same RateLimiter instance. A client's quota MUST apply across
+   * protocols; two independent limiters give the client effectively 2x the
+   * configured limit (Fix N-4).
+   *
+   * Returns nullptr-equivalent shared_ptr if rate limiting is disabled.
    */
-  std::string StartSync(const std::string& table_name);
-
-  /**
-   * @brief Get SYNC status for all tables
-   * @return Response string with sync status
-   */
-  std::string GetSyncStatus();
-#endif
+  std::shared_ptr<RateLimiter> GetSharedRateLimiter() const { return rate_limiter_; }
 
  private:
-  friend class SyncHandler;
-
   // Configuration
   ServerConfig config_;
   const config::Config* full_config_;
@@ -194,7 +189,13 @@ class TcpServer {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};  // Replication paused for DUMP SAVE/LOAD
   std::atomic<bool> mysql_reconnecting_{false};           // MySQL reconnection in progress
-  DumpProgress dump_progress_;                            // Progress tracking for async dump operations
+  // Set by Stop() before joining the dump worker so DumpSaveWorker / DumpLoadWorker
+  // can skip the post-operation binlog Start() when the server is tearing down
+  // (see CR-3 / CR-10 audit, May 2026). Without this, a worker that observes
+  // replication_was_running=true at entry will call binlog_reader_->Start()
+  // during shutdown — racing the binlog_reader's destructor.
+  std::atomic<bool> shutdown_in_progress_{false};
+  DumpProgress dump_progress_;  // Progress tracking for async dump operations
 
   // Services (composition) - NEW
   std::unique_ptr<TableCatalog> table_catalog_;
@@ -205,7 +206,10 @@ class TcpServer {
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
-  std::unique_ptr<RateLimiter> rate_limiter_;
+  // shared_ptr so the same instance can be co-owned with HttpServer (Fix N-4).
+  // ServerLifecycleManager constructs both servers and hands the same shared
+  // RateLimiter to each so a client's quota applies across protocols.
+  std::shared_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
 #endif
@@ -231,9 +235,6 @@ class TcpServer {
 #ifdef USE_MYSQL
   std::unique_ptr<CommandHandler> sync_handler_;
 #endif
-
-  // Shutdown flag
-  std::atomic<bool> shutdown_requested_{false};
 };
 
 }  // namespace mygramdb::server

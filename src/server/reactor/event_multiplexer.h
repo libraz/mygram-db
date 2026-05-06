@@ -70,10 +70,21 @@ struct ReadyEvent {
 /**
  * @brief Abstract interface for backend-specific polling primitives.
  *
- * Thread-safety: instances are NOT thread-safe on their own. `IoReactor` owns
- * the multiplexer from a single event-loop thread and serializes any
- * cross-thread invocations (e.g. `ArmWrite` from a worker) via its own
- * synchronisation before calling into the multiplexer.
+ * Thread-safety contract (refined; see backend-specific notes):
+ *  - `Add`, `Modify`, and `Remove` may be called concurrently from multiple
+ *    threads. Concrete backends are responsible for serialising any internal
+ *    state and ensuring the kernel's view of the interest set stays in
+ *    lockstep with whatever in-process bookkeeping they keep.
+ *  - `Poll` is **single-threaded only**. It is invoked from `IoReactor`'s
+ *    `EventLoop()` thread and is not safe to call concurrently with itself.
+ *    Backends rely on this to skip locking on the per-Poll scratch buffer.
+ *  - `IoReactor` enforces the publication/teardown of the multiplexer
+ *    pointer via its own `mux_lifecycle_` shared mutex; Poll runs under a
+ *    shared lock and concurrent Add/Modify/Remove also run under shared
+ *    locks, while Stop() takes the unique lock to drain them.
+ *
+ * Backend-specific clarifications live on each implementation
+ * (`KqueueMultiplexer`, `EpollMultiplexer`).
  */
 class EventMultiplexer {
  public:
@@ -136,6 +147,30 @@ class EventMultiplexer {
    * Must return a stable string literal: "epoll", "kqueue", "mock".
    */
   virtual const char* Name() const = 0;
+
+  /**
+   * @brief Force any in-progress `Poll()` to return immediately.
+   *
+   * Used by `IoReactor::Stop()` to break out of a blocked `Poll()` call as
+   * soon as `running_=false` is published, instead of waiting for the
+   * configured `poll_timeout_ms`. The wake-up mechanism is backend specific:
+   *   - epoll: write to a registered `eventfd`.
+   *   - kqueue: trigger an `EVFILT_USER` filter.
+   *   - mock: signal the internal condition variable.
+   *
+   * Backends MUST drop wake-up bookkeeping events from the `Poll()` output
+   * vector (read drain on epoll's eventfd, ignore the EVFILT_USER ident on
+   * kqueue) so callers never observe them as ReadyEvents. Calling `Wake()`
+   * while no thread is inside `Poll()` is a no-op: the next `Poll()` simply
+   * observes the latched signal and returns immediately with an empty event
+   * set.
+   *
+   * Safe to call from any thread, including concurrently with `Poll()` and
+   * `Add`/`Modify`/`Remove`. Default implementation is a no-op so that
+   * backends without a wake mechanism can opt out (the reactor falls back to
+   * waiting for the poll timeout, which is the pre-wake-up behaviour).
+   */
+  virtual mygram::utils::Expected<void, mygram::utils::Error> Wake() { return {}; }
 
  protected:
   EventMultiplexer() = default;

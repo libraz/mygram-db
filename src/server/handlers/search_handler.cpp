@@ -16,8 +16,28 @@
 #include "server/search_pipeline.h"
 #include "server/table_catalog.h"
 #include "utils/string_utils.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::server {
+
+namespace {
+
+/// @brief Pick the optimization_used label for a given path + early-exit state.
+const char* OptimizationLabel(search_pipeline::PipelinePath path, bool empty_term_detected) {
+  switch (path) {
+    case search_pipeline::PipelinePath::FUZZY:
+      return empty_term_detected ? "fuzzy-search (empty posting list)" : "";  // detailed label set elsewhere
+    case search_pipeline::PipelinePath::SYNONYM:
+      return empty_term_detected ? "synonym-search (empty posting list)" : "synonym-expanded search";
+    case search_pipeline::PipelinePath::REGULAR:
+      return empty_term_detected ? "early-exit (empty posting list)" : "size-based term ordering";
+    case search_pipeline::PipelinePath::CACHE_HIT:
+    default:
+      return "";
+  }
+}
+
+}  // namespace
 
 std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
   if (query.type == query::QueryType::SEARCH) {
@@ -29,14 +49,150 @@ std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& 
   return ResponseFormatter::FormatError("Invalid query type for SearchHandler");
 }
 
-std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx,
-                                                 PipelineOutput& output) {
-  // Check if server is loading
-  if (ctx_.dump_load_in_progress) {
-    return ResponseFormatter::FormatError("Server is loading, please try again later");
+search_pipeline::FullPipelineParams SearchHandler::BuildPipelineParams(const query::Query& query,
+                                                                       const PipelineOutput& output) const {
+  // Forward to the shared free function. The TableContext lookup must succeed
+  // here because ExecuteSearchPipeline already validated the table via
+  // GetTableContext; an unexpected null fails closed by returning a params
+  // struct with the index/doc_store wired up but no per-table data.
+  auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
+  if (table_ctx != nullptr) {
+    return search_pipeline::BuildPipelineParamsFromContext(*table_ctx, ctx_.full_config, ctx_.cache_manager,
+                                                           filter_threshold_.load(std::memory_order_relaxed),
+                                                           /*attach_bm25_stats=*/true);
   }
 
-  // Get table context (needed for both cache lookup and search)
+  // Fallback for the (defensive) case where the catalog lost the entry
+  // between GetTableContext() and here. Use the data already projected onto
+  // PipelineOutput so the pipeline can still execute against the resolved
+  // index/doc_store. The pipeline will return an "Index not available" error
+  // if those are also null.
+  search_pipeline::FullPipelineParams params;
+  params.current_index = output.current_index;
+  params.current_doc_store = output.current_doc_store;
+  params.full_config = ctx_.full_config;
+  params.cache_manager = ctx_.cache_manager;
+  params.ngram_size = output.current_ngram_size;
+  params.kanji_ngram_size = output.current_kanji_ngram_size;
+  params.cross_boundary_ngrams = output.current_cross_boundary;
+  params.filter_threshold = filter_threshold_.load(std::memory_order_relaxed);
+  return params;
+}
+
+void SearchHandler::PopulateInputDebugInfo(search_pipeline::PipelinePath path_taken,
+                                           const search_pipeline::FullPipelineParams& params, PipelineOutput& output) {
+  // search_terms reflects the terms actually fed to the search engine.
+  output.debug_info.search_terms = output.all_search_terms;
+
+  if (path_taken == search_pipeline::PipelinePath::SYNONYM && params.synonym_dict != nullptr) {
+    // Synonym path: re-expand terms to recover variant n-grams for debug only.
+    // ExecuteFullPipeline drops the per-variant SearchTermInfo after computing
+    // results; recreating it here avoids changing the public output struct
+    // and only runs when debug_mode is enabled.
+    auto synonym_groups = search_pipeline::ExpandTermsWithSynonyms(
+        output.all_search_terms, params.synonym_dict, output.current_index, output.current_ngram_size,
+        output.current_kanji_ngram_size, output.current_cross_boundary);
+    for (const auto& group : synonym_groups) {
+      for (const auto& variant : group.variants) {
+        for (const auto& ngram : variant.ngrams) {
+          output.debug_info.ngrams_used.push_back(ngram);
+        }
+        output.debug_info.posting_list_sizes.push_back(variant.estimated_size);
+      }
+    }
+    return;
+  }
+
+  // Fuzzy / regular path: copy from term_infos populated by ExecuteFullPipeline.
+  for (const auto& ti : output.term_infos) {
+    for (const auto& ngram : ti.ngrams) {
+      output.debug_info.ngrams_used.push_back(ngram);
+    }
+    output.debug_info.posting_list_sizes.push_back(ti.estimated_size);
+  }
+}
+
+void SearchHandler::PopulateCacheHitDebugInfo(const search_pipeline::FullPipelineOutput& pipeline_output,
+                                              PipelineOutput& output) {
+  output.debug_info.query_time_ms = pipeline_output.query_time_ms;
+  output.debug_info.final_results = output.results.size();
+  output.debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
+  output.debug_info.cache_info.cache_age_ms = pipeline_output.cache_age_ms;
+  output.debug_info.cache_info.cache_saved_ms = pipeline_output.cache_saved_ms;
+}
+
+void SearchHandler::PopulateEmptyTermDebugInfo(search_pipeline::PipelinePath path_taken,
+                                               const search_pipeline::FullPipelineOutput& pipeline_output,
+                                               PipelineOutput& output) {
+  output.debug_info.optimization_used = OptimizationLabel(path_taken, /*empty_term_detected=*/true);
+  output.debug_info.final_results = 0;
+  output.debug_info.query_time_ms = pipeline_output.query_time_ms;
+  output.debug_info.index_time_ms = pipeline_output.query_time_ms;
+}
+
+void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
+                                                  const search_pipeline::FullPipelineOutput& pipeline_output,
+                                                  PipelineOutput& output) const {
+  // Successful (non-empty-term) path: report the matched candidates count.
+  output.debug_info.total_candidates = output.results.size();
+  output.debug_info.after_intersection = output.results.size();
+  output.debug_info.after_not = output.results.size();
+  output.debug_info.after_filters = output.results.size();
+
+  // Path-specific optimization label.
+  if (pipeline_output.path_taken == search_pipeline::PipelinePath::FUZZY) {
+    // Fuzzy path: append the configured edit distance.
+    output.debug_info.optimization_used = "fuzzy-search (distance=" + std::to_string(*query.fuzzy_max_distance) + ")";
+  } else {
+    output.debug_info.optimization_used = OptimizationLabel(pipeline_output.path_taken, /*empty_term_detected=*/false);
+  }
+
+  output.debug_info.query_time_ms = pipeline_output.query_time_ms;
+  output.debug_info.index_time_ms = pipeline_output.query_time_ms;
+
+  // Map the pipeline's authoritative miss reason to the debug protocol's
+  // CacheDebugInfo::Status. The pipeline distinguishes Stale vs NotFound vs
+  // Disabled; we collapse Stale and Disabled into the matching debug enums
+  // and report NotFound otherwise. Falling through to a single MISS_NOT_FOUND
+  // (the previous behaviour) hid genuinely-disabled and stale cases.
+  switch (pipeline_output.cache_miss_reason) {
+    case search_pipeline::CacheMissReason::kHit:
+      // Should not reach here: the cache-hit branch is handled by
+      // PopulateCacheHitDebugInfo. Treat as not-found to keep the field set.
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kStale:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_INVALIDATED;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kNotFound:
+    case search_pipeline::CacheMissReason::kCostBelowThreshold:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
+      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+      break;
+    case search_pipeline::CacheMissReason::kDisabled:
+      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+      break;
+  }
+}
+
+std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, ConnectionContext& conn_ctx,
+                                                 PipelineOutput& output) {
+  // Per-request latency: measure from handler entry through pipeline projection
+  // so both cache-hit fast paths and cache-miss paths are observable. The
+  // log event is emitted at DEBUG level — operators enable debug logging
+  // when investigating slow queries; structured-log filtering by level keeps
+  // production overhead minimal.
+  const auto request_start = std::chrono::steady_clock::now();
+
+  // Pre-flight: server must not be loading.
+  if (auto err = CheckNotLoading(); !err.empty()) {
+    return err;
+  }
+
+  // Resolve the table context required by both the search and any debug
+  // bookkeeping that follows.
   auto table_ctx = GetTableContext(query.table);
   if (!table_ctx) {
     return ResponseFormatter::FormatError(table_ctx.error().message());
@@ -45,278 +201,58 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.current_doc_store = table_ctx->doc_store;
   output.current_ngram_size = table_ctx->ngram_size;
   output.current_kanji_ngram_size = table_ctx->kanji_ngram_size;
-
-  // Verify index is available
   if (output.current_index == nullptr) {
     return ResponseFormatter::FormatError("Index not available");
   }
-
-  // Try cache lookup first
-  auto cache_lookup_start = std::chrono::high_resolution_clock::now();
-  auto cache_result = search_pipeline::TryCacheLookup(query, ctx_.cache_manager, output.current_doc_store);
-  if (cache_result) {
-    auto cache_lookup_end = std::chrono::high_resolution_clock::now();
-    double cache_lookup_time_ms =
-        std::chrono::duration<double, std::milli>(cache_lookup_end - cache_lookup_start).count();
-
-    output.results = std::move(cache_result->results);
-    output.query_time_ms = cache_lookup_time_ms;
-
-    if (!query.search_text.empty()) {
-      output.all_search_terms.push_back(query.search_text);
-    }
-    output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.query_time_ms = cache_lookup_time_ms;
-      output.debug_info.final_results = output.results.size();
-      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
-      output.debug_info.cache_info.cache_age_ms = cache_result->cache_age_ms;
-      output.debug_info.cache_info.cache_saved_ms = cache_result->cache_saved_ms;
-    }
-
-    // Empty string = success (cache hit)
-    return "";
-  }
-
-  // Start timing
-  auto start_time = std::chrono::high_resolution_clock::now();
-  auto index_start = std::chrono::high_resolution_clock::now();
-
-  // Collect all search terms (main + AND terms)
-  if (!query.search_text.empty()) {
-    output.all_search_terms.push_back(query.search_text);
-  }
-  output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-  // Collect debug info for search terms
-  if (conn_ctx.debug_mode) {
-    output.debug_info.search_terms = output.all_search_terms;
-  }
-
-  // Check for synonym dictionary
   output.current_cross_boundary = output.current_index->GetCrossBoundaryNgrams();
-  query::SynonymDictionary* synonym_dict = nullptr;
-  {
-    auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
-    if (table_ctx != nullptr && table_ctx->synonym_dict && !table_ctx->synonym_dict->IsEmpty()) {
-      synonym_dict = table_ctx->synonym_dict.get();
-    }
+
+  // Delegate the actual search to the unified pipeline shared with HTTP.
+  auto params = BuildPipelineParams(query, output);
+  auto pipeline_output = search_pipeline::ExecuteFullPipeline(query, params);
+  if (!pipeline_output.success) {
+    return ResponseFormatter::FormatError(pipeline_output.error_message);
   }
 
-  // Fuzzy search path (takes precedence over synonyms)
-  if (query.fuzzy_max_distance.has_value()) {
-    // Generate n-grams for each term (same as normal path)
-    output.term_infos =
-        search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
-                                           output.current_kanji_ngram_size, output.current_cross_boundary);
+  // Project pipeline output into PipelineOutput consumed by HandleSearch /
+  // HandleCount.
+  output.results = std::move(pipeline_output.results);
+  output.all_search_terms = std::move(pipeline_output.all_search_terms);
+  output.term_infos = std::move(pipeline_output.term_infos);
+  output.query_time_ms = pipeline_output.query_time_ms;
+  // Mirror the authoritative cache hit signal so the caller can branch
+  // independently of debug_mode (debug_info is only populated when debug_mode
+  // is true; relying on it for control flow caused cache hits to skip the
+  // optimized early-return path in the common non-debug case).
+  output.cache_hit = pipeline_output.cache_hit;
 
-    if (conn_ctx.debug_mode) {
-      for (const auto& ti : output.term_infos) {
-        for (const auto& ngram : ti.ngrams) {
-          output.debug_info.ngrams_used.push_back(ngram);
-        }
-        output.debug_info.posting_list_sizes.push_back(ti.estimated_size);
-      }
-    }
-
-    auto pipeline_result = search_pipeline::ExecuteWithFuzzy(
-        query, output.term_infos, output.all_search_terms, *query.fuzzy_max_distance, output.current_index,
-        output.current_doc_store, ctx_.full_config, output.current_ngram_size, output.current_kanji_ngram_size,
-        output.current_cross_boundary, filter_threshold_);
-
-    if (pipeline_result.empty_term_detected) {
-      output.results.clear();
-      auto end_time = std::chrono::high_resolution_clock::now();
-      output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-      if (conn_ctx.debug_mode) {
-        output.debug_info.optimization_used = "fuzzy-search (empty posting list)";
-        output.debug_info.final_results = 0;
-        output.debug_info.query_time_ms = output.query_time_ms;
-        output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-      }
-      return "";
-    }
-
-    output.results = std::move(pipeline_result.results);
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.total_candidates = output.results.size();
-      output.debug_info.after_intersection = output.results.size();
-      output.debug_info.optimization_used = "fuzzy-search (distance=" + std::to_string(*query.fuzzy_max_distance) + ")";
-      output.debug_info.after_not = output.results.size();
-      output.debug_info.after_filters = output.results.size();
-    }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-
-    search_pipeline::InsertToCache(ctx_.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
-                                   output.current_ngram_size, output.current_kanji_ngram_size,
-                                   output.current_cross_boundary);
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.query_time_ms = output.query_time_ms;
-      output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-      if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
-        output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
-      } else {
-        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
-      }
-    }
-
-    return "";  // Success
-  }
-
-  if (synonym_dict != nullptr) {
-    // Synonym-aware search path
-    auto synonym_groups = search_pipeline::ExpandTermsWithSynonyms(
-        output.all_search_terms, synonym_dict, output.current_index, output.current_ngram_size,
-        output.current_kanji_ngram_size, output.current_cross_boundary);
-
-    if (conn_ctx.debug_mode) {
-      for (const auto& group : synonym_groups) {
-        for (const auto& variant : group.variants) {
-          for (const auto& ngram : variant.ngrams) {
-            output.debug_info.ngrams_used.push_back(ngram);
-          }
-          output.debug_info.posting_list_sizes.push_back(variant.estimated_size);
-        }
-      }
-    }
-
-    auto pipeline_result = search_pipeline::ExecuteWithSynonyms(
-        query, synonym_groups, output.current_index, output.current_doc_store, ctx_.full_config,
-        output.current_ngram_size, output.current_kanji_ngram_size, output.current_cross_boundary, filter_threshold_);
-
-    if (pipeline_result.empty_term_detected) {
-      output.results.clear();
-      auto end_time = std::chrono::high_resolution_clock::now();
-      output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-      if (conn_ctx.debug_mode) {
-        output.debug_info.optimization_used = "synonym-search (empty posting list)";
-        output.debug_info.final_results = 0;
-        output.debug_info.query_time_ms = output.query_time_ms;
-        output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-      }
-      return "";
-    }
-
-    output.results = std::move(pipeline_result.results);
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.total_candidates = output.results.size();
-      output.debug_info.after_intersection = output.results.size();
-      output.debug_info.optimization_used = "synonym-expanded search";
-      output.debug_info.after_not = output.results.size();
-      output.debug_info.after_filters = output.results.size();
-    }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-
-    // Collect all n-grams for cache invalidation
-    std::vector<SearchTermInfo> all_term_infos;
-    // Reserve capacity to avoid reallocation during synonym term collection
-    size_t total_variants = 0;
-    for (const auto& group : synonym_groups) {
-      total_variants += group.variants.size();
-    }
-    all_term_infos.reserve(total_variants);
-    for (const auto& group : synonym_groups) {
-      for (const auto& variant : group.variants) {
-        all_term_infos.push_back(variant);
-      }
-    }
-    search_pipeline::InsertToCache(ctx_.cache_manager, query, output.results, all_term_infos, output.query_time_ms,
-                                   output.current_ngram_size, output.current_kanji_ngram_size,
-                                   output.current_cross_boundary);
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.query_time_ms = output.query_time_ms;
-      output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-      if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
-        output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
-      } else {
-        output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
-      }
-    }
-
-    return "";  // Success
-  }
-
-  // Non-synonym path: generate n-grams for each term and estimate result sizes
-  output.term_infos =
-      search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
-                                         output.current_kanji_ngram_size, output.current_cross_boundary);
-
-  // Collect debug info for n-grams and posting list sizes
+  // Populate debug_info if requested. The cache-hit path produces a different
+  // set of debug fields than the cache-miss paths.
   if (conn_ctx.debug_mode) {
-    for (const auto& ti : output.term_infos) {
-      for (const auto& ngram : ti.ngrams) {
-        output.debug_info.ngrams_used.push_back(ngram);
-      }
-      output.debug_info.posting_list_sizes.push_back(ti.estimated_size);
-    }
-  }
-
-  // Sort terms by estimated size (smallest first for faster intersection)
-  std::sort(
-      output.term_infos.begin(), output.term_infos.end(),
-      [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) { return lhs.estimated_size < rhs.estimated_size; });
-
-  // Execute the core search pipeline (intersection, NOT filter, filters, verify_text)
-  auto pipeline_result =
-      search_pipeline::Execute(query, output.term_infos, output.all_search_terms, output.current_index,
-                               output.current_doc_store, ctx_.full_config, output.current_ngram_size,
-                               output.current_kanji_ngram_size, output.current_cross_boundary, filter_threshold_);
-
-  if (pipeline_result.empty_term_detected) {
-    output.results.clear();
-    auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    if (conn_ctx.debug_mode) {
-      output.debug_info.optimization_used = "early-exit (empty posting list)";
-      output.debug_info.final_results = 0;
-      output.debug_info.query_time_ms = output.query_time_ms;
-      output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-    }
-    return "";  // Success with empty results
-  }
-
-  output.results = std::move(pipeline_result.results);
-
-  if (conn_ctx.debug_mode) {
-    output.debug_info.total_candidates = output.results.size();
-    output.debug_info.after_intersection = output.results.size();
-    output.debug_info.optimization_used = "size-based term ordering";
-    output.debug_info.after_not = output.results.size();
-    output.debug_info.after_filters = output.results.size();
-  }
-
-  // Calculate query execution time
-  auto end_time = std::chrono::high_resolution_clock::now();
-  output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-
-  // Store in cache if enabled
-  search_pipeline::InsertToCache(ctx_.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
-                                 output.current_ngram_size, output.current_kanji_ngram_size,
-                                 output.current_cross_boundary);
-
-  // Populate debug info timing and cache status
-  if (conn_ctx.debug_mode) {
-    output.debug_info.query_time_ms = output.query_time_ms;
-    output.debug_info.index_time_ms = std::chrono::duration<double, std::milli>(end_time - index_start).count();
-
-    if (ctx_.cache_manager != nullptr && ctx_.cache_manager->IsEnabled()) {
-      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_NOT_FOUND;
-      output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
+    if (pipeline_output.cache_hit) {
+      PopulateCacheHitDebugInfo(pipeline_output, output);
     } else {
-      output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_DISABLED;
+      PopulateInputDebugInfo(pipeline_output.path_taken, params, output);
+      if (pipeline_output.empty_term_detected) {
+        PopulateEmptyTermDebugInfo(pipeline_output.path_taken, pipeline_output, output);
+      } else {
+        PopulatePostPipelineDebugInfo(query, pipeline_output, output);
+      }
     }
   }
+
+  // Emit per-request structured log so operators can correlate cache_hit /
+  // result_count with end-to-end latency. Done after success projection so
+  // the fields are populated; the request_start timer captures any overhead
+  // between entry and pipeline completion.
+  const auto request_elapsed = std::chrono::steady_clock::now() - request_start;
+  const double elapsed_ms = std::chrono::duration<double, std::milli>(request_elapsed).count();
+  mygram::utils::StructuredLog()
+      .Event("search_completed")
+      .Field("table", query.table)
+      .Field("query_time_ms", elapsed_ms)
+      .Field("result_count", static_cast<int64_t>(output.results.size()))
+      .Field("cache_hit", output.cache_hit)
+      .Debug();
 
   return "";  // Success
 }
@@ -333,12 +269,18 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     return ResponseFormatter::FormatError("Document store not available");
   }
 
-  // Check for cache hit path - results are already final, just need pagination
-  bool is_cache_hit = (output.debug_info.cache_info.status == query::CacheDebugInfo::Status::HIT);
+  // Check for cache hit path - results are already final, just need pagination.
+  // Use the authoritative cache_hit signal that is set regardless of debug
+  // mode, instead of the debug_info status which is only populated when
+  // conn_ctx.debug_mode == true.
+  bool is_cache_hit = output.cache_hit;
 
   size_t total_results = output.results.size();
 
-  // Get primary key column name from table config
+  // Defensive null-check: GetTable() called earlier in the pipeline already
+  // validated this. The duplicate lookup is intentional during current
+  // refactor; will be eliminated once TableContext* is plumbed through
+  // PipelineOutput. See review finding M-9 / Phase 3 task.
   std::string primary_key_column = "id";  // default
   {
     auto* table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
@@ -558,7 +500,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       query::ResultSorter::SortAndPaginate(output.results, *output.current_doc_store, query, primary_key_column);
 
   if (!sorted_result.has_value()) {
-    return sorted_result.error().to_string();
+    return ResponseFormatter::FormatError(sorted_result.error().message());
   }
 
   auto sorted_results = std::move(sorted_result.value());

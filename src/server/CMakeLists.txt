@@ -18,6 +18,7 @@ add_library(mygramdb_server STATIC
   reactor/kqueue_multiplexer.cpp
   sync_operation_manager.cpp
   rate_limiter.cpp
+  socket_utils.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
   handlers/facet_handler.cpp
@@ -37,6 +38,7 @@ target_include_directories(mygramdb_server PUBLIC
 
 target_link_libraries(mygramdb_server PUBLIC
   mygramdb_config     # Configuration and schema help
+  mygramdb_runtime_config
   mygramdb_cache      # Includes mygramdb_query transitively
   httplib::httplib
   nlohmann_json::nlohmann_json

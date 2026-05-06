@@ -83,19 +83,25 @@ struct ServerInfo {
   std::string version;
   uint64_t uptime_seconds = 0;
   uint64_t total_requests = 0;
-  uint64_t active_connections = 0;
-  uint64_t index_size_bytes = 0;
+  uint64_t active_connections = 0;  ///< From "connected_clients" in INFO response
+  uint64_t index_size_bytes = 0;    ///< Total memory bytes (from "used_memory_bytes")
   uint64_t doc_count = 0;
-  std::vector<std::string> tables;  // List of table names
+  std::vector<std::string> tables;  ///< List of table names
 };
 
 /**
  * @brief Replication status
+ *
+ * Reflects the contents of the server's "OK REPLICATION" multi-line response.
+ * Fields not emitted by the server (e.g. when replication is not configured)
+ * remain at their default values.
  */
 struct ReplicationStatus {
-  bool running = false;    // Whether replication is active
-  std::string gtid;        // Current GTID position
-  std::string status_str;  // Raw status string
+  bool running = false;           ///< True when status == "running"
+  std::string gtid;               ///< Current GTID position (from current_gtid)
+  std::string status_str;         ///< Raw status string ("running", "stopped", "not_configured", ...)
+  uint64_t processed_events = 0;  ///< Number of binlog events processed since start
+  uint64_t queue_size = 0;        ///< Pending events waiting to be applied (0 when not running)
 };
 
 /**
@@ -115,8 +121,21 @@ struct ClientConfig {
 /**
  * @brief MygramDB client
  *
- * This class provides a thread-safe client for MygramDB. Each instance
- * maintains a single TCP connection to the server.
+ * This class maintains a single TCP connection to a MygramDB server.
+ *
+ * Thread-safety: concurrent calls into a single instance from multiple
+ * threads are serialized internally by an internal mutex around
+ * SendCommand(). The wire protocol is synchronous request/response on a
+ * single socket, so commands necessarily run sequentially. Throughput is
+ * single-command-at-a-time per instance — for higher throughput, use
+ * multiple `MygramClient` instances (e.g. one per worker thread).
+ *
+ * Connect() / Disconnect() are NOT meant to race with in-flight
+ * SendCommand() calls; calling Disconnect() while another thread is
+ * blocked in SendCommand() is a logic error. The implementation closes
+ * the socket without taking the command lock, so it cannot deadlock —
+ * the in-flight recv() will simply return EBADF / EOF and SendCommand()
+ * will surface a connection-closed error.
  *
  * Example usage:
  * @code

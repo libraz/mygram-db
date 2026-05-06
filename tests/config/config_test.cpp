@@ -155,6 +155,46 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_EQ(config.memory.hard_limit_mb, 8192);
   EXPECT_EQ(config.api.tcp.port, 11016);
   EXPECT_FALSE(config.api.http.enable);
+  // H-N8: HTTP read/write timeouts must default to kHttpTimeoutSec when not
+  // specified in the YAML; they are no longer hardcoded inside HttpServer.
+  EXPECT_EQ(config.api.http.read_timeout_sec, defaults::kHttpTimeoutSec);
+  EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
+}
+
+/**
+ * @brief Regression test for H-N8: api.http.read_timeout_sec /
+ *        write_timeout_sec must propagate from YAML into Config.
+ *
+ * Pre-fix the fields did not exist on `ApiConfig::http`, so the corresponding
+ * YAML keys were silently dropped and HttpServer always ran with the
+ * hardcoded 5-second defaults. This test pins the wiring: an operator that
+ * sets these keys must see them on the parsed Config struct.
+ */
+TEST(ConfigTest, HttpTimeoutsParsedFromYaml) {
+  std::ofstream f("http_timeout.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "api:\n";
+  f << "  http:\n";
+  f << "    enable: true\n";
+  f << "    read_timeout_sec: 30\n";
+  f << "    write_timeout_sec: 45\n";
+  f.close();
+
+  auto config_result = LoadConfig("http_timeout.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  Config config = *config_result;
+
+  EXPECT_TRUE(config.api.http.enable);
+  EXPECT_EQ(config.api.http.read_timeout_sec, 30);
+  EXPECT_EQ(config.api.http.write_timeout_sec, 45);
 }
 
 /**

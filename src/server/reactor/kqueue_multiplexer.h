@@ -49,9 +49,26 @@ namespace mygramdb::server::reactor {
 /**
  * @brief kqueue-backed `EventMultiplexer` implementation.
  *
- * Not thread-safe. `IoReactor` owns the instance from a single event-loop
- * thread and serialises any cross-thread arm/disarm requests before calling
- * into this class.
+ * Thread-safety:
+ *  - `Add`, `Modify`, and `Remove` are safe to call concurrently from
+ *    multiple threads. `interest_mutex_` serialises map updates against the
+ *    paired kevent() syscall so the in-memory `interest_` view never diverges
+ *    from the kernel's filter set. The kqueue kernel object is itself
+ *    thread-safe for simultaneous EV_ADD/EV_DELETE/EV_MODIFY operations.
+ *  - `Poll` is **event-loop thread only**. It does not take
+ *    `interest_mutex_` and writes to `events_` without any locking; both are
+ *    safe because IoReactor calls Poll exclusively from its single
+ *    EventLoop() thread, sequenced behind the reactor's `mux_lifecycle_`
+ *    shared lock that publishes/republishes the multiplexer pointer. The
+ *    fact that other reactor threads may concurrently call Add/Modify/Remove
+ *    is what makes the mutex on those paths necessary; Poll's exclusivity to
+ *    one thread is what lets `events_` stay lock-free.
+ *  - It is therefore *not* legal to call Poll concurrently from two threads,
+ *    even though the kqueue fd itself would tolerate it. The single-Poll
+ *    invariant is part of the contract IoReactor depends on.
+ *
+ * Do not revert the `interest_mutex_` without removing the cross-thread
+ * Add/Modify/Remove pattern in IoReactor.
  */
 class KqueueMultiplexer final : public EventMultiplexer {
  public:
@@ -81,32 +98,66 @@ class KqueueMultiplexer final : public EventMultiplexer {
   /// Backend identifier for metrics and logging.
   const char* Name() const override { return "kqueue"; }
 
+  /**
+   * @brief Trigger a self-wake event so a blocked `Poll()` returns now.
+   *
+   * Implemented by sending an `EVFILT_USER` trigger on a sentinel ident
+   * registered during `Open()`. `Poll()` filters the resulting event out of
+   * its output vector so callers never observe it as a ready fd.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
+
  private:
   /**
    * @brief Diff `old_interest` against `new_interest` and apply the delta.
    *
-   * @param fd            Target file descriptor.
-   * @param new_interest  Desired interest bitmask (`event::kReadable` |
-   *                      `event::kWritable`).
-   * @param old_interest  Previously-armed interest bitmask. Ignored when
-   *                      `is_add` is true.
-   * @param is_add        If true, this is a fresh `Add()` and we unconditionally
-   *                      emit `EV_ADD` for every bit set in `new_interest`.
-   *                      If false, only the bits that changed are touched.
+   * @param fd                Target file descriptor.
+   * @param new_interest      Desired interest bitmask (`event::kReadable` |
+   *                          `event::kWritable`).
+   * @param applied_interest  Out-param: on return, set to the interest mask
+   *                          that is actually armed in the kernel. On a fully
+   *                          successful call this equals `new_interest`. On
+   *                          partial failure (CR-4) it reflects only the
+   *                          filters whose individual kevent() call succeeded
+   *                          before the failure, so the caller can keep its
+   *                          in-process `interest_` map in lockstep with the
+   *                          kernel. May be nullptr when the caller does not
+   *                          care (e.g. tests).
+   * @param old_interest      Previously-armed interest bitmask. Ignored when
+   *                          `is_add` is true.
+   * @param is_add            If true, this is a fresh `Add()` and we
+   *                          unconditionally emit `EV_ADD` for every bit set
+   *                          in `new_interest`. If false, only the bits that
+   *                          changed are touched.
    *
-   * Emits up to two `struct kevent` change records and flushes them in a
-   * single `kevent()` call. Returns `kNetworkReactorRegisterFailed` (on add)
-   * or `kNetworkReactorModifyFailed` (on modify) if the syscall fails.
+   * Emits at most two `struct kevent` change records, one per filter
+   * (EVFILT_READ, EVFILT_WRITE). Each record is sent in its own `kevent()`
+   * syscall so a mid-list failure cannot leave the in-process interest map
+   * desynchronised from the kernel (kevent(2) does not report partial
+   * application of a change list). Returns `kNetworkReactorRegisterFailed`
+   * (on add) or `kNetworkReactorModifyFailed` (on modify) if any individual
+   * syscall fails.
    */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyInterest(int fd, uint8_t new_interest, uint8_t old_interest,
+  mygram::utils::Expected<void, mygram::utils::Error> ApplyInterest(int fd, uint8_t new_interest,
+                                                                    uint8_t* applied_interest, uint8_t old_interest,
                                                                     bool is_add);
 
   int kqueue_fd_ = -1;
+
+  /// Sentinel `ident` for the self-wake `EVFILT_USER` filter. Chosen as a
+  /// large constant that cannot collide with a real fd. Registered once
+  /// during `Open()` and triggered from `Wake()` to interrupt a blocked
+  /// `Poll()`.
+  static constexpr uintptr_t kWakeIdent = 0xFFFFFFFE;
 
   /// Reusable output buffer for `kevent()`. Sized at construction and
   /// doubled on demand (up to a fixed cap) whenever a Poll() fills it
   /// completely, so sustained bursts do not fragment across multiple Poll
   /// rounds. Touched only by the event-loop thread via `Poll()`; no locking.
+  /// IoReactor guarantees that `Poll()` is only ever invoked from its single
+  /// `EventLoop()` thread (see the class-level Thread-safety note above), so
+  /// no `interest_mutex_` acquisition is needed here even though
+  /// Add/Modify/Remove may run concurrently from worker / accept threads.
   std::vector<struct kevent> events_;
 
   /// Mutex protecting `interest_`. IoReactor now allows concurrent Poll (on

@@ -29,7 +29,6 @@ add_executable(mygramdb main.cpp)
 
 target_link_libraries(mygramdb PRIVATE
   mygramdb_app        # Application layer (includes all other modules)
-  mygramdb_server     # Includes config, cache, query, index, storage transitively
 )
 
 target_include_directories(mygramdb PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -1311,4 +1311,208 @@ TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChange
       << "C-8: Entry without filters should not be invalidated by filter change alone";
 }
 
+// =============================================================================
+// Perf-1: ClearTable uses table -> cache_keys reverse index for O(k) cost
+// =============================================================================
+
+/**
+ * @brief Verify ClearTable correctly removes only the target table's entries
+ *        when many tables share the manager.
+ *
+ * The performance improvement (O(k) instead of O(N)) is verified by reading
+ * the algorithm in invalidation_manager.cpp; this test guards the functional
+ * contract that must hold under either implementation: clearing one table out
+ * of many leaves the others completely untouched.
+ */
+TEST(InvalidationManagerTest, ClearTableScalesWithTableSizeNotTotalSize) {
+  QueryCache cache(64 * 1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  constexpr int kNumTables = 10;
+  constexpr int kEntriesPerTable = 1000;
+  constexpr int kTotalEntries = kNumTables * kEntriesPerTable;
+
+  // Register kEntriesPerTable entries across kNumTables tables.
+  for (int t = 0; t < kNumTables; ++t) {
+    std::string table = "t" + std::to_string(t);
+    for (int i = 0; i < kEntriesPerTable; ++i) {
+      auto key = CacheKeyGenerator::Generate(table + "_q" + std::to_string(i));
+      CacheMetadata meta;
+      meta.table = table;
+      meta.ngrams = {"ng" + std::to_string(i)};
+      mgr.RegisterCacheEntry(key, meta);
+    }
+  }
+
+  ASSERT_EQ(static_cast<size_t>(kTotalEntries), mgr.GetTrackedEntryCount());
+
+  // Clear one table; only its entries should disappear.
+  mgr.ClearTable("t1");
+
+  EXPECT_EQ(static_cast<size_t>(kTotalEntries - kEntriesPerTable), mgr.GetTrackedEntryCount())
+      << "ClearTable must remove exactly the cleared table's entries";
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("t1")) << "Cleared table must have no ngrams left";
+
+  // Other tables must remain fully intact.
+  for (int t = 0; t < kNumTables; ++t) {
+    if (t == 1) {
+      continue;
+    }
+    std::string table = "t" + std::to_string(t);
+    EXPECT_EQ(static_cast<size_t>(kEntriesPerTable), mgr.GetTrackedNgramCount(table))
+        << "Untouched table " << table << " must retain all its ngrams";
+  }
+}
+
+/**
+ * @brief Verify the table -> cache_keys reverse index is updated by
+ *        ClearTable so subsequent invalidations against that table find
+ *        zero entries.
+ */
+TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Two tables; we only clear one.
+  for (int i = 0; i < 50; ++i) {
+    auto key_t1 = CacheKeyGenerator::Generate("t1_q" + std::to_string(i));
+    CacheMetadata meta_t1;
+    meta_t1.table = "t1";
+    meta_t1.ngrams = {"hel", "ell", "llo"};  // overlap with "hello"
+    mgr.RegisterCacheEntry(key_t1, meta_t1);
+
+    auto key_t2 = CacheKeyGenerator::Generate("t2_q" + std::to_string(i));
+    CacheMetadata meta_t2;
+    meta_t2.table = "t2";
+    meta_t2.ngrams = {"hel", "ell", "llo"};
+    mgr.RegisterCacheEntry(key_t2, meta_t2);
+  }
+
+  // Sanity: invalidating t1 with "hello" hits all 50 entries.
+  auto pre_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  EXPECT_EQ(50, pre_clear.size());
+
+  mgr.ClearTable("t1");
+
+  // After ClearTable, no t1 entries should exist in the reverse index.
+  auto post_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  EXPECT_EQ(0, post_clear.size()) << "ClearTable must remove t1 entries from the reverse index";
+
+  // t2 should be unaffected.
+  auto t2_invalidated = mgr.InvalidateAffectedEntries("t2", "", "hello", 3, 2);
+  EXPECT_EQ(50, t2_invalidated.size()) << "ClearTable on t1 must not touch t2";
+}
+
+// =============================================================================
+// Phase 3 (HIGH): H-M2 / H-M7 regression tests
+// =============================================================================
+
+/**
+ * @brief H-M7: UnregisterCacheEntries removes a batch under a single mutex
+ *        acquisition. This test asserts the functional equivalence with the
+ *        per-key UnregisterCacheEntry path (the lock-batching is observable
+ *        only via timing/profiling, not via the public API).
+ */
+TEST(InvalidationManagerTest, UnregisterCacheEntriesRemovesBatch) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  std::vector<CacheKey> keys;
+  for (int i = 0; i < 20; ++i) {
+    CacheMetadata meta;
+    meta.table = "batch_test";
+    meta.ngrams = {"abc", "bcd"};
+    auto key = CacheKeyGenerator::Generate("batch_q" + std::to_string(i));
+    mgr.RegisterCacheEntry(key, meta);
+    keys.push_back(key);
+  }
+  ASSERT_EQ(mgr.GetTrackedEntryCount(), 20U);
+
+  // Batch unregister of half the keys.
+  std::vector<CacheKey> first_half(keys.begin(), keys.begin() + 10);
+  mgr.UnregisterCacheEntries(first_half);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 10U);
+
+  // Empty batch is a no-op.
+  mgr.UnregisterCacheEntries({});
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 10U);
+
+  // Batch with duplicates is tolerated (idempotent on missing keys after
+  // the first removal).
+  std::vector<CacheKey> second_half_with_dup(keys.begin() + 10, keys.end());
+  second_half_with_dup.push_back(keys[10]);  // duplicate
+  mgr.UnregisterCacheEntries(second_half_with_dup);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+
+  // Batch including unknown keys is tolerated.
+  auto unknown = CacheKeyGenerator::Generate("never_registered");
+  mgr.UnregisterCacheEntries({unknown});
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+}
+
+/**
+ * @brief H-M2: filter_columns_changed invalidation only walks entries that
+ *        belong to the affected table. Entries on OTHER tables that happen to
+ *        have filters must not be touched, and the cost must scale with the
+ *        affected table's size, not the global cache size.
+ */
+TEST(InvalidationManagerTest, FilterColumnsChangedRestrictedToTargetTable) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  // Mix of tables and filter/no-filter entries.
+  CacheMetadata meta_t1_filter;
+  meta_t1_filter.table = "t1";
+  meta_t1_filter.ngrams = {"abc"};
+  meta_t1_filter.filters = {{"col1", query::FilterOp::EQ, "v"}};
+
+  CacheMetadata meta_t1_nofilter;
+  meta_t1_nofilter.table = "t1";
+  meta_t1_nofilter.ngrams = {"def"};
+  // no filters
+
+  CacheMetadata meta_t2_filter;
+  meta_t2_filter.table = "t2";
+  meta_t2_filter.ngrams = {"ghi"};
+  meta_t2_filter.filters = {{"col2", query::FilterOp::EQ, "w"}};
+
+  std::vector<CacheKey> t1_filter_keys;
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("t1_f_" + std::to_string(i));
+    mgr.RegisterCacheEntry(key, meta_t1_filter);
+    t1_filter_keys.push_back(key);
+  }
+
+  std::vector<CacheKey> t1_nofilter_keys;
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("t1_nf_" + std::to_string(i));
+    mgr.RegisterCacheEntry(key, meta_t1_nofilter);
+    t1_nofilter_keys.push_back(key);
+  }
+
+  std::vector<CacheKey> t2_filter_keys;
+  for (int i = 0; i < 10; ++i) {
+    auto key = CacheKeyGenerator::Generate("t2_f_" + std::to_string(i));
+    mgr.RegisterCacheEntry(key, meta_t2_filter);
+    t2_filter_keys.push_back(key);
+  }
+
+  // filter_columns_changed=true on t1: must invalidate only the 10 t1+filter
+  // entries. t1 entries without filters and t2 entries (regardless of
+  // filters) must NOT be invalidated.
+  auto invalidated = mgr.InvalidateAffectedEntries("t1", "", "", 3, 2,
+                                                   /*cross_boundary_ngrams=*/true,
+                                                   /*filter_columns_changed=*/true);
+  EXPECT_EQ(invalidated.size(), 10U);
+  for (const auto& key : t1_filter_keys) {
+    EXPECT_TRUE(invalidated.find(key) != invalidated.end()) << "t1 filtered entry must be invalidated";
+  }
+  for (const auto& key : t1_nofilter_keys) {
+    EXPECT_FALSE(invalidated.find(key) != invalidated.end()) << "t1 unfiltered entry must NOT be invalidated";
+  }
+  for (const auto& key : t2_filter_keys) {
+    EXPECT_FALSE(invalidated.find(key) != invalidated.end()) << "t2 entries must never be touched by t1 invalidation";
+  }
+}
+
 }  // namespace mygramdb::cache

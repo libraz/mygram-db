@@ -15,7 +15,18 @@
 #include <string>
 #include <vector>
 
+#include "utils/error.h"
+
 namespace mygram::utils {
+
+/**
+ * @brief Maximum query / request length to log.
+ *
+ * Untrusted client input is truncated to this many characters before being
+ * placed into structured log fields. This bounds log volume on long requests
+ * and limits the blast radius of log-injection sequences embedded in queries.
+ */
+constexpr size_t kMaxQueryLogLength = 200;
 
 /**
  * @brief Log output format
@@ -164,6 +175,22 @@ class StructuredLog {
     } else {
       fields_text_.push_back(key + "=" + val_str);
     }
+    return *this;
+  }
+
+  /**
+   * @brief Add an Error object as two fields: "error" (message) and "error_code" (numeric).
+   *
+   * Shortcut for `.Field("error", err.message()).Field("error_code", static_cast<int64_t>(err.code()))`.
+   * Pairs the human-readable error message with its numeric code so log aggregators can
+   * group/filter on `error_code` even when message text varies.
+   *
+   * @param err Error object to log
+   * @return Reference to *this for chaining
+   */
+  StructuredLog& FieldError(const mygram::utils::Error& err) {
+    Field("error", err.message());
+    Field("error_code", static_cast<int64_t>(err.code()));
     return *this;
   }
 
@@ -417,9 +444,6 @@ inline void LogMySQLConnectionError(const std::string& host, int port, const std
  * @brief Log MySQL query error in structured format
  */
 inline void LogMySQLQueryError(const std::string& query, const std::string& error_msg) {
-  // Maximum query length to log (prevent log spam)
-  constexpr size_t kMaxQueryLogLength = 200;
-
   StructuredLog()
       .Event("mysql_query_error")
       .Field("query", query.substr(0, kMaxQueryLogLength))
@@ -457,9 +481,6 @@ inline void LogStorageError(const std::string& operation, const std::string& fil
  * @brief Log query parsing error in structured format
  */
 inline void LogQueryParseError(const std::string& query, const std::string& error_msg, size_t error_position = 0) {
-  // Maximum query length to log (prevent log spam)
-  constexpr size_t kMaxQueryLogLength = 200;
-
   StructuredLog()
       .Event("query_parse_error")
       .Field("query", query.substr(0, kMaxQueryLogLength))

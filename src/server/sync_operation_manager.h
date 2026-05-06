@@ -13,9 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "config/config.h"
 #include "server/server_types.h"
@@ -102,6 +104,12 @@ class SyncOperationManager {
 
   /**
    * @brief Start SYNC operation for a table
+   *
+   * Returns kServerShuttingDown if RequestShutdown() has already been
+   * called: once the manager has begun shutting down, no new SYNC is
+   * accepted (and existing syncs are cancelled). Callers should not
+   * retry such errors.
+   *
    * @param table_name Table to synchronize
    * @return Expected containing success response string, or Error on failure
    */
@@ -122,6 +130,11 @@ class SyncOperationManager {
 
   /**
    * @brief Request shutdown and cancel all active syncs
+   *
+   * After this returns, StartSync() will reject any new request with
+   * kServerShuttingDown. Existing syncs are cancelled (their loaders are
+   * told to abort); the caller is expected to follow up with
+   * WaitForCompletion() to drain the worker threads before destruction.
    */
   void RequestShutdown();
 
@@ -149,6 +162,22 @@ class SyncOperationManager {
    * @return true if any tables are syncing, false otherwise
    */
   bool GetSyncingTablesIfAny(std::vector<std::string>& out_tables) const;
+
+  /**
+   * @brief Verify that no SYNC is currently in progress.
+   *
+   * Convenience wrapper used by handlers (DUMP SAVE/LOAD, REPLICATION START,
+   * OPTIMIZE, SET mysql.*) to centralize the conflict-check pattern. When a
+   * SYNC is active, returns an Error with a formatted message of the form:
+   *   "Cannot {operation} while SYNC is in progress for tables: a b c"
+   *
+   * @param operation Short verb phrase describing the blocked operation
+   *                  (e.g., "save dump", "start replication"). Used inside
+   *                  the formatted error message.
+   * @return Empty Expected on success (no syncs in progress); Unexpected
+   *         containing an `ErrorCode::kSyncAlreadyInProgress` Error otherwise.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> CheckNoSyncInProgress(std::string_view operation) const;
 
   /**
    * @brief Set the cache manager (for deferred initialization)

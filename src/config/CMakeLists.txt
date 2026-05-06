@@ -28,7 +28,6 @@ add_library(mygramdb_config STATIC
   config_loader.cpp
   config_validator.cpp
   config_help.cpp
-  runtime_variable_manager.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_schema_embedded.h  # Add as source to track changes
 )
 
@@ -43,5 +42,20 @@ target_link_libraries(mygramdb_config PUBLIC
   nlohmann_json_schema_validator
   spdlog::spdlog
   mygramdb_utils
+)
+
+add_library(mygramdb_runtime_config STATIC
+  runtime_variable_manager.cpp
+)
+
+target_include_directories(mygramdb_runtime_config PUBLIC
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(mygramdb_runtime_config PUBLIC
+  mygramdb_config
+)
+
+target_link_libraries(mygramdb_runtime_config PRIVATE
   mygramdb_cache  # For CacheManager methods called by RuntimeVariableManager
 )

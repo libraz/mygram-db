@@ -611,6 +611,20 @@
               "type": "string",
               "description": "Value for Access-Control-Allow-Origin header when CORS is enabled",
               "default": ""
+            },
+            "read_timeout_sec": {
+              "type": "integer",
+              "description": "HTTP read timeout in seconds (httplib::Server::set_read_timeout)",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "write_timeout_sec": {
+              "type": "integer",
+              "description": "HTTP write timeout in seconds (httplib::Server::set_write_timeout)",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 3600
             }
           }
         },

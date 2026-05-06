@@ -6,13 +6,16 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -292,6 +295,27 @@ struct DumpProgress {
   }
 
   /**
+   * @brief Spawn a new worker thread under DumpProgress::mutex.
+   *
+   * Race fix: the previous code assigned worker_thread directly from the
+   * handler thread without holding mutex, while JoinWorker() reads
+   * worker_thread under mutex. If TcpServer::Stop() (which calls JoinWorker)
+   * raced with HandleDumpSave's worker_thread assignment, that was a data
+   * race on the unique_ptr by the C++ memory model. Centralizing the
+   * assignment here eliminates the unguarded write.
+   *
+   * Pre-condition: caller has already drained any prior worker via
+   * JoinWorker(). This method asserts worker_thread is empty so a misuse
+   * (forgetting the JoinWorker drain) cannot silently leak a thread.
+   */
+  void StartWorker(std::function<void()> work) {
+    std::lock_guard<std::mutex> lock(mutex);
+    // Pre-condition: caller drained prior worker. Misuse should be loud.
+    assert(!worker_thread || !worker_thread->joinable());
+    worker_thread = std::make_unique<std::thread>(std::move(work));
+  }
+
+  /**
    * @brief Join worker thread if exists
    */
   void JoinWorker() {
@@ -339,6 +363,14 @@ struct HandlerContext {
   cache::CacheManager* cache_manager = nullptr;
   config::RuntimeVariableManager* variable_manager = nullptr;
   DumpProgress* dump_progress = nullptr;  // Progress tracking for async dump operations
+
+  /// Optional pointer to the server's shutdown flag. When non-null and true,
+  /// long-running workers (DumpSaveWorker / DumpLoadWorker) skip
+  /// auto-restarting replication after their in-flight operation completes,
+  /// because the binlog_reader is about to be torn down by TcpServer::Stop()
+  /// (see CR-3 / CR-10 audit, May 2026). Tests may leave this null; in that
+  /// case the worker behaves as before (always attempts auto-restart).
+  std::atomic<bool>* shutdown_flag = nullptr;
 };
 
 }  // namespace mygramdb::server

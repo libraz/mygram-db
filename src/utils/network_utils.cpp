@@ -141,7 +141,7 @@ std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
   for (const auto& cidr_str : allow_cidrs) {
     auto cidr = CIDR::Parse(cidr_str);
     if (!cidr) {
-      StructuredLog().Event("server_warning").Field("type", "invalid_cidr_entry").Field("cidr", cidr_str).Warn();
+      StructuredLog().Event("invalid_cidr_entry").Field("cidr", cidr_str).Warn();
       continue;
     }
     parsed.push_back(*cidr);

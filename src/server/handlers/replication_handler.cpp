@@ -5,9 +5,9 @@
 
 #include "server/handlers/replication_handler.h"
 
-#include <spdlog/spdlog.h>
-
 #include "mysql/binlog_reader_interface.h"
+#include "server/log_field_names.h"
+#include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
 
@@ -53,10 +53,11 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       }
 
       // Check if any table is currently syncing
-      if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        return ResponseFormatter::FormatError(
-            "Cannot start replication while SYNC is in progress. "
-            "SYNC will automatically start replication when complete.");
+      if (ctx_.sync_manager != nullptr) {
+        auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kStartReplication);
+        if (!check) {
+          return ResponseFormatter::FormatError(check.error().message());
+        }
       }
 
       // Check if DUMP LOAD is in progress (block REPLICATION START)
@@ -89,18 +90,22 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
               .Field("gtid", current_gtid)
               .Info();
 
-          if (ctx_.binlog_reader->Start()) {
+          // H-D4: use Expected<void, Error> chain rather than the legacy
+          // bool + GetLastError() pair. This matches the pattern used by
+          // dump_handler.cpp's restart paths so all replication-Start sites
+          // surface errors via the same Expected -> FieldError() flow.
+          auto start_result = ctx_.binlog_reader->Start();
+          if (start_result) {
             return ResponseFormatter::FormatReplicationStartResponse();
           }
 
-          std::string error = ctx_.binlog_reader->GetLastError();
           mygram::utils::StructuredLog()
               .Event("replication_start_failed")
               .Field("source", "user_request")
-              .Field("gtid", current_gtid)
-              .Field("error", error)
+              .Field(log_fields::kFieldGtid, current_gtid)
+              .FieldError(start_result.error())
               .Error();
-          return ResponseFormatter::FormatError("Failed to start replication: " + error);
+          return ResponseFormatter::FormatError("Failed to start replication: " + start_result.error().message());
         }
         return ResponseFormatter::FormatError("Replication is already running");
       }

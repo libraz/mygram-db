@@ -218,6 +218,111 @@ TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
   EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
 }
 
+TEST_F(HttpServerTest, SearchSupportsJsonSort) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "e";
+  request_body["limit"] = 3;
+  request_body["sort"] = {{"column", "status"}, {"order", "ASC"}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 3);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_3");
+}
+
+TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machime";
+  request_body["fuzzy"] = 1;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_1");
+}
+
+TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
+  auto doc_id = doc_store_->GetDocId("article_1");
+  ASSERT_TRUE(doc_id.has_value());
+  doc_store_->SetNormalizedText(*doc_id, "machine learning");
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["highlight"] = {
+      {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 50}, {"max_fragments", 1}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 1);
+  ASSERT_TRUE(body["results"][0].contains("highlight"));
+  EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>machine</strong>"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  // 257 bytes — one over the 256-byte cap.
+  request_body["highlight"] = {{"open_tag", std::string(257, 'a')}, {"close_tag", "</strong>"}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  const auto error_str = body["error"].get<std::string>();
+  EXPECT_NE(error_str.find("open_tag"), std::string::npos);
+  EXPECT_NE(error_str.find("at most 256 bytes"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"] = json::array();
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["error"], "Field 'filters' must be an object");
+}
+
 TEST_F(HttpServerTest, SearchMissingQuery) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -372,48 +477,31 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
   EXPECT_EQ(body["results"][0]["primary_key"], "bool_article_2");
 }
 
-TEST_F(HttpServerTest, SearchWithSort) {
+/**
+ * @brief Test that SORT inside `q` is rejected as parameter pollution (P1-9).
+ *
+ * The HTTP API accepts dedicated JSON fields for limit/offset/filters, so the
+ * search expression `q` must not be allowed to embed parser clause keywords.
+ * Otherwise a caller could override JSON-supplied values or smuggle extra
+ * clauses past validation. This regression test pins that behavior.
+ */
+TEST_F(HttpServerTest, SearchRejectsSortKeywordInQ) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
 
-  // Test SORT score DESC
   json request_body;
   request_body["q"] = "e SORT score DESC";
   request_body["limit"] = 10;
 
   auto res = client.Post("/test/search", request_body.dump(), "application/json");
-
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 200);
+  EXPECT_EQ(res->status, 400);
 
   auto body = json::parse(res->body);
-  // Should return article_1 (3.14159), article_2 (1.61803), article_3 (no score)
-  ASSERT_GE(body["results"].size(), 2);
-  EXPECT_EQ(body["results"][0]["primary_key"], "article_1");  // Highest score
-  EXPECT_EQ(body["results"][1]["primary_key"], "article_2");  // Second highest
-
-  // Test SORT score ASC
-  request_body["q"] = "e SORT score ASC";
-  res = client.Post("/test/search", request_body.dump(), "application/json");
-  ASSERT_TRUE(res);
-  body = json::parse(res->body);
-  ASSERT_GE(body["results"].size(), 2);
-  // article_3 has no score (NULL) - should be first in ASC
-  // Then article_2 (1.61803), then article_1 (3.14159)
-  EXPECT_EQ(body["results"][0]["primary_key"], "article_3");  // NULL first in ASC
-  EXPECT_EQ(body["results"][1]["primary_key"], "article_2");  // Lowest score
-
-  // Test SORT category ASC (string sorting)
-  request_body["q"] = "e SORT category ASC";
-  res = client.Post("/test/search", request_body.dump(), "application/json");
-  ASSERT_TRUE(res);
-  body = json::parse(res->body);
-  ASSERT_GE(body["results"].size(), 2);
-  // "news" < "tech" in alphabetical order
-  EXPECT_EQ(body["results"][0]["primary_key"], "article_3");  // NULL first
-  EXPECT_EQ(body["results"][1]["primary_key"], "article_2");  // "news"
-  EXPECT_EQ(body["results"][2]["primary_key"], "article_1");  // "tech"
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Reserved keyword"), std::string::npos);
+  EXPECT_NE(body["error"].get<std::string>().find("SORT"), std::string::npos);
 }
 
 /**
@@ -1016,6 +1104,231 @@ TEST_F(HttpServerTest, CountRejectsIntegerQField) {
   auto body = json::parse(res->body);
   EXPECT_TRUE(body.contains("error"));
   EXPECT_NE(body["error"].get<std::string>().find("must be a string"), std::string::npos);
+}
+
+// ============================================================
+// Parameter pollution prevention tests (P1-9)
+// ============================================================
+
+/**
+ * @brief Smuggling LIMIT inside `q` must not override JSON `limit`.
+ *
+ * Without the fix, the QueryParser would interpret the trailing `LIMIT 0`
+ * as an override and the server would respond with zero results despite
+ * the JSON request specifying `limit: 10`.
+ */
+TEST_F(HttpServerTest, SearchRejectsLimitKeywordInQ) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "e LIMIT 0 OFFSET 999999";
+  request_body["limit"] = 10;
+  request_body["offset"] = 0;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  // Either LIMIT or OFFSET must be flagged; matching is left-to-right so we
+  // expect LIMIT to be reported first.
+  EXPECT_NE(body["error"].get<std::string>().find("LIMIT"), std::string::npos);
+}
+
+/**
+ * @brief Smuggling OFFSET alone inside `q` is also rejected.
+ */
+TEST_F(HttpServerTest, SearchRejectsOffsetKeywordInQ) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine OFFSET 100";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("OFFSET"), std::string::npos);
+}
+
+/**
+ * @brief Mixed-case reserved keywords are rejected (case-insensitive match).
+ */
+TEST_F(HttpServerTest, SearchRejectsMixedCaseLimitKeywordInQ) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine Limit 5";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+}
+
+/**
+ * @brief Quoted reserved keywords are allowed (legitimate phrase search).
+ *
+ * Phrase queries such as `"foo LIMIT bar"` must continue to work because the
+ * literal text is not a parser clause; the rejection logic must skip quoted
+ * regions.
+ */
+TEST_F(HttpServerTest, SearchAllowsLimitKeywordInQuotedPhrase) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "\"machine LIMIT learning\"";  // quoted phrase
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  // Quoted phrase is a valid search input; even if no document matches the
+  // exact phrase, the request itself must not be flagged as invalid.
+  EXPECT_EQ(res->status, 200);
+}
+
+/**
+ * @brief Boolean operators (AND/OR/NOT) are not parameter pollution and
+ * remain valid inside `q`.
+ */
+TEST_F(HttpServerTest, SearchAllowsBooleanOperatorsInQ) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine AND learning";  // boolean AND
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+}
+
+/**
+ * @brief A table name containing whitespace is rejected (URL-encoded form).
+ *
+ * This covers the case where the raw URL would be `/articles%20foo/search`.
+ * The matched table name `articles foo` must not be embedded in the parser
+ * command since the embedded space would inject a stray token.
+ */
+TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+
+  // %20 -> space. The httplib router decodes percent-escapes before matching.
+  auto res = client.Post("/test%20foo/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Invalid table name"), std::string::npos);
+}
+
+/**
+ * @brief Table names with semicolons or other punctuation are rejected.
+ */
+TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+
+  auto res = client.Post("/test%3Bdrop/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+}
+
+/**
+ * @brief COUNT also rejects reserved keywords inside `q`.
+ */
+TEST_F(HttpServerTest, CountRejectsFilterKeywordInQ) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "e FILTER status = 1";
+
+  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("FILTER"), std::string::npos);
+}
+
+/**
+ * @brief COUNT also rejects unsafe table names.
+ */
+TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+
+  auto res = client.Post("/test%20foo/count", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+}
+
+/**
+ * @brief End-to-end: smuggled LIMIT does not affect pagination metadata.
+ *
+ * Even though the request is rejected at validation time, this guards against
+ * a hypothetical regression where the validator is removed and the JSON
+ * `limit` continues to be the source of truth.
+ */
+TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  // Sanity: a clean request with explicit limit returns the requested limit.
+  json clean_request;
+  clean_request["q"] = "e";
+  clean_request["limit"] = 2;
+  clean_request["offset"] = 0;
+
+  auto clean_res = client.Post("/test/search", clean_request.dump(), "application/json");
+  ASSERT_TRUE(clean_res);
+  EXPECT_EQ(clean_res->status, 200);
+  auto clean_body = json::parse(clean_res->body);
+  EXPECT_EQ(clean_body["limit"], 2);
+  EXPECT_EQ(clean_body["offset"], 0);
+  EXPECT_EQ(clean_body["results"].size(), 2);
+
+  // Smuggle attempt: the request must be rejected (not silently override).
+  json smuggle_request;
+  smuggle_request["q"] = "e LIMIT 0";
+  smuggle_request["limit"] = 2;
+  smuggle_request["offset"] = 0;
+
+  auto smuggle_res = client.Post("/test/search", smuggle_request.dump(), "application/json");
+  ASSERT_TRUE(smuggle_res);
+  EXPECT_EQ(smuggle_res->status, 400);
 }
 
 }  // namespace server

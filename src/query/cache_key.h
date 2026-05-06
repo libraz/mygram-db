@@ -79,8 +79,18 @@ namespace std {
 template <>
 struct hash<mygramdb::cache::CacheKey> {
   size_t operator()(const mygramdb::cache::CacheKey& key) const noexcept {
-    // XOR the two halves for hash combination
-    return static_cast<size_t>(key.hash_high ^ key.hash_low);
+    // Plain XOR combination produces guaranteed collisions for keys whose
+    // halves are swapped (e.g., (a, b) and (b, a) hash identically because
+    // XOR is commutative). Mix using a boost::hash_combine-style step
+    // (Fibonacci constant + shifts) to preserve entropy and break the
+    // swapped-pair symmetry. The shift amounts (6 and 2) are taken from
+    // the original boost::hash_combine implementation.
+    constexpr std::uint64_t kFibonacci = 0x9E3779B97F4A7C15ULL;
+    constexpr unsigned int kShiftLeft = 6;
+    constexpr unsigned int kShiftRight = 2;
+    std::uint64_t combined = key.hash_high;
+    combined ^= key.hash_low + kFibonacci + (combined << kShiftLeft) + (combined >> kShiftRight);
+    return static_cast<size_t>(combined);
   }
 };
 }  // namespace std

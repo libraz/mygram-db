@@ -15,7 +15,9 @@
 #include <unistd.h>
 
 #include <array>
+#include <cassert>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -63,6 +65,11 @@ ReactorConnection::~ReactorConnection() {
 }
 
 bool ReactorConnection::OnReadable() {
+  // Refresh idle-timer baseline. Any inbound event counts as activity for
+  // the reaper, even if recv() ultimately returns 0 (peer half-close): the
+  // peer just spoke to us, so we are not idle.
+  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
+
   if (closing_.load(std::memory_order_acquire)) {
     return false;
   }
@@ -143,19 +150,31 @@ bool ReactorConnection::OnReadable() {
   // pending in the write queue, we can tear down immediately. Otherwise the
   // drain task (or OnWritable, after the write queue drains) will do the
   // close for us.
+  //
+  // Bug fix (P1-3): the empty-queue test must hold BOTH mutexes
+  // simultaneously. Releasing frame_mutex_ before acquiring write_mutex_
+  // opens a window where an in-flight DrainTask can finish dispatching the
+  // last frame and call EnqueueResponse → write_queue_.push_back AFTER we
+  // observed pending_frames_/drain_scheduled_ both empty but BEFORE we read
+  // write_queue_. The result was a closing_=true decision while a fresh
+  // response sat in the write queue, dropping the response on the floor.
+  //
+  // Lock ordering (consistent with the rest of this file):
+  //   frame_mutex_ -> write_mutex_
+  // No code path takes write_mutex_ then frame_mutex_; OnWritable
+  // deliberately avoids acquiring frame_mutex_ while holding write_mutex_
+  // (see commentary in OnWritable).
   if (read_eof_.load(std::memory_order_acquire)) {
-    bool nothing_to_dispatch = false;
+    bool should_close = false;
     {
-      std::lock_guard<std::mutex> lock(frame_mutex_);
-      nothing_to_dispatch = pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire);
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      std::lock_guard<std::mutex> write_lock(write_mutex_);
+      if (pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire) && write_queue_.empty()) {
+        closing_.store(true, std::memory_order_release);
+        should_close = true;
+      }
     }
-    bool write_queue_empty = false;
-    {
-      std::lock_guard<std::mutex> lock(write_mutex_);
-      write_queue_empty = write_queue_.empty();
-    }
-    if (nothing_to_dispatch && write_queue_empty) {
-      closing_.store(true, std::memory_order_release);
+    if (should_close) {
       return false;
     }
   }
@@ -164,6 +183,11 @@ bool ReactorConnection::OnReadable() {
 }
 
 bool ReactorConnection::OnWritable() {
+  // Outbound progress also resets the idle-timer (Fix N-3): a slow client
+  // that is steadily draining its socket is not "idle" even if it never
+  // sends another request.
+  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
+
   std::unique_lock<std::mutex> lock(write_mutex_);
 
   if (!DrainWriteQueueLocked()) {
@@ -239,7 +263,7 @@ size_t ReactorConnection::ExtractFramesLocked() {
   }
   if (consumed > 0) {
     // Single splice at the end to avoid quadratic erase-per-frame cost.
-    read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<ssize_t>(consumed));
+    read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
   }
   return enqueued;
 }
@@ -282,11 +306,10 @@ void ReactorConnection::DrainTask() {
     }
 
     // Dispatch. `Dispatch` is synchronous and returns the full response.
+    // The per-request counter is incremented inside RequestDispatcher::Dispatch
+    // so all dispatch paths agree on a single canonical site; do not call
+    // stats_->IncrementRequests() here or the request count will double.
     std::string response = dispatcher_->Dispatch(frame, conn_ctx_);
-    if (stats_ != nullptr) {
-      // Mirror the blocking path's per-request counter increment.
-      stats_->IncrementRequests();
-    }
 
     // Enqueue the response for non-blocking send. The fast path in
     // EnqueueResponse attempts an inline drain before returning; only on
@@ -300,19 +323,53 @@ void ReactorConnection::DrainTask() {
   // Netty/Vert.x "clear-then-recheck": before releasing the drain slot,
   // confirm that no new frames arrived in the window between the last
   // queue-empty check and now. If frames did arrive, reschedule ourselves.
+  //
+  // Bug fix (P1-4): the previous version cleared `drain_scheduled_=false`
+  // OUTSIDE the frame_mutex_ critical section and BEFORE calling
+  // ScheduleDrainTask. That created a window where another thread's
+  // ScheduleDrainTask CAS could succeed (because drain_scheduled_ was
+  // momentarily false) AND this task's subsequent ScheduleDrainTask CAS
+  // would also succeed (after the other task's CAS reset it to false), so
+  // two drain tasks ran concurrently against the same connection,
+  // violating the "at most one drain task per connection" invariant.
+  //
+  // The fix: do the empty/closing test under frame_mutex_, and only flip
+  // drain_scheduled_ to false in the path where we are NOT going to
+  // reschedule. When we ARE going to reschedule, leave drain_scheduled_
+  // as true so any concurrent ScheduleDrainTask CAS fails; this task then
+  // submits the follow-up drain externally and returns.
   bool reschedule = false;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (!pending_frames_.empty() && !closing_.load(std::memory_order_acquire)) {
+    if (pending_frames_.empty() || closing_.load(std::memory_order_acquire)) {
+      drain_scheduled_.store(false, std::memory_order_release);
+    } else {
+      // Keep drain_scheduled_ = true so concurrent ScheduleDrainTask
+      // attempts fail their CAS — we own the next drain submission.
       reschedule = true;
     }
   }
-  drain_scheduled_.store(false, std::memory_order_release);
   if (reschedule) {
-    if (!ScheduleDrainTask()) {
-      // Scheduling failed (e.g., thread pool full) — close the connection
-      // to avoid silently abandoning pending frames.
+    // Submit the follow-up task directly. We deliberately bypass
+    // ScheduleDrainTask's CAS because drain_scheduled_ is already true and
+    // belongs to us; calling ScheduleDrainTask here would early-return
+    // without submitting. If submission fails (e.g., thread pool full),
+    // we must clear drain_scheduled_ so the connection can recover, then
+    // close it because we can no longer guarantee progress on its frames.
+    if (thread_pool_ == nullptr || dispatcher_ == nullptr) {
+      drain_scheduled_.store(false, std::memory_order_release);
       closing_.store(true, std::memory_order_release);
+    } else {
+      auto self = shared_from_this();
+      const bool submitted = thread_pool_->Submit([self]() { self->DrainTask(); });
+      if (!submitted) {
+        drain_scheduled_.store(false, std::memory_order_release);
+        mygram::utils::StructuredLog()
+            .Event("reactor_drain_resubmit_failed")
+            .Field("fd", static_cast<int64_t>(fd_))
+            .Warn();
+        closing_.store(true, std::memory_order_release);
+      }
     }
     return;
   }
@@ -414,15 +471,44 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
 }
 
 bool ReactorConnection::DrainWriteQueueLocked() {
+  // MSG_NOSIGNAL is defined on all platforms we target (Linux, macOS, BSDs).
+  // Falling back to 0 in the #else preserves correctness via SO_NOSIGPIPE
+  // that the acceptor sets per-socket on macOS (see
+  // ConnectionAcceptor::SetSocketOptions). The ifdef guards an unlikely
+  // future port to a platform that lacks both MSG_NOSIGNAL and a per-socket
+  // alternative; on such a platform SIGPIPE would have to be ignored
+  // process-wide (signal_manager.cpp already does this) for correctness.
+#ifdef MSG_NOSIGNAL
+  constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+  constexpr int kSendFlags = 0;
+#endif
   while (!write_queue_.empty()) {
     const std::string& front = write_queue_.front();
     const char* data = front.data() + front_offset_;
     const size_t remaining = front.size() - front_offset_;
 
-    ssize_t n = ::send(fd_, data, remaining, MSG_NOSIGNAL);
+    ssize_t n = ::send(fd_, data, remaining, kSendFlags);
     if (n > 0) {
       front_offset_ += static_cast<size_t>(n);
-      write_queue_bytes_ -= static_cast<size_t>(n);
+      // Defensive underflow guard: a bug elsewhere that drives
+      // write_queue_bytes_ below the actually-queued byte count would wrap
+      // the size_t to ~SIZE_MAX, hiding the bug from the slow-reader gate
+      // in EnqueueResponse. assert() catches it in debug builds; the
+      // release-build clamp + structured log keeps the connection healthy
+      // and surfaces the bug to operators without crashing.
+      const auto sent_bytes = static_cast<size_t>(n);
+      assert(write_queue_bytes_ >= sent_bytes);
+      if (write_queue_bytes_ < sent_bytes) {
+        mygram::utils::StructuredLog()
+            .Event("reactor_write_accounting_underflow")
+            .Field("fd", static_cast<int64_t>(fd_))
+            .Field("write_queue_bytes", static_cast<uint64_t>(write_queue_bytes_))
+            .Field("sent_bytes", static_cast<uint64_t>(sent_bytes))
+            .Warn();
+        write_queue_bytes_ = sent_bytes;
+      }
+      write_queue_bytes_ -= sent_bytes;
       pending_write_bytes_.store(write_queue_bytes_, std::memory_order_relaxed);
       if (front_offset_ == front.size()) {
         write_queue_.pop_front();
