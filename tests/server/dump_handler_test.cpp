@@ -1727,11 +1727,12 @@ TEST(ReplicationPauseCounterTest, FirstPauserDetectedOnce) {
 /**
  * @brief Counter behaves correctly under concurrent Pause/Release pairs.
  *
- * N threads each call RequestPause and ReleasePause in pairs. We verify
- * that:
- *   - Exactly one RequestPause returns true (first pauser).
- *   - Exactly one ReleasePause returns true (last releaser).
- *   - The counter ends at 0 (no leaks).
+ * N threads first all call RequestPause, then a barrier ensures every
+ * thread has paused before any thread releases. This guarantees the
+ * counter goes 0->1->2->...->N->...->1->0, so we can deterministically
+ * assert the "exactly one first-pauser, exactly one last-releaser"
+ * contract regardless of scheduling jitter on slower runners (coverage
+ * builds, sanitizers).
  */
 TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLast) {
   replication_pause::ResetForTesting();
@@ -1739,6 +1740,7 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
   constexpr int kThreads = 32;
   std::atomic<int> first_pauser_count{0};
   std::atomic<int> last_releaser_count{0};
+  std::atomic<int> paused_count{0};
   std::atomic<bool> start{false};
 
   std::vector<std::thread> workers;
@@ -1751,8 +1753,11 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
       if (replication_pause::RequestPause()) {
         first_pauser_count.fetch_add(1, std::memory_order_relaxed);
       }
-      // Tiny sleep to widen the overlap window.
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      // Barrier: wait until every thread has paused before any thread releases.
+      paused_count.fetch_add(1, std::memory_order_acq_rel);
+      while (paused_count.load(std::memory_order_acquire) < kThreads) {
+        std::this_thread::yield();
+      }
       if (replication_pause::ReleasePause()) {
         last_releaser_count.fetch_add(1, std::memory_order_relaxed);
       }

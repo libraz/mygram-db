@@ -80,11 +80,13 @@ TEST_F(HttpServerStartupTest, StartOnValidPortSucceeds) {
 /**
  * @brief Verify that starting on a port already in use returns an error (no crash or hang)
  *
- * Uses a raw socket with SO_REUSEADDR disabled to exclusively occupy the port,
- * preventing httplib's SO_REUSEADDR from allowing a second bind.
+ * Uses a raw socket bound to port 0 (OS-assigned ephemeral port) with
+ * SO_REUSEADDR disabled to exclusively occupy a known-free port, then
+ * attempts to start HttpServer on the same port. Letting the OS pick the
+ * port avoids collisions with other concurrent tests in parallel ctest runs.
  */
 TEST_F(HttpServerStartupTest, StartOnOccupiedPortReturnsError) {
-  // Occupy the port with a raw socket (without SO_REUSEADDR)
+  // Occupy a port with a raw socket (without SO_REUSEADDR)
   int sock_fd = ::socket(AF_INET, SOCK_STREAM, 0);
   ASSERT_GE(sock_fd, 0) << "Failed to create socket";
 
@@ -98,19 +100,27 @@ TEST_F(HttpServerStartupTest, StartOnOccupiedPortReturnsError) {
   struct sockaddr_in addr {};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons(18091);
+  addr.sin_port = htons(0);  // Let the OS pick a free port to avoid collisions
 
   int bind_result = ::bind(sock_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-  ASSERT_EQ(bind_result, 0) << "Failed to bind raw socket to port 18091";
+  ASSERT_EQ(bind_result, 0) << "Failed to bind raw socket to ephemeral port";
   ASSERT_EQ(::listen(sock_fd, 1), 0) << "Failed to listen on raw socket";
 
+  // Read back the OS-assigned port number
+  struct sockaddr_in actual_addr {};
+  socklen_t addr_len = sizeof(actual_addr);
+  ASSERT_EQ(::getsockname(sock_fd, reinterpret_cast<struct sockaddr*>(&actual_addr), &addr_len), 0)
+      << "Failed to read back bound port";
+  uint16_t occupied_port = ntohs(actual_addr.sin_port);
+  ASSERT_GT(occupied_port, 0) << "OS did not assign a port";
+
   // Now attempt to start HttpServer on the same port
-  auto cfg = MakeConfig(18091);
+  auto cfg = MakeConfig(occupied_port);
   HttpServer server(cfg, table_contexts_, config_.get());
   auto result = server.Start();
 
   // Should fail with an error, not crash or hang
-  ASSERT_FALSE(result.has_value()) << "Server should fail to bind to occupied port";
+  ASSERT_FALSE(result.has_value()) << "Server should fail to bind to occupied port " << occupied_port;
   EXPECT_FALSE(server.IsRunning());
 
   // Verify error message mentions the bind failure
