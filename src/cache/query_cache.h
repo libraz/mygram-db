@@ -6,7 +6,6 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -14,7 +13,6 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +20,7 @@
 #include "cache/cache_entry.h"
 #include "cache/result_compressor.h"
 #include "query/cache_key.h"
+#include "utils/periodic_worker.h"
 
 namespace mygramdb::cache {
 
@@ -453,11 +452,12 @@ class QueryCache {
   std::unordered_set<CacheKey> pending_expired_keys_;        ///< TTL-expired keys
   std::unordered_set<CacheKey> pending_decompression_keys_;  ///< Decompression-failed keys
 
-  // Background LRU refresh thread
-  std::atomic<bool> should_stop_{false};
-  std::thread lru_refresh_thread_;
-  std::mutex stop_mutex_;            ///< Mutex for stop_cv_ condition variable
-  std::condition_variable stop_cv_;  ///< Notified on shutdown to avoid busy-poll sleep
+  // Background LRU refresh worker. M-8 unified the previous std::thread +
+  // std::condition_variable + atomic<bool> trio with the rest of MygramDB's
+  // periodic-task plumbing via PeriodicWorker; the worker invokes
+  // RefreshLRU() at a fixed cadence and is stopped (with a fast cv-wake)
+  // by the destructor.
+  mygram::utils::PeriodicWorker lru_refresh_worker_{"query_cache_lru_refresh"};
 
   /**
    * @brief Evict entries to make room for new entry
@@ -508,18 +508,11 @@ class QueryCache {
   void Touch(const CacheKey& key);
 
   /**
-   * @brief Background worker for LRU refresh
-   *
-   * Periodically updates LRU list based on accessed_since_refresh flags.
-   * This allows Lookup() to avoid lock upgrade, improving read concurrency.
-   */
-  void RefreshLRUWorker();
-
-  /**
    * @brief Refresh LRU list based on access flags
    *
    * Moves entries with accessed_since_refresh=true to front of LRU list.
-   * Called by RefreshLRUWorker() while holding exclusive lock.
+   * Invoked by lru_refresh_worker_ at a fixed cadence; runs without
+   * holding the worker's internal cv mutex.
    */
   void RefreshLRU();
 

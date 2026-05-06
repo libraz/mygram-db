@@ -8,6 +8,7 @@ add_library(mygramdb_utils STATIC
   datetime_converter.cpp
   safe_path.cpp
   sql_utils.cpp
+  periodic_worker.cpp
 )
 
 target_include_directories(mygramdb_utils PUBLIC

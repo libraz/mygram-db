@@ -58,20 +58,18 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
     cache_map_.reserve(estimated_entries);
   }
 
-  // Start background LRU refresh thread
-  lru_refresh_thread_ = std::thread(&QueryCache::RefreshLRUWorker, this);
+  // Start background LRU refresh worker. The 100ms cadence (10 Hz) is the
+  // same value the hand-rolled loop used; PeriodicWorker handles the
+  // shutdown-aware cv-wake so we no longer carry a dedicated stop flag.
+  // Start failure here is logged by PeriodicWorker; we ignore the return
+  // because realistic failure modes (interval<=0, already-running) cannot
+  // fire on a fresh PeriodicWorker.
+  constexpr auto kRefreshInterval = std::chrono::milliseconds(100);
+  (void)lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
 }
 
 QueryCache::~QueryCache() {
-  // Stop background LRU refresh thread
-  should_stop_.store(true);
-  {
-    std::lock_guard<std::mutex> lock(stop_mutex_);
-    stop_cv_.notify_all();
-  }
-  if (lru_refresh_thread_.joinable()) {
-    lru_refresh_thread_.join();
-  }
+  lru_refresh_worker_.Stop();
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
@@ -642,23 +640,6 @@ void QueryCache::Touch(const CacheKey& key) {
   lru_list_.erase(iter->second.second);
   lru_list_.push_front(key);
   iter->second.second = lru_list_.begin();
-}
-
-void QueryCache::RefreshLRUWorker() {
-  constexpr auto kRefreshInterval = std::chrono::milliseconds(100);  // 10 Hz refresh cycle
-
-  while (!should_stop_.load()) {
-    {
-      std::unique_lock<std::mutex> lock(stop_mutex_);
-      stop_cv_.wait_for(lock, kRefreshInterval, [this] { return should_stop_.load(); });
-    }
-
-    if (should_stop_.load()) {
-      break;
-    }
-
-    RefreshLRU();
-  }
 }
 
 void QueryCache::RefreshLRU() {

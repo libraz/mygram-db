@@ -7,12 +7,12 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
+
+#include "utils/periodic_worker.h"
 
 namespace mygramdb::server {
 
@@ -190,20 +190,11 @@ class RateLimiter {
   // O(n) latency spikes on the request hot path. The previous implementation
   // swept inside AllowRequest under mutex_, blocking all rate-limit checks
   // (including for unrelated clients) while every expired bucket was removed.
-  // Now AllowRequest is strictly O(1) on the bucket count.
-  std::thread sweeper_thread_;
-  std::mutex sweeper_mutex_;
-  std::condition_variable sweeper_cv_;
-  std::atomic<bool> stop_{false};
-
-  /**
-   * @brief Sweeper thread loop.
-   *
-   * Wakes every `cleanup_interval_` to remove buckets older than
-   * `inactivity_timeout_`. Wakes immediately when `stop_` is set so the
-   * destructor doesn't have to wait a full interval.
-   */
-  void SweeperLoop();
+  // Now AllowRequest is strictly O(1) on the bucket count. M-8 unified the
+  // hand-rolled cv-loop with the rest of MygramDB's periodic-task plumbing
+  // via PeriodicWorker; the worker calls SweepExpiredBuckets() on its own
+  // thread and respects stop signals via its internal cv.
+  mygram::utils::PeriodicWorker sweeper_{"rate_limiter_sweeper"};
 
   /**
    * @brief Single sweep over client_buckets_, removing expired entries.

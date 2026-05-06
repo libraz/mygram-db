@@ -80,20 +80,18 @@ RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients
       .Debug();
 
   // Start background sweeper. Started last so all members are fully
-  // initialized before the thread observes them.
-  sweeper_thread_ = std::thread(&RateLimiter::SweeperLoop, this);
+  // initialized before the worker observes them. Start failure here is
+  // logged by PeriodicWorker itself; we deliberately ignore the
+  // Expected return because (a) failure modes are interval<=0 (compile-
+  // time guarded by kDefaultCleanupInterval) or already-running (a
+  // fresh PeriodicWorker can never be), so the only realistic failure
+  // is OOM during std::thread construction, which we cannot recover
+  // from at this layer.
+  (void)sweeper_.Start([this] { SweepExpiredBuckets(); }, cleanup_interval_);
 }
 
 RateLimiter::~RateLimiter() {
-  // Signal stop and wake the sweeper.
-  {
-    std::lock_guard<std::mutex> lock(sweeper_mutex_);
-    stop_.store(true, std::memory_order_release);
-  }
-  sweeper_cv_.notify_all();
-  if (sweeper_thread_.joinable()) {
-    sweeper_thread_.join();
-  }
+  sweeper_.Stop();
 }
 
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
@@ -141,24 +139,6 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   }
 
   return allowed;
-}
-
-void RateLimiter::SweeperLoop() {
-  std::unique_lock<std::mutex> lock(sweeper_mutex_);
-  while (!stop_.load(std::memory_order_acquire)) {
-    // wait_for releases sweeper_mutex_ while sleeping. The predicate makes
-    // the wait stop-aware so the destructor doesn't have to wait a full
-    // interval for shutdown.
-    sweeper_cv_.wait_for(lock, cleanup_interval_, [this] { return stop_.load(std::memory_order_acquire); });
-    if (stop_.load(std::memory_order_acquire)) {
-      break;
-    }
-    // Release sweeper_mutex_ around the actual sweep so notify_all() from
-    // the destructor can preempt us promptly even if the sweep is large.
-    lock.unlock();
-    SweepExpiredBuckets();
-    lock.lock();
-  }
 }
 
 void RateLimiter::SweepExpiredBuckets() {

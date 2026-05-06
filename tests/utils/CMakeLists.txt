@@ -40,6 +40,23 @@ gtest_discover_tests(memory_utils_test
   DISCOVERY_TIMEOUT 30
 )
 
+# PeriodicWorker tests (M-8 unified periodic-task abstraction)
+add_executable(periodic_worker_test
+  periodic_worker_test.cpp
+)
+
+target_link_libraries(periodic_worker_test PRIVATE
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+# SLOW: tests sleep up to ~200ms each to verify multi-tick + fast-stop behavior
+gtest_discover_tests(periodic_worker_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES LABELS "SLOW"
+)
+
 add_executable(file_logging_test
   file_logging_test.cpp
 )
