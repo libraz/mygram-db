@@ -218,48 +218,49 @@ void SnapshotScheduler::TakeSnapshot() {
     // counter on destruction as a last-line safety net, but we Release()
     // explicitly here so we observe the last_releaser bool.
     const std::string dump_path_str = dump_path.string();
-    auto restore_replication = mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str, &pause_scope]() {
-      if (!replication_was_running) {
-        // We did not enter the pause counter (replication was already stopped
-        // when we started), so we have nothing to release.
-        return;
-      }
-      const bool last_releaser = pause_scope.Release();
-      if (!last_releaser) {
-        // Another operation is still holding the pause. Do not Start().
-        // The flag stays asserted (set by the first pauser) until that
-        // operation releases.
-        mygram::utils::StructuredLog()
-            .Event("replication_pause_released")
-            .Field("operation", "snapshot")
-            .Field("filepath", dump_path_str)
-            .Field("last_releaser", false)
-            .Info();
-        return;
-      }
-      replication_paused_for_dump_.store(false, std::memory_order_release);
-      if (binlog_reader_ == nullptr) {
-        return;
-      }
-      auto start_result = binlog_reader_->Start();
-      if (start_result) {
-        mygram::utils::StructuredLog()
-            .Event("replication_resumed_after_dump")
-            .Field("operation", "snapshot")
-            .Field(log_fields::kFieldFilepath, dump_path_str)
-            .Info();
-      } else {
-        // H-D4: surface the error via FieldError(start_result.error()) instead
-        // of the legacy GetLastError() string, so the numeric error_code is
-        // included alongside the message.
-        mygram::utils::StructuredLog()
-            .Event("replication_restart_failed")
-            .Field("operation", "snapshot")
-            .Field(log_fields::kFieldFilepath, dump_path_str)
-            .FieldError(start_result.error())
-            .Error();
-      }
-    });
+    auto restore_replication =
+        mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str, &pause_scope]() {
+          if (!replication_was_running) {
+            // We did not enter the pause counter (replication was already stopped
+            // when we started), so we have nothing to release.
+            return;
+          }
+          const bool last_releaser = pause_scope.Release();
+          if (!last_releaser) {
+            // Another operation is still holding the pause. Do not Start().
+            // The flag stays asserted (set by the first pauser) until that
+            // operation releases.
+            mygram::utils::StructuredLog()
+                .Event("replication_pause_released")
+                .Field("operation", "snapshot")
+                .Field("filepath", dump_path_str)
+                .Field("last_releaser", false)
+                .Info();
+            return;
+          }
+          replication_paused_for_dump_.store(false, std::memory_order_release);
+          if (binlog_reader_ == nullptr) {
+            return;
+          }
+          auto start_result = binlog_reader_->Start();
+          if (start_result) {
+            mygram::utils::StructuredLog()
+                .Event("replication_resumed_after_dump")
+                .Field("operation", "snapshot")
+                .Field(log_fields::kFieldFilepath, dump_path_str)
+                .Info();
+          } else {
+            // H-D4: surface the error via FieldError(start_result.error()) instead
+            // of the legacy GetLastError() string, so the numeric error_code is
+            // included alongside the message.
+            mygram::utils::StructuredLog()
+                .Event("replication_restart_failed")
+                .Field("operation", "snapshot")
+                .Field(log_fields::kFieldFilepath, dump_path_str)
+                .FieldError(start_result.error())
+                .Error();
+          }
+        });
 #endif
 
     // Get current GTID (after stopping replication so we record the last

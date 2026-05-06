@@ -95,8 +95,7 @@ TEST(SocketUtilsTrySetSockOpt, ReturnsFalseOnUnsupportedOption) {
   int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   ASSERT_GE(fd, 0);
 
-  const bool ok =
-      mygramdb::server::socket_utils::TrySetSockOpt(fd, IPPROTO_TCP, TCP_NODELAY, 1, "TCP_NODELAY_on_UDS");
+  const bool ok = mygramdb::server::socket_utils::TrySetSockOpt(fd, IPPROTO_TCP, TCP_NODELAY, 1, "TCP_NODELAY_on_UDS");
   ::close(fd);
 
   EXPECT_FALSE(ok);

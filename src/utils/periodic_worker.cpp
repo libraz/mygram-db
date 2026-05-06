@@ -21,19 +21,30 @@ PeriodicWorker::~PeriodicWorker() {
 Expected<void, Error> PeriodicWorker::Start(Task task, std::chrono::milliseconds interval) {
   if (running_.load(std::memory_order_acquire)) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "PeriodicWorker '" + name_ + "' already running");
-    StructuredLog().Event("periodic_worker_start_failed").Field("name", name_).Field("error", error.to_string()).Error();
+    StructuredLog()
+        .Event("periodic_worker_start_failed")
+        .Field("name", name_)
+        .Field("error", error.to_string())
+        .Error();
     return MakeUnexpected(error);
   }
   if (interval.count() <= 0) {
-    auto error = MakeError(ErrorCode::kInvalidArgument,
-                           "PeriodicWorker '" + name_ + "' interval must be > 0; got " +
-                               std::to_string(interval.count()) + " ms");
-    StructuredLog().Event("periodic_worker_start_failed").Field("name", name_).Field("error", error.to_string()).Error();
+    auto error = MakeError(ErrorCode::kInvalidArgument, "PeriodicWorker '" + name_ + "' interval must be > 0; got " +
+                                                            std::to_string(interval.count()) + " ms");
+    StructuredLog()
+        .Event("periodic_worker_start_failed")
+        .Field("name", name_)
+        .Field("error", error.to_string())
+        .Error();
     return MakeUnexpected(error);
   }
   if (!task) {
     auto error = MakeError(ErrorCode::kInvalidArgument, "PeriodicWorker '" + name_ + "' task must not be empty");
-    StructuredLog().Event("periodic_worker_start_failed").Field("name", name_).Field("error", error.to_string()).Error();
+    StructuredLog()
+        .Event("periodic_worker_start_failed")
+        .Field("name", name_)
+        .Field("error", error.to_string())
+        .Error();
     return MakeUnexpected(error);
   }
 
@@ -121,11 +132,7 @@ void PeriodicWorker::Loop() {
       // worker thread's stack unwind. Swallow + log so periodic work is
       // resilient to transient task failures (e.g. I/O errors during a
       // sweep). Operators can correlate via the named event.
-      StructuredLog()
-          .Event("periodic_worker_task_failed")
-          .Field("name", name_)
-          .Field("error", ex.what())
-          .Warn();
+      StructuredLog().Event("periodic_worker_task_failed").Field("name", name_).Field("error", ex.what()).Warn();
     } catch (...) {
       StructuredLog().Event("periodic_worker_task_failed").Field("name", name_).Field("error", "unknown").Warn();
     }

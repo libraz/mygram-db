@@ -62,8 +62,7 @@ TEST(PeriodicWorkerTest, DestructorStopsRunningWorker) {
   std::atomic<int> ticks{0};
   {
     PeriodicWorker worker("test_dtor_stop");
-    ASSERT_TRUE(worker.Start([&ticks] { ticks.fetch_add(1, std::memory_order_relaxed); },
-                             std::chrono::milliseconds(20))
+    ASSERT_TRUE(worker.Start([&ticks] { ticks.fetch_add(1, std::memory_order_relaxed); }, std::chrono::milliseconds(20))
                     .has_value());
     // Give the worker a chance to fire at least once.
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -79,8 +78,7 @@ TEST(PeriodicWorkerTest, DestructorStopsRunningWorker) {
 TEST(PeriodicWorkerTest, CallbackFiresMultipleTimes) {
   std::atomic<int> ticks{0};
   PeriodicWorker worker("test_multi_tick");
-  ASSERT_TRUE(worker.Start([&ticks] { ticks.fetch_add(1, std::memory_order_relaxed); },
-                           std::chrono::milliseconds(20))
+  ASSERT_TRUE(worker.Start([&ticks] { ticks.fetch_add(1, std::memory_order_relaxed); }, std::chrono::milliseconds(20))
                   .has_value());
   // Wait long enough that we expect at least 3 ticks even on slow CI.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
