@@ -20,10 +20,10 @@ from lib.wait import wait_until
 DB_FLAVOR = os.environ.get("DB_FLAVOR", "mysql")  # "mysql" or "mariadb"
 MYSQL_CONTAINER = "inttest_mariadb" if DB_FLAVOR == "mariadb" else "inttest_mysql"
 MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13306
+MYSQL_PORT = 23306
 MYGRAMDB_HOST = "127.0.0.1"
 MYGRAMDB_TCP_PORT = 11016
-MYGRAMDB_HTTP_PORT = 18080
+MYGRAMDB_HTTP_PORT = 20080
 
 PROJECT_ROOT = Path(__file__).parent.parent
 MYGRAMDB_BINARY = PROJECT_ROOT / "build" / "bin" / "mygramdb"

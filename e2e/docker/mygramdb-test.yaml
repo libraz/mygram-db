@@ -1,6 +1,6 @@
 mysql:
   host: "127.0.0.1"
-  port: 13306
+  port: 23306
   user: "repl_user"
   password: "test_password"
   database: "testdb"
@@ -81,7 +81,7 @@ api:
   http:
     enable: true
     bind: "127.0.0.1"
-    port: 18080
+    port: 20080
 
 network:
   allow_cidrs:
