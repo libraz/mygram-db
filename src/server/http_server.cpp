@@ -306,8 +306,8 @@ bool IsSafeJsonColumnName(std::string_view column) {
   for (char c : column) {
     auto u = static_cast<unsigned char>(c);
     const bool ascii_safe = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' ||
-                            u == '-' || u == '.' || c == '$';
-    if (!ascii_safe || std::isspace(u) != 0 || std::iscntrl(u) != 0) {
+                            u == '-' || u == '.' || u == '$';
+    if (!ascii_safe) {
       return false;
     }
   }
@@ -389,6 +389,8 @@ bool ParseHighlightUint(const json& highlight_json, const char* field_name, uint
   return true;
 }
 
+constexpr size_t kMaxHighlightTagLength = 256;
+
 bool ParseHighlightFromJson(const json& highlight_json, query::Query& query, std::string& error_message) {
   if (!highlight_json.is_object()) {
     error_message = "Field 'highlight' must be an object";
@@ -402,6 +404,10 @@ bool ParseHighlightFromJson(const json& highlight_json, query::Query& query, std
       return false;
     }
     opts.open_tag = highlight_json["open_tag"].get<std::string>();
+    if (opts.open_tag.size() > kMaxHighlightTagLength) {
+      error_message = "Field 'highlight.open_tag' must be at most 256 bytes";
+      return false;
+    }
   }
   if (highlight_json.contains("close_tag")) {
     if (!highlight_json["close_tag"].is_string()) {
@@ -409,6 +415,10 @@ bool ParseHighlightFromJson(const json& highlight_json, query::Query& query, std
       return false;
     }
     opts.close_tag = highlight_json["close_tag"].get<std::string>();
+    if (opts.close_tag.size() > kMaxHighlightTagLength) {
+      error_message = "Field 'highlight.close_tag' must be at most 256 bytes";
+      return false;
+    }
   }
 
   if (!ParseHighlightUint(highlight_json, "snippet_length", 1, 10000, opts.snippet_length, error_message)) {

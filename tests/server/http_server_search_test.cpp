@@ -283,6 +283,28 @@ TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
   EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>machine</strong>"), std::string::npos);
 }
 
+TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  // 257 bytes — one over the 256-byte cap.
+  request_body["highlight"] = {{"open_tag", std::string(257, 'a')}, {"close_tag", "</strong>"}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  const auto error_str = body["error"].get<std::string>();
+  EXPECT_NE(error_str.find("open_tag"), std::string::npos);
+  EXPECT_NE(error_str.find("at most 256 bytes"), std::string::npos);
+}
+
 TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
   ASSERT_TRUE(http_server_->Start());
 
