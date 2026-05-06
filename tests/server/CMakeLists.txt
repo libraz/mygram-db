@@ -830,6 +830,21 @@ gtest_discover_tests(connection_acceptor_tcp_test
   PROPERTIES RESOURCE_LOCK server_socket
 )
 
+# Socket utilities tests (TrySetSockOpt helper)
+add_executable(socket_utils_test
+  socket_utils_test.cpp
+)
+
+target_link_libraries(socket_utils_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(socket_utils_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_subdirectory(reactor)
 
 # IoReactor tests (Phase 2.T5)

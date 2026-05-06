@@ -18,6 +18,7 @@ add_library(mygramdb_server STATIC
   reactor/kqueue_multiplexer.cpp
   sync_operation_manager.cpp
   rate_limiter.cpp
+  socket_utils.cpp
   handlers/command_handler.cpp
   handlers/search_handler.cpp
   handlers/facet_handler.cpp

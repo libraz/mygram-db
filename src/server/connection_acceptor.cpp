@@ -26,6 +26,7 @@
 
 #include "server/log_field_names.h"
 #include "server/server_types.h"
+#include "server/socket_utils.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/network_utils.h"
@@ -523,67 +524,26 @@ void ConnectionAcceptor::AcceptLoop() {
     // stock Linux defaults (2h idle + 9 probes * 75s) are too lax for
     // detecting half-open connections, so tighten them per YAML config.
     if (!IsUnixSocket() && config_.keepalive.enabled) {
-      int keepalive_on = 1;
-      if (setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive_on, sizeof(keepalive_on)) < 0) {
-        mygram::utils::StructuredLog()
-            .Event("setsockopt_failed")
-            .Field("option", "SO_KEEPALIVE")
-            .Field("error", strerror(errno))
-            .Warn();
-      }
+      socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_KEEPALIVE, 1, "SO_KEEPALIVE");
 #if defined(__linux__)
       // Linux exposes TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT. These are our
       // production target and where this mitigation actually matters.
-      int idle_sec = config_.keepalive.idle_sec;
-      int intvl_sec = config_.keepalive.interval_sec;
-      int probe_cnt = config_.keepalive.probe_count;
-      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle_sec, sizeof(idle_sec)) < 0) {
-        mygram::utils::StructuredLog()
-            .Event("setsockopt_failed")
-            .Field("option", "TCP_KEEPIDLE")
-            .Field("error", strerror(errno))
-            .Warn();
-      }
-      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl_sec, sizeof(intvl_sec)) < 0) {
-        mygram::utils::StructuredLog()
-            .Event("setsockopt_failed")
-            .Field("option", "TCP_KEEPINTVL")
-            .Field("error", strerror(errno))
-            .Warn();
-      }
-      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &probe_cnt, sizeof(probe_cnt)) < 0) {
-        mygram::utils::StructuredLog()
-            .Event("setsockopt_failed")
-            .Field("option", "TCP_KEEPCNT")
-            .Field("error", strerror(errno))
-            .Warn();
-      }
+      socket_utils::TrySetSockOpt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, config_.keepalive.idle_sec, "TCP_KEEPIDLE");
+      socket_utils::TrySetSockOpt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, config_.keepalive.interval_sec,
+                                  "TCP_KEEPINTVL");
+      socket_utils::TrySetSockOpt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, config_.keepalive.probe_count, "TCP_KEEPCNT");
 #elif defined(__APPLE__) && defined(TCP_KEEPALIVE)
       // macOS/BSD only exposes TCP_KEEPALIVE (equivalent to Linux TCP_KEEPIDLE).
       // Interval/count fall back to system defaults. production target is
       // Linux; this branch only keeps dev/CI on macOS functional.
-      int idle_sec = config_.keepalive.idle_sec;
-      if (setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle_sec, sizeof(idle_sec)) < 0) {
-        mygram::utils::StructuredLog()
-            .Event("setsockopt_failed")
-            .Field("option", "TCP_KEEPALIVE")
-            .Field("error", strerror(errno))
-            .Warn();
-      }
+      socket_utils::TrySetSockOpt(client_fd, IPPROTO_TCP, TCP_KEEPALIVE, config_.keepalive.idle_sec, "TCP_KEEPALIVE");
 #endif
     }
 
 #ifdef __APPLE__
     // On macOS, set SO_NOSIGPIPE to prevent SIGPIPE when writing to closed connections
     // Linux uses MSG_NOSIGNAL flag instead, but writev() doesn't support flags
-    int nosigpipe = 1;
-    if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe)) < 0) {
-      mygram::utils::StructuredLog()
-          .Event("setsockopt_failed")
-          .Field("option", "SO_NOSIGPIPE")
-          .Field("error", strerror(errno))
-          .Warn();
-    }
+    socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, 1, "SO_NOSIGPIPE");
 #endif
 
     // Track connection
@@ -635,6 +595,11 @@ void ConnectionAcceptor::AcceptLoop() {
 }
 
 bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {
+  // The two listening-socket options below are intentionally inlined rather
+  // than routed through socket_utils::TrySetSockOpt: failure here is fatal
+  // (we cannot rebind/keepalive the listener) and we need ERROR-level logs
+  // plus a `return false` to abort Start(). The helper is for non-fatal
+  // per-client tunings where WARN + continue is the right behavior.
   // SO_REUSEADDR: Allow reuse of local addresses
   int opt = 1;
   if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
@@ -666,40 +631,16 @@ bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {
 }
 
 void ConnectionAcceptor::SetClientSocketOptions(int client_fd) const {
-  int rcvbuf = config_.recv_buffer_size;
-  if (setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
-    mygram::utils::StructuredLog()
-        .Event("setsockopt_failed")
-        .Field("option", "SO_RCVBUF")
-        .Field(log_fields::kFieldFd, static_cast<int64_t>(client_fd))
-        .Field(log_fields::kFieldError, strerror(errno))
-        .Warn();
-  }
-  int sndbuf = config_.send_buffer_size;
-  if (setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
-    mygram::utils::StructuredLog()
-        .Event("setsockopt_failed")
-        .Field("option", "SO_SNDBUF")
-        .Field(log_fields::kFieldFd, static_cast<int64_t>(client_fd))
-        .Field(log_fields::kFieldError, strerror(errno))
-        .Warn();
-  }
+  socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_RCVBUF, config_.recv_buffer_size, "SO_RCVBUF");
+  socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_SNDBUF, config_.send_buffer_size, "SO_SNDBUF");
 
   // TCP_NODELAY: Disable Nagle's algorithm so small responses (typical of the
   // text protocol's request/response cadence) are not held in the kernel for
   // up to 200ms waiting for ACK coalescing. Only meaningful on TCP; Unix
   // domain sockets do not support TCP_NODELAY (would return EOPNOTSUPP).
-  // Failure is non-fatal — we log a WARN and keep the connection.
+  // Failure is non-fatal — TrySetSockOpt logs a WARN and we keep the connection.
   if (!IsUnixSocket()) {
-    int one = 1;
-    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
-      mygram::utils::StructuredLog()
-          .Event("setsockopt_failed")
-          .Field("option", "TCP_NODELAY")
-          .Field(log_fields::kFieldFd, static_cast<int64_t>(client_fd))
-          .Field(log_fields::kFieldError, strerror(errno))
-          .Warn();
-    }
+    socket_utils::TrySetSockOpt(client_fd, IPPROTO_TCP, TCP_NODELAY, 1, "TCP_NODELAY");
   }
 }
 
