@@ -171,7 +171,13 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     // Start background worker thread.
     // NOTE: flag_guard.Dismiss() is intentionally AFTER thread creation.
     // If make_unique<thread> throws, the guard auto-resets the flag.
-    ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
+    //
+    // StartWorker() performs the worker_thread assignment under
+    // DumpProgress::mutex so it cannot race with JoinWorker() (called
+    // from TcpServer::Stop()) on the unique_ptr itself. JoinWorker()
+    // above has already drained any prior worker, satisfying the
+    // StartWorker pre-condition.
+    ctx_.dump_progress->StartWorker([this, filepath]() { DumpSaveWorker(filepath); });
 
     // Thread created successfully — ownership of the dump_save_in_progress
     // flag transfers to the worker (DumpSaveWorker has its own RAII guard

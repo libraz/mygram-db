@@ -101,6 +101,19 @@ void PeriodicWorker::Loop() {
     // mutex serves only to coordinate the wait; the task callback is
     // expected to manage its own locking.
     lock.unlock();
+    // Re-check after releasing mutex_. The previous check above is inside
+    // the lock, so Stop() cannot have set should_stop_ while we held the
+    // mutex. The only race window is the few instructions between the
+    // unlock above and this load — a Stop() that arrives in that window
+    // will set should_stop_, then notify, and we observe it here. Without
+    // this recheck, Stop() could fire between the unlock and the task_()
+    // call, causing one extra task invocation after Stop() was requested.
+    //
+    // break after lock.unlock() is safe: unique_lock tracks ownership
+    // state, so its destructor will not double-unlock.
+    if (should_stop_.load(std::memory_order_acquire)) {
+      break;
+    }
     try {
       task_();
     } catch (const std::exception& ex) {
