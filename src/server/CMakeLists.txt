@@ -38,6 +38,7 @@ target_include_directories(mygramdb_server PUBLIC
 
 target_link_libraries(mygramdb_server PUBLIC
   mygramdb_config     # Configuration and schema help
+  mygramdb_runtime_config
   mygramdb_cache      # Includes mygramdb_query transitively
   httplib::httplib
   nlohmann_json::nlohmann_json

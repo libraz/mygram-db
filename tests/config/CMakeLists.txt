@@ -105,8 +105,7 @@ add_executable(runtime_variable_manager_test
 )
 
 target_link_libraries(runtime_variable_manager_test PRIVATE
-  mygramdb_config
-  mygramdb_cache
+  mygramdb_runtime_config
   GTest::gtest_main
 )
 

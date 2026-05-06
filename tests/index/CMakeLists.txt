@@ -248,7 +248,6 @@ add_executable(bm25_scorer_test
 )
 
 target_link_libraries(bm25_scorer_test
-  mygramdb_index
   mygramdb_storage
   GTest::gtest_main
 )

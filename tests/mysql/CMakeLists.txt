@@ -21,7 +21,7 @@ add_executable(runtime_variable_manager_mysql_test
 )
 
 target_link_libraries(runtime_variable_manager_mysql_test
-  mygramdb_config
+  mygramdb_runtime_config
   GTest::gtest_main
 )
 

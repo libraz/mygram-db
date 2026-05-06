@@ -737,7 +737,6 @@ add_executable(sync_instance_preservation_test
 )
 
 target_link_libraries(sync_instance_preservation_test
-  mygramdb_index
   mygramdb_storage
   GTest::gtest_main
 )

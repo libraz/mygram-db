@@ -91,6 +91,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     return MakeUnexpected(error);
   }
 
+  shutdown_in_progress_.store(false, std::memory_order_release);
+
   // Create rate limiter (if configured). The reactor_handler lambda below
   // enforces the token bucket per peer IP on every accept.
   //
@@ -208,6 +210,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   {
     auto r = reactor_->Start();
     if (!r) {
+      Stop();
       return MakeUnexpected(r.error());
     }
   }
@@ -269,6 +272,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   {
     auto accept_result = acceptor_->StartAccepting();
     if (!accept_result) {
+      Stop();
       return MakeUnexpected(accept_result.error());
     }
   }

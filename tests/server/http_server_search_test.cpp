@@ -218,6 +218,89 @@ TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
   EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
 }
 
+TEST_F(HttpServerTest, SearchSupportsJsonSort) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "e";
+  request_body["limit"] = 3;
+  request_body["sort"] = {{"column", "status"}, {"order", "ASC"}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 3);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_3");
+}
+
+TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machime";
+  request_body["fuzzy"] = 1;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_1");
+}
+
+TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
+  auto doc_id = doc_store_->GetDocId("article_1");
+  ASSERT_TRUE(doc_id.has_value());
+  doc_store_->SetNormalizedText(*doc_id, "machine learning");
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["highlight"] = {
+      {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 50}, {"max_fragments", 1}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 1);
+  ASSERT_TRUE(body["results"][0].contains("highlight"));
+  EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>machine</strong>"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"] = json::array();
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["error"], "Field 'filters' must be an object");
+}
+
 TEST_F(HttpServerTest, SearchMissingQuery) {
   ASSERT_TRUE(http_server_->Start());
 

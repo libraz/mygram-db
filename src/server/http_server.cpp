@@ -9,6 +9,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <iterator>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include <variant>
 
 #include "cache/cache_manager.h"
+#include "query/highlighter.h"
 #include "query/query_parser.h"
 #include "query/result_sorter.h"
 #include "server/handlers/search_handler.h"
@@ -295,6 +297,168 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
     query.filters.push_back(std::move(filter));
   }
   return true;
+}
+
+bool IsSafeJsonColumnName(std::string_view column) {
+  if (column.empty() || column.size() > query::QueryParser::kMaxFilterColumnNameLength) {
+    return false;
+  }
+  for (char c : column) {
+    auto u = static_cast<unsigned char>(c);
+    const bool ascii_safe = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' ||
+                            u == '-' || u == '.' || c == '$';
+    if (!ascii_safe || std::isspace(u) != 0 || std::iscntrl(u) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool EqualsAsciiIgnoreCase(std::string_view lhs, std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    auto a = static_cast<unsigned char>(lhs[i]);
+    auto b = static_cast<unsigned char>(rhs[i]);
+    if (std::tolower(a) != std::tolower(b)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ParseSortFromJson(const json& sort_json, query::Query& query, std::string& error_message) {
+  if (!sort_json.is_object()) {
+    error_message = "Field 'sort' must be an object";
+    return false;
+  }
+  if (!sort_json.contains("column") || !sort_json["column"].is_string()) {
+    error_message = "Field 'sort.column' must be a string";
+    return false;
+  }
+
+  std::string column = sort_json["column"].get<std::string>();
+  if (column != "_score" && column != "id" && !IsSafeJsonColumnName(column)) {
+    error_message = "Invalid sort column";
+    return false;
+  }
+
+  query::SortOrder order = query::SortOrder::DESC;
+  if (sort_json.contains("order")) {
+    if (!sort_json["order"].is_string()) {
+      error_message = "Field 'sort.order' must be a string";
+      return false;
+    }
+    std::string order_str = sort_json["order"].get<std::string>();
+    if (EqualsAsciiIgnoreCase(order_str, "ASC")) {
+      order = query::SortOrder::ASC;
+    } else if (EqualsAsciiIgnoreCase(order_str, "DESC")) {
+      order = query::SortOrder::DESC;
+    } else {
+      error_message = "Invalid sort order: " + order_str;
+      return false;
+    }
+  }
+
+  if (column == "id") {
+    column.clear();  // Query AST convention: empty column means primary key.
+  }
+  query.order_by = query::OrderByClause{std::move(column), order};
+  return true;
+}
+
+bool ParseHighlightUint(const json& highlight_json, const char* field_name, uint32_t min_value, uint32_t max_value,
+                        uint32_t& out, std::string& error_message) {
+  if (!highlight_json.contains(field_name)) {
+    return true;
+  }
+  const auto& value = highlight_json[field_name];
+  if (!value.is_number_unsigned() && !value.is_number_integer()) {
+    error_message = std::string("Field 'highlight.") + field_name + "' must be an integer";
+    return false;
+  }
+  int64_t parsed = value.get<int64_t>();
+  if (parsed < static_cast<int64_t>(min_value) || parsed > static_cast<int64_t>(max_value)) {
+    std::ostringstream oss;
+    oss << "Field 'highlight." << field_name << "' must be between " << min_value << " and " << max_value;
+    error_message = oss.str();
+    return false;
+  }
+  out = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+bool ParseHighlightFromJson(const json& highlight_json, query::Query& query, std::string& error_message) {
+  if (!highlight_json.is_object()) {
+    error_message = "Field 'highlight' must be an object";
+    return false;
+  }
+
+  query::HighlightOptions opts;
+  if (highlight_json.contains("open_tag")) {
+    if (!highlight_json["open_tag"].is_string()) {
+      error_message = "Field 'highlight.open_tag' must be a string";
+      return false;
+    }
+    opts.open_tag = highlight_json["open_tag"].get<std::string>();
+  }
+  if (highlight_json.contains("close_tag")) {
+    if (!highlight_json["close_tag"].is_string()) {
+      error_message = "Field 'highlight.close_tag' must be a string";
+      return false;
+    }
+    opts.close_tag = highlight_json["close_tag"].get<std::string>();
+  }
+
+  if (!ParseHighlightUint(highlight_json, "snippet_length", 1, 10000, opts.snippet_length, error_message)) {
+    return false;
+  }
+  if (!ParseHighlightUint(highlight_json, "max_fragments", 1, 100, opts.max_fragments, error_message)) {
+    return false;
+  }
+
+  query.highlight = std::move(opts);
+  return true;
+}
+
+bool ParseFuzzyFromJson(const json& fuzzy_json, query::Query& query, std::string& error_message) {
+  if (!fuzzy_json.is_number_unsigned() && !fuzzy_json.is_number_integer()) {
+    error_message = "Field 'fuzzy' must be an integer";
+    return false;
+  }
+  int64_t distance = fuzzy_json.get<int64_t>();
+  if (distance < 1 || distance > 2) {
+    error_message = "Field 'fuzzy' must be 1 or 2";
+    return false;
+  }
+  query.fuzzy_max_distance = static_cast<uint32_t>(distance);
+  return true;
+}
+
+std::vector<std::string> BuildHighlightTerms(const query::Query& query, TableContext& table_ctx) {
+  std::vector<std::string> terms;
+  terms.push_back(query.search_text);
+  terms.insert(terms.end(), query.and_terms.begin(), query.and_terms.end());
+
+  for (auto& term : terms) {
+    if (table_ctx.index != nullptr) {
+      term = table_ctx.index->NormalizeText(term);
+    }
+  }
+
+  if (table_ctx.synonym_dict && !table_ctx.synonym_dict->IsEmpty()) {
+    std::vector<std::string> expanded;
+    for (const auto& term : terms) {
+      auto synonyms = table_ctx.synonym_dict->Expand(term);
+      expanded.insert(expanded.end(), std::make_move_iterator(synonyms.begin()),
+                      std::make_move_iterator(synonyms.end()));
+    }
+    mygram::utils::DeduplicateSorted(expanded);
+    terms = std::move(expanded);
+  }
+
+  return terms;
 }
 
 }  // namespace
@@ -709,10 +873,38 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   }
 
   // Apply filters from JSON payload
-  if (body.contains("filters") && body["filters"].is_object()) {
+  if (body.contains("filters") && !body["filters"].is_object()) {
+    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+    return std::nullopt;
+  }
+  if (body.contains("filters")) {
     std::string filter_error;
     if (!ParseFiltersFromJson(body["filters"], *parsed_query, filter_error)) {
       SendError(res, kHttpBadRequest, filter_error);
+      return std::nullopt;
+    }
+  }
+
+  if (body.contains("sort")) {
+    std::string sort_error;
+    if (!ParseSortFromJson(body["sort"], *parsed_query, sort_error)) {
+      SendError(res, kHttpBadRequest, sort_error);
+      return std::nullopt;
+    }
+  }
+
+  if (body.contains("highlight")) {
+    std::string highlight_error;
+    if (!ParseHighlightFromJson(body["highlight"], *parsed_query, highlight_error)) {
+      SendError(res, kHttpBadRequest, highlight_error);
+      return std::nullopt;
+    }
+  }
+
+  if (body.contains("fuzzy")) {
+    std::string fuzzy_error;
+    if (!ParseFuzzyFromJson(body["fuzzy"], *parsed_query, fuzzy_error)) {
+      SendError(res, kHttpBadRequest, fuzzy_error);
       return std::nullopt;
     }
   }
@@ -783,6 +975,18 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     json results_array = json::array();
     auto docs = current_doc_store->GetDocumentsBatch(sorted_results);
+    std::vector<std::optional<std::string>> highlight_texts;
+    std::vector<std::string> highlight_terms;
+    if (query->highlight.has_value()) {
+      if (!current_doc_store->IsStoreTextsEnabled()) {
+        SendError(res, kHttpBadRequest,
+                  "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
+                  "configuration.");
+        return;
+      }
+      highlight_texts = current_doc_store->GetNormalizedTextBatch(sorted_results);
+      highlight_terms = BuildHighlightTerms(*query, *table_ctx);
+    }
     for (size_t i = 0; i < docs.size(); ++i) {
       if (docs[i]) {
         json doc_obj;
@@ -796,6 +1000,15 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
             filters_obj[key] = FilterValueToJson(val);
           }
           doc_obj["filters"] = filters_obj;
+        }
+
+        if (query->highlight.has_value() && i < highlight_texts.size()) {
+          if (highlight_texts[i].has_value()) {
+            auto hl = query::Highlighter::Generate(*highlight_texts[i], highlight_terms, *query->highlight);
+            doc_obj["highlight"] = hl.snippet;
+          } else {
+            doc_obj["highlight"] = "";
+          }
         }
 
         results_array.push_back(doc_obj);
