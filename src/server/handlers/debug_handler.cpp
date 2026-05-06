@@ -58,17 +58,14 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       // Note: DUMP SAVE (dump_save_in_progress flag) is allowed during OPTIMIZE
       // to support auto-save functionality that runs in background
 
-      // Check if another OPTIMIZE is already running globally
-      bool expected = false;
-      if (!ctx_.optimization_in_progress.compare_exchange_strong(expected, true)) {
+      // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire
+      // (Phase 4 H-D1). Same contract as DUMP SAVE / DUMP LOAD: prevents
+      // two concurrent OPTIMIZE callers from both observing the flag false
+      // and racing each other inside the index-rebuild critical section.
+      auto guard = mygram::utils::OperationGuard::TryAcquire(ctx_.optimization_in_progress);
+      if (!guard.engaged()) {
         return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress");
       }
-
-      // RAII guard to ensure flag is cleared even if exception occurs.
-      // The flag was already set via the compare_exchange_strong above, so we
-      // use AtomicFlagResetGuard (reset-only) rather than AtomicFlagGuard
-      // (set-on-construct, reset-on-destroy) to avoid double-setting.
-      mygram::utils::AtomicFlagResetGuard guard(ctx_.optimization_in_progress);
 
       // Get table context
       auto table_ctx = GetTableContext(query.table);

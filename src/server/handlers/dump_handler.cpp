@@ -116,35 +116,26 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
 
-  // Atomic test-and-set on dump_save_in_progress.
+  // Atomic test-and-set on dump_save_in_progress, bundled with a release-on-
+  // scope-exit RAII guard via OperationGuard::TryAcquire (Phase 4 H-D1).
   //
   // CR-2: do NOT split this into a separate load() + store(true) — that race
   // lets two concurrent DUMP SAVE clients both observe false and then both
-  // store true, spawning duplicate worker threads. compare_exchange_strong
-  // collapses the test-and-set into a single atomic step. This matches the
-  // pattern in SnapshotScheduler::TakeSnapshot, which is the other place
-  // that competes for this flag (auto-snapshot vs. manual DUMP SAVE).
+  // store true, spawning duplicate worker threads. OperationGuard collapses
+  // the test-and-set into a single atomic step. This matches the pattern in
+  // SnapshotScheduler::TakeSnapshot, which is the other place that competes
+  // for this flag (auto-snapshot vs. manual DUMP SAVE).
   //
-  // The acquire ordering on success ensures that any subsequent reads in
-  // this thread (filepath, table catalog snapshot for the worker) observe
-  // a state at least as fresh as the previous worker's release-store(false).
-  // The acquire ordering on failure mirrors that contract for the busy
-  // path so logging/diagnostics see consistent state.
-  bool expected = false;
-  if (!ctx_.dump_save_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                          std::memory_order_acquire)) {
+  // On the async path, ownership of the flag transfers to the worker thread
+  // (via flag_guard.Release() below) and the worker's own RAII guard resets
+  // it (H-C1). On the sync path / thread-creation-failure path, the guard's
+  // destructor resets the flag.
+  auto flag_guard = mygram::utils::OperationGuard::TryAcquire(ctx_.dump_save_in_progress);
+  if (!flag_guard.engaged()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while another DUMP SAVE is in progress. "
         "Please wait for current save to complete or use DUMP STATUS to check progress.");
   }
-
-  // Flag was successfully acquired. Use ScopeGuard so the flag is
-  // automatically reset if thread creation fails or if the synchronous path
-  // throws an exception. On the async path, ownership of the flag transfers
-  // to the worker thread (via flag_guard.Release() below) and the worker's
-  // own RAII guard resets it (H-C1).
-  auto flag_guard =
-      mygram::utils::ScopeGuard([this]() { ctx_.dump_save_in_progress.store(false, std::memory_order_release); });
 
   // Capture the current GTID once for both async/sync log paths so the
   // dump_save_started event records the position the operator would expect
@@ -178,13 +169,16 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     ctx_.dump_progress->Reset(DumpStatus::SAVING, filepath, ctx_.table_catalog->GetTables().size());
 
     // Start background worker thread.
-    // NOTE: flag_guard.Release() is intentionally AFTER thread creation.
+    // NOTE: flag_guard.Dismiss() is intentionally AFTER thread creation.
     // If make_unique<thread> throws, the guard auto-resets the flag.
     ctx_.dump_progress->worker_thread = std::make_unique<std::thread>([this, filepath]() { DumpSaveWorker(filepath); });
 
-    // Thread created successfully - the worker thread now owns the flag cleanup
-    // (DumpSaveWorker resets dump_save_in_progress at the end)
-    flag_guard.Release();
+    // Thread created successfully — ownership of the dump_save_in_progress
+    // flag transfers to the worker (DumpSaveWorker has its own RAII guard
+    // that resets it at the end). Dismiss(), NOT Release(): we must NOT
+    // clear the flag here, otherwise a concurrent client can observe false
+    // and slip through compare_exchange before the worker even starts work.
+    flag_guard.Dismiss();
 
     // Return immediately with started message (async mode)
     // Do NOT embed \r\n in the response -- the TCP protocol uses \r\n as the
@@ -195,8 +189,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   // Fallback: run synchronously if no progress tracking available (e.g., in tests)
   log_dump_save_started("sync");
 
-  // DumpSaveWorker resets the flag at the end, so release the guard
-  flag_guard.Release();
+  // DumpSaveWorker has its own RAII guard that resets the flag at the end,
+  // so dismiss this guard (don't clear) and hand ownership to the worker.
+  flag_guard.Dismiss();
   bool success = DumpSaveWorker(filepath);
 
   // Check result and return appropriate response (sync mode)
@@ -460,30 +455,24 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
   std::string filepath = std::move(*resolved);
 
-  // Atomic test-and-set on dump_load_in_progress.
+  // Atomic test-and-set on dump_load_in_progress, bundled with a release-on-
+  // scope-exit RAII guard via OperationGuard::TryAcquire (Phase 4 H-D1).
   //
   // CR-2: do NOT split this into a separate load() + later AtomicFlagGuard —
   // that race lets two concurrent DUMP LOAD clients both observe false and
   // then both proceed to stop replication / clear data, corrupting state.
-  // compare_exchange_strong collapses the test-and-set into a single atomic
-  // step, mirroring the pattern in HandleDumpSave / TakeSnapshot.
+  // OperationGuard::TryAcquire collapses the test-and-set into a single
+  // atomic step, mirroring HandleDumpSave / TakeSnapshot.
   //
-  // The guard below releases the flag in the failure path (before
-  // returning) and is dismissed via Release() on the success path AFTER
-  // post-load steps complete.
-  bool expected = false;
-  if (!ctx_.dump_load_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                          std::memory_order_acquire)) {
+  // The guard below releases the flag in the failure path (its destructor)
+  // and is dismissed via Release() on the success path AFTER post-load steps
+  // complete.
+  auto loading_guard = mygram::utils::OperationGuard::TryAcquire(ctx_.dump_load_in_progress);
+  if (!loading_guard.engaged()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while another DUMP LOAD is in progress. "
         "Please wait for current load to complete.");
   }
-  // RAII reset: corresponds to the compare_exchange above. AtomicFlagResetGuard
-  // (not AtomicFlagGuard) is the right tool here because the flag is already
-  // set; the guard is only responsible for clearing it on scope exit / failure.
-  // Replaces the previous AtomicFlagGuard that was constructed AFTER the
-  // load() check, leaving a TOCTOU window.
-  mygram::utils::AtomicFlagResetGuard loading_guard(ctx_.dump_load_in_progress);
 
 #ifdef USE_MYSQL
   // Check if replication is running (need to stop it before DUMP LOAD)

@@ -149,20 +149,18 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
-    // Atomically try to acquire the dump_save_in_progress flag
-    // This prevents TOCTOU race between checking and setting the flag
-    bool expected = false;
-    if (!dump_save_in_progress_.compare_exchange_strong(expected, true)) {
-      // Another dump operation (manual or auto) is already in progress
+    // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire
+    // (Phase 4 H-D1). Prevents TOCTOU race between checking and setting the
+    // flag — same contract as HandleDumpSave / HandleDumpLoad in DumpHandler.
+    auto dump_save_guard = mygram::utils::OperationGuard::TryAcquire(dump_save_in_progress_);
+    if (!dump_save_guard.engaged()) {
+      // Another dump operation (manual or auto) is already in progress.
       mygram::utils::StructuredLog()
           .Event("auto_snapshot_skipped")
           .Field("reason", "another DUMP operation is in progress")
           .Info();
       return;
     }
-
-    // Flag successfully acquired, use RAII guard to ensure it's reset on exit
-    mygram::utils::AtomicFlagResetGuard dump_save_guard(dump_save_in_progress_);
 
     // Generate timestamp-based filename
     auto timestamp = std::time(nullptr);
